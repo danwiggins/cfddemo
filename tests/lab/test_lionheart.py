@@ -14,14 +14,40 @@ from pathlib import Path
 import pytest
 
 from tests.lab.test_landing import _dom, needs_chrome
+from tests.lab.fake_algorithms import ASSET_PROBE
 from traceback_lab.algorithms import lionheart
 from traceback_lab.algorithms.read_summary import READ_SUMMARY
 from traceback_lab.interpretation.engine import load_library
-from traceback_lab.registry import InputContext, Ready, execution_identity, plan, validate_algorithm
-from traceback_lab.store import LabStore
+from traceback_lab.registry import InputContext, PlanItem, Ready, execution_identity, plan, validate_algorithm
+from traceback_lab.runner import RunTarget, run_plan
+from traceback_lab.scrub import Scrubber
+from traceback_lab.store import LabStore, new_run_id
 from traceback_lab.web.server import RunningLabServer
 
 ID12 = "3f9a1c2b7e04"
+
+
+def test_planned_asset_and_tool_identity_reaches_real_worker(tmp_path: Path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    target = RunTarget(
+        input_id="b" * 64, source_id="a" * 64, input_dir=tmp_path,
+        reference_id="hg38", reference_sha256="c" * 64, eligible_reads=5_000_000,
+    )
+    run_id = new_run_id()
+    [result] = run_plan(
+        store, None, store.run_log(run_id), target, [PlanItem(ASSET_PROBE, False)],
+        {ASSET_PROBE.id: "tests.lab.fake_algorithms:ASSET_PROBE"},
+        run_id=run_id, scrubber=Scrubber(root=tmp_path),
+    )
+    assert result.status == "ok", result.first_line
+    assert result.parameters_sha256 == execution_identity(
+        ASSET_PROBE, reference_sha256=target.reference_sha256,
+        asset_sha256s=["a" * 64], tool_pins=[{"name": "probe", "version": "2.2.0"}],
+    )
+    assert result.artifacts_dir is not None
+    observed = json.loads((Path(result.artifacts_dir) / "worker_identity.json").read_text())
+    assert observed == {"assets": ["a" * 64], "tools": {"probe": "2.2.0"}}
 
 
 def _setup(tmp_path: Path, monkeypatch) -> tuple[InputContext, Path]:
