@@ -91,6 +91,8 @@ def test_wps_accepts_a_real_read_summary(tmp_path) -> None:
     panel = json.loads(result.artifacts["wps_summary.json"])
     assert panel["contigs"] == [{"contig": "chr1", "length_bp": 1200, "bins": 2}]
     assert panel["qualifying_fragments"] == 3
+    assert panel["qualifying_fragment_depth_x"] == 450 / 1200
+    assert next(m["value"] for m in result.metrics if m["metric_id"] == "qualifying_fragment_depth_x") == 450 / 1200
     assert result.metrics[0]["value"] is not None
     derived_ctx = InputContext(**{**ctx.__dict__, "derived": {"transform": "downsample", "fraction": 0.5}})
     derived_out = tmp_path / "derived-output"
@@ -98,7 +100,9 @@ def test_wps_accepts_a_real_read_summary(tmp_path) -> None:
     assert {"wps_track.npz", "wps_summary.json"} == set(derived.artifacts)
     assert not (derived_out / "wps_exact").exists()
     assert json.loads(derived.artifacts["wps_summary.json"])["exact_index"] is None
-    assert {row["metric_id"] for row in derived.metrics} == {"mean_wps", "positive_bin_fraction"}
+    assert {row["metric_id"] for row in derived.metrics} == {
+        "mean_wps", "positive_bin_fraction", "qualifying_fragment_depth_x",
+    }
 
 
 def test_wps_depth_gate_requires_known_ten_x(tmp_path, monkeypatch) -> None:
@@ -163,6 +167,9 @@ def test_wps_registry_and_algorithm_output(tmp_path, monkeypatch, valid_fragment
     panel = json.loads(result.artifacts["wps_summary.json"])
     assert panel["valid_centres"] == int(counts.sum())
     assert panel["qualifying_fragments"] == (3 if valid_fragments else 0)
+    assert panel["qualifying_fragment_depth_x"] == (
+        (120 + 160 + 180) / 1200 if valid_fragments else 0
+    )
     assert (result.metrics[0]["value"] is not None) == valid_fragments
     assert (result.metrics[1]["value"] is not None) == valid_fragments
     index = json.loads(result.artifacts["wps_exact_index.json"])

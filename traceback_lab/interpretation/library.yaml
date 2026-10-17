@@ -2847,3 +2847,27 @@ entries:
     stability: {kind: unvalidated}
     citations: ["doi:10.1016/j.cell.2015.11.050"]
     citation_checked: {by: "Lab S5 source review", date: "2026-10-17", note: "This fraction is an in-house summary of 1 kb mean WPS bins derived from the Snyder WPS definition. It changes nonlinearly with depth and local coverage, so no stability tolerance, reference interval, or validated ONT interpretation applies."}
+
+  - algorithm_id: wps
+    metric_id: qualifying_fragment_depth_x
+    label: "WPS-eligible 120–180 bp aligned-fragment depth"
+    value_kind: positive
+    tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "ONT aligned-span support for this Lab WPS implementation"
+    min_depth_x: 10
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No validated support-depth threshold or biological interpretation is established"
+    meaning_high: "More eligible aligned-fragment span bases support the WPS calculation."
+    meaning_low: "Sparse eligible span depth can leave a WPS score with little molecular support."
+    confounders: ["ONT fragment-length distribution", "mapping and copy-number bias", "sequencing depth"]
+    next_steps:
+      analytical: ["Inspect qualifying fragment count and depth in the WPS summary"]
+      clinical_setting: null
+    license_ids: [method-patents]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: unvalidated}
+    citations: ["doi:10.1016/j.cell.2015.11.050"]
+    citation_checked: {by: "Lab S5 source review", date: "2026-10-17", note: "This support-depth metric is a Lab-specific descriptive count, not a measure or threshold validated by Snyder et al."}

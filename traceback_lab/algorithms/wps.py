@@ -169,6 +169,7 @@ class Wps(Base):
         positive = 0
         valid_bins = 0
         qualifying_fragments = 0
+        qualifying_span_bp = 0
         exact_chunks: list[dict[str, Any]] = []
         publish_exact = ctx.derived is None
         for cid in ids:
@@ -177,8 +178,10 @@ class Wps(Base):
             on_starts = starts[on]
             on_ends = ends[on]
             span = on_ends.astype(np.int64) - on_starts.astype(np.int64)
-            qualifying_fragments += int(((on_starts >= 0) & (on_ends <= summary.lengths[int(cid)])
-                                         & (span >= FRAGMENT_RANGE[0]) & (span <= FRAGMENT_RANGE[1])).sum())
+            qualifying = ((on_starts >= 0) & (on_ends <= summary.lengths[int(cid)])
+                          & (span >= FRAGMENT_RANGE[0]) & (span <= FRAGMENT_RANGE[1]))
+            qualifying_fragments += int(qualifying.sum())
+            qualifying_span_bp += int(span[qualifying].sum(dtype=np.int64))
             def emit(start: int, score: np.ndarray) -> None:
                 nonlocal total_score
                 if np.any((score < np.iinfo(np.int32).min) | (score > np.iinfo(np.int32).max)):
@@ -203,9 +206,12 @@ class Wps(Base):
             metadata.append({"contig": name, "length_bp": summary.lengths[int(cid)], "bins": len(mean)})
         buffer = io.BytesIO()
         np.savez_compressed(buffer, **tracks)
+        autosomal_bp = sum(int(summary.lengths[int(cid)]) for cid in ids)
+        qualifying_depth_x = qualifying_span_bp / autosomal_bp
         panel = {"window_bp": WINDOW, "fragment_bp": list(FRAGMENT_RANGE), "bin_bp": BIN,
                  "contigs": metadata, "valid_centres": total_centres,
                  "qualifying_fragments": qualifying_fragments,
+                 "qualifying_fragment_depth_x": qualifying_depth_x,
                  "track_format": "npz float32 mean WPS per 1 kb genomic bin",
                  "exact_index": "wps_exact_index.json" if publish_exact else None}
         artifacts = {"wps_track.npz": buffer.getvalue(),
@@ -220,7 +226,9 @@ class Wps(Base):
             metrics=[metric("mean_wps", total_score / total_centres if total_centres and qualifying_fragments else None,
                             unit="fragments", n=total_centres),
                      metric("positive_bin_fraction", positive / valid_bins if valid_bins and qualifying_fragments else None,
-                            unit="fraction", n=valid_bins)],
+                            unit="fraction", n=valid_bins),
+                     metric("qualifying_fragment_depth_x", qualifying_depth_x,
+                            unit="x", n=qualifying_fragments)],
             artifacts=artifacts,
         )
 
