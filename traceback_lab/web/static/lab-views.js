@@ -412,7 +412,8 @@
     details.append(
       meaning ? h("p", {}, meaning) : "",
       entry.confounders && entry.confounders.length ? h("p", {}, h("strong", {}, "Confounders: "), entry.confounders.join(", ")) : "",
-      h("p", {}, h("strong", {}, "Next steps (analytical): "), (steps.analytical || []).join("; ") || "—"),
+      h("p", {}, h("strong", {}, "Next steps (analytical): "), (steps.analytical || []).join("; ") || "—", " ",
+        flagPill("CLIA", "FLAG: CLIA — reads as clinical advice if a donor or clinician sees it.")),
       steps.clinical_setting ? h("p", {}, h("strong", {}, "Clinical setting: "), steps.clinical_setting, " ", flagPill("CLIA", "FLAG: CLIA — reads as clinical advice if a donor or clinician sees it.")) : "",
       h("p", {}, h("strong", {}, "Citations: "), (entry.citations || []).join(", ") || "none",
         entry.citation_checked ? ` · checked by ${entry.citation_checked.by}, ${entry.citation_checked.date}` : ""),
@@ -1089,7 +1090,7 @@
                 h("p", {}, "Original evidence tier: ", tierBadge(evidence.origin_tier || metric.tier),
                   evidence.origin_platform ? ` · ${evidence.origin_platform}` : ""),
                 h("p", {}, "Citations: ", citations.length ? citations.flatMap((citation, i) => i ? [", ", citation] : [citation]) : "none",
-                  citations.length && !evidence.citation_checked ? h("span", { class: "unverified" }, " UNVERIFIED citation") : ""));
+                  ...spacedUnverifiedBadge(metric.entry)));
               const values = metric.cohort_values || [];
               const valueTable = values.length ? h("details", {},
                 h("summary", {}, `Eligible values (${values.length})`),
