@@ -371,9 +371,16 @@ def _recorded_selection(
                 or not isinstance(plan.get("tools"), list)
                 or not isinstance(plan.get("asset_sha256s"), list)):
             return None
-        if any(plan["parameters"].get(key) != value
-               for key, value in algorithm.parameters.items()):
-            return None
+        if any(callable(getattr(algorithm, hook, None)) for hook in
+               ("identity_tools", "identity_assets", "identity_parameters")):
+            # Dynamic hooks may add effective parameters, but may not alter
+            # their static contract. Normalize through JSON because producer
+            # tuples are stored as lists. Static methods can retain recorded
+            # historical pins after a reader upgrade (for example cell-origin).
+            if any(key not in plan["parameters"] or
+                   canonical_json_bytes(plan["parameters"][key]) != canonical_json_bytes(value)
+                   for key, value in algorithm.parameters.items()):
+                return None
         # Griffin's fixed method and Snakemake pins must still match the
         # producer plan even when its dynamic runtime pin changes.
         if algorithm.id == "griffin" and any(tool.identity() not in plan["tools"] for tool in algorithm.tools):

@@ -8,6 +8,7 @@ import pytest
 import pysam
 
 from traceback_lab import cohorts
+from traceback_lab.algorithms.epi_clock import EPI_CLOCK
 from traceback_lab.cohorts import add_sample, build_cohort, project_current_metric, project_sample_metric, read_current, read_roster, remove_sample
 from traceback_lab.envelope import Failure, Metric, ResultEnvelope, provenance
 from traceback_lab.identity import cohort_compat_key, parameters_sha256
@@ -65,6 +66,51 @@ def _sample(
     )
     store.publish_result(result, input_id=input_id)
     return source_id
+
+
+def test_epiclock_recorded_tuple_weights_survive_json_plan(tmp_path: Path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    algorithm = EPI_CLOCK
+    assert isinstance(algorithm.parameters["weights"], tuple)
+    input_id, source_id, reference_sha256 = _sha(801), _sha(802), _sha(900)
+    upstream = [{"algorithm_id": name, "parameters_sha256": _sha(803 + index)}
+                for index, name in enumerate(algorithm.upstream)]
+    tools = [tool.identity() for tool in algorithm.tools]
+    identity = execution_identity(
+        algorithm, reference_sha256=reference_sha256, upstream=upstream,
+        tool_pins=tools, asset_sha256s=[],
+    )
+    plan = {
+        "schema": "traceback.lab.execution-plan.v1", "algorithm_id": algorithm.id,
+        "algorithm_version": algorithm.version, "input_id": input_id,
+        "reference_sha256": reference_sha256, "platform": "ont",
+        "parameters": algorithm.parameters, "tools": tools,
+        "asset_sha256s": [], "upstream": upstream,
+    }
+    store.publish_result(ResultEnvelope(
+        algorithm_id=algorithm.id, algorithm_version=algorithm.version, status="ok",
+        provenance=provenance(tool="fixture", parameters_sha256=identity,
+                              source_id=source_id, input_id=input_id, reference_id="hg38"),
+        metrics=[Metric(metric_id="epigenetic_age_years", value=42.0)],
+    ), input_id=input_id, execution_plan=plan)
+    attempt = store.selected_attempt(input_id, algorithm.id, identity)
+    latest = store.read_result(input_id, algorithm.id, identity)
+    assert attempt is not None and latest is not None
+    assert isinstance(json.loads((attempt / "execution_plan.json").read_bytes())["parameters"]["weights"], list)
+    selected = cohorts._recorded_selection(
+        store, input_id, algorithm, attempt, latest,
+        {"reference_sha256": reference_sha256}, upstream, [], "ont",
+    )
+    assert selected is not None and selected[0] == identity
+    dynamic_reader = SimpleNamespace(
+        id=algorithm.id, version=algorithm.version, parameters=algorithm.parameters,
+        tools=algorithm.tools, identity_parameters=lambda _: pytest.fail("reader must use recorded parameters"),
+    )
+    assert cohorts._recorded_selection(
+        store, input_id, dynamic_reader, attempt, latest,
+        {"reference_sha256": reference_sha256}, upstream, [], "ont",
+    ) is not None
 
 
 def test_add_is_idempotent_and_build_publishes_immutable_generations(store: LabStore) -> None:
