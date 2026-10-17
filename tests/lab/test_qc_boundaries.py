@@ -59,6 +59,7 @@ def test_empty_input_has_no_quality_or_mapping_estimate(tmp_path: Path) -> None:
     _summary(path)
     metrics = _metrics(tmp_path)
     assert metrics["total_reads"]["value"] == 0
+    assert metrics["total_reads"]["n"] == 0
     for name in ("mapped_fraction", "mapq_ge20_fraction", "supplementary_fraction", "mean_read_q"):
         assert metrics[name]["value"] is None
         assert metrics[name]["n"] == 0
@@ -69,18 +70,19 @@ def test_empty_input_has_no_quality_or_mapping_estimate(tmp_path: Path) -> None:
 def test_coverage_sampling_continues_across_autosomes_and_clips_last_window(tmp_path: Path) -> None:
     # chr1 contributes 99 windows; chr2's second window is global index 100.
     # Thus sampled windows are chr1 [0,1M) and chr2 [1M,1M+50).
+    # chrX comes first so including it would shift the sampling phase.
     path = tmp_path / "aligned.bam"
     header = {"HD": {"SO": "coordinate"}, "SQ": [
-        {"SN": "chr1", "LN": 99_000_000}, {"SN": "chr2", "LN": 1_000_050},
         {"SN": "chrX", "LN": 1000},
+        {"SN": "chr1", "LN": 99_000_000}, {"SN": "chr2", "LN": 1_000_050},
     ]}
     with pysam.AlignmentFile(str(path), "wb", header=header) as out:
-        _record(out, "synthetic-crossing", 0, 999_990, 30)  # only ten bases in sampled window
-        _record(out, "synthetic-unsampled-1", 0, 2_000_000, 50)
-        _record(out, "synthetic-unsampled-2", 1, 0, 50)
-        _record(out, "synthetic-last-a", 1, 1_000_000, 20)
-        _record(out, "synthetic-last-b", 1, 1_000_040, 10)
-        _record(out, "synthetic-nonautosome", 2, 0, 100)
+        _record(out, "synthetic-nonautosome", 0, 0, 100)
+        _record(out, "synthetic-crossing", 1, 999_990, 30)  # only ten bases in sampled window
+        _record(out, "synthetic-unsampled-1", 1, 2_000_000, 50)
+        _record(out, "synthetic-unsampled-2", 2, 0, 50)
+        _record(out, "synthetic-last-a", 2, 1_000_000, 20)
+        _record(out, "synthetic-last-b", 2, 1_000_040, 10)
     summary = _summary(path)
     fraction, denominator = covered_fraction(path, summary, None)
     assert denominator == 1_000_050
