@@ -77,6 +77,17 @@ def _safe_result_selections(sample: Any, order: list[str]) -> dict[str, Any]:
     }
 
 
+def _safe_result_selections(sample: Any, order: list[str]) -> dict[str, Any]:
+    known = set(order)
+    unreadable = sample.full.unreadable
+    ambiguous = sample.full.ambiguous
+    return {
+        "unreadable_results": sorted(unreadable & known),
+        "ambiguous_results": sorted(ambiguous & known),
+        "malformed_result_selections": bool((unreadable | ambiguous) - known),
+    }
+
+
 def _recovery_problem(problem: LabProblem) -> dict[str, str]:
     """Only operator-safe fields cross the local Compare API boundary."""
 
