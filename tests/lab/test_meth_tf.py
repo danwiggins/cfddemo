@@ -18,7 +18,6 @@ from traceback_lab.algorithms.meth_calls import METH_CALLS
 from traceback_lab.algorithms.meth_tf import METH_TF, solve_two_component, tally_markers
 from traceback_lab.assets import AssetError
 from traceback_lab.cli import main as lab_main
-from traceback_lab.meth_calls import DTYPE, HAS_M, SCHEMA
 from traceback_lab.meth_tf_reference import CALL_DEFINITION, add_reference, inspect_reference
 from traceback_lab.read_summary import SPLIT_SALT, ReadSummary, h64
 from traceback_lab.registry import Ready, Skip, context_to_json, load_registry
@@ -32,7 +31,7 @@ def _reference(
 ) -> Path:
     markers = [
         {"chrom": "chr1", "pos0": 101, "healthy": 0.25, "tumour": 0.75},
-        {"chrom": "chr1", "pos0": 103 if third else 102, "healthy": 0.75, "tumour": 0.25},
+        {"chrom": "chr1", "pos0": 103, "healthy": 0.75, "tumour": 0.25},
     ]
     if third:
         markers.append({"chrom": "chr1", "pos0": 105, "healthy": 0.5, "tumour": 0.5})
@@ -46,31 +45,20 @@ def _reference(
     return path
 
 
-def _calls(base: Path) -> None:
-    directory = base / "mc" / "calls"
-    directory.mkdir(parents=True)
-    rows = []
-    for read_row in range(8):
-        for pos0, methylated in ((101, read_row < 3), (102, read_row < 5)):
-            p_m = 230 if methylated else 10
-            rows.append((read_row, 0, pos0, 0, p_m, 0, 255 - p_m, HAS_M))
-    np.asarray(rows, dtype=DTYPE).tofile(directory / "calls-00000.bin")
-    (directory / "meta.json").write_text(json.dumps({
-        "schema": SCHEMA, "chunks": [len(rows)], "codes_sampled": ["C+m"],
-        "records_with_mm": 8, "records_decoded": 8,
-    }))
-    np.asarray([], dtype="<u4").tofile(directory / "invalid_rows.bin")
-
-
-def _fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def _fixture(tmp_path: Path):
+    reads = [
+        Read(
+            f"molecule-{index}", "chr1", 100, "ACGCGCGAAAA", mm="C+m?,0,0;",
+            ml=[230 if index < 3 else 10, 230 if index < 5 else 10],
+        )
+        for index in range(8)
+    ]
     ctx = context_for(
         tmp_path, [("chr1", 10_000)],
-        [Read(f"molecule-{index}", "chr1", 100, "A" * 100) for index in range(8)],
-        eligible_reads=2_500_000,
+        reads, eligible_reads=2_500_000, modbase_model="synthetic-model",
     )
-    _calls(tmp_path)
+    METH_CALLS.run(ctx, tmp_path / "mc")
     ctx.extras["upstream"]["meth-calls"] = str(tmp_path / "mc")
-    monkeypatch.setattr(cell_origin, "header_model", lambda *_: "synthetic-model")
     source = _reference(tmp_path / "marker-source.json", ctx.reference_sha256)
     store = LabStore(tmp_path)
     with store.writer("synthetic meth-TF reference", new_run_id()):
@@ -152,17 +140,15 @@ def test_missing_or_changed_reference_refuses_without_using_unpinned_bytes(
 def test_reference_model_genome_and_depth_must_match(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    ctx, _ = _fixture(tmp_path, monkeypatch)
+    ctx, _ = _fixture(tmp_path)
     assert METH_TF.preflight(replace(ctx, eligible_reads=2_499_999)).reason_code == "depth"
     assert METH_TF.preflight(replace(ctx, reference_sha256="f" * 64)).reason_code == "reference"
     monkeypatch.setattr(cell_origin, "header_model", lambda *_: "different-model")
     assert METH_TF.preflight(ctx).reason_code == "missing_tags"
 
 
-def test_registered_worker_produces_exploratory_fraction_and_pinned_attempt(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    ctx, registered = _fixture(tmp_path, monkeypatch)
+def test_registered_worker_produces_exploratory_fraction_and_pinned_attempt(tmp_path: Path) -> None:
+    ctx, registered = _fixture(tmp_path)
     assert "meth-tf" in [algorithm.id for algorithm in load_registry()]
     assert isinstance(METH_TF.preflight(ctx), Ready)
     output = METH_TF.run(ctx, tmp_path / "out")
