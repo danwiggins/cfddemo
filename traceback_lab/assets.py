@@ -22,7 +22,7 @@ from pydantic import ValidationError
 from traceback_runner.serialization import canonical_json_bytes
 
 from .asset_contracts import AssetDescriptor
-from .store import open_regular_no_follow
+from .file_access import open_regular_no_follow
 if TYPE_CHECKING:
     from .store import LabStore
 
