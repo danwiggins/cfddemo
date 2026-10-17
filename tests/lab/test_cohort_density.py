@@ -184,3 +184,48 @@ def test_build_pins_vector_before_selected_attempt_changes(tmp_path, monkeypatch
     assert built.members[0].results[0].size_density.count == _counts(3, 1)
     publish(_counts(1, 3))
     assert read_current(store, "healthy").members[0].results[0].size_density.count == _counts(3, 1)
+
+
+def test_valid_zero_density_member_publishes_without_vector_but_malformed_still_refuses(tmp_path, monkeypatch) -> None:
+    from tests.lab.test_cohort_store import _sample
+
+    store = LabStore(tmp_path)
+    algorithm = SimpleNamespace(id="fragment-size", version="1", parameters={}, tools=[], upstream=())
+    monkeypatch.setattr(cohorts, "load_registry", lambda: (algorithm,))
+    source_id = _sample(store, 1)
+    input_id = f"{101:064x}"
+    params = parameters_sha256(
+        algorithm_id="fragment-size", algorithm_version="1", parameters={},
+        tools=[], reference_sha256=f"{900:064x}",
+    )
+
+    def publish(count: list[int]) -> None:
+        envelope = ResultEnvelope(
+            algorithm_id="fragment-size", algorithm_version="1", status="ok",
+            provenance=provenance(tool="fixture", parameters_sha256=params,
+                                  source_id=source_id, input_id=input_id, reference_id="synthetic"),
+            metrics=[Metric(metric_id="mode_bp", value=None)],
+            panels=[{"panel_id": "size-density", "kind": "density", "data_ref": "artifacts/size_hist.json"}],
+        )
+        store.publish_result(envelope, input_id=input_id, artifacts={"size_hist.json": json.dumps({
+            "span_bp": list(range(1, 1001)), "count": count,
+        }).encode()})
+
+    zero = [0] * 1000
+    zero[9] = 3  # A valid histogram with only 10 bp spans.
+    publish(zero)
+    add_sample(store, "healthy", source_id)
+    built = build_cohort(store, "healthy")
+    assert built.members[0].results[0].size_density is None
+    assert read_current(store, "healthy").version == 1
+    previous = built.members[0].results[0].model_copy(update={
+        "size_density": SizeDensityVector(attempt_id=ATTEMPT, artifact_sha256="c" * 64, count=_counts(1)),
+    })
+    stale = built.members[0].model_copy(update={"results": (previous,)})
+    assert capture_density_vectors(store, (stale,))[0].results[0].size_density is None
+
+    publish([0] * 999)
+    with pytest.raises(LabProblem) as error:
+        build_cohort(store, "healthy")
+    assert "fragment-size density" in error.value.cause
+    assert read_current(store, "healthy").version == 1

@@ -74,6 +74,8 @@ def _snapshot_vector(store: LabStore, member: CohortMember, result: CohortResult
                 not isinstance(data.get("count"), list) or len(data["count"]) != 1000 or
                 any(type(value) is not int or value < 0 for value in data["count"])):
             raise ValueError("histogram dimensions or counts invalid")
+        if not any(data["count"][49:]):
+            return None  # A valid result with no 50–1000 bp molecules has no normalizable vector.
         return SizeDensityVector(
             attempt_id=selected.name, artifact_sha256=hashlib.sha256(content).hexdigest(),
             count=tuple(data["count"]),
@@ -90,7 +92,8 @@ def capture_density_vectors(store: LabStore, members: tuple[CohortMember, ...]) 
         results = []
         for result in member.results:
             vector = _snapshot_vector(store, member, result) if result.algorithm_id == "fragment-size" else None
-            results.append(result.model_copy(update={"size_density": vector}) if vector is not None else result)
+            results.append(result.model_copy(update={"size_density": vector})
+                           if result.algorithm_id == "fragment-size" else result)
         captured.append(member.model_copy(update={"results": tuple(results)}))
     return tuple(captured)
 
