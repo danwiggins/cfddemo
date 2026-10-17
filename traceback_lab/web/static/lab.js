@@ -394,7 +394,10 @@
       if (state.generationAtLoad === null) state.generationAtLoad = status.generation;
       if (status.active) {
         const minutes = Math.max(0, Math.round((Date.now() - Date.parse(status.active.started_utc)) / 60000));
-        setStatus(`A Lab run is in progress (step: ${status.active.step}, ${minutes} min). Results below are from completed steps.${logIssue ? ` Run log status unavailable (${logReason}).` : ""}`);
+        const priorInterrupted = status.interrupted && status.interrupted.run_id !== status.active.run_id
+          ? ` Earlier run (${status.interrupted.run_id}) stopped during ${status.interrupted.step || "a step"}.` : "";
+        const logNotice = logIssue ? ` Run log for ${logIssue.run_id} is unavailable (${logReason}).` : "";
+        setStatus(`A Lab run is in progress (step: ${status.active.step || "starting"}, ${minutes} min). Results below are from completed steps.${priorInterrupted}${logNotice}`);
       } else if (status.interrupted) {
         // A run that died (stale heartbeat, open log) is "interrupted", even
         // if it published results before it stopped.
