@@ -15,6 +15,10 @@ CpG upstream of array probe `cg17861230`. The arithmetic can yield values
 from −12.1 to 202.7 years; those are mathematical bounds, not a valid age
 range or clinical interpretation. The one-year split-stability tolerance is
 an analysis check, not a guarantee at the five-call completeness gate.
+At exactly five eligible PDE4C calls, one call changing between modified and
+unmodified changes that site's fraction by 0.2 and the fitted arithmetic by
+`164.7 × 0.2 = 32.94` years. The gate therefore does not establish a precise
+age estimate; inspect each site's call count and split stability.
 
 The operator must provide a verified hg38 coordinate mapping for the two
 Illumina probe CpGs and the **upstream PDE4C assay CpG** used for the third
