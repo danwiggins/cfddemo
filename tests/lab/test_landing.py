@@ -237,7 +237,7 @@ def _id12(root: Path) -> str:
     return LabApi(LabStore(root)).samples()["samples"][0]["id12"]
 
 
-def test_agreement_api_refuses_unqualified_copy_number_without_a_pon(page_root: Path) -> None:
+def test_agreement_api_reports_copy_number_unavailable_at_fixture_depth(page_root: Path) -> None:
     from traceback_lab.web.api import LabApi
 
     payload = LabApi(LabStore(page_root)).sample(_id12(page_root))
@@ -245,7 +245,7 @@ def test_agreement_api_refuses_unqualified_copy_number_without_a_pon(page_root: 
     assert "not independent confirmation" in concordance["caption"]
     assert "whole-genome doubling" in concordance["wgd_caveat"]
     assert len(concordance["pairs"]) == 3
-    assert all(pair["state"] == "no_pon" and pair["x"] is None for pair in concordance["pairs"])
+    assert all(pair["state"] == "missing_cn" and pair["x"] is None for pair in concordance["pairs"])
 
 
 @needs_chrome
