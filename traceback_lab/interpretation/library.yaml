@@ -87,27 +87,27 @@ entries:
 
   - algorithm_id: bam-qc
     metric_id: supplementary_fraction
-    label: "Supplementary alignments per mapped read (chimera proxy)"
+    label: "Supplementary alignments per mapped read"
     value_kind: proportion
     tier: NEWER
     origin_tier: NEWER
-    origin_platform: "ONT"
+    origin_platform: "any"
     min_depth_x: null
     reference: {kind: none}
     performance: null
     performance_missing_reason: "none published"
-    meaning_high: "Ligation chimeras: two cfDNA molecules joined during library prep, which inflates apparent fragment lengths."
-    meaning_low: "Few chimeras."
-    confounders: ["library prep chemistry", "input mass"]
+    meaning_high: "More alignments have supplementary records; inspect their mapping and library origin."
+    meaning_low: "Fewer alignments have supplementary records."
+    confounders: ["library prep chemistry", "read length", "aligner settings"]
     next_steps:
-      analytical: ["Compare across kit batches", "Check the long-fragment tail"]
+      analytical: ["Compare only within one sequencing platform and aligner protocol"]
       clinical_setting: null
     license_ids: []
     flags: []
     headline: false
     stability: {kind: proportion}
     citations: []
-    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "No citation displayed. V1 (partial run): the read-coverage chimera proxy is uninformative on ONT; this share is the proxy used."}
+    citation_checked: {by: "Lab S5 platform review", date: "2026-10-17", note: "No citation displayed. This is a raw supplementary-alignment QC share; no cross-platform chimera threshold is supplied."}
 
   - algorithm_id: bam-qc
     metric_id: mean_read_q
@@ -115,16 +115,16 @@ entries:
     value_kind: positive
     tier: PROVEN
     origin_tier: PROVEN
-    origin_platform: "ONT"
+    origin_platform: "any"
     min_depth_x: null
     reference: {kind: none}
     performance: null
     performance_missing_reason: "QC measure, not a diagnostic"
-    meaning_high: "Accurate basecalls."
-    meaning_low: "Noisy basecalls: methylation calls and end motifs are less reliable."
-    confounders: ["basecaller model", "flow-cell wear"]
+    meaning_high: "Higher average recorded base quality."
+    meaning_low: "Lower average recorded base quality; inspect the platform-specific quality distribution."
+    confounders: ["sequencing platform", "basecaller or sequencer model", "quality calibration"]
     next_steps:
-      analytical: ["Confirm the basecall model in the @RG line"]
+      analytical: ["Compare quality only within one sequencing platform and protocol"]
       clinical_setting: null
     license_ids: []
     flags: []
@@ -2748,13 +2748,13 @@ entries:
     license_ids: [method-patents]
     flags: [LEGAL]
     headline: true
-    stability: {kind: absolute, tolerance: 0.5}
+    stability: {kind: scales_with_depth, tolerance: 0.5}
     citations: ["doi:10.1016/j.cell.2015.11.050"]
-    citation_checked: {by: "Lab S5 source review", date: "2026-10-16", note: "Snyder et al. define WPS as spanning fragments minus fragments with an endpoint in a 120 bp window for 120–180 bp fragments. This in-house ONT implementation publishes a 1 kb mean, not their nucleosome peak calls; the 0.5 stability tolerance is an engineering comparison rule."}
+    citation_checked: {by: "Lab S5 source review", date: "2026-10-16", note: "Snyder et al. define WPS as spanning fragments minus fragments with an endpoint in a 120 bp window for 120–180 bp fragments. This in-house ONT implementation publishes a 1 kb mean, not their nucleosome peak calls; raw WPS scales with depth, so the 0.5 tolerance compares depth-scaled values as an unvalidated engineering rule."}
 
   - algorithm_id: wps
     metric_id: positive_bin_fraction
-    label: "Fraction of 1 kb bins with positive mean WPS"
+    label: "Fraction of all autosomal 1 kb bins with positive mean WPS"
     value_kind: proportion
     tier: SPECULATIVE
     origin_tier: SPECULATIVE
@@ -2765,7 +2765,7 @@ entries:
     performance_missing_reason: "No healthy range or clinical performance is established for this ONT 1 kb WPS summary"
     meaning_high: "A larger share of autosomal 1 kb bins has positive mean long-fragment WPS."
     meaning_low: "A smaller share of autosomal 1 kb bins has positive mean long-fragment WPS."
-    confounders: ["ONT fragment-length distribution", "aligned versus physical molecule ends", "mapping and copy-number bias", "sequencing depth"]
+    confounders: ["ONT fragment-length distribution", "aligned versus physical molecule ends", "mapping and copy-number bias", "sequencing depth and local coverage"]
     next_steps:
       analytical: ["Inspect the 1 kb mean-WPS track", "Compare only with a protocol-matched cohort"]
       clinical_setting: null

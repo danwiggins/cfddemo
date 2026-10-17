@@ -14,6 +14,7 @@ from traceback_lab.algorithms import wps
 from traceback_lab.algorithms.wps import HALF, WINDOW, WPS, chromosome_track, score_centres
 from traceback_lab.envelope import ResultEnvelope, provenance
 from traceback_lab.interpretation.engine import load_library
+from traceback_lab.read_summary import write_summary
 from traceback_lab.registry import InputContext, Ready, Skip, context_to_json, load_registry
 from traceback_lab.store import LabStore
 from traceback_lab.worker import main as worker_main
@@ -65,6 +66,39 @@ def test_genome_track_is_chunk_invariant_and_filters_size_and_bounds() -> None:
         assert counts[index] == int(selected.sum())
         if selected.any():
             assert mean[index] == np.float32(expected[selected].mean())
+
+
+def test_wps_accepts_a_real_read_summary(tmp_path) -> None:
+    import pysam
+
+    bam = tmp_path / "aligned.bam"
+    with pysam.AlignmentFile(str(bam), "wb", header={
+        "HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 1200}],
+    }) as out:
+        for index, start in enumerate((100, 250, 500)):
+            read = pysam.AlignedSegment()
+            read.query_name = f"ont{index}"
+            read.query_sequence = "A" * 150
+            read.flag = 0
+            read.reference_id = 0
+            read.reference_start = start
+            read.mapping_quality = 60
+            read.cigarstring = "150M"
+            out.write(read)
+    ctx = _summary_context(tmp_path)
+    write_summary(bam, tmp_path / "summary" / "columns")
+    result = WPS.run(ctx, tmp_path / "output")
+    panel = json.loads(result.artifacts["wps_summary.json"])
+    assert panel["contigs"] == [{"contig": "chr1", "length_bp": 1200, "bins": 2}]
+    assert panel["qualifying_fragments"] == 3
+    assert result.metrics[0]["value"] is not None
+    derived_ctx = InputContext(**{**ctx.__dict__, "derived": {"transform": "downsample", "fraction": 0.5}})
+    derived_out = tmp_path / "derived-output"
+    derived = WPS.run(derived_ctx, derived_out)
+    assert {"wps_track.npz", "wps_summary.json"} == set(derived.artifacts)
+    assert not (derived_out / "wps_exact").exists()
+    assert json.loads(derived.artifacts["wps_summary.json"])["exact_index"] is None
+    assert {row["metric_id"] for row in derived.metrics} == {"mean_wps", "positive_bin_fraction"}
 
 
 def test_wps_depth_gate_requires_known_ten_x(tmp_path, monkeypatch) -> None:

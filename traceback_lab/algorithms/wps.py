@@ -133,6 +133,8 @@ class Wps(Base):
                            if name in AUTOSOMES)
         if autosomal_bp == 0:
             return Skip("reference", "long-fragment WPS needs chr1–chr22 autosome names in the hg38 summary")
+        if ctx.derived is not None:
+            return Ready()  # Derived controls retain scalar/preview results without exact per-base chunks.
         # int32 exact scores occupy four bytes per valid centre before compression.
         # Allow 10% for chunk/preview overhead and 2 GiB for other scratch use.
         required = (4 * autosomal_bp * 11 + 9) // 10 + DISK_MARGIN_BYTES
@@ -168,6 +170,7 @@ class Wps(Base):
         valid_bins = 0
         qualifying_fragments = 0
         exact_chunks: list[dict[str, Any]] = []
+        publish_exact = ctx.derived is None
         for cid in ids:
             name = summary.contigs[int(cid)]
             on = eligible & (contig == cid)
@@ -181,6 +184,8 @@ class Wps(Base):
                 if np.any((score < np.iinfo(np.int32).min) | (score > np.iinfo(np.int32).max)):
                     raise OverflowError("WPS per-base score exceeds int32")
                 total_score += int(score.sum(dtype=np.int64))
+                if not publish_exact:
+                    return
                 relative = Path("wps_exact") / name / f"{start:010d}.npz"
                 target = out / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
@@ -202,19 +207,21 @@ class Wps(Base):
                  "contigs": metadata, "valid_centres": total_centres,
                  "qualifying_fragments": qualifying_fragments,
                  "track_format": "npz float32 mean WPS per 1 kb genomic bin",
-                 "exact_index": "wps_exact_index.json"}
-        exact_index = {"schema": "traceback.wps-exact.v1", "window_bp": WINDOW,
-                       "fragment_bp": list(FRAGMENT_RANGE), "centres": "zero-based; valid [60,length-60]",
-                       "chunk_format": "npz score:int32; one integer per centre in [start,stop)",
-                       "chunks": exact_chunks}
+                 "exact_index": "wps_exact_index.json" if publish_exact else None}
+        artifacts = {"wps_track.npz": buffer.getvalue(),
+                     "wps_summary.json": json.dumps(panel, separators=(",", ":")).encode()}
+        if publish_exact:
+            exact_index = {"schema": "traceback.wps-exact.v1", "window_bp": WINDOW,
+                           "fragment_bp": list(FRAGMENT_RANGE), "centres": "zero-based; valid [60,length-60]",
+                           "chunk_format": "npz score:int32; one integer per centre in [start,stop)",
+                           "chunks": exact_chunks}
+            artifacts["wps_exact_index.json"] = json.dumps(exact_index, separators=(",", ":")).encode()
         return AlgorithmOutput(
             metrics=[metric("mean_wps", total_score / total_centres if total_centres and qualifying_fragments else None,
                             unit="fragments", n=total_centres),
                      metric("positive_bin_fraction", positive / valid_bins if valid_bins and qualifying_fragments else None,
                             unit="fraction", n=valid_bins)],
-            artifacts={"wps_track.npz": buffer.getvalue(),
-                       "wps_summary.json": json.dumps(panel, separators=(",", ":")).encode(),
-                       "wps_exact_index.json": json.dumps(exact_index, separators=(",", ":")).encode()},
+            artifacts=artifacts,
         )
 
 
