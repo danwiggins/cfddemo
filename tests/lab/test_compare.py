@@ -375,13 +375,13 @@ def test_compare_and_joint_panel_render_in_native_tables(tmp_path, monkeypatch) 
     monkeypatch.setattr(web_api.LabApi, "artifact", lambda self, *args: json.dumps(artifact).encode())
 
     with RunningLabServer(LabStore(tmp_path)) as server:
-        def dom(route: str, profile: str, want: str) -> str:
+        def dom(route: str, profile: str, *want: str) -> str:
             profile_path = tmp_path / profile
             return _dom_cdp([
                 _chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
                 f"--user-data-dir={profile_path}", "--window-size=360,740",
                 server.issue_link() + f"&route=/sample/{id12}/{route}",
-            ], profile_path, ok=lambda page: 'data-ready="1"' in page and want in page, timeout=90)
+            ], profile_path, ok=lambda page: 'data-ready="1"' in page and all(text in page for text in want), timeout=90)
 
         compare = dom("compare", "compare-profile", "Comparison against healthy:7")
         problem = {
@@ -394,7 +394,7 @@ def test_compare_and_joint_panel_render_in_native_tables(tmp_path, monkeypatch) 
             "cohort_id": "healthy", "cohort_version": "healthy:7", "kind": "internal_cohort",
             "member_n": 11, "pon_n": 0,
         }], "unavailable": [{"cohort_id": "broken", "problem": problem}]})
-        with_broken = dom("compare", "broken-profile", "Unavailable cohorts")
+        with_broken = dom("compare", "broken-profile", "Unavailable cohorts", "Comparison against healthy:7")
         monkeypatch.setattr(web_api.LabApi, "compare", lambda self, value, cohort: {
             "found": True, "state": "target_unavailable", "cohort_id": "healthy",
             "metrics": [], "problem": problem,
