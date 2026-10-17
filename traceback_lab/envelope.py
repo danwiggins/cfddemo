@@ -33,11 +33,13 @@ SKIP_REASONS: tuple[str, ...] = (
     "disk",
     "missing_toolchain",
     "missing_asset",
+    "invalid_asset",
     "missing_channel",
     "input_unavailable",
     "missing_tags",
     "example_reference",
     "platform",
+    "input_kind",
     "reference",
     "upstream",
 )
