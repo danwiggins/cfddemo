@@ -152,6 +152,7 @@ class CopyNumber(Base):
 
 COPY_NUMBER = CopyNumber(
     "copy-number",
+    version="2",  # v1 could execute below its identity's signed counted-read floor.
     family="copy-number",
     consumes="counting_bam",
     cost="slow",
