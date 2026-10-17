@@ -208,12 +208,11 @@
   }
 
   // -- charts ---------------------------------------------------------------------------
-  const chartCell = (value) => typeof value === "number" && Number.isFinite(value) ? String(value) : fmt(value);
   function dataTable(caption, headers, rows) {
     const table = h("table", { class: "data-table" },
       h("caption", {}, caption),
       h("thead", {}, h("tr", {}, ...headers.map((name) => h("th", { scope: "col" }, name)))),
-      h("tbody", {}, ...rows.map((row) => h("tr", {}, ...row.map((cell) => h("td", {}, chartCell(cell)))))));
+      h("tbody", {}, ...rows.map((row) => h("tr", {}, ...row.map((cell) => h("td", {}, fmt(cell)))))));
     return h("details", { class: "chart-table" }, h("summary", {}, "Data table"), h("div", { class: "table-wrap" }, table));
   }
 

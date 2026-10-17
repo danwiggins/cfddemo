@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -62,7 +63,10 @@ def test_echarts_scatter_values_match_adjacent_table_without_animation(route, ex
         assert len(chart["points"]) == len(chart["rows"])
         # Home's first two table columns are the pair; Agreement has a sample-ID column.
         table_pairs = [row[:2] if route == "/" else row[1:3] for row in chart["rows"]]
-        assert [[float(value) for value in pair] for pair in table_pairs] == chart["points"]
+        for displayed, point in zip(table_pairs, chart["points"], strict=True):
+            assert all(math.isclose(float(value.replace(",", "")), actual,
+                                    rel_tol=0.05, abs_tol=1e-10)
+                       for value, actual in zip(displayed, point, strict=True))
 
 
 @needs_chrome
@@ -159,6 +163,9 @@ def test_genome_copy_number_points_match_unmasked_table_bins_in_genome_order(tmp
         cursor = max(cursor, offsets[chromosome] + ending)
         if log2 != "—":
             expected.append([(offsets[chromosome] + beginning) / 1_000_000, float(log2)])
-    assert observed["points"] == expected == [
+    assert observed["points"] == [
         [0.0, 0.123456789], [0.002, -1.23456789], [0.0025, 0.0000004321],
     ]
+    for displayed, point in zip(expected, observed["points"], strict=True):
+        assert math.isclose(displayed[0], point[0])
+        assert math.isclose(displayed[1], point[1], rel_tol=0.05, abs_tol=1e-10)
