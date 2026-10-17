@@ -268,6 +268,7 @@
     ];
     if (sample.excluded_chunks && sample.excluded_chunks.length) {
       out.push(h("p", { class: "status-line" }, `Provisional: this input excludes ${sample.excluded_chunks.length} truncated chunks; depth reflects the reads present.`));
+      out.push(h("p", { class: "help" }, `Excluded chunk indexes: ${sample.excluded_chunks.join(", ")}.`));
     }
     // Depth vs minimum-depth bars.
     const visible = sample.algorithms.filter((a) => !a.hidden);
