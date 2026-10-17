@@ -33,9 +33,14 @@ def _show(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any
     ))
     lines = [f"ROOT  {store.root}", f"SAMPLE {source_id[:12]}",
              f"COHORT {report.cohort_version or 'unbuilt'}"]
+    def support(score: Any) -> str:
+        target_bins = "?" if score.target_bins_used is None else str(score.target_bins_used)
+        control_bins = "?" if score.reference_min_bins_used is None else str(score.reference_min_bins_used)
+        return f"controls={score.reference_n}, target_bins={target_bins}, min_control_bins={control_bins}"
+
     lines.extend(
-        f"{arm:<7} {score.z:+.3f} (n={score.reference_n})" if score.z is not None
-        else f"{arm:<7} {score.state} (n={score.reference_n})"
+        f"{arm:<7} {score.z:+.3f} ({support(score)})" if score.z is not None
+        else f"{arm:<7} {score.state} ({support(score)})"
         for arm, score in report.scores.items()
     )
     return EXIT_OK, _with_human(payload, lines, replace_data=True)

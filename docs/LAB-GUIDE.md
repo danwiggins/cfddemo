@@ -509,7 +509,11 @@ arm summaries against one published cohort generation. It excludes the target
 source and requires ten remaining controls with the same protocol and arm
 definition. A member of an exactly-ten-source cohort has nine controls and
 receives `no_reference`. The JSON reports n, the cohort mean and population
-SD, z, or a named unavailable state; the human view shows z and n. This is exploratory: no abnormality
+SD, z, or a named unavailable state. Each arm also reports the target's bin
+count and the smallest bin count among matched controls when the pinned
+generation recorded them; older generations show `null` (or `?` in the human
+view). The human view labels the control count separately from bin support.
+This is exploratory: no abnormality
 cutoff, donor-independence claim, or clinical reference is assigned.
 The JSON response names the target panel digest and source count and whether
 the target was excluded. A nonmember uses the full panel while cohort members

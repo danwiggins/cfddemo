@@ -142,6 +142,7 @@ def _member(index: int, value: float, *, protocol: str = "a" * 64) -> CohortMemb
             CohortResult(
                 algorithm_id="arm-summary", parameters_sha256="d" * 64,
                 cohort_compat_key=protocol, metrics={"chr1p_log2": value},
+                metric_n={"chr1p_log2": index},
             ),
         ),
     )
@@ -195,6 +196,8 @@ def test_read_side_arm_z_requires_ten_controls_after_self_exclusion(
     assert report.public()["target_excluded"] is True
     score = report.scores["chr1p"]
     assert score.state == "ok" and score.reference_n == 10
+    assert score.target_bins_used == 1 and score.reference_min_bins_used == 2
+    assert report.public()["scores"]["chr1p"]["target_bins_used"] == 1
     assert score.reference_mean == 6.5
     assert score.z == pytest.approx((1 - 6.5) / math.sqrt(8.25))
 
@@ -204,6 +207,7 @@ def test_read_side_arm_z_requires_ten_controls_after_self_exclusion(
     assert full_report.public()["target_panel_sha256"] == generation.pon_asset_sha256
     assert full_report.public()["target_panel_n"] == 11
     assert full_report.public()["target_excluded"] is False
+    assert full_report.scores["chr1p"].reference_min_bins_used == 1
     monkeypatch.setattr(arm_zscores, "member_for_generation", lambda *_: target)
 
     ten_member_generation = generation_for(members[:10])

@@ -84,10 +84,12 @@ def report_arm_zscores(store: LabStore, cohort_id: str, source_id: str) -> ArmZR
             protocol_key=result.cohort_compat_key,
             arm_asset_sha256=asset_sha256,
             log2=result.metrics.get(metric_id),
+            bins_used=result.metric_n.get(metric_id),
         ) for control_source, result in controls) if asset_sha256 is not None else ()
         scores[arm] = score_arm(
             target_source_id=source_id, arm_id=arm,
             target_log2=target_value,
+            target_bins_used=arm_result.metric_n.get(metric_id) if arm_result is not None else None,
             target_protocol_key=protocol, eligible_reads=eligible,
             arm_asset_sha256=asset_sha256, observations=observations,
         )

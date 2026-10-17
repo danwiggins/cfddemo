@@ -417,6 +417,8 @@ def _selected_results(
         found.append(CohortResult(
             algorithm_id=algorithm.id, parameters_sha256=chosen.provenance.parameters_sha256,
             cohort_compat_key=compat, metrics=metrics,
+            metric_n={metric.metric_id: metric.n for metric in chosen.metrics
+                      if metric.metric_id in metrics and metric.n is not None},
         ))
     return tuple(found)
 

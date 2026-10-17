@@ -30,6 +30,7 @@ class CohortResult(BaseModel):
     parameters_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
     cohort_compat_key: str = Field(pattern=SHA256_PATTERN.pattern)
     metrics: dict[str, StrictFloat | StrictInt | None]
+    metric_n: dict[str, StrictInt] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _metric_values(self) -> CohortResult:
@@ -38,11 +39,19 @@ class CohortResult(BaseModel):
                 raise ValueError(f"invalid metric id {name!r}")
             if value is not None and (isinstance(value, bool) or not math.isfinite(value)):
                 raise ValueError(f"metric {name!r} must be finite or null")
+        for name, count in self.metric_n.items():
+            if name not in self.metrics or count < 0:
+                raise ValueError(f"metric support {name!r} must name a metric and be nonnegative")
         object.__setattr__(self, "metrics", MappingProxyType(dict(self.metrics)))
+        object.__setattr__(self, "metric_n", MappingProxyType(dict(self.metric_n)))
         return self
 
     @field_serializer("metrics")
     def _serialize_metrics(self, value: dict[str, StrictFloat | StrictInt | None]) -> dict[str, float | int | None]:
+        return dict(value)
+
+    @field_serializer("metric_n")
+    def _serialize_metric_n(self, value: dict[str, StrictInt]) -> dict[str, int]:
         return dict(value)
 
 
