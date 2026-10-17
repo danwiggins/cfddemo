@@ -11,6 +11,8 @@ from types import SimpleNamespace
 import pysam
 import pytest
 
+from tests.lab.test_lab_server import _chrome
+
 from traceback_lab.algorithms import microbial as algorithm
 from traceback_lab import cohorts
 from traceback_lab.cohort_contracts import CohortGeneration, CohortMember, CohortResult
@@ -139,6 +141,82 @@ def test_sample_page_uses_bounded_receipt_and_reports_changed_database(tmp_path,
     assert profile_for_sample(store, sample, None, None, "not_built")["state"] == "asset_unavailable"
     (directory / "hash.k2d").unlink()
     assert profile_for_sample(store, sample, None, None, "not_built")["state"] == "asset_unavailable"
+
+
+def _profile_with_nonzero_exclusions(tmp_path: Path, monkeypatch) -> dict:
+    from traceback_lab import microbial_view as view
+
+    store = LabStore(tmp_path / "measure")
+    source, input_id, identity = "a" * 64, "b" * 64, "c" * 64
+    prov = provenance(tool="fixture", parameters_sha256=identity, source_id=source,
+                      input_id=input_id, reference_id="ref")
+    summary = ResultEnvelope(algorithm_id="read-summary", algorithm_version="1", status="ok", provenance=prov)
+    measured = ResultEnvelope(algorithm_id="microbial", algorithm_version="3", status="ok",
+                              provenance=prov, metrics=[Metric(metric_id="microbial_rpm_primary", value=500_000.0)])
+    sample = SampleView(source, source[:12], False,
+                        InputView("full", input_id, None, {}, {"read-summary": summary, "microbial": measured}))
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "microbial_profile.json").write_text(json.dumps({
+        "schema": "traceback.lab.microbial-profile.v1", "source_id": source, "input_id": input_id,
+        "database_sha256": "d" * 64, "database_source_label": "anonymous synthetic database",
+        "read_length": 75, "denominator": 10, "candidate_unmapped_reads": 5,
+        "too_short_unmapped_reads": 3, "missing_sequence_unmapped_reads": 2,
+        "omitted_taxa": 0, "taxa": [],
+    }))
+    monkeypatch.setattr(view, "_tool", lambda name: (name, "e" * 64))
+    monkeypatch.setattr(view, "inspect_database", lambda _store, **_kwargs: SimpleNamespace(
+        sha256="d" * 64, source_label="anonymous synthetic database", read_length=75))
+    monkeypatch.setattr(view, "resolve_reference", lambda *_args, **_kwargs: SimpleNamespace(sha256="f" * 64))
+    monkeypatch.setattr(view, "execution_identity", lambda *_args, **_kwargs: identity)
+    monkeypatch.setattr(store, "selected_artifacts", lambda *_args: artifacts)
+    return profile_for_sample(store, sample, None, None, "not_built")
+
+
+def test_validated_microbe_exclusions_reach_profile_payload(tmp_path: Path, monkeypatch) -> None:
+    profile = _profile_with_nonzero_exclusions(tmp_path, monkeypatch)
+    assert profile["state"] == "cohort_unavailable"
+    assert profile["candidate_unmapped_reads"] == 5
+    assert profile["too_short_unmapped_reads"] == 3
+    assert profile["missing_sequence_unmapped_reads"] == 2
+
+
+@pytest.fixture(scope="module")
+def microbial_dom_root(tmp_path_factory, synthetic_world):
+    from traceback_runner import cli as signed_cli
+    from traceback_runner.references import register_reference
+    from tests.lab.bam_fixtures import Read, write_bam
+
+    base = tmp_path_factory.mktemp("microbial-page")
+    root = base / "root"
+    register_reference(root, synthetic_world["fasta"], "synth")
+    with pysam.FastaFile(str(synthetic_world["fasta"])) as fasta:
+        contigs = list(zip(fasta.references, fasta.lengths))
+    bam = write_bam(base / "aligned.bam", contigs,
+                    [Read("anonymous-synthetic", "chr1", 100, "A" * 75)])
+    assert signed_cli.main(["lab", "run", str(bam), "--root", str(root),
+                            "--only", "read-summary", "--no-downsample", "--no-controls", "--json"]) == 0
+    return root
+
+
+@pytest.mark.skipif(_chrome() is None, reason="no Chrome/Chromium for the headless DOM check")
+def test_nonzero_microbe_exclusions_reach_api_and_dom(tmp_path: Path, monkeypatch, microbial_dom_root) -> None:
+    from tests.lab.test_landing import _dom, _id12
+    from traceback_lab.web import api as web_api
+    from traceback_lab.web.server import RunningLabServer
+
+    profile = _profile_with_nonzero_exclusions(tmp_path, monkeypatch)
+    monkeypatch.setattr(web_api, "profile_for_sample", lambda *_args: profile)
+    root = LabStore(microbial_dom_root)
+    id12 = _id12(microbial_dom_root)
+    payload = web_api.LabApi(root).sample(id12)
+    assert payload["microbial_profile"]["too_short_unmapped_reads"] == 3
+    assert payload["microbial_profile"]["missing_sequence_unmapped_reads"] == 2
+    with RunningLabServer(root) as server:
+        dom = _dom(server, tmp_path / "dom", route=f"/sample/{id12}/trust-qc",
+                   want=lambda text: "3 unmapped reads were shorter" in text and "2 lacked sequence" in text)
+    assert "3 unmapped reads were shorter" in dom
+    assert "2 lacked sequence" in dom
 
 
 def test_same_bytes_at_different_database_directory_are_refused(tmp_path) -> None:

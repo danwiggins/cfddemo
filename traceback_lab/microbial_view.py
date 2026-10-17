@@ -178,6 +178,8 @@ def profile_for_sample(store: LabStore, sample: SampleView, generation: CohortGe
             "database_sha256": database.sha256, "read_length": database.read_length,
             "database_source_label": database.source_label,
             "denominator": profile.get("denominator"), "candidate_unmapped_reads": profile.get("candidate_unmapped_reads"),
+            "too_short_unmapped_reads": profile.get("too_short_unmapped_reads"),
+            "missing_sequence_unmapped_reads": profile.get("missing_sequence_unmapped_reads"),
             "omitted_taxa": profile.get("omitted_taxa"),
             "microbial_rpm_primary": float(static["microbial_rpm_primary"]),
             "cohort_p975": total_threshold, "cohort_n": len(total_values),
