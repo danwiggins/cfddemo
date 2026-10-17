@@ -20,7 +20,6 @@
     ok_usable: ["●", "usable"],
     ok_unstable: ["◐", "unstable"],
     not_interpretable: ["▨", "not interpretable"],
-    unavailable: ["?", "unavailable"],
     skipped: ["○", "skipped"],
     failed: ["✕", "failed"],
     unavailable: ["?", "result unavailable"],
