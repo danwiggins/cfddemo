@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import traceback
+from copy import copy
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -28,6 +29,21 @@ from traceback_lab.registry import InputContext, ToolPin
 from traceback_lab.registry import execution_identity
 from traceback_lab.store import LabStore
 from traceback_lab.views import InputView, SampleView
+
+
+def test_microbial_execution_identity_survives_recorded_parameters_roundtrip() -> None:
+    from traceback_runner.serialization import canonical_json_bytes
+
+    live = algorithm.MICROBIAL
+    recorded = copy(live)
+    recorded.parameters = json.loads(canonical_json_bytes(live.parameters))
+    assert canonical_json_bytes(live.parameters) == canonical_json_bytes(recorded.parameters)
+    assert all(isinstance(taxid, str) for taxid in live.parameters["microbial_roots"])
+    pinned = {"reference_sha256": "a" * 64, "asset_sha256s": ["b" * 64],
+              "upstream": [{"algorithm_id": "read-summary", "parameters_sha256": "c" * 64}],
+              "tool_pins": [{"name": "kraken2", "version": "kraken"},
+                            {"name": "bracken", "version": "bracken"}]}
+    assert execution_identity(live, **pinned) == execution_identity(recorded, **pinned)
 
 
 def _hash(data: bytes) -> str:
@@ -70,6 +86,7 @@ def test_planned_result_resolves_into_sample_profile_without_identity_stubs(
     from traceback_runner.references import register_reference
     from traceback_lab.ingest import source_ids
     from traceback_lab.views import load_sample
+    from traceback_lab.web.api import LabApi
     from tests.lab.bam_fixtures import Read, write_bam
 
     store, _ = _database(tmp_path)
@@ -80,10 +97,18 @@ def test_planned_result_resolves_into_sample_profile_without_identity_stubs(
     kraken.write_text(
         '#!/bin/sh\nreport=""\nwhile [ "$#" -gt 0 ]; do\n'
         '  if [ "$1" = "--report" ]; then shift; report="$1"; fi\n'
-        '  shift\ndone\nprintf "100.00\\t1\\t1\\tU\\t0\\tunclassified\\n" > "$report"\n'
+        '  shift\ndone\nprintf "100.00\\t1\\t0\\tR\\t1\\troot\\n'
+        '100.00\\t1\\t0\\tD\\t2\\t  Bacteria\\n'
+        '100.00\\t1\\t1\\tS\\t562\\t    Synthetic bacterium\\n" > "$report"\n'
     )
     bracken = tools_dir / "bracken"
-    bracken.write_text("#!/bin/sh\nexit 99\n")
+    bracken.write_text(
+        '#!/bin/sh\noutput=""\nwhile [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = "-o" ]; then shift; output="$1"; fi\n'
+        '  shift\ndone\nprintf "name\\ttaxonomy_id\\ttaxonomy_lvl\\tkraken_assigned_reads\\t'
+        'added_reads\\tnew_est_reads\\tfraction_total_reads\\n'
+        'Synthetic bacterium\\t562\\tS\\t1\\t0\\t1\\t1.0\\n" > "$output"\n'
+    )
     for launcher in (kraken, bracken):
         launcher.chmod(0o755)
     (tools_dir / "classify").write_bytes(b"pinned synthetic helper")
@@ -106,7 +131,15 @@ def test_planned_result_resolves_into_sample_profile_without_identity_stubs(
     profile = profile_for_sample(store, sample, None, None, "not_built")
     assert profile is not None and profile["state"] == "cohort_unavailable"
     assert profile["candidate_unmapped_reads"] == 1
-    assert profile["microbial_rpm_primary"] == 0
+    assert profile["microbial_rpm_primary"] == 500_000
+    assert profile["taxa"][0]["taxid"] == 562
+
+    payload = LabApi(store).sample(source[:12])
+    microbial = next(row for row in payload["algorithms"] if row["algorithm_id"] == "microbial")
+    assert microbial["status"] == "ok"
+    assert all(not row["metric_id"].startswith("taxon_") for row in microbial["metrics"])
+    assert payload["microbial_profile"]["taxa"][0]["taxid"] == 562
+    assert payload["library_health"]["no_library_entry"] == 0
 
 
 def test_outer_timeout_removes_private_candidate_files(
