@@ -14,7 +14,10 @@ from traceback_lab.algorithms.short_read_fragment_size import (
     _tlen_counts,
 )
 from traceback_lab.interpretation.engine import load_library
-from traceback_lab.registry import InputContext, Ready, Skip, execution_identity
+from traceback_lab.registry import InputContext, PlanItem, Ready, Skip, execution_identity
+from traceback_lab.runner import RunTarget, run_plan
+from traceback_lab.scrub import Scrubber
+from traceback_lab.store import LabStore, new_run_id
 
 
 def _context(input_dir: Path, *, derived: dict | None = None) -> InputContext:
@@ -128,6 +131,28 @@ def test_preflight_requires_prealigned_declared_illumina(
     decision = SHORT_READ_FRAGMENT_SIZE.preflight(_context(input_dir))
     assert isinstance(decision, Skip)
     assert decision.reason_code == reason
+
+
+def test_input_kind_skip_is_published_by_real_runner(tmp_path: Path) -> None:
+    store = LabStore(tmp_path / "root")
+    store.ensure()
+    input_dir = tmp_path / "input"
+    _write_bam(input_dir, kind="aligned", platforms=("ONT",))
+    target = RunTarget(
+        input_id="b" * 64, source_id="a" * 64, input_dir=input_dir,
+        reference_id="hg38", reference_sha256="c" * 64,
+    )
+    run_id = new_run_id()
+    log = store.run_log(run_id)
+    result = run_plan(
+        store, None, log, target, [PlanItem(SHORT_READ_FRAGMENT_SIZE, False)],
+        {"short-read-fragment-size": "traceback_lab.algorithms.short_read_fragment_size:SHORT_READ_FRAGMENT_SIZE"},
+        run_id=run_id, scrubber=Scrubber(root=store.root),
+    )[0]
+    assert result.status == "skipped" and result.skip_reason == "input_kind"
+    stored = store.read_result(target.input_id, result.algorithm_id, result.parameters_sha256)
+    assert stored is not None and stored.status == "skipped" and stored.skip_reason == "input_kind"
+    assert any(event["event"] == "step_end" and event["skip_reason"] == "input_kind" for event in log.events())
 
 
 def test_derived_pair_selection_uses_read_name_predicate(tmp_path: Path) -> None:
