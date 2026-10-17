@@ -132,7 +132,7 @@ def _griffin_register(args: argparse.Namespace, store: LabStore) -> tuple[int, d
                 source_label=args.source_label, terms=args.terms,
                 license_id=args.license_id,
             )
-    except GriffinAssetError as exc:
+    except (GriffinAssetError, OSError) as exc:
         payload = _result_payload("lab asset griffin-register", "blocked", "Griffin assets not registered", store, {"cause": str(exc)})
         return EXIT_BLOCKED, _with_human(payload, [f"BLOCKED {exc}"])
     payload = _result_payload("lab asset griffin-register", "ok", "Griffin assets pinned", store, {

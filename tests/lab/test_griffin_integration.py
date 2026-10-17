@@ -15,6 +15,7 @@ from traceback_lab.adapters.griffin_run import GRIFFIN_COMMIT, _REF_FILES
 from traceback_lab.adapters.griffin_run import count_d21_pairs
 from traceback_lab.algorithms.griffin import GRIFFIN
 from traceback_lab.griffin_assets import GriffinAssetError, inspect_griffin_assets, register_griffin_assets
+from traceback_lab.problems import EXIT_BLOCKED
 from traceback_lab.registry import InputContext, Skip
 from traceback_lab.store import LabStore
 from traceback_lab.asset_command import _griffin_inspect, _griffin_register
@@ -106,6 +107,32 @@ def test_griffin_asset_commands_register_and_inspect(tmp_path: Path, monkeypatch
     assert code == 0 and payload["data"]["primary_site"] == "CTCF"
     code, payload = _griffin_inspect(Namespace(), store)
     assert code == 0 and payload["data"]["sha256"] == inspect_griffin_assets(root).sha256
+
+
+def test_griffin_registration_write_failure_is_blocked_without_replacing_existing_asset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import traceback_lab.griffin_assets as asset_module
+
+    root, sites = _registered(tmp_path, monkeypatch)
+    registration = root / "lab" / "assets" / "griffin" / "registration.json"
+    original = registration.read_bytes()
+    store = LabStore(root)
+    arguments = Namespace(
+        upstream_root=tmp_path / "upstream", ref_assets=tmp_path / "ref-assets",
+        site_list=[f"CTCF={sites}"], primary_site="CTCF",
+        source_label="operator supplied TF sites", terms="unknown", license_id=None,
+    )
+
+    def deny_tempfile(*args: object, **kwargs: object) -> None:
+        raise OSError("registration directory is full")
+
+    monkeypatch.setattr(asset_module.tempfile, "mkstemp", deny_tempfile)
+    code, payload = _griffin_register(arguments, store)
+    assert code == EXIT_BLOCKED and payload["status"] == "blocked"
+    assert "registration directory is full" in payload["data"]["cause"]
+    assert registration.read_bytes() == original
+    assert inspect_griffin_assets(root).primary_site == "CTCF"
 
 
 def test_griffin_preflight_depth_and_native_ont_skip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
