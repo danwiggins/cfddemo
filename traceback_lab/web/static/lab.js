@@ -435,7 +435,7 @@
     const identityPairs = sample.identity_pairs || [];
     if (sample.algorithms.some((a) => a.algorithm_id === "identity") || identityPairs.length) {
       out.push(h("section", { class: "panel" }, h("h2", {}, "Identity comparisons"),
-      h("p", { class: "problem" }, "FLAG: PRIVACY — pair comparison can reveal family relationships."),
+      h("p", {}, h("span", { class: "flag-pill" }, "FLAG: PRIVACY — pair comparison can reveal family relationships.")),
       h("p", { class: "help" }, "Exploratory Somalier measurements from explicitly selected stored samples. No ONT duplicate or kinship cutoff is claimed."),
       identityPairs.length
         ? h("div", { class: "table-wrap" }, h("table", {}, h("thead", {}, h("tr", {},

@@ -385,6 +385,19 @@ def test_compare_and_joint_panel_render_in_native_tables(tmp_path, monkeypatch) 
             ], profile_path, ok=lambda page: 'data-ready="1"' in page and all(text in page for text in want), timeout=90)
 
         compare = dom("compare", "compare-profile", "Comparison against healthy:7")
+        citation_payload = web_api.LabApi(LabStore(tmp_path)).compare(id12, "healthy")
+        original_compare = web_api.LabApi.compare
+        citation_rows = []
+        for label, checked in (("Unchecked citation probe", False), ("Checked citation probe", True)):
+            row = dict(citation_payload["metrics"][0])
+            row["label"] = label
+            row["entry"] = {**row["entry"], "citations": [], "citation_checked": checked}
+            citation_rows.append(row)
+        monkeypatch.setattr(web_api.LabApi, "compare", lambda self, value, cohort: {
+            **citation_payload, "metrics": citation_rows,
+        })
+        citation_dom = dom("compare", "citation-profile", "Unchecked citation probe", "Checked citation probe")
+        monkeypatch.setattr(web_api.LabApi, "compare", original_compare)
         problem = {
             "code": "TBX-LAB-022", "summary": "Cohort generation unavailable",
             "cause": "selected generation cannot be verified",
@@ -435,6 +448,11 @@ def test_compare_and_joint_panel_render_in_native_tables(tmp_path, monkeypatch) 
     assert compare.count('tabindex="0" role="region"') >= 2
     assert "Published mean: 167 bp" in compare and "Original evidence tier:" in compare
     assert "https://doi.org/10.1234%2Fsynthetic" in compare
+    unchecked_block = citation_dom.split("Unchecked citation probe", 1)[1].split("Checked citation probe", 1)[0]
+    checked_block = citation_dom.split("Checked citation probe", 1)[1]
+    assert "Citations: none" in unchecked_block and "UNVERIFIED citation" in unchecked_block
+    assert "Citations: none" in checked_block
+    assert "UNVERIFIED citation" not in checked_block.split("Citations: none", 1)[1][:100]
     assert 'data-csp-violations="0"' in compare
     assert "Comparison against healthy:7" in with_broken
     assert 'value="healthy"' in with_broken and 'value="broken"' not in with_broken
