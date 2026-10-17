@@ -25,6 +25,58 @@ from traceback_lab.store import LabStore, new_run_id
 from traceback_lab.stability import Side, band_at, stable
 
 
+def test_aligned_end_signals_names_span_and_peak_diagnostics(tmp_path: Path, monkeypatch) -> None:
+    from tests.lab.test_lab_server import _chrome, _dom_cdp
+    from traceback_lab.web import api as web_api
+    from traceback_lab.web.server import RunningLabServer
+
+    browser = _chrome()
+    if browser is None:
+        pytest.skip("no Chrome/Chromium for aligned-end DOM check")
+    source_id = "a" * 64
+    sample = {
+        "found": True, "id12": source_id[:12], "source_id": source_id,
+        "cohort_version": None, "cohort_n": 0, "cohort_state": "not_built",
+        "excluded_chunks": [], "interpretation_version": "fixture", "catalog": [], "licenses": [],
+        "algorithms": [
+            {"algorithm_id": "fragment-size", "status": "skipped", "skip_reason": "depth", "metrics": []},
+            {"algorithm_id": "aligned-end-structure", "status": "ok", "hidden": False,
+             "metrics": [], "provenance": {}},
+        ],
+    }
+    panel = {
+        "offset_bp": list(range(-100, 101)), "u_count": [0] * 201, "d_count": [0] * 201,
+        "source_label": "synthetic catalogue", "centers_source": "centers-v1",
+        "preferred_source": "sites-v1", "terms": "unknown", "observed_depth_x": 10.0,
+        "valid_molecules": 10, "eligible_centers": 1, "catalogue_centers": 1,
+        "eligible_preferred_sites": 2, "catalogue_preferred_sites": 2,
+        "ocf_like_left": 1, "ocf_like_right": 1, "ocf_like_left_ends": 1,
+        "ocf_like_right_ends": 1, "preferred_u_hits": 1, "preferred_d_hits": 1,
+        "valid_ends": 20, "aligned_span_length_bins_bp": {
+            "lt100": 1, "100_200": 7, "201_500": 1, "501_2000": 1, "gt2000": 0,
+        },
+        "left_d_peak_offset_bp": -60, "right_u_peak_offset_bp": 60,
+    }
+    monkeypatch.setattr(web_api.LabApi, "samples", lambda self: {"samples": [
+        {"id12": source_id[:12], "run_utc": "", "depth_x": 10.0, "example": False},
+    ], "root_has_runs": True})
+    monkeypatch.setattr(web_api.LabApi, "sample", lambda self, value: sample)
+    monkeypatch.setattr(web_api.LabApi, "artifact", lambda self, *args: json.dumps(panel).encode())
+    with RunningLabServer(LabStore(tmp_path)) as server:
+        profile = tmp_path / "aligned-end-chrome"
+        html = _dom_cdp([
+            browser, "--headless=new", "--disable-gpu", "--no-first-run",
+            f"--user-data-dir={profile}", "--window-size=1280,800",
+            server.issue_link() + f"&route=/sample/{source_id[:12]}/signals",
+        ], profile, ok=lambda page: 'data-ready="1"' in page and "Aligned spans by length" in page,
+            timeout=60)
+    assert "Aligned spans by length (bp)" in html
+    assert "100–200" in html and "Left D peak offset: -60 bp" in html
+    assert "right U peak offset: 60 bp" in html
+    assert "do not measure soft clipping" in html
+    assert 'data-csp-violations="0"' in html
+
+
 def test_missing_catalogue_traceback_does_not_expose_external_path(tmp_path: Path) -> None:
     private = tmp_path / "private-donor-identifier" / "centers.bed"
     with pytest.raises(EndCatalogueError) as caught:
