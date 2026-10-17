@@ -12,7 +12,7 @@ import pytest
 
 import traceback_lab.methylbert_bundle as bundle_module
 from traceback_lab.methylbert_bundle import BundleError, REQUIRED_FILES, SCHEMA, unpack_bundle, verify_bundle
-from traceback_runner.references import AssetKind, copy_registered_asset, register_asset
+from traceback_runner.references import AssetKind, ReferenceProblem, copy_registered_asset, register_asset
 
 
 def _bundle(path, *, bad_digest=False, extra=False, link=False, model_id="test-tumour-normal"):
@@ -66,6 +66,16 @@ def test_bundle_registers_by_digest_then_reverifies_worker_copy(tmp_path):
         root, "asset_methylbert_test", scratch, kind=AssetKind.METHYLBERT_BUNDLE,
     )
     assert unpack_bundle(copy, scratch / "model").model_id == "test-tumour-normal"
+
+
+def test_registration_refuses_malformed_bundle_before_publication(tmp_path):
+    archive = tmp_path / "model.tar"
+    _bundle(archive, bad_digest=True)
+    root = tmp_path / "root"
+    with pytest.raises(ReferenceProblem) as raised:
+        register_asset(root, AssetKind.METHYLBERT_BUNDLE, "asset_bad_model", archive)
+    assert raised.value.code == "TBX-ASSET-005"
+    assert not (root / "assets-local" / AssetKind.METHYLBERT_BUNDLE.value / "asset_bad_model").exists()
 
 
 @pytest.mark.parametrize("damage,message", [

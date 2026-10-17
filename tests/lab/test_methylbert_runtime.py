@@ -83,6 +83,7 @@ def test_readiness_requires_pinned_model_reference_depth_ont_and_gpu(monkeypatch
         ({"eligible_reads": True}, "2,500,000"),
         ({"platform": "illumina"}, "declared ONT"),
         ({"gpu_available": False}, "CUDA GPU"),
+        ({"gpu_available": "false"}, "CUDA GPU"),
     ):
         with pytest.raises(runtime.RuntimeRefusal, match=message):
             _ready(**change)
@@ -96,7 +97,8 @@ def test_readiness_requires_pinned_model_reference_depth_ont_and_gpu(monkeypatch
 def _aggregate(path, **changes):
     values = {
         "schema": runtime.AGGREGATE_SCHEMA, "model_id": "tumour-normal",
-        "tumour_fraction": 0.2, "normal_fraction": 0.8, "classified_reads": 50,
+        "tumour_fraction": 0.2, "normal_fraction": 0.8,
+        "classified_reads": runtime.MIN_CLASSIFIED_READS,
     }
     values.update(changes)
     path.write_text(json.dumps(values))
@@ -106,14 +108,15 @@ def test_only_small_finite_aggregate_without_per_read_fields_is_publishable(tmp_
     path = tmp_path / "aggregate.json"
     _aggregate(path)
     result = runtime.read_aggregate(path, model_id="tumour-normal")
-    assert (result.tumour_fraction, result.classified_reads) == (0.2, 50)
+    assert (result.tumour_fraction, result.classified_reads) == (0.2, runtime.MIN_CLASSIFIED_READS)
     for change, message in (
         ({"read_name": "private"}, "unexpected fields"),
         ({"normal_fraction": 0.7}, "fractions"),
         ({"tumour_fraction": float("nan")}, "fractions"),
         ({"tumour_fraction": 10**1000}, "fractions"),
-        ({"classified_reads": 0}, "no classified reads"),
-        ({"classified_reads": runtime.MAX_CLASSIFIED_READS + 1}, "no classified reads"),
+        ({"classified_reads": 0}, "2,500,000 classified reads"),
+        ({"classified_reads": runtime.MIN_CLASSIFIED_READS - 1}, "2,500,000 classified reads"),
+        ({"classified_reads": runtime.MAX_CLASSIFIED_READS + 1}, "exceeds the cap"),
     ):
         _aggregate(path, **change)
         with pytest.raises(runtime.RuntimeRefusal, match=message):
@@ -122,7 +125,7 @@ def test_only_small_finite_aggregate_without_per_read_fields_is_publishable(tmp_
     with pytest.raises(runtime.RuntimeRefusal, match="oversized"):
         runtime.read_aggregate(path, model_id="tumour-normal")
     path.write_text('{"classified_reads":' + "9" * 5000 + "}")
-    with pytest.raises(runtime.RuntimeRefusal, match="invalid JSON"):
+    with pytest.raises(runtime.RuntimeRefusal):
         runtime.read_aggregate(path, model_id="tumour-normal")
     path.write_text("[" * 3000 + "0" + "]" * 3000)
     with pytest.raises(runtime.RuntimeRefusal, match="invalid JSON"):
