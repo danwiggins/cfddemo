@@ -861,13 +861,13 @@ def test_status_does_not_require_run_logs_from_other_writer_commands(tmp_path) -
     {"command": "run", "run_id": []},
     {"command": "run", "run_id": "invalid"},
 ))
-def test_status_ignores_malformed_latest_run_pointer(tmp_path, pointer) -> None:
+def test_status_reports_malformed_latest_run_pointer_without_echoing_it(tmp_path, pointer) -> None:
     store = LabStore(tmp_path)
     store.ensure()
     store.last_run_file.write_text(json.dumps(pointer))
     status = api_module.LabApi(store).status()
     assert status["active"] is None and status["interrupted"] is None
-    assert status["run_log_unavailable"] is None
+    assert status["run_log_unavailable"] == {"run_id": None, "reason": "latest_run_pointer_unavailable"}
 
 
 def test_recent_run_candidates_are_bounded_and_do_not_use_unbounded_run_ids(tmp_path, monkeypatch) -> None:
@@ -885,7 +885,7 @@ def test_recent_run_candidates_are_bounded_and_do_not_use_unbounded_run_ids(tmp_
 
 
 @pytest.mark.skipif(_chrome() is None, reason="no Chrome/Chromium for the headless Trust/QC check")
-@pytest.mark.parametrize("kind", ("active", "active-before-sample", "interrupted",
+@pytest.mark.parametrize("kind", ("active", "active-pending", "active-before-sample", "interrupted",
                                   "active-unlogged-prior-badlog", "active-unlogged-prior-interrupted"))
 @pytest.mark.parametrize("selected", ("a", "c"))
 def test_trust_qc_run_note_is_scoped_without_replacing_result_status(tmp_path, kind, selected) -> None:
@@ -895,7 +895,7 @@ def test_trust_qc_run_note_is_scoped_without_replacing_result_status(tmp_path, k
     for source_id, input_id in ((source_a, input_a), (source_b, input_b)):
         id12 = source_id[:12]
         samples[id12] = {
-            "found": True, "id12": id12, "source_id": source_id, "example": False,
+            "found": True, "id12": id12, "source_id": source_id, "full_input_id": input_id, "example": False,
             "run_utc": "2026-10-16T00:00:00Z", "depth": {"approx_depth_x": 1.0},
             "excluded_chunks": [], "preanalytic_sex": {"state": "no_verdict", "reason": "no_assertion"},
             "cohort_n": 0,
@@ -908,6 +908,8 @@ def test_trust_qc_run_note_is_scoped_without_replacing_result_status(tmp_path, k
         }
     marker = {"run_id": "r-20261015-0101-abcd", "step": "bam-qc",
               "source_id": source_a, "input_id": input_a}
+    if kind == "active-pending":
+        marker["step"] = "read-summary"
     shown_marker = {key: value for key, value in marker.items()
                     if kind not in ("active-before-sample", "active-unlogged-prior-badlog",
                                     "active-unlogged-prior-interrupted") or key not in ("source_id", "input_id")}
@@ -940,6 +942,8 @@ def test_trust_qc_run_note_is_scoped_without_replacing_result_status(tmp_path, k
         )
     run_table = dom.split("<h2>Run</h2>", 1)[1].split("</table>", 1)[0]
     assert '<th scope="row">bam-qc</th><td>ok' in run_table
+    if kind == "active-pending":
+        assert ("Latest run in progress during read-summary; no result was published for this step." in dom) == (selected == "a")
     note = "latest run " + ("interrupted" if kind == "interrupted" else "in progress")
     assert (note in run_table) == (selected == "a" and kind in ("active", "interrupted"))
     if kind == "active-before-sample":

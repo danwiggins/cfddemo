@@ -402,7 +402,8 @@
       state.lastStatus = status;
       const logIssue = status.run_log_unavailable;
       const logReason = logIssue && ({ invalid_run_id: "invalid run ID", unreadable_or_over_1mib: "log unreadable, unsafe, or over 1 MiB",
-        over_4096_lines: "log over 4,096 lines", malformed_or_empty: "log malformed or empty" }[logIssue.reason] || "log unavailable");
+        over_4096_lines: "log over 4,096 lines", malformed_or_empty: "log malformed or empty",
+        latest_run_pointer_unavailable: "latest-run pointer unavailable" }[logIssue.reason] || "log unavailable");
       if (state.generationAtLoad === null) state.generationAtLoad = status.generation;
       if (status.active) {
         const minutes = Math.max(0, Math.round((Date.now() - Date.parse(status.active.started_utc)) / 60000));
@@ -416,7 +417,7 @@
         setStatus(`The last run (${status.interrupted.run_id}) stopped during ${status.interrupted.step || "a step"}. Results shown are from completed steps. Rerun the same command; only missing results recompute.`,
           status.generation > state.generationAtLoad ? "Reload" : null);
       } else if (logIssue) {
-        setStatus(`The last run (${logIssue.run_id}) status is unavailable (${logReason}). Results shown are from completed steps. Inspect the run log or rerun the command.`,
+        setStatus(`The last run${logIssue.run_id ? ` (${logIssue.run_id})` : ""} status is unavailable (${logReason}). Results shown are from completed steps. Inspect the run log or rerun the command.`,
           status.generation > state.generationAtLoad ? "Reload" : null);
       } else if (status.generation > state.generationAtLoad && previous && previous.active) {
         setStatus("New results are available.", "Reload");
