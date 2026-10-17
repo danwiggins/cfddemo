@@ -195,10 +195,18 @@ def run_plan(
             for name in algorithm.upstream
             if name in done
         ]
+        identity_ctx = target.context(store.root)
+        identity_assets = getattr(algorithm, "identity_assets", None)
         assets_of = getattr(algorithm, "asset_sha256s", None)
-        planned_assets = list(assets_of(store.root) if callable(assets_of) else ())
+        if callable(identity_assets):
+            planned_assets = list(identity_assets(identity_ctx))
+        elif callable(assets_of):
+            planned_assets = list(assets_of(store.root))
+        else:
+            planned_assets = []
+        identity_parameters = getattr(algorithm, "identity_parameters", None)
+        planned_parameters = identity_parameters(identity_ctx) if callable(identity_parameters) else algorithm.parameters
         planned_tools = [tool.identity() for tool in algorithm.tools]
-        planned_parameters = algorithm.parameters
         identity = execution_identity(
             algorithm,
             reference_sha256=target.reference_sha256,
@@ -245,6 +253,7 @@ def run_plan(
         }
         target.extras["planned_asset_sha256s"] = planned_assets
         target.extras["planned_tool_pins"] = planned_tools
+        target.extras["planned_parameters"] = planned_parameters
         ctx = target.context(store.root)
         decision: Ready | Skip
         if blocked:

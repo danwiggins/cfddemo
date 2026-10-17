@@ -62,7 +62,6 @@ ALGORITHMS: tuple[str, ...] = (
     "global_5mc:GLOBAL_5MC",
     "global_5hmc:GLOBAL_5HMC",
     "pmd_score:PMD_SCORE",
-    "methylbert:METHYLBERT",
     "hypometh_reads:HYPOMETH_READS",
     "frag_x_meth:FRAG_X_METH",
 )
