@@ -160,6 +160,22 @@ def test_unprefixed_nuclear_contigs_exclude_mt_and_decoy(tmp_path: Path) -> None
     assert _tlen_counts(ctx) == {180: 1}
 
 
+def test_all_filtered_pairs_have_null_metrics_and_fixed_empty_histogram(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    proper = 0x1 | 0x2
+    _write_bam(input_dir, pairs=(("low-mapq", 180, proper, 19),
+                                 ("duplicate", 180, proper | 0x400, 60),
+                                 ("zero-tlen", 0, proper, 60)))
+    ctx = _context(input_dir)
+    assert isinstance(SHORT_READ_FRAGMENT_SIZE.preflight(ctx), Ready)
+    assert _tlen_counts(ctx) == {}
+    output = SHORT_READ_FRAGMENT_SIZE.run(ctx, tmp_path)
+    assert all(item["value"] is None and item["n"] == 0 for item in output.metrics)
+    histogram = json.loads(output.artifacts["tlen_hist.json"])
+    assert len(histogram["tlen_bp"]) == len(histogram["count"]) == 1000
+    assert sum(histogram["count"]) == 0
+
+
 def test_no_canonical_nuclear_contigs_skips_explicitly(tmp_path: Path) -> None:
     input_dir = tmp_path / "input"
     _write_bam(
