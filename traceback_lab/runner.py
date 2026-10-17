@@ -217,6 +217,14 @@ def run_plan(
             tool_pins=planned_tools,
             parameters=planned_parameters,
         )
+        execution_plan = {
+            "schema": "traceback.lab.execution-plan.v1",
+            "algorithm_id": algorithm.id, "algorithm_version": algorithm.version,
+            "input_id": target.input_id, "reference_sha256": target.reference_sha256,
+            "platform": "ont", "parameters": planned_parameters,
+            "tools": planned_tools, "asset_sha256s": planned_assets,
+            "upstream": upstream,
+        }
         step = algorithm.id if target.label == "full" else f"{algorithm.id}@{target.label}"
         existing = store.read_result(target.input_id, algorithm.id, identity)
         blocked = [name for name in algorithm.upstream if done.get(name) is None or done[name].status != "ok"]
@@ -358,6 +366,7 @@ def run_plan(
                         input_id=target.input_id,
                         artifacts_dir=scratch / "artifacts",
                         upstream_selections=consumed,
+                        execution_plan=execution_plan,
                     )
                     log.append(
                         "step_end",
