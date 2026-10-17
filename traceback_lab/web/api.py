@@ -22,7 +22,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ..cohort_contracts import CohortGeneration, CohortMember, MetricProjection, project_metric
-from ..cohorts import list_cohorts, member_for_generation, member_from_store, read_current
+from ..cohorts import list_cohorts, member_for_generation_or_independent, member_from_store, pon_dependent_algorithms, read_current
 from ..file_access import open_regular_no_follow
 from ..identity import resolve_prefix, shortest_unique_prefixes
 from ..ingest import source_ids, source_record
@@ -40,7 +40,6 @@ from ..interpretation.engine import (
     qc_band,
 )
 from ..problems import LabProblem
-from ..registry import load_registry
 from ..store import LabStore, summarize_run
 from .. import views
 
@@ -55,16 +54,7 @@ def _recovery_problem(problem: LabProblem) -> dict[str, str]:
 
 
 def _pon_dependent_algorithms() -> set[str]:
-    dependent = {"copy-number"}
-    algorithms = load_registry()
-    while True:
-        expanded = dependent | {
-            algorithm.id for algorithm in algorithms
-            if any(upstream in dependent for upstream in algorithm.upstream)
-        }
-        if expanded == dependent:
-            return dependent
-        dependent = expanded
+    return pon_dependent_algorithms()
 
 
 def _cohort_target(
@@ -72,20 +62,7 @@ def _cohort_target(
 ) -> tuple[CohortMember, LabProblem | None]:
     """Keep independent cohort metrics when only the PoN tools are missing."""
 
-    try:
-        return member_for_generation(store, generation, source_id), None
-    except LabProblem as problem:
-        if (generation.pon_asset_sha256 is None or problem.code != "TBX-LAB-020"
-                or problem.data.get("field") not in ("toolchain", "method assets")):
-            raise
-        # No uncorrected copy-number result may masquerade as panel-corrected.
-        # Remove its entire transitive dependency chain from the read view.
-        dependent = _pon_dependent_algorithms()
-        target = member_from_store(store, source_id)
-        return target.model_copy(update={
-            "results": tuple(result for result in target.results
-                             if result.algorithm_id not in dependent),
-        }), problem
+    return member_for_generation_or_independent(store, generation, source_id)
 
 
 class LibraryHolder:

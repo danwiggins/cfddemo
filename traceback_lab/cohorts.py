@@ -452,6 +452,40 @@ def member_for_generation(store: LabStore, generation: CohortGeneration, source_
     return member_from_store(store, source_id, pon_selection=selection)
 
 
+def pon_dependent_algorithms() -> set[str]:
+    """The registry's transitive copy-number dependency closure."""
+
+    dependent = {"copy-number"}
+    algorithms = load_registry()
+    while True:
+        expanded = dependent | {
+            algorithm.id for algorithm in algorithms
+            if any(upstream in dependent for upstream in algorithm.upstream)
+        }
+        if expanded == dependent:
+            return dependent
+        dependent = expanded
+
+
+def member_for_generation_or_independent(
+    store: LabStore, generation: CohortGeneration, source_id: str,
+) -> tuple[CohortMember, LabProblem | None]:
+    """Keep independent metrics when only the selected PoN method is unavailable."""
+
+    try:
+        return member_for_generation(store, generation, source_id), None
+    except LabProblem as problem:
+        if (generation.pon_asset_sha256 is None or problem.code != "TBX-LAB-020"
+                or problem.data.get("field") not in ("toolchain", "method assets")):
+            raise
+        dependent = pon_dependent_algorithms()
+        target = member_from_store(store, source_id)
+        return target.model_copy(update={
+            "results": tuple(result for result in target.results
+                             if result.algorithm_id not in dependent),
+        }), problem
+
+
 def pon_inputs_for_members(store: LabStore, members: tuple[CohortMember, ...]) -> tuple[PonInput, ...]:
     """Resolve eligible full aligned inputs for the isolated PoN builder.
 
@@ -720,7 +754,7 @@ def project_sample_metric(
     generation = read_current(store, cohort_id)
     if generation is None:
         return None
-    target = member_for_generation(store, generation, target_source_id)
+    target, _ = member_for_generation_or_independent(store, generation, target_source_id)
     result = next((item for item in target.results if item.algorithm_id == algorithm_id), None)
     if result is None:
         return None
@@ -731,6 +765,6 @@ def project_sample_metric(
 
 
 __all__ = [
-    "CohortListing", "add_sample", "build_cohort", "list_cohorts", "member_for_generation", "member_from_store", "pon_inputs_for_members",
+    "CohortListing", "add_sample", "build_cohort", "list_cohorts", "member_for_generation", "member_for_generation_or_independent", "member_from_store", "pon_dependent_algorithms", "pon_inputs_for_members",
     "project_current_metric", "project_sample_metric", "read_current", "read_roster", "remove_sample",
 ]
