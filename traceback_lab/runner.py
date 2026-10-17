@@ -35,9 +35,35 @@ from .registry import (
     execution_identity,
 )
 from .scrub import Scrubber
-from .store import LabStore, RunLog, WriterLock
+from .store import MAX_EXECUTION_PLAN_BYTES, LabStore, RunLog, WriterLock, open_regular_no_follow
 
 DEFAULT_TIMEOUT_S = 3600.0
+
+
+def _cached_plan_matches(attempt: Path | None, expected: Mapping[str, Any], *, required: bool) -> bool:
+    """Reuse only a bounded producer plan matching this run's complete identity."""
+    if attempt is None:
+        return False
+    path = attempt / "execution_plan.json"
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        # Static pre-plan results remain eligible for the legacy cache path.
+        return not required
+    except OSError:
+        return False
+    try:
+        with os.fdopen(open_regular_no_follow(path), "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                    or info.st_size > MAX_EXECUTION_PLAN_BYTES):
+                return False
+            data = stream.read(MAX_EXECUTION_PLAN_BYTES + 1)
+        if len(data) > MAX_EXECUTION_PLAN_BYTES:
+            return False
+        return canonical_json_bytes(json.loads(data)) == canonical_json_bytes(expected)
+    except (OSError, ValueError, TypeError, RecursionError):
+        return False
 
 
 @dataclass
@@ -259,17 +285,16 @@ def run_plan(
             consumed is not None
             and store.selected_upstream_selections(target.input_id, algorithm.id, identity) == consumed
         )
-        if (callable(identity_tools) or callable(identity_assets) or callable(identity_parameters)) and existing is not None:
-            # Legacy cached results have no producer plan. A cohort cannot
-            # safely reconstruct a dynamic runtime or asset identity from its
-            # reader environment, so republish once with the recorded plan.
+        if existing is not None:
+            # Dynamic identities require their producer plan. A present plan,
+            # even for a static method, must describe this exact run before
+            # its result can be reselected from cache.
+            dynamic_plan = any(callable(hook) for hook in
+                               (identity_tools, identity_assets, identity_parameters))
             cached_attempt = store.selected_attempt(target.input_id, algorithm.id, identity)
-            try:
-                has_plan = cached_attempt is not None and stat.S_ISREG(
-                    (cached_attempt / "execution_plan.json").lstat().st_mode)
-            except OSError:
-                has_plan = False
-            cache_valid = cache_valid and has_plan
+            cache_valid = cache_valid and _cached_plan_matches(
+                cached_attempt, execution_plan, required=dynamic_plan,
+            )
         if (existing is not None and existing.status == "ok" and not force and
                 not platform_rejected and not pon_unavailable and not blocked and cache_valid):
             store.reselect_cached_result(target.input_id, algorithm.id, identity)
