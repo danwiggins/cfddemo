@@ -93,9 +93,9 @@
       if (target) { target.setAttribute("tabindex", "-1"); target.scrollIntoView({ block: "center" }); target.focus({ preventScroll: true }); }
     } }, `${lic ? lic.headline : id} ↗`);
   }
-  function unverifiedBadge(metric) {
-    const entry = metric.entry || {};
-    return entry.citations && entry.citations.length && !entry.citation_checked ? h("span", { class: "unverified" }, "UNVERIFIED citation") : "";
+  function unverifiedBadge(item) {
+    const entry = item.entry || item;
+    return (entry.citations || []).length && !entry.citation_checked ? h("span", { class: "unverified" }, "UNVERIFIED citation") : "";
   }
   function licenseCallouts(sample) {
     const used = sample.licenses || [];
@@ -410,7 +410,7 @@
       h("p", { class: "card-value" }, h("strong", {}, fmt(metric.value, metric.unit))),
       strip(metric),
       h("p", {}, "Performance: ", perf ? `${perf.value} (${perf.platform || ""}${perf.depth ? ", " + perf.depth : ""}; ${perf.source || ""})` : (entry.performance_missing_reason || "none published"),
-        entry.citation_checked ? "" : [" ", h("span", { class: "unverified" }, "UNVERIFIED citation")]),
+        " ", unverifiedBadge(entry)),
       meaning ? h("p", {}, meaning.split(". ")[0] + ".") : "",
       h("p", {}, ...(entry.flags || []).map((f) => flagPill(f)), ...licenses),
       toggle, details);
@@ -593,7 +593,7 @@
           h("h3", {}, c.label), h("p", { class: "help" }, c.algorithm_id),
           h("p", {}, `Original evidence: ${c.origin_tier || "—"} (${c.origin_platform || "—"})`),
           h("p", {}, "Footnote: ", c.footnote || "none published", c.footnote_source ? ` (${c.footnote_source})` : "",
-            c.citation_checked ? "" : [" ", h("span", { class: "unverified" }, "UNVERIFIED citation")]),
+            " ", unverifiedBadge(c)),
           h("p", {}, c.status === "skipped" ? `skipped (${(c.skip_reason || "").replace(/_/g, " ")})` : c.status === "ok" ? "ran" : c.status,
             c.min_depth_x ? ` · literature minimum ${c.min_depth_x}x` : ""),
           h("p", {}, ...c.license_ids.map((id) => licenseRef(sample, id)))))));
@@ -630,7 +630,7 @@
           h("td", {}, a.provenance.reference_id),
           h("td", {}, a.provenance.timestamp_utc),
           h("td", {}, ...(e.license_ids || []).map(firstUse)),
-          h("td", {}, (e.citations || []).join(", ") || "—", m.entry && !e.citation_checked ? [" ", h("span", { class: "unverified" }, "UNVERIFIED citation")] : ""),
+          h("td", {}, (e.citations || []).join(", ") || "—", " ", unverifiedBadge(e)),
           h("td", {}, ref.kind === "none" || !ref.kind ? "none" : `${ref.kind}${ref.source ? ": " + ref.source : ""}`)));
       }
     }
@@ -657,7 +657,7 @@
     const c = (sample.catalog || []).find((x) => x.algorithm_id === algorithmId);
     const out = [];
     if (c) out.push(h("p", { class: "help" }, tierBadge(c.tier), ` As run here (ONT). Original evidence: ${c.origin_tier || "—"}. Footnote: ${c.footnote || "none published"}`,
-      c.citation_checked ? "" : [" ", h("span", { class: "unverified" }, "UNVERIFIED citation")]));
+      " ", unverifiedBadge(c)));
     for (const id of (c ? c.license_ids : [])) {
       if (seen.has(id)) { out.push(licenseRef(sample, id)); continue; }
       seen.add(id);
