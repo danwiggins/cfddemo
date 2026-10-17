@@ -57,7 +57,7 @@ def registration_available(root: Path) -> bool:
 
 def _file(path: Path) -> Path:
     if path.is_symlink() or not path.is_file():
-        raise GriffinAssetError(f"Griffin input is absent or a symlink: {path}")
+        raise GriffinAssetError("Griffin registration input is absent or a symlink")
     return _safe_path(path)
 
 

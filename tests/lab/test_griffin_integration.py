@@ -81,6 +81,15 @@ def test_registered_assets_pin_site_bytes_and_execution_identity(tmp_path: Path,
     assert GRIFFIN.asset_sha256s(root) == []
 
 
+def test_missing_registered_site_error_omits_operator_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root, sites = _registered(tmp_path, monkeypatch)
+    sites.unlink()
+    with pytest.raises(GriffinAssetError) as caught:
+        inspect_griffin_assets(root)
+    assert "absent or a symlink" in str(caught.value)
+    assert str(tmp_path) not in str(caught.value)
+
+
 def test_oversized_registration_preserves_existing_verified_asset(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import traceback_lab.griffin_assets as asset_module
 
