@@ -329,6 +329,13 @@ supplementary records, then runs
 minimap2 separately against an operator-supplied viral FASTA, and reports
 EBV/HPV/HBV aligned reads per million human-unmapped primaries. The count is
 null if that denominator is zero. A read with reported primary or secondary
+The microbial panel's viral taxa use Bracken estimates from QC-passing,
+non-duplicate unmapped reads long enough for its registered read length and
+divide by all QC-passing, non-duplicate primaries. `viral-reads` instead uses
+the side-reference alignments and divides by human-unmapped primaries,
+including QC-fail and duplicate-flagged reads. Their rates can differ or one
+can be zero while the other is nonzero; do not compare them as matching assays.
+A read with reported primary or secondary
 alignments to more than one virus group is excluded from all groups; multiple
 primary alignments within one group count once. The side alignment explicitly
 retains up to 100 secondary alignments per read at minimap2's 0.8 score ratio;
