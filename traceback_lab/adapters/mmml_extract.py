@@ -133,7 +133,7 @@ def extract_cpg_calls(
             chromosome = record.reference_name
             for position0, reverse, channels in sites:
                 if include_regions is not None and not include_regions.overlaps(
-                    chromosome, position0, position0 + 1
+                    chromosome, position0 + reverse, position0 + reverse + 1
                 ):
                     outside += 1
                     continue
@@ -143,19 +143,21 @@ def extract_cpg_calls(
                 candidates += 1
                 if candidates > maximum_calls:
                     raise ValueError("cell-origin MM/ML calls exceed the locked cap")
-                p_c = max(0, 255 - sum(channels.values()))
-                # ML stores the midpoint of a 1/256 probability bin; modkit
-                # applies its filter to that midpoint, including at the edge.
-                confidence = (max((p_c, *channels.values())) + 0.5) / 256.0
+                # Each ML channel is the midpoint of a 1/256 bin. Canonical
+                # is the remaining mass across every declared channel.
+                probabilities = {code: (value + 0.5) / 256.0
+                                 for code, value in channels.items()}
+                p_c = max(0.0, 1.0 - sum(probabilities.values()))
+                confidence = max((p_c, *probabilities.values()))
                 if confidence < filter_threshold:
                     low_confidence += 1
                     continue
-                p_m, p_h = channels.get("m", 0), channels.get("h", 0)
-                if any(value >= max(p_c, p_m, p_h) for code, value in channels.items()
-                       if code not in {"m", "h"}):
+                winner = ("-" if p_c > max(probabilities.values()) else
+                          max(enumerate(probabilities),
+                              key=lambda item: (probabilities[item[1]], item[0]))[1])
+                if winner not in {"-", "m", "h"}:
                     unsupported += 1
                     continue
-                methylated = (p_m > p_c and p_m >= p_h) or (p_h > p_c and p_h > p_m)
                 calls.append(ModkitCpgCall(
                     fragment_digest=fragment_digest,
                     chromosome=chromosome,
@@ -163,7 +165,8 @@ def extract_cpg_calls(
                     strand=Strand.MINUS if reverse else Strand.PLUS,
                     modification_code="m",
                     modified_probability=confidence,
-                    state=CpgCallState.METHYLATED if methylated else CpgCallState.UNMETHYLATED,
+                    state=(CpgCallState.UNMETHYLATED if winner == "-"
+                           else CpgCallState.METHYLATED),
                 ))
     return Extraction(
         tuple(calls), scanned, tagged, invalid, unaligned, non_reference, outside, low_confidence, unsupported,

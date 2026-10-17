@@ -109,6 +109,13 @@ def _write_boundary_input(tmp_path: Path) -> tuple[Path, Path]:
             ("ml205", "C+m?,0;", [205]),
             ("ml232", "C+m?,0;", [232]),
             ("ml233", "C+m?,0;", [233]),
+            ("multi-canonical-edge", "C+h?,0;C+m?,0;", [10, 12]),
+            ("three-canonical-edge", "C+h?,0;C+m?,0;C+a?,0;", [5, 5, 12]),
+            ("three-overmass-valid", "C+h?,0;C+m?,0;C+a?,0;", [85, 85, 85]),
+            ("three-raw-over", "C+h?,0;C+m?,0;C+a?,0;", [86, 86, 86]),
+            ("two-mod-tie", "C+h?,0;C+m?,0;", [120, 120]),
+            ("unsupported-tie", "C+a?,0;C+m?,0;", [120, 120]),
+            ("unsupported-last-tie", "C+m?,0;C+a?,0;", [120, 120]),
             ("overlap", "C+h?,0;C+m?,0;", [240, 240]),
         ):
             read = pysam.AlignedSegment(writer.header)
@@ -128,9 +135,9 @@ def test_modkit_probability_bins_and_invalid_overlap(tmp_path: Path) -> None:
     bam, fasta = _write_boundary_input(tmp_path)
     at_eighty = extract_cpg_calls(bam, fasta, maximum_calls=20, filter_threshold=0.8)
     at_locked = extract_cpg_calls(bam, fasta, maximum_calls=20, filter_threshold=0.912109375)
-    assert len(at_eighty.calls) == 5  # ML 204 is below 0.8 after bin decoding.
-    assert len(at_locked.calls) == 2  # Canonical ML 22 and modified ML 233 meet the locked edge.
-    assert at_eighty.invalid_mm == at_locked.invalid_mm == 1  # 240 + 240 is impossible.
+    assert len(at_eighty.calls) == 7  # ML 204 is below 0.8 after bin decoding.
+    assert len(at_locked.calls) == 2  # Two-channel canonical 10+12 falls below the locked edge.
+    assert at_eighty.invalid_mm == at_locked.invalid_mm == 2  # Raw channel sum > 255.
     assert at_eighty.calls[2].modified_probability == (205 + 0.5) / 256
     assert {call.state.value for call in at_locked.calls} == {"unmethylated", "methylated"}
     assert all(call.modified_probability == 0.912109375 for call in at_locked.calls)
@@ -144,12 +151,15 @@ def test_pinned_modkit_probability_boundary_parity(
         pytest.skip("set LAB_MODKIT_PARITY_BINARY to the pinned modkit 0.6.4 binary")
     bam, fasta = _write_boundary_input(tmp_path)
     monkeypatch.setattr(mmml_extract.os, "urandom", lambda size: b"\0" * size)
-    names = ("ml22", "ml23", "ml204", "ml205", "ml232", "ml233", "overlap")
+    names = ("ml22", "ml23", "ml204", "ml205", "ml232", "ml233",
+             "multi-canonical-edge", "three-canonical-edge", "three-overmass-valid",
+             "three-raw-over", "two-mod-tie", "unsupported-tie",
+             "unsupported-last-tie", "overlap")
     digest_to_name = {
         hashlib.sha256(b"\0" * 32 + b"\0" + name.encode()).hexdigest(): name
         for name in names
     }
-    for threshold in (0.8, 0.912109375):
+    for threshold in (0.3, 0.8, 0.912109375):
         output = tmp_path / f"boundary-{threshold}.tsv"
         subprocess.run(
             [binary, "extract", "calls", "--reference", str(fasta), "--cpg",
@@ -158,8 +168,18 @@ def test_pinned_modkit_probability_boundary_parity(
             check=True, capture_output=True, text=True, timeout=60,
         )
         with output.open(newline="") as stream:
-            accepted = [row for row in csv.DictReader(stream, delimiter="\t")
-                        if row["fail"] == "false"]
+            rows = list(csv.DictReader(stream, delimiter="\t"))
+        if threshold == 0.3:
+            assert {(row["read_id"], row["call_code"]) for row in rows
+                    if row["fail"] == "false" and row["read_id"] in {
+                        "three-overmass-valid", "unsupported-tie", "unsupported-last-tie",
+                    }} == {
+                        ("three-overmass-valid", "a"),
+                        ("unsupported-tie", "m"),
+                        ("unsupported-last-tie", "a"),
+                    }
+        accepted = [row for row in rows
+                    if row["fail"] == "false" and row["call_code"] in {"-", "m", "h"}]
         ours = extract_cpg_calls(bam, fasta, maximum_calls=20, filter_threshold=threshold)
         assert {digest_to_name[call.fragment_digest] for call in ours.calls} == {
             row["read_id"] for row in accepted
@@ -168,6 +188,34 @@ def test_pinned_modkit_probability_boundary_parity(
             matching = next(row for row in accepted
                             if row["read_id"] == digest_to_name[call.fragment_digest])
             assert call.modified_probability == pytest.approx(float(matching["call_prob"]))
+            assert call.state.value == (
+                "unmethylated" if matching["call_code"] == "-" else "methylated"
+            )
+
+
+def test_reverse_marker_boundary_matches_pinned_modkit(tmp_path: Path) -> None:
+    binary = os.environ.get("LAB_MODKIT_PARITY_BINARY")
+    if not binary:
+        pytest.skip("set LAB_MODKIT_PARITY_BINARY to the pinned modkit 0.6.4 binary")
+    bam, fasta = _write_input(tmp_path)
+    for start, expected in ((206, 0), (207, 1)):
+        bed = tmp_path / f"marker-{start}.bed"
+        bed.write_text(f"chr1\t{start}\t{start + 1}\n")
+        output = tmp_path / f"marker-{start}.tsv"
+        subprocess.run(
+            [binary, "extract", "calls", "--reference", str(fasta), "--cpg",
+             "--include-bed", str(bed), "--mapped-only", "--filter-threshold", "0.9",
+             "--suppress-progress", str(bam), str(output)],
+            check=True, capture_output=True, text=True, timeout=60,
+        )
+        with output.open(newline="") as stream:
+            accepted = [row for row in csv.DictReader(stream, delimiter="\t")
+                        if row["fail"] == "false"]
+        ours = extract_cpg_calls(
+            bam, fasta, maximum_calls=100, filter_threshold=0.9,
+            include_regions=read_bed_regions(bed),
+        )
+        assert len(ours.calls) == len(accepted) == expected
 
 
 def test_matches_pinned_modkit_on_synthetic_calls(
