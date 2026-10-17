@@ -139,11 +139,13 @@ def test_cohort_binding_uses_member_loo_and_full_for_nonmember(tmp_path: Path, m
     member_selection = pon.binding_for(store, generation, _sha(1), **expected)
     assert member_selection.pon_sha256 == build.loo_asset_sha256s[_sha(1)]
     assert member_selection.target_excluded
+    assert member_selection.pon_n == 10
     assert member_selection.panel_n == 9
     assert _sha(1) not in member_selection.panel_source_ids
     external_selection = pon.binding_for(store, generation, _sha(99), **expected)
     assert external_selection.pon_sha256 == build.full_asset_sha256
     assert not external_selection.target_excluded
+    assert external_selection.pon_n == 10
     assert external_selection.panel_n == 10
     assert external_selection.pon_policy == "lab_loo_v1"
     pon.require_grid(member_selection, _sha(700))
@@ -261,3 +263,94 @@ def test_builder_rejects_too_few_or_mixed_protocol_sources(tmp_path: Path) -> No
                              mixed[-1].aligner_identity, mixed[-1].bam_path)
     with pytest.raises(LabProblem, match="TBX-LAB-020"):
         pon.build_panels(store, tuple(mixed))
+
+
+def test_twelve_admitted_ten_depth_eligible_and_dropped_member_uses_full(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = LabStore(tmp_path)
+    calls = _fake_builder(monkeypatch, store)
+
+    def count(item: pon.PonInput, work: Path, *_: object) -> tuple[Path, str] | None:
+        if item.source_id in {_sha(11), _sha(12)}:
+            return None
+        work.mkdir()
+        wig = work / f"{item.source_id}.wig"
+        wig.write_text(item.source_id)
+        return wig, _sha(700)
+
+    monkeypatch.setattr(pon, "_count_wig", count)
+    inputs = _inputs(store, 12)
+    build = pon.build_panels(store, inputs)
+    assert build.source_ids == tuple(item.source_id for item in inputs[:10])
+    assert build.pon_n == 10
+    assert len(calls) == 11
+    members = tuple(CohortMember(
+        source_id=item.source_id, input_id=item.input_id, aligner_identity=item.aligner_identity,
+        results=(), pon_asset_sha256=build.loo_asset_sha256s.get(item.source_id),
+    ) for item in inputs)
+    generation = CohortGeneration(
+        cohort_id="healthy", version=1, members=members, pon_n=10,
+        pon_asset_sha256=build.full_asset_sha256, pon_build=build.provenance(),
+    )
+    protocol = {
+        "reference_sha256": _sha(900), "toolchain_lock_sha256": _sha(800),
+        "counting_parameters_sha256": build.counting_parameters_sha256,
+        "grid_sha256": _sha(700), "aligner_identity": build.aligner_identity,
+        "gc_sha256": build.gc_sha256, "map_sha256": build.map_sha256,
+        "centromere_sha256": build.centromere_sha256,
+    }
+    selected = pon.binding_for(store, generation, _sha(1), **protocol)
+    assert selected.target_excluded and selected.pon_n == 10 and selected.panel_n == 9
+    dropped = pon.binding_for(store, generation, _sha(11), **protocol)
+    assert not dropped.target_excluded
+    assert dropped.pon_sha256 == build.full_asset_sha256
+    assert dropped.pon_n == 10 and dropped.panel_n == 10
+
+
+def test_depth_gate_below_ten_and_mismatched_grid_refuse_before_r(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = LabStore(tmp_path)
+    calls = _fake_builder(monkeypatch, store)
+
+    def count(item: pon.PonInput, work: Path, *_: object) -> tuple[Path, str] | None:
+        if item.source_id in {_sha(10), _sha(11), _sha(12)}:
+            return None
+        work.mkdir()
+        wig = work / f"{item.source_id}.wig"
+        wig.write_text(item.source_id)
+        return wig, _sha(700)
+
+    monkeypatch.setattr(pon, "_count_wig", count)
+    with pytest.raises(LabProblem, match="TBX-LAB-020"):
+        pon.build_panels(store, _inputs(store, 12))
+    assert not calls
+    assert not list((store.lab / "assets" / "pon").glob("*.rds"))
+
+    def wrong_grid(item: pon.PonInput, work: Path, *_: object) -> tuple[Path, str]:
+        work.mkdir()
+        wig = work / f"{item.source_id}.wig"
+        wig.write_text(item.source_id)
+        return wig, _sha(700 if item.source_id != _sha(2) else 701)
+
+    monkeypatch.setattr(pon, "_count_wig", wrong_grid)
+    with pytest.raises(LabProblem, match="TBX-LAB-020"):
+        pon.build_panels(store, _inputs(store))
+    assert not calls
+
+
+def test_oversized_aligner_identity_refuses_before_toolchain_or_r(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = LabStore(tmp_path)
+    inputs = list(_inputs(store))
+    inputs[0] = pon.PonInput(
+        inputs[0].source_id, inputs[0].input_id, inputs[0].reference_sha256,
+        "a" * 161, inputs[0].bam_path,
+    )
+
+    def no_toolchain() -> None:
+        pytest.fail("invalid aligner identity reached the toolchain")
+
+    monkeypatch.setattr("traceback_runner.toolchain.resolve_copy_number_toolchain", no_toolchain)
+    with pytest.raises(LabProblem, match="TBX-LAB-020"):
+        pon.build_panels(store, tuple(inputs))
