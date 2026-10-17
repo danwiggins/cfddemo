@@ -63,8 +63,9 @@ def test_sample_view_marks_old_copy_number_and_instability_as_superseded(tmp_pat
 
 
 @pytest.mark.parametrize("record_upstream", [False, True])
-def test_sample_view_follows_instability_consumed_v1_after_copy_number_v2(
-    tmp_path: Path, record_upstream: bool,
+@pytest.mark.parametrize("consumed_version", ["1", "2"])
+def test_sample_view_hides_instability_consuming_old_copy_number_identity(
+    tmp_path: Path, record_upstream: bool, consumed_version: str,
 ) -> None:
     store = LabStore(tmp_path)
     source_id = _sample(store, 1)
@@ -80,7 +81,7 @@ def test_sample_view_follows_instability_consumed_v1_after_copy_number_v2(
             ),
         )
 
-    old_attempt = store.publish_result(result("copy-number", "1", old_identity), input_id=input_id)
+    old_attempt = store.publish_result(result("copy-number", consumed_version, old_identity), input_id=input_id)
     store.publish_result(
         result("instability", "1", instability_identity), input_id=input_id,
         upstream_selections=[{
@@ -114,6 +115,91 @@ def test_sample_view_hides_instability_without_selected_copy_number(tmp_path: Pa
     assert view is not None
     assert view.full.results["instability"].skip_reason == "superseded_method"
     assert store.read_result(input_id, "instability", identity).status == "ok"
+
+
+def test_sample_view_hides_instability_after_same_identity_copy_number_rerun(tmp_path: Path) -> None:
+    store = LabStore(tmp_path)
+    source_id = _sample(store, 1)
+    input_id = f"{101:064x}"
+    cn_identity, instability_identity = "8" * 64, "9" * 64
+
+    def result(algorithm_id: str, identity: str) -> ResultEnvelope:
+        return ResultEnvelope(
+            algorithm_id=algorithm_id, algorithm_version="2", status="ok",
+            provenance=provenance(
+                tool="fixture", parameters_sha256=identity,
+                source_id=source_id, input_id=input_id, reference_id="hg38",
+            ),
+        )
+
+    consumed_attempt = store.publish_result(result("copy-number", cn_identity), input_id=input_id)
+    store.publish_result(
+        result("instability", instability_identity), input_id=input_id,
+        upstream_selections=[{
+            "algorithm_id": "copy-number", "input_id": input_id,
+            "parameters_sha256": cn_identity, "attempt_id": consumed_attempt,
+        }],
+    )
+    store.publish_result(result("copy-number", cn_identity), input_id=input_id)
+    view = load_sample(store, source_id)
+    assert view is not None
+    assert view.full.results["copy-number"].status == "ok"
+    assert view.full.results["instability"].skip_reason == "superseded_method"
+
+
+def test_sample_view_preserves_upstream_skip_when_copy_number_asset_is_missing(tmp_path: Path) -> None:
+    store = LabStore(tmp_path)
+    source_id = _sample(store, 1)
+    input_id = f"{101:064x}"
+    for algorithm_id, reason, identity in (
+        ("copy-number", "missing_asset", "8" * 64),
+        ("instability", "upstream", "9" * 64),
+    ):
+        store.publish_result(ResultEnvelope(
+            algorithm_id=algorithm_id, algorithm_version="2", status="skipped",
+            skip_reason=reason, skip_message="method asset unavailable",
+            provenance=provenance(
+                tool="fixture", parameters_sha256=identity,
+                source_id=source_id, input_id=input_id, reference_id="hg38",
+            ),
+        ), input_id=input_id)
+    view = load_sample(store, source_id)
+    assert view is not None
+    assert view.full.results["copy-number"].skip_reason == "missing_asset"
+    assert view.full.results["instability"].skip_reason == "upstream"
+
+
+def test_projection_keeps_independent_metric_when_panel_assets_are_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = LabStore(tmp_path)
+    monkeypatch.setattr(cohorts, "load_registry", lambda: (
+        SimpleNamespace(id="fragment-size", version="1", parameters={}, tools=[], upstream=()),
+    ))
+    source_id = _sample(store, 1)
+    other_source_id = _sample(store, 2)
+    add_sample(store, "healthy", source_id)
+    add_sample(store, "healthy", other_source_id)
+    generation = build_cohort(store, "healthy").model_copy(update={"pon_asset_sha256": "a" * 64})
+    assert any(result.algorithm_id == "fragment-size" for result in generation.members[0].results)
+    assert any(result.algorithm_id == "fragment-size" for result in cohorts.member_from_store(store, source_id).results)
+    monkeypatch.setattr(cohorts, "read_current", lambda *_: generation)
+    unavailable = LabProblem(
+        "TBX-LAB-020", cause="registered assets are unavailable",
+        fix="Restore method assets", data={"field": "method assets"},
+    )
+    monkeypatch.setattr(
+        pon_consumer, "selection_for_generation", lambda *_, **__: (_ for _ in ()).throw(unavailable),
+    )
+    independent = cohorts.project_sample_metric(
+        store, "healthy", target_source_id=source_id,
+        algorithm_id="fragment-size", metric_id="mode_bp",
+    )
+    assert independent is not None
+    assert cohorts.project_sample_metric(
+        store, "healthy", target_source_id=source_id,
+        algorithm_id="copy-number", metric_id="tumor_fraction",
+    ) is None
 
 
 def test_pon_contract_requires_policy_and_digest_together() -> None:

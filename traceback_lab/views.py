@@ -158,26 +158,36 @@ def load_sample(store: LabStore, source_id: str) -> SampleView | None:
     def visible_results(input_id: str, identities: Mapping[str, str] | None = None) -> dict[str, ResultEnvelope]:
         selected = selected_results(store, input_id, identities)
         old_cn = selected.get("copy-number")
-        superseded_cn = (old_cn is not None and (current_cn_version is None
+        superseded_cn = (old_cn is not None and old_cn.status == "ok" and (current_cn_version is None
                          or old_cn.algorithm_version != current_cn_version))
         superseded_ids = {"copy-number"} if superseded_cn else set()
-        instability = selected.get("instability")
-        if instability is not None and not superseded_cn:
-            if old_cn is None or current_cn_version is None:
-                superseded_ids.add("instability")
-            else:
-                consumed = store.selected_upstream_selections(
-                    input_id, "instability", instability.provenance.parameters_sha256,
-                )
-                copy_number = next((item for item in consumed or () if item["algorithm_id"] == "copy-number"), None)
-                if copy_number is None:
-                    superseded_ids.add("instability")
-                else:
-                    upstream = store.read_result(
-                        copy_number["input_id"], "copy-number", copy_number["parameters_sha256"],
-                    )
-                    if upstream is None or upstream.algorithm_version != current_cn_version:
-                        superseded_ids.add("instability")
+        for algorithm in algorithms:
+            dependent = selected.get(algorithm.id)
+            if ("copy-number" not in algorithm.upstream or dependent is None
+                    or dependent.status != "ok" or superseded_cn):
+                continue
+            if old_cn is None or old_cn.status != "ok" or current_cn_version is None:
+                superseded_ids.add(algorithm.id)
+                continue
+            consumed = store.selected_upstream_selections(
+                input_id, algorithm.id, dependent.provenance.parameters_sha256,
+            )
+            copy_number = next((item for item in consumed or () if item["algorithm_id"] == "copy-number"), None)
+            if copy_number is None:
+                superseded_ids.add(algorithm.id)
+                continue
+            selected_cn_attempt = store.selected_attempt(
+                input_id, "copy-number", old_cn.provenance.parameters_sha256,
+            )
+            upstream = store.read_result(
+                copy_number["input_id"], "copy-number", copy_number["parameters_sha256"],
+            )
+            if (upstream is None or upstream.algorithm_version != current_cn_version
+                    or copy_number["input_id"] != input_id
+                    or copy_number["parameters_sha256"] != old_cn.provenance.parameters_sha256
+                    or selected_cn_attempt is None
+                    or copy_number["attempt_id"] != selected_cn_attempt.name):
+                superseded_ids.add(algorithm.id)
         while True:
             added = {
                 algorithm.id for algorithm in algorithms
@@ -190,7 +200,7 @@ def load_sample(store: LabStore, source_id: str) -> SampleView | None:
         def visible(algorithm_id: str, envelope: ResultEnvelope) -> ResultEnvelope:
             if supported is not None and algorithm_id not in supported:
                 reason, message = "platform", skip_message
-            elif algorithm_id in superseded_ids:
+            elif algorithm_id in superseded_ids and envelope.status == "ok":
                 reason = "superseded_method"
                 message = "Selected copy-number method or its consumed provenance is not current; rerun this input"
             else:
