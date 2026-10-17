@@ -201,8 +201,30 @@ def test_installed_nipter_package_files_are_exactly_pinned(tmp_path: Path, monke
     assert original is not None
     helper.write_bytes(b"second")
     assert fetal._nipter_package_sha(tmp_path / "Rscript") != original
+    helper.write_bytes(b"first")
+    ambiguous = packages[0] / "a"
+    ambiguous.write_bytes(b"x\x00b\x00y")
+    one_file = fetal._nipter_package_sha(tmp_path / "Rscript")
+    ambiguous.write_bytes(b"x")
+    (packages[0] / "b").write_bytes(b"y")
+    assert fetal._nipter_package_sha(tmp_path / "Rscript") != one_file
     helper.unlink()
     helper.symlink_to(tmp_path / "outside")
+    assert fetal._nipter_package_sha(tmp_path / "Rscript") is None
+
+
+def test_nipter_package_limit_counts_directories_before_sorting(tmp_path: Path, monkeypatch) -> None:
+    packages = [tmp_path / name for name in ("NIPTeR", "sets", "Rsamtools", "S4Vectors")]
+    for package in packages:
+        package.mkdir()
+        (package / "DESCRIPTION").write_bytes(b"installed package")
+    lines = "\n".join(f"{version}\t{package}" for version, package in
+                      zip(("1.0.2", "1.0-25", "2.22.0", "0.44.0"), packages))
+    monkeypatch.setattr(fetal, "_run_bounded_r", lambda *args, **kwargs: SimpleNamespace(
+        outcome="exited", returncode=0, stdout=lines.encode(), stdout_truncated=False))
+    monkeypatch.setattr(fetal, "MAX_PACKAGE_ENTRIES", 4)
+    assert fetal._nipter_package_sha(tmp_path / "Rscript") is not None
+    (packages[0] / "empty").mkdir()
     assert fetal._nipter_package_sha(tmp_path / "Rscript") is None
 
 

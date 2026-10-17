@@ -21,6 +21,7 @@ from typing import Any
 import pysam
 
 from ..fetal_contract import FetalContractError, inspect_contract
+from ..file_access import open_regular_no_follow
 from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip, ToolPin
 from ._base import Base, metric
 
@@ -47,6 +48,8 @@ for (chrom in c(13L, 18L, 21L)) {
 '''
 SCRIPT_SHA256 = hashlib.sha256(R_CODE.encode()).hexdigest()
 _CONTIGS = tuple(f"chr{chrom}" for chrom in range(1, 23)) + ("chrX", "chrY")
+MAX_PACKAGE_ENTRIES = 10000
+MAX_PACKAGE_BYTES = 256 << 20
 
 
 @dataclass(frozen=True)
@@ -154,28 +157,55 @@ def _nipter_package_sha(rscript: Path) -> str | None:
         digest = hashlib.sha256()
         total = 0
         files = 0
+        entries = 0
+
+        def frame(value: bytes) -> None:
+            digest.update(len(value).to_bytes(8, "big"))
+            digest.update(value)
+
         for name, (version, directory) in zip(packages, lines):
             package = Path(directory)
             if not version or not package.is_absolute() or package.is_symlink() or not package.is_dir():
                 return None
-            digest.update(name.encode() + b"\0" + version.encode() + b"\0")
-            for path in sorted(package.rglob("*")):
-                info = path.lstat()
-                if stat.S_ISLNK(info.st_mode):
-                    return None
-                if stat.S_ISDIR(info.st_mode):
-                    continue
-                if not stat.S_ISREG(info.st_mode):
-                    return None
-                total += info.st_size
-                files += 1
-                if total > (256 << 20) or files > 10000:
-                    return None
-                digest.update(path.relative_to(package).as_posix().encode() + b"\0")
-                with path.open("rb") as stream:
-                    while block := stream.read(1 << 20):
-                        digest.update(block)
-                digest.update(b"\0")
+            frame(name.encode())
+            frame(version.encode())
+            pending = [package]
+            regular_files: list[Path] = []
+            while pending:
+                with os.scandir(pending.pop()) as children:
+                    for child in children:
+                        entries += 1
+                        if entries > MAX_PACKAGE_ENTRIES:
+                            return None
+                        info = child.stat(follow_symlinks=False)
+                        if stat.S_ISDIR(info.st_mode):
+                            pending.append(Path(child.path))
+                        elif stat.S_ISREG(info.st_mode):
+                            regular_files.append(Path(child.path))
+                        else:
+                            return None
+            for path in sorted(regular_files, key=lambda item: item.relative_to(package).as_posix()):
+                fd = open_regular_no_follow(path)
+                try:
+                    before = os.fstat(fd)
+                    if not stat.S_ISREG(before.st_mode):
+                        return None
+                    total += before.st_size
+                    files += 1
+                    if total > MAX_PACKAGE_BYTES or files > MAX_PACKAGE_ENTRIES:
+                        return None
+                    frame(path.relative_to(package).as_posix().encode())
+                    digest.update(before.st_size.to_bytes(8, "big"))
+                    with os.fdopen(fd, "rb", closefd=False) as stream:
+                        while block := stream.read(1 << 20):
+                            digest.update(block)
+                    after = os.fstat(fd)
+                    if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns,
+                            before.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_size,
+                                                   after.st_mtime_ns, after.st_ctime_ns):
+                        return None
+                finally:
+                    os.close(fd)
         return digest.hexdigest() if files else None
     except OSError:
         return None
