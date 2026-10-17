@@ -335,6 +335,10 @@ progress", then "New results are available. [Reload]" (it never swaps
 content under you). The page is strict: same-origin scripts only, no inline
 script or style, no outside requests.
 
+The run-status banner follows the latest Lab writer; a later cohort update or
+other writer can supersede an earlier interrupted-run banner. It does not
+serve as a history of every interrupted run.
+
 ## What the page shows
 
 - **Landing (`#/`)**: the CLIA explainer (short version, "Read the full
@@ -362,7 +366,17 @@ script or style, no outside requests.
   generation is labelled as such. Missing or failed metrics are never zero.
   The synthetic EXAMPLE cannot be scored against a real kit cohort.
 - **Trust/QC**: depth against each algorithm's minimum, the run table with
-  scrubbed stderr for failures, provisional QC bands, library health.
+  scrubbed stderr for failures and a link to a matching numbered run-log line,
+  provisional QC bands, library health. The link searches up to 64 recently updated
+  runs and reveals only allowlisted status fields. A line must name the selected
+  immutable result attempt; legacy logs without that ID, older runs, or cached
+  steps may have no matching line. A latest-run in-progress or interrupted note
+  appears only when that run names the same source and full input; the selected
+  result status remains visible beside it. If the step published no result yet,
+  a sample-scoped run notice appears instead of a result row. If the latest
+  analysis or simulation run log is unreadable, unsafe, malformed, or outside
+  the 1 MiB / 4,096-line limit, the status banner reports an unavailable
+  status without inferring whether the run ended normally or was interrupted.
 - **Stability**: one small multiple per metric: deviation from full depth at
   each fraction, the stability band, and split halves A/B at 50%.
 
