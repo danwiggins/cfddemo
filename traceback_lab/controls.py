@@ -192,8 +192,9 @@ def run_derived(
             approx_depth_x=stamp["approx_depth_x"],
             index_mapped_upper_bound=None,
         )
-        chosen = [item for item in derived_plan_items(items, spec.transform)
-                  if parent.platform in item.algorithm.requires.platforms]
+        # Keep unsupported requested algorithms in the derived plan. run_plan
+        # publishes their platform skips so the depth curve shows a labelled gap.
+        chosen = derived_plan_items(items, spec.transform)
         results = run_plan(
             store,
             lock,

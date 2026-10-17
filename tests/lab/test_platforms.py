@@ -24,6 +24,67 @@ def test_read_group_platform(lines: list[str], expected: str) -> None:
     assert from_rg_lines(lines) == expected
 
 
+def test_derived_platform_skip_is_persisted_and_shown_in_depth_curve(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from traceback_lab import controls, views
+    from traceback_lab.algorithms.short_read_fragment_size import SHORT_READ_FRAGMENT_SIZE
+    from traceback_lab.derived import DerivedInput, downsample
+    from traceback_lab.registry import PlanItem
+    from traceback_lab.runner import RunTarget, StepResult, run_plan
+    from traceback_lab.scrub import Scrubber
+    from traceback_lab.store import LabStore
+
+    store = LabStore(tmp_path / "store")
+    store.ensure()
+    log = store.run_log("r-20261017-1200-aaaa")
+    parent = RunTarget(input_id="a" * 64, source_id="b" * 64, input_dir=tmp_path,
+                       reference_id="hg38", reference_sha256="c" * 64,
+                       platform="ont", eligible_reads=5_000_000, approx_depth_x=10.0)
+    algorithm = SHORT_READ_FRAGMENT_SIZE
+    monkeypatch.setattr(algorithm, "preflight", lambda _: pytest.fail("platform skip must precede preflight"))
+    monkeypatch.setattr(algorithm, "run", lambda *_: pytest.fail("platform skip must not run worker"))
+    items = [PlanItem(algorithm, False)]
+    entries = {algorithm.id: "traceback_lab.algorithms.short_read_fragment_size:SHORT_READ_FRAGMENT_SIZE"}
+    scrubber = Scrubber(root=store.root)
+    full, = run_plan(store, None, log, parent, items, entries, run_id=log.run_id, scrubber=scrubber)
+    assert (full.status, full.skip_reason) == ("skipped", "platform")
+    from traceback_lab.registry import execution_identity
+    assert full.parameters_sha256 == execution_identity(
+        algorithm, reference_sha256=parent.reference_sha256,
+    )
+
+    monkeypatch.setattr(controls.ReadSummary, "open", lambda *_: object())
+    monkeypatch.setattr(controls, "derived_mask", lambda *_: None)
+    monkeypatch.setattr(controls, "depth_stamp", lambda *_: {
+        "eligible_reads": 2_500_000, "mean_span_bp": 150.0, "approx_depth_x": 5.0,
+    })
+    monkeypatch.setattr(controls, "record_derived", lambda *_: None)
+
+    def materialize(_store, parent_id, _bam, specs, **_kwargs):
+        return {spec.label(): DerivedInput(spec, spec.input_id(parent_id), parent_id, tmp_path)
+                for spec in specs}
+
+    monkeypatch.setattr(controls, "materialize", materialize)
+    summary = StepResult("read-summary", "ok", True, "d" * 64, artifacts_dir=str(tmp_path))
+    derived, = controls.run_derived(
+        store, None, log, parent, [downsample(0.5)], items, entries,
+        run_id=log.run_id, read_summary=summary, scrubber=scrubber, timeout_s=30,
+    )
+    result, = derived.results
+    assert (result.status, result.skip_reason) == ("skipped", "platform")
+    persisted = store.read_result(derived.derived.input_id, algorithm.id, result.parameters_sha256)
+    assert persisted is not None and persisted.status == "skipped" and persisted.skip_reason == "platform"
+    sample = views.SampleView(
+        source_id=parent.source_id, id12=parent.source_id[:12], example=False,
+        full=views.InputView("full", parent.input_id, None, {}, views.selected_results(store, parent.input_id)),
+        derived=[views.InputView("0.5", derived.derived.input_id, "downsample", {"fraction": 0.5},
+                                 views.selected_results(store, derived.derived.input_id), 0.5)],
+    )
+    row = next(row for row in views.depth_curve(sample)["rows"] if row["algorithm_id"] == algorithm.id)
+    assert row["cells"][0]["state"] == "skipped" and row["cells"][0]["reason"] == "platform"
+
+
 def test_each_unaligned_chunk_must_declare_the_platform() -> None:
     from traceback_lab.ingest import Chunk, ChunkSet, _refuse_mixed_models
     from traceback_lab.problems import LabProblem
@@ -78,15 +139,21 @@ def test_legacy_illumina_source_record_keeps_header_platform(tmp_path: Path) -> 
     assert record["inputs"][0]["platform"] == "illumina"
 
 
-@pytest.mark.parametrize("platforms,expected", [
-    (("ILLUMINA",), "skipped"), ((None,), "skipped"), (("ONT",), "ok"),
+@pytest.mark.parametrize("platforms,kind,declared,expected", [
+    (("ILLUMINA",), "prealigned", None, "skipped"),
+    ((None,), "prealigned", None, "skipped"),
+    (("ONT",), "prealigned", None, "ok"),
+    (("ILLUMINA",), "aligned", None, "skipped"),
+    ((None,), "prealigned", "unknown", "skipped"),
+    ((), "aligned", None, "ok"),
 ])
-def test_legacy_prealigned_view_qualifies_old_ont_only_selection_before_rerun(
-    tmp_path: Path, platforms: tuple[str | None, ...], expected: str,
+def test_stored_view_qualifies_unverified_platform_before_rerun(
+    tmp_path: Path, platforms: tuple[str | None, ...], kind: str, declared: str | None, expected: str,
 ) -> None:
     import shutil
 
     from traceback_lab.envelope import ResultEnvelope, provenance
+    from traceback_lab.ingest import ALIGNER_IDENTITY_ARGV
     from traceback_lab.store import LabStore
     from traceback_lab.interpretation.engine import load_library
     from traceback_lab.views import InputView, cell_state, load_sample, selected_results
@@ -99,11 +166,16 @@ def test_legacy_prealigned_view_qualifies_old_ont_only_selection_before_rerun(
     input_dir = store.inputs_dir / input_id
     input_dir.mkdir(parents=True)
     shutil.copyfile(bam_path, input_dir / "aligned.bam")
-    (input_dir / "manifest.json").write_text(json.dumps({"kind": "prealigned", "reference_id": "hg38"}))
+    manifest = {"kind": kind, "reference_id": "hg38"}
+    if declared is not None:
+        manifest["platform"] = declared
+    if kind == "aligned":
+        manifest["aligner_argv"] = list(ALIGNER_IDENTITY_ARGV)
+    (input_dir / "manifest.json").write_text(json.dumps(manifest))
     store.sources_dir.mkdir(parents=True)
     (store.sources_dir / f"{source_id}.json").write_text(json.dumps({
         "schema": "traceback.lab.source.v1", "source_id": source_id,
-        "inputs": [{"input_id": input_id, "kind": "prealigned", "used_utc": "2026-10-16T00:00:00Z"}],
+        "inputs": [{"input_id": input_id, "kind": kind, "used_utc": "2026-10-16T00:00:00Z"}],
         "derived": [],
     }))
     old = ResultEnvelope.model_validate({
