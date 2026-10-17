@@ -1,10 +1,9 @@
-"""``cell-origin``: tissue composition through the public, lease-free
-``cell_origin.compute_measurement`` (D14, L0.5b).
+"""``cell-origin``: Lab-only tissue composition using in-house MM/ML decoding.
 
-The Lab calls the signed method's own computation with ``heartbeat=None``,
-plain asset paths resolved (and re-verified) through the method-asset store,
-and the modified-base model passed explicitly from the aligned BAM's ``@RG``
-header (D9).  A derived input (downsample fraction, split half) is written as
+The Lab reuses the registered Loyfer assets and the existing UXM, NNLS and
+bootstrap computation; the signed modkit job is unchanged. The modified-base
+model still comes from the aligned BAM's ``@RG`` header (D9). A derived input
+(downsample fraction, split half) is written as
 a **transient** filtered BAM in the worker's scratch directory with the same
 row predicate as the read-summary masks; the runner deletes the scratch
 directory after the result is published (D30, D33).
@@ -13,30 +12,16 @@ directory after the result is published (D30, D33).
 from __future__ import annotations
 
 import json
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from ..adapters.mmml_extract import EXTRACTOR_VERSION
+from ..identity import canonical_sha256
 from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip, ToolPin
 from ._base import Base, metric
 
 MIN_ELIGIBLE_READS = 2_500_000
 LOYFER_KINDS = ("loyfer-atlas", "loyfer-markers", "loyfer-regions")
-
-
-@lru_cache(maxsize=1)
-def _modkit() -> Any:
-    from traceback_runner.toolchain import resolve_modkit
-
-    return resolve_modkit()
-
-
-def modkit_or_none() -> Any | None:
-    try:
-        return _modkit()
-    except Exception:  # noqa: BLE001 - any resolution failure means "missing"
-        _modkit.cache_clear()
-        return None
 
 
 def loyfer_assets(root: Path) -> dict[str, Any]:
@@ -101,27 +86,18 @@ def write_transient_bam(source: Path, destination: Path, derived: dict[str, Any]
     return kept
 
 
-def _signed_parameters_sha256() -> str:
-    """The locked signed parameters (without a model) enter the execution identity."""
+def _downstream_parameters_sha256() -> str:
+    """Pin reused UXM/solver settings without claiming the signed modkit path."""
 
-    from traceback_runner.cell_origin_method import default_parameters, parameters_sha256
+    from traceback_runner.cell_origin_method import default_parameters
 
-    return parameters_sha256(default_parameters())
+    values = default_parameters().model_dump(mode="json")
+    values.pop("modkit_arguments", None)
+    return canonical_sha256(values)
 
 
 class CellOrigin(Base):
-    """Not re-decorated: ``tools`` is a live property (the installed modkit
-    pin enters the execution identity)."""
-
-    @property  # type: ignore[override]
-    def tools(self) -> tuple[ToolPin, ...]:
-        modkit = modkit_or_none()
-        version = modkit.identity.version if modkit is not None else "missing"
-        return (ToolPin("modkit", version, "modkit-ont-public"),)
-
-    @tools.setter
-    def tools(self, value: Any) -> None:
-        pass
+    """Unsigned Lab result; the signed cell-origin method keeps modkit."""
 
     def asset_sha256s(self, root: Path) -> list[str]:
         try:
@@ -132,8 +108,6 @@ class CellOrigin(Base):
     def preflight(self, ctx: InputContext) -> Ready | Skip:
         if ctx.example:
             return Skip("example_reference", "cell-origin needs the hg38 Loyfer atlas; not in the synthetic example")
-        if modkit_or_none() is None:
-            return Skip("missing_toolchain", "modkit not installed: traceback toolchain install modkit")
         try:
             loyfer_assets(ctx.root)
         except Exception:  # noqa: BLE001
@@ -147,16 +121,15 @@ class CellOrigin(Base):
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
         import tempfile
 
-        from traceback_runner.cell_origin import ModbaseModel, compute_measurement
+        from ..adapters.cell_origin_inhouse import compute_inhouse
         from traceback_runner.cell_origin_method import default_parameters
 
         fasta = Path(ctx.extras["reference_fasta"])
         if _sha256_file(fasta) != ctx.reference_sha256:
-            # The signed stage refuses this too: the FASTA on disk is not the
-            # registered reference this input was aligned against.
             raise RuntimeError("the reference FASTA changed since it was registered")
         model_id = header_model(ctx.input_dir / "aligned.bam")
-        model = ModbaseModel(id=model_id, source="header")
+        if model_id is None:
+            raise RuntimeError("the BAM no longer declares one modified-base model")
         parameters = default_parameters(modbase_model=model_id)
         assets = loyfer_assets(ctx.root)
         with tempfile.TemporaryDirectory(prefix="co-", dir=out.parent) as scratch:
@@ -165,29 +138,27 @@ class CellOrigin(Base):
             if ctx.derived:
                 bam = work / "derived.bam"  # transient: gone when this directory goes
                 write_transient_bam(ctx.input_dir / "aligned.bam", bam, dict(ctx.derived))
-            measurement = compute_measurement(
+            measurement = compute_inhouse(
                 parameters=parameters,
-                reference_id=ctx.reference_id,
-                modbase_model=model,
                 bam=bam,
                 fasta=fasta,
                 atlas=Path(assets["loyfer-atlas"].source.file_path),
                 markers=Path(assets["loyfer-markers"].source.file_path),
                 regions=Path(assets["loyfer-regions"].source.file_path),
-                job_directory=work,
-                modkit=_modkit(),
-                heartbeat=None,
+                scratch=work,
             )
         level = float(parameters.bootstrap_confidence_level)
-        classified = int(measurement.denominators.classified_fragments)
+        classified = measurement.classified_fragments
         metrics = []
         rows = []
-        for estimate in measurement.estimates:
-            interval = estimate.interval
-            ci = (float(interval.low), float(interval.high)) if interval is not None else None
+        intervals = {item.cell_type_id: item for item in measurement.bootstrap.intervals}
+        for estimate in measurement.fit.estimates:
+            interval = intervals[estimate.cell_type_id]
+            ci = ((float(interval.lower_fraction), float(interval.upper_fraction))
+                  if interval.lower_fraction is not None else None)
             metrics.append(
                 metric(
-                    metric_id_for(estimate.contributor_id),
+                    metric_id_for(estimate.cell_type_id),
                     float(estimate.fraction),
                     unit="fraction",
                     n=classified,
@@ -197,14 +168,24 @@ class CellOrigin(Base):
             )
             rows.append(
                 {
-                    "contributor_id": estimate.contributor_id,
+                    "contributor_id": estimate.cell_type_id,
                     "fraction": float(estimate.fraction),
                     "interval": list(ci) if ci else None,
-                    "interval_state": str(estimate.interval_state),
+                    "interval_state": str(interval.information_status.value),
                 }
             )
         metrics.append(metric("classified_fragments", classified, unit="fragments", n=classified))
-        composition = {"confidence_level": level, "contributors": rows, "solver_converged": bool(measurement.solver.converged)}
+        composition = {
+            "confidence_level": level, "contributors": rows,
+            "solver_converged": bool(measurement.fit.diagnostics.converged),
+            "extraction_qc": {
+                "records_with_mm": measurement.extraction.records_with_mm,
+                "invalid_mm": measurement.extraction.invalid_mm,
+                "dropped_unaligned": measurement.extraction.dropped_unaligned,
+                "non_reference_cpg": measurement.extraction.non_reference_cpg,
+                "low_confidence": measurement.extraction.low_confidence,
+            },
+        }
         return AlgorithmOutput(
             metrics=metrics,
             panels=[{"panel_id": "composition", "kind": "dot-interval", "data_ref": "artifacts/composition.json"}],
@@ -214,9 +195,12 @@ class CellOrigin(Base):
 
 CELL_ORIGIN = CellOrigin(
     "cell-origin",
+    version="2",
     family="methylation",
     consumes="full_bam",
     cost="slow",
     requires=Requirements(mm_tags=True, min_eligible_reads=MIN_ELIGIBLE_READS),
-    parameters={"method": "cell_origin.compute_measurement", "atlas": "loyfer-u250", "signed_parameters_sha256": _signed_parameters_sha256()},
+    tools=(ToolPin("lab-mmml", EXTRACTOR_VERSION),),
+    parameters={"method": "lab-mmml-loyfer-uxm-v1", "atlas": "loyfer-u250",
+                "downstream_parameters_sha256": _downstream_parameters_sha256()},
 )

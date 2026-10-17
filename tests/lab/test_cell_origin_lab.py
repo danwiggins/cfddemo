@@ -1,4 +1,4 @@
-"""L0.5b: cell-origin through the public, lease-free compute_measurement."""
+"""L3: Lab cell-origin through its in-house MM/ML extraction path."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import pysam
 import pytest
 
 import traceback_runner.cell_origin_method as method_module
-from tests.test_cell_origin_stage import _fake_modkit, _test_parameters
+from tests.test_cell_origin_stage import _test_parameters
 from traceback_lab.algorithms import cell_origin as co
 from traceback_lab.registry import InputContext, Ready
 from traceback_runner.fixtures import create_cell_origin_inputs
@@ -19,9 +19,6 @@ from traceback_runner.references import register_loyfer_directory, register_refe
 @pytest.fixture
 def world(tmp_path, monkeypatch):
     inputs = create_cell_origin_inputs(tmp_path / "inputs", header_model="model-h")
-    tool = _fake_modkit(tmp_path)
-    monkeypatch.setattr(co, "_modkit", lambda: tool)
-    monkeypatch.setattr(co, "modkit_or_none", lambda: tool)
     monkeypatch.setattr(method_module, "default_parameters", _test_parameters())
     root = tmp_path / "root"
     register_reference(root, inputs.fasta_path, "ref")
@@ -67,6 +64,29 @@ def test_run_recovers_the_planted_mixture_with_intervals(world) -> None:
     )
 
 
+def test_inhouse_extraction_matches_the_signed_synthetic_fixture_counts(world) -> None:
+    from traceback_lab.adapters.cell_origin_inhouse import compute_inhouse
+    from traceback_runner.cell_origin_method import default_parameters
+
+    inputs = world["inputs"]
+    measurement = compute_inhouse(
+        parameters=default_parameters(modbase_model="model-h"),
+        bam=inputs.bam_path,
+        fasta=inputs.fasta_path,
+        atlas=inputs.loyfer_dir / "Atlas.U250.l4.hg38.full.tsv",
+        markers=inputs.loyfer_dir / "Markers.U250.hg38.tsv",
+        regions=inputs.loyfer_dir / "Regions.U250.l4.hg38.bed",
+        scratch=world["tmp"] / "inhouse-work",
+    )
+    marker_reads = sum(u + m for u, m in inputs.planted)
+    assert len(measurement.extraction.calls) == marker_reads * 10
+    assert measurement.classified_fragments == marker_reads
+    assert measurement.observed_markers == len(inputs.planted)
+    assert {row.cell_type_id: row.fraction for row in measurement.fit.estimates} == pytest.approx(
+        {"TypeA": 0.7, "TypeB": 0.3}, abs=1e-6
+    )
+
+
 def test_transient_bam_for_a_split_half_is_a_subset(world) -> None:
     source = world["ctx"].input_dir / "aligned.bam"
     destination = world["tmp"] / "half.bam"
@@ -98,7 +118,7 @@ def test_metric_ids_and_library_cover_the_atlas() -> None:
     assert library.headline("cell-origin").metric_id == "fraction_blood_granul"
     entry = library.entry("cell-origin", "fraction_liver_hep")
     assert entry["min_depth_x"] == 5.0 and entry.tier == "SPECULATIVE"
-    assert set(entry["license_ids"]) == {"modkit-ont-public", "yissum-uxm", "loyfer-atlas-terms-unknown"}
+    assert set(entry["license_ids"]) == {"yissum-uxm", "loyfer-atlas-terms-unknown"}
 
 
 def test_a_changed_fasta_is_refused(world) -> None:
