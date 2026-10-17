@@ -102,7 +102,7 @@ class DonorDerivedChrY(Base):
             return Skip("reference", "transplant calibration is bound to a different reference")
         if contract.calibration_status != "operator_verified":
             return Skip("missing_asset", "synthetic calibration is for mechanics only")
-        if contract.manifest_sha256 not in ctx.extras.get("planned_asset_sha256s", ()):
+        if [contract.manifest_sha256] != list(ctx.extras.get("planned_asset_sha256s", ())):
             return Skip("missing_asset", "transplant calibration changed after result identity was planned")
         if (ctx.approx_depth_x is None or not math.isfinite(ctx.approx_depth_x)
                 or ctx.approx_depth_x < contract.min_depth_x):
