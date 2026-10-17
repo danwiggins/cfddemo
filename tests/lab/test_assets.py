@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import errno
+import shlex
 from pathlib import Path
 
 import pytest
 
 from traceback_lab import assets
 from traceback_lab.algorithms.pmd_score import PMD_SCORE
+from traceback_lab.doctor import _pmd_asset_check, doctor_command, lab_checks
 from traceback_lab.registry import execution_identity
 from traceback_lab.store import LabStore
 
@@ -63,6 +65,99 @@ def test_absent_wrong_valid_and_tampered_asset(pinned: tuple[LabStore, Path, byt
     with pytest.raises(assets.AssetError, match="differs"):
         _add(store, source)
     assert record.file.read_bytes() == b"tampered"
+
+
+def test_doctor_reports_missing_valid_and_altered_pmd_asset(
+    pinned: tuple[LabStore, Path, bytes],
+) -> None:
+    store, source, _ = pinned
+    missing = _pmd_asset_check(store)
+    assert missing["status"] == "warn"
+    assert "pmd-score will skip" in missing["detail"]
+    assert "traceback lab asset add pmd --file" in missing["fix"]
+    assert "--terms unknown --root <ROOT>" in missing["fix"]
+    assert [check for check in lab_checks(store) if check["name"] == "pmd_asset"] == [missing]
+
+    empty = store.lab / "assets" / "pmd"
+    empty.mkdir(parents=True)
+    empty_check = _pmd_asset_check(store)
+    assert empty_check["status"] == "warn"
+    assert empty_check["fix"].startswith("rmdir <ROOT>/lab/assets/pmd && traceback lab asset add pmd")
+    empty.rmdir()
+
+    record = _add(store, source)
+    ready = _pmd_asset_check(store)
+    assert ready["status"] == "pass"
+    assert record.sha256[:12] in ready["detail"]
+    assert "fix" not in ready
+
+    record.file.write_bytes(b"tampered")
+    altered = _pmd_asset_check(store)
+    assert altered["status"] == "warn"
+    assert "differs from the pinned SHA-256" in altered["detail"]
+    assert "Restore the original pinned PMD bytes" in altered["fix"]
+    assert "traceback lab asset inspect pmd --root <ROOT>" in altered["fix"]
+
+
+def test_doctor_warns_without_leaking_a_path_when_pmd_stat_fails(
+    pinned: tuple[LabStore, Path, bytes], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _, _ = pinned
+    target = store.lab / "assets" / "pmd"
+    original = Path.is_symlink
+
+    def denied(path: Path) -> bool:
+        if path == target:
+            raise PermissionError(13, "access denied", str(target))
+        return original(path)
+
+    monkeypatch.setattr(Path, "is_symlink", denied)
+    check = _pmd_asset_check(store)
+    assert check["status"] == "warn"
+    assert "could not be inspected" in check["detail"]
+    assert str(store.root) not in str(check)
+    assert "<ROOT>/lab/assets/pmd" in check["fix"]
+    assert "traceback lab asset inspect pmd --root <ROOT>" in check["fix"]
+
+
+@pytest.mark.parametrize("dangling", [False, True])
+def test_doctor_symlink_remedy_only_removes_the_link(
+    pinned: tuple[LabStore, Path, bytes], dangling: bool,
+) -> None:
+    store, _, _ = pinned
+    directory = store.lab / "assets" / "pmd"
+    directory.parent.mkdir(parents=True)
+    target = store.root.parent / "linked-pmd-target"
+    if not dangling:
+        target.mkdir()
+        (target / "keep.txt").write_text("operator data")
+    directory.symlink_to(target, target_is_directory=True)
+
+    check = _pmd_asset_check(store)
+    assert check["status"] == "warn"
+    assert check["fix"].startswith("unlink <ROOT>/lab/assets/pmd && traceback lab asset add pmd")
+    assert "leave the link target untouched" in check["fix"]
+    if dangling:
+        assert not target.exists()
+    else:
+        assert (target / "keep.txt").read_text() == "operator data"
+
+
+def test_doctor_quotes_root_in_pmd_repair_commands(tmp_path: Path) -> None:
+    root = tmp_path / "PMD space' $(touch injected)"
+    store = LabStore(root)
+    directory = store.lab / "assets" / "pmd"
+
+    _, absent = doctor_command(None, store)
+    absent_line = next(line for line in absent["_human"]["lines"] if "fix: traceback lab asset add pmd" in line)
+    assert shlex.split(absent_line.split("fix: ", 1)[1])[-2:] == ["--root", str(root)]
+
+    directory.mkdir(parents=True)
+    _, empty = doctor_command(None, store)
+    empty_line = next(line for line in empty["_human"]["lines"] if "fix: rmdir " in line)
+    words = shlex.split(empty_line.split("fix: ", 1)[1])
+    assert words[:3] == ["rmdir", str(directory), "&&"]
+    assert words[-2:] == ["--root", str(root)]
 
 
 def test_exact_legacy_file_gains_manifest_without_byte_replacement(

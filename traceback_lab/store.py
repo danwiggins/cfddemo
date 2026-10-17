@@ -13,7 +13,8 @@ Layout (D11, D19, D22, D35)::
     ROOT/lab/inputs/<input_id>/   aligned or derived input (published as a unit)
     ROOT/lab/results/<input_id>/<algorithm_id>/<parameters_sha256>/
         attempts/<attempt_id>/{result.json, artifacts/, artifacts.json}
-        selected.json             {attempt_id, last_success_attempt_id?}, switched by os.replace
+        selected.json             {attempt_id, publication_order,
+                                   last_success_attempt_id?}, switched by os.replace
 
 Every multi-file write is staged in a ``.staging-<random>`` sibling and
 published with one ``rename_directory_exclusive_at`` call, so readers see the
@@ -91,6 +92,26 @@ class ResultPublishUncertain(LabProblem):
                 "parameters_sha256": parameters_sha256,
                 "attempt_id": attempt_id,
                 "generation_notified": generation_notified,
+            },
+        )
+
+
+class ResultSelectionNotificationFailed(LabProblem):
+    """A cached result was reselected durably, but readers may need a reload."""
+
+    def __init__(
+        self, *, input_id: str, algorithm_id: str, parameters_sha256: str, attempt_id: str,
+    ) -> None:
+        super().__init__(
+            "TBX-LAB-020",
+            summary="Cached result selection changed but notification failed",
+            cause="The selected result is visible, but the Lab generation update could not be confirmed.",
+            fix="Manually reload or reopen the Lab view and inspect the selected result.",
+            data={
+                "input_id": input_id,
+                "algorithm_id": algorithm_id,
+                "parameters_sha256": parameters_sha256,
+                "attempt_id": attempt_id,
             },
         )
 
@@ -487,6 +508,121 @@ class LabStore:
         except OSError as exc:
             raise ResultOrderUnavailable("Lab attempt order is unreadable") from exc
 
+    @staticmethod
+    def _publication_order(selection: dict[str, Any]) -> int | None:
+        if "publication_order" not in selection:
+            return None  # selected.json from an older store
+        order = selection["publication_order"]
+        if not isinstance(order, int) or isinstance(order, bool) or order <= 0:
+            raise ValueError("Lab result publication order is invalid")
+        return order
+
+    def _result_selection_orders(self, input_id: str, algorithm_id: str) -> dict[str, int | None]:
+        """Read selection order across identities without using the clock."""
+
+        algorithm_dir = self.results_dir / input_id / algorithm_id
+        orders: dict[str, int | None] = {}
+        try:
+            with os.scandir(algorithm_dir) as entries:
+                for entry in entries:
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                    selector = Path(entry.path) / "selected.json"
+                    try:
+                        if selector.is_symlink():
+                            raise ValueError("Lab result selection is a symlink")
+                        selection = json.loads(selector.read_bytes())
+                    except FileNotFoundError:
+                        continue
+                    if not isinstance(selection, dict):
+                        raise ValueError("Lab result selection is invalid")
+                    orders[entry.name] = self._publication_order(selection)
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError) as exc:
+            raise ResultOrderUnavailable("Lab result publication order is unreadable") from exc
+        return orders
+
+    def _next_result_order(self, input_id: str, algorithm_id: str) -> int:
+        orders = self._result_selection_orders(input_id, algorithm_id)
+        return max((order or 0 for order in orders.values()), default=0) + 1
+
+    def _switch_result_selection(
+        self, directory: Path, selection: dict[str, Any], *,
+        input_id: str, algorithm_id: str, parameters_sha256: str,
+    ) -> None:
+        attempt_id = selection["attempt_id"]
+        write_atomic(directory / "selected.json", canonical_json_bytes(selection))
+        try:
+            _fsync_dir(directory)
+        except OSError as exc:
+            # The replacement selector may already be visible to readers.
+            # Notify the UI without allowing a counter failure to hide the
+            # selector's uncertain durability or trigger pruning.
+            generation_notified = False
+            try:
+                self.bump_generation()
+            except Exception:  # noqa: BLE001 - preserve the original publication failure
+                pass
+            else:
+                generation_notified = True
+            raise ResultPublishUncertain(
+                input_id=input_id,
+                algorithm_id=algorithm_id,
+                parameters_sha256=parameters_sha256,
+                attempt_id=attempt_id,
+                generation_notified=generation_notified,
+            ) from exc
+
+    def reselect_cached_result(
+        self, input_id: str, algorithm_id: str, parameters_sha256: str,
+    ) -> bool:
+        """Make a validated cached success current, without rewriting its attempt."""
+
+        selected = self._selected_result(input_id, algorithm_id, parameters_sha256)
+        if selected is None or selected[1].status != "ok":
+            raise ResultOrderUnavailable("Cached result selection is invalid")
+        orders = self._result_selection_orders(input_id, algorithm_id)
+        for identity in orders:
+            try:
+                candidate = self._selected_result(input_id, algorithm_id, identity)
+            except ValueError as exc:
+                raise ResultOrderUnavailable("Another result selection is invalid") from exc
+            if candidate is None:
+                raise ResultOrderUnavailable("Another result selection is invalid")
+        if parameters_sha256 not in orders:
+            raise ResultOrderUnavailable("Cached result selection is missing")
+        current_order = orders[parameters_sha256]
+        highest = max((order or 0 for order in orders.values()), default=0)
+        if len(orders) == 1 or (
+            current_order is not None
+            and current_order == highest
+            and sum(order == highest for order in orders.values()) == 1
+        ):
+            return False
+
+        directory = self.result_dir(input_id, algorithm_id, parameters_sha256)
+        attempt_id = selected[0].name
+        self._switch_result_selection(
+            directory,
+            {
+                "attempt_id": attempt_id,
+                "last_success_attempt_id": attempt_id,
+                "publication_order": highest + 1,
+            },
+            input_id=input_id,
+            algorithm_id=algorithm_id,
+            parameters_sha256=parameters_sha256,
+        )
+        try:
+            self.bump_generation()
+        except OSError as exc:
+            raise ResultSelectionNotificationFailed(
+                input_id=input_id, algorithm_id=algorithm_id,
+                parameters_sha256=parameters_sha256, attempt_id=attempt_id,
+            ) from exc
+        return True
+
     def publish_result(
         self,
         envelope: ResultEnvelope,
@@ -511,6 +647,7 @@ class LabStore:
         attempts = directory / "attempts"
         attempt = attempt_id or new_attempt_id()
         ordinal = self._next_attempt_order(attempts)
+        publication_order = self._next_result_order(input_id, envelope.algorithm_id)
         files = dict(artifacts or {})
         for relative in files:
             parts = Path(relative).parts
@@ -565,30 +702,15 @@ class LabStore:
             except (OSError, ValueError, AttributeError):
                 pass
         self.publish_directory(attempts, attempt, build)
-        selection = {"attempt_id": attempt}
+        selection = {"attempt_id": attempt, "publication_order": publication_order}
         if last_success is not None:
             selection["last_success_attempt_id"] = last_success
-        write_atomic(directory / "selected.json", canonical_json_bytes(selection))
-        try:
-            _fsync_dir(directory)
-        except OSError as exc:
-            # The replacement selector may already be visible to readers.
-            # Notify the UI without allowing a counter failure to hide the
-            # selector's uncertain durability or trigger pruning.
-            generation_notified = False
-            try:
-                self.bump_generation()
-            except Exception:  # noqa: BLE001 - preserve the original publication failure
-                pass
-            else:
-                generation_notified = True
-            raise ResultPublishUncertain(
-                input_id=input_id,
-                algorithm_id=envelope.algorithm_id,
-                parameters_sha256=envelope.provenance.parameters_sha256,
-                attempt_id=attempt,
-                generation_notified=generation_notified,
-            ) from exc
+        self._switch_result_selection(
+            directory, selection,
+            input_id=input_id,
+            algorithm_id=envelope.algorithm_id,
+            parameters_sha256=envelope.provenance.parameters_sha256,
+        )
         keep = {attempt, *([previous.name] if previous is not None else [])}
         if last_success is not None:
             keep.add(last_success)
@@ -726,7 +848,7 @@ class LabStore:
 
     def _selected_result(
         self, input_id: str, algorithm_id: str, parameters_sha256: str
-    ) -> tuple[Path, ResultEnvelope] | None:
+    ) -> tuple[Path, ResultEnvelope, int | None] | None:
         directory = self.result_dir(input_id, algorithm_id, parameters_sha256)
         selector = directory / "selected.json"
         try:
@@ -734,6 +856,7 @@ class LabStore:
                 return None
             data = json.loads(selector.read_bytes())
             attempt_id = str(data["attempt_id"])
+            publication_order = self._publication_order(data)
         except (OSError, ValueError, KeyError, TypeError):
             return None
         if not re.fullmatch(_ATTEMPT_ID, attempt_id):
@@ -780,7 +903,15 @@ class LabStore:
                     return None
             if not artifact.is_file():
                 return None
-        return path, envelope
+        return path, envelope, publication_order
+
+    def selected_result_with_order(
+        self, input_id: str, algorithm_id: str, parameters_sha256: str
+    ) -> tuple[ResultEnvelope, int | None] | None:
+        """Return a validated selection and its cross-identity publication order."""
+
+        selected = self._selected_result(input_id, algorithm_id, parameters_sha256)
+        return (selected[1], selected[2]) if selected is not None else None
 
     def read_result(
         self, input_id: str, algorithm_id: str, parameters_sha256: str
