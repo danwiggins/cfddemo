@@ -84,6 +84,8 @@ def test_calibrated_derived_counts_only_selected_reads(tmp_path: Path, kind: str
         assert metrics[rate_metric]["value"] == pytest.approx(expected_y * 1_000_000 / len(chosen))
         assert metrics[fraction_metric]["value"] == pytest.approx(expected_y / len(chosen))
         assert derived_id != INPUT
+        if kind == "donor":
+            assert algorithm.preflight(replace(derived, eligible_reads=None)).reason_code == "depth"
         assert isinstance(algorithm.preflight(replace(derived, source_id="f" * 64)), Skip)
         assert isinstance(algorithm.preflight(replace(derived, reference_sha256="f" * 64)), Skip)
         assert algorithm.preflight(replace(derived, approx_depth_x=0.0001)).reason_code in (

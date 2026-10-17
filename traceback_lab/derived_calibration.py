@@ -7,11 +7,12 @@ import os
 import re
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from .derived import DERIVED_SCHEMA, downsample, split
 from .file_access import open_regular_no_follow
-from .store import LabStore
+
+if TYPE_CHECKING:
+    from .store import LabStore
 
 _SHA = re.compile(r"[0-9a-f]{64}\Z")
 
@@ -42,6 +43,8 @@ def calibrated_input_id(
     A derived id is a digest over its parent, transform, parameters and fixed
     salt. A damaged or unsupported derived manifest never inherits an asset.
     """
+
+    from .derived import DERIVED_SCHEMA, downsample, split
 
     if not isinstance(input_id, str) or not _SHA.fullmatch(input_id):
         return None

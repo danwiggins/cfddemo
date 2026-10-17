@@ -91,6 +91,8 @@ class DonorDerivedChrY(Base):
         decision = super().preflight(ctx)
         if isinstance(decision, Skip):
             return decision
+        if ctx.derived is not None and ctx.eligible_reads is None:
+            return Skip("depth", "derived donor read count is unavailable")
         if ctx.derived is not None and ctx.derived.get("transform") not in ("downsample", "split"):
             return Skip("unsupported_input", "donor calibration supports only selected read subsets")
         if not _protocol_matches():
