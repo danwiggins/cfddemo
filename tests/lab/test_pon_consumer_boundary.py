@@ -89,12 +89,20 @@ def test_sample_view_hides_instability_consuming_old_copy_number_identity(
             "parameters_sha256": old_identity, "attempt_id": old_attempt,
         }] if record_upstream else None,
     )
+    store.publish_result(
+        result("arm-summary", "1", "b" * 64), input_id=input_id,
+        upstream_selections=[{
+            "algorithm_id": "copy-number", "input_id": input_id,
+            "parameters_sha256": old_identity, "attempt_id": old_attempt,
+        }] if record_upstream else None,
+    )
     store.publish_result(result("copy-number", "2", current_identity), input_id=input_id)
     view = load_sample(store, source_id)
     assert view is not None
     assert view.full.results["copy-number"].status == "ok"
     assert view.full.results["copy-number"].algorithm_version == "2"
     assert view.full.results["instability"].skip_reason == "superseded_method"
+    assert view.full.results["arm-summary"].skip_reason == "superseded_method"
     assert store.read_result(input_id, "copy-number", old_identity).status == "ok"
     assert store.read_result(input_id, "instability", instability_identity).status == "ok"
 
