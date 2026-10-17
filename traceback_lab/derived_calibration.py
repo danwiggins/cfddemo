@@ -17,20 +17,20 @@ if TYPE_CHECKING:
 _SHA = re.compile(r"[0-9a-f]{64}\Z")
 
 
-def _manifest(path: Path) -> dict | None:
+def _manifest(path: Path) -> tuple[dict, int] | None:
     try:
         descriptor = open_regular_no_follow(path)
         try:
             size = os.fstat(descriptor).st_size
-            if not 1 <= size <= 8192:
+            if not 1 <= size <= 1_048_576:
                 return None
-            raw = os.read(descriptor, 8193)
+            raw = os.read(descriptor, 1_048_577)
             if len(raw) != size or os.fstat(descriptor).st_size != size:
                 return None
         finally:
             os.close(descriptor)
         data = json.loads(raw)
-        return data if isinstance(data, dict) else None
+        return (data, size) if isinstance(data, dict) else None
     except (OSError, ValueError, UnicodeError, RecursionError):
         return None
 
@@ -51,11 +51,14 @@ def calibrated_input_id(
     path = store.inputs_dir / input_id / "manifest.json"
     if not path.exists() and not path.is_symlink():
         return input_id if derived is None else None
-    data = _manifest(path)
-    if data is None:
+    parsed = _manifest(path)
+    if parsed is None:
         return None
+    data, size = parsed
     if data.get("schema") != DERIVED_SCHEMA:
         return input_id if derived is None else None
+    if size > 8192:
+        return None
     parent = data.get("parent_input_id")
     parameters = data.get("parameters")
     if (data.get("input_id") != input_id or not isinstance(parent, str)

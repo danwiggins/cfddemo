@@ -65,6 +65,10 @@ def test_calibrated_derived_counts_only_selected_reads(tmp_path: Path, kind: str
     full = replace(context, source_id=SOURCE, input_id=INPUT, reference_id="hg38",
                    reference_sha256=REFERENCE, approx_depth_x=0.01,
                    extras={**context.extras, "planned_asset_sha256s": [contract.manifest_sha256]})
+    full_manifest = store.inputs_dir / INPUT / "manifest.json"
+    full_manifest.parent.mkdir(parents=True, exist_ok=True)
+    full_manifest.write_text(json.dumps({"schema": "traceback.lab.input.v1", "padding": "x" * 9000}))
+    assert calibrated_input_id(store, INPUT) == INPUT
     assert algorithm.asset_sha256s_for_input(store.root, INPUT) == [contract.manifest_sha256]
     full_metrics = {row["metric_id"]: row for row in algorithm.run(full, tmp_path).metrics}
     assert full_metrics[count_metric]["value"] == len(y_reads)
@@ -101,6 +105,8 @@ def test_calibrated_derived_counts_only_selected_reads(tmp_path: Path, kind: str
     broken = specs[0].input_id(INPUT)
     manifest_path = store.inputs_dir / broken / "manifest.json"
     manifest = json.loads(manifest_path.read_bytes())
+    manifest_path.write_text(json.dumps({**manifest, "padding": "x" * 9000}))
+    assert calibrated_input_id(store, broken, specs[0].mask_spec()) is None
     manifest["salt"] = "wrong"
     manifest_path.write_text(json.dumps(manifest))
     assert algorithm.asset_sha256s_for_input(store.root, broken) == []
