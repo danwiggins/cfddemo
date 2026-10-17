@@ -32,7 +32,11 @@ from ._records import eligible_record, name_predicate
 from .cell_origin import header_model
 
 _CANONICAL = re.compile(r"^chr(?:[1-9]|1[0-9]|2[0-2]|X|Y)$")
-_EXECUTION_CODE_FILES = ("methylbert_child.py", "methylbert_runtime.py", "methylbert_gpu_probe.py")
+_EXECUTION_CODE_FILES = (
+    "methylbert_child.py", "methylbert_runtime.py", "methylbert_gpu_probe.py",
+    "methylbert_assets.py", "methylbert_bundle.py", "algorithms/methylbert.py",
+    "algorithms/_records.py",
+)
 
 
 def _digest(path: Path) -> str:
@@ -207,6 +211,8 @@ class Methylbert(Base):
         planned = ctx.extras.get("planned_parameters", {})
         if _execution_code_sha256s() != planned.get("execution_code_sha256s"):
             raise RuntimeError("MethylBERT execution code changed since execution identity was selected")
+        if header_model(ctx.input_dir / "aligned.bam") != planned.get("basecall_model"):
+            raise RuntimeError("MethylBERT basecall model changed since execution identity was selected")
         if numerical_runtime_identity(probe_gpu=True, isolated_gpu=True) != planned.get("numerical_runtime"):
             raise RuntimeError("MethylBERT numerical runtime changed since execution identity was selected")
         with tempfile.TemporaryDirectory(prefix="methylbert-", dir=out.parent) as private_name:

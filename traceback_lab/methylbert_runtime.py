@@ -22,7 +22,8 @@ from urllib.parse import urlparse
 from traceback_runner.contained_process import run_contained
 
 from .methylbert_bundle import Bundle
-from .methylbert_gpu_probe import probe_cuda
+from .methylbert_gpu_probe import NUMERICAL_PACKAGES as NUMERICAL_PACKAGES
+from .methylbert_gpu_probe import package_versions, probe_cuda
 
 
 PINNED_UPSTREAM_COMMIT = "f82f83b0bc20e2af1441795536ec9f338fbbb3e7"
@@ -38,38 +39,34 @@ CHILD_ENV_KEYS = frozenset({
     "HOME", "TMPDIR", "TMP", "TEMP", "HF_HOME", "HF_HUB_OFFLINE",
     "HF_DATASETS_OFFLINE", "TRANSFORMERS_OFFLINE", "TOKENIZERS_PARALLELISM", "NO_PROXY",
 })
-NUMERICAL_PACKAGES = (
-    "torch", "transformers", "tokenizers", "safetensors", "huggingface-hub",
-    "numpy", "pandas", "scipy", "scikit-learn", "pysam",
-)
-
-
-def numerical_runtime_identity(*, probe_gpu: bool, isolated_gpu: bool = False) -> dict[str, Any]:
+def numerical_runtime_identity(*, probe_gpu: bool, isolated_gpu: bool) -> dict[str, Any]:
     """Key numerical dependencies without importing Torch for an absent model."""
 
-    versions: dict[str, str | None] = {}
-    for name in NUMERICAL_PACKAGES:
-        try:
-            versions[name] = metadata.version(name)
-        except metadata.PackageNotFoundError:
-            versions[name] = None
     cuda: dict[str, Any] | None = None
     if probe_gpu:
         if isolated_gpu:
+            probe_env = {name: os.environ[name] for name in (
+                "PATH", "SYSTEMROOT", "LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER",
+            ) if name in os.environ}
+            probe_env.update({"HF_HUB_OFFLINE": "1", "HF_DATASETS_OFFLINE": "1",
+                              "TRANSFORMERS_OFFLINE": "1", "TOKENIZERS_PARALLELISM": "false",
+                              "NO_PROXY": "*"})
             result = run_contained(
                 [sys.executable, "-I", str(Path(__file__).with_name("methylbert_gpu_probe.py"))],
-                env=os.environ, cwd=Path(__file__).resolve().parent,
+                env=probe_env, cwd=Path(__file__).resolve().parent,
                 timeout_seconds=30, log_limit_bytes=8 * 1024,
             )
             try:
-                cuda = json.loads(result.stdout) if result.succeeded and not result.stdout_truncated else None
+                identity = json.loads(result.stdout) if result.succeeded and not result.stdout_truncated else None
             except (UnicodeDecodeError, json.JSONDecodeError):
-                cuda = None
-            if not isinstance(cuda, dict):
-                cuda = {"available": False, "torch_cuda": None, "device_count": 0}
+                identity = None
+            if (not isinstance(identity, dict) or set(identity) != {"python", "packages", "cuda"}
+                    or not isinstance(identity["packages"], dict) or not isinstance(identity["cuda"], dict)):
+                raise RuntimeRefusal("MethylBERT isolated numerical runtime probe failed")
+            return identity
         else:
             cuda = probe_cuda()
-    return {"python": sys.version.split()[0], "packages": versions, "cuda": cuda}
+    return {"python": sys.version.split()[0], "packages": package_versions(), "cuda": cuda}
 
 
 class RuntimeRefusal(ValueError):
@@ -99,7 +96,7 @@ def apply_precision_flags(expected: object) -> None:
 def require_numerical_runtime(expected: object) -> dict[str, Any]:
     """Refuse package or CUDA drift before loading a trusted checkpoint."""
 
-    actual = numerical_runtime_identity(probe_gpu=True)
+    actual = numerical_runtime_identity(probe_gpu=True, isolated_gpu=False)
     if not isinstance(expected, dict) or actual != expected:
         raise RuntimeRefusal("MethylBERT numerical runtime differs from the selected execution identity")
     return actual

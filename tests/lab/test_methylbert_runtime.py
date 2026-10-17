@@ -49,10 +49,10 @@ def test_numerical_runtime_identity_is_lightweight_until_a_model_needs_cuda(monk
         get_float32_matmul_precision=lambda: "highest",
     )
     monkeypatch.setitem(sys.modules, "torch", torch)
-    without_model = runtime.numerical_runtime_identity(probe_gpu=False)
+    without_model = runtime.numerical_runtime_identity(probe_gpu=False, isolated_gpu=True)
     assert without_model["cuda"] is None
     assert set(without_model["packages"]) == set(runtime.NUMERICAL_PACKAGES)
-    with_model = runtime.numerical_runtime_identity(probe_gpu=True)
+    with_model = runtime.numerical_runtime_identity(probe_gpu=True, isolated_gpu=False)
     assert with_model["cuda"] == {
         "available": True, "torch_cuda": "12.4", "device_count": 1,
         "current_device": 0,
@@ -61,7 +61,7 @@ def test_numerical_runtime_identity_is_lightweight_until_a_model_needs_cuda(monk
         "cudnn_benchmark": False, "float32_matmul_precision": "highest",
     }
     visible.append("fixture GPU 1")
-    two_devices = runtime.numerical_runtime_identity(probe_gpu=True)
+    two_devices = runtime.numerical_runtime_identity(probe_gpu=True, isolated_gpu=False)
     assert two_devices["cuda"]["device_count"] == 2
     assert two_devices["cuda"]["devices"][1] == {"name": "fixture GPU 1", "capability": [8, 7]}
     assert two_devices != with_model
@@ -83,20 +83,29 @@ def test_parent_gpu_identity_uses_a_bounded_process_without_importing_cuda(monke
     monkeypatch.setattr(runtime, "probe_cuda", lambda: pytest.fail("parent initialized CUDA"))
     seen = {}
     cuda = {"available": True, "torch_cuda": "12.4", "device_count": 1}
+    identity = {"python": "3.11", "packages": {"torch": "2.1"}, "cuda": cuda}
 
     def contained(argv, **kwargs):
         seen.update({"argv": argv, **kwargs})
-        output = json.dumps(cuda).encode()
+        output = json.dumps(identity).encode()
         return ContainedResult(tuple(argv), "exited", 0, 0.1, output, b"", len(output), 0, False, False)
 
     monkeypatch.setattr(runtime, "run_contained", contained)
     actual = runtime.numerical_runtime_identity(probe_gpu=True, isolated_gpu=True)
-    assert actual["cuda"] == cuda
+    assert actual == identity
     assert seen["argv"][1] == "-I"
     assert seen["argv"][2].endswith("methylbert_gpu_probe.py")
     assert seen["env"]["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID"
+    assert "NVIDIA_VISIBLE_DEVICES" not in seen["env"]
     assert seen["timeout_seconds"] == 30
     assert seen["log_limit_bytes"] == 8 * 1024
+
+    def failed_probe(argv, **_kwargs):
+        return ContainedResult(tuple(argv), "exited", 1, 0.1, b"", b"failure", 0, 7, False, False)
+
+    monkeypatch.setattr(runtime, "run_contained", failed_probe)
+    with pytest.raises(runtime.RuntimeRefusal, match="isolated numerical runtime probe failed"):
+        runtime.numerical_runtime_identity(probe_gpu=True, isolated_gpu=True)
 
 
 def test_child_restores_selected_precision_after_model_import(monkeypatch):

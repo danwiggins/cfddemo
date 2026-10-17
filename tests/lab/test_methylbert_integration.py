@@ -168,6 +168,7 @@ def test_private_worker_lifecycle_publishes_only_aggregate(tmp_path, monkeypatch
         tmp_path, reference_fasta=str(fasta),
         methylbert_bundle_sha256="b" * 64, methylbert_code_sha256="c" * 64,
         methylbert_min_classified_reads=100000, planned_parameters={
+            "basecall_model": "dorado-model",
             "execution_code_sha256s": {name: "a" * 64 for name in adapter._EXECUTION_CODE_FILES},
             "numerical_runtime": {"packages": {"torch": "fixture"}},
         },
@@ -218,6 +219,11 @@ def test_private_worker_lifecycle_publishes_only_aggregate(tmp_path, monkeypatch
         adapter.METHYLBERT.run(ctx, out)
     monkeypatch.setattr(adapter, "numerical_runtime_identity", lambda **_kwargs: {"packages": {"torch": "fixture"}})
     assert json.loads(result.artifacts["methylbert_provenance.json"])["min_classified_reads"] == 100000
+
+    monkeypatch.setattr(adapter, "header_model", lambda *_: "changed-model")
+    with pytest.raises(RuntimeError, match="basecall model changed"):
+        adapter.METHYLBERT.run(ctx, out)
+    monkeypatch.setattr(adapter, "header_model", lambda *_: "dorado-model")
 
     def low_support(_argv, *, scratch, **_kwargs):
         return Aggregate("model-1", 0.25, 0.75, 99999)
