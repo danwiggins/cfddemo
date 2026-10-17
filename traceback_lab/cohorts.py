@@ -421,6 +421,34 @@ def pon_inputs_for_members(store: LabStore, members: tuple[CohortMember, ...]) -
     return tuple(eligible)
 
 
+def pon_inputs_for_members(store: LabStore, members: tuple[CohortMember, ...]) -> tuple[PonInput, ...]:
+    """Resolve eligible full aligned inputs for the isolated PoN builder.
+
+    Pre-aligned inputs have unknown protocol provenance and cannot establish a
+    protocol-matched panel. The caller holds the cohort writer lock.
+    """
+
+    from .pon import PonInput
+
+    eligible: list[PonInput] = []
+    for member in members:
+        selected = _full_input(store, _checked_source_record(store, member.source_id))
+        if selected is None or selected[0] != member.input_id:
+            raise _invalid_input(member.input_id, "selected full input changed")
+        input_id, manifest = selected
+        label, _ = _aligner(manifest, input_id)
+        if label != member.aligner_identity:
+            raise _invalid_input(input_id, "aligner identity changed")
+        if manifest["kind"] != "aligned":
+            continue
+        eligible.append(PonInput(
+            source_id=member.source_id, input_id=input_id,
+            reference_sha256=manifest["reference_sha256"], aligner_identity=label,
+            bam_path=store.inputs_dir / input_id / "aligned.bam",
+        ))
+    return tuple(eligible)
+
+
 def read_current(store: LabStore, cohort_id: str) -> CohortGeneration | None:
     """Pin one complete immutable generation with a single pointer read."""
 
