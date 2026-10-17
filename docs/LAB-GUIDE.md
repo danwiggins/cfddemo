@@ -218,7 +218,7 @@ ROOT, home, login and chunk names redacted) is ever stored.
 | `hypometh-reads` | among reads with ≥ 4 CpG calls, the share under 25% methylated, and U/X/M counts (≤ 25% / between / ≥ 75%); needs 500,000 eligible reads |
 | `frag-x-meth` | descriptive molecule-count matrix of aligned-size bins by per-read 5mC fraction (at least four distinct CpG sites/read); the scalar is long (151–220 bp) mean minus short (100–150 bp) mean, null if either group is empty; no normal range |
 | `breakpoint-motifs` | 4-mer counts at aligned-reference-span start and end−1, stratified by CpG proximity; the scalar is the fraction of ends near a CpG. These are not proven physical cleavage positions, and the methylation link is unavailable without a supported joint input |
-| `aligned-end-structure` | exploratory ONT aligned-span U/D end asymmetry around operator-pinned hg38 open-chromatin centers and exact support for separately pinned U/D preferred-end coordinates; needs a native ONT input or its verified downsample/split subset at ≥10x observed eligible depth and both catalogues registered below. No tissue-origin or clinical calibration |
+| `aligned-end-structure` | exploratory ONT aligned-span U/D end asymmetry around operator-pinned hg38 open-chromatin centers and exact support for separately pinned U/D preferred-end coordinates; needs a native ONT input or its downsample/split subset at ≥10x observed eligible depth and both catalogues registered below. No tissue-origin or clinical calibration |
 
 **Short-read TLEN slice.** For a prealigned paired-end Illumina BAM against
 the registered hg38 reference, run the separate measurement explicitly:

@@ -513,7 +513,15 @@ def test_ten_x_synthetic_ont_bam_runs_read_summary_and_end_worker(
         assert artifact["valid_molecules"] == 100
         assert artifact["depth_basis"] == "run_target"
     else:
-        assert 83 <= artifact["valid_molecules"] < 250
+        selected = artifact["valid_molecules"]
+        if derived["transform"] == "downsample":
+            assert 160 <= selected <= 210
+        else:
+            assert 100 <= selected <= 150
+        hits = artifact["preferred_u_hits"]
+        assert hits == artifact["preferred_d_hits"] and hits in (0, 1)
+        assert metrics["preferred_end_support_fraction"] == hits / selected
+        assert metrics["ocf_like_end_asymmetry"] == (-2 if hits else None)
         assert artifact["observed_depth_x"] >= 10.0
         assert artifact["depth_basis"] == "selected_read_summary"
         assert artifact["derived_selection"] == derived
