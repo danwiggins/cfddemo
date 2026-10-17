@@ -30,6 +30,7 @@ from ._base import Base, metric
 
 MAX_TAXA = 256
 MAX_REPORT_ROWS = 100_000
+MAX_CANDIDATE_FASTA_BYTES = 512 << 20
 _BRACKEN_COLUMNS = ("name", "taxonomy_id", "taxonomy_lvl", "kraken_assigned_reads",
                     "added_reads", "new_est_reads", "fraction_total_reads")
 _ROOTS = {2: "bacteria", 2157: "archaea", 10239: "viruses", 4751: "fungi"}
@@ -149,28 +150,45 @@ def _bracken_species(path: Path, lineages: dict[int, str], denominator: int) -> 
 
 def _write_candidates(bam: Path, fasta: Path, read_length: int) -> tuple[int, int, int, int]:
     denominator = candidate = too_short = missing_sequence = 0
-    with pysam.AlignmentFile(bam, "rb", check_sq=False) as stream, fasta.open("wt", encoding="ascii") as out:
-        for read in stream.fetch(until_eof=True):
-            if read.is_secondary or read.is_supplementary or read.is_qcfail or read.is_duplicate:
-                continue
-            denominator += 1
-            if not read.is_unmapped:
-                continue
-            sequence = read.query_sequence
-            if sequence is None:
-                missing_sequence += 1
-                continue
-            if len(sequence) < read_length:
-                too_short += 1
-                continue
-            candidate += 1
-            out.write(f">r{candidate}\n{sequence[:read_length]}\n")
+    staged_bytes = 0
+    try:
+        with pysam.AlignmentFile(bam, "rb", check_sq=False) as stream, fasta.open("wb") as out:
+            for read in stream.fetch(until_eof=True):
+                if read.is_secondary or read.is_supplementary or read.is_qcfail or read.is_duplicate:
+                    continue
+                denominator += 1
+                if not read.is_unmapped:
+                    continue
+                sequence = read.query_sequence
+                if sequence is None:
+                    missing_sequence += 1
+                    continue
+                if len(sequence) < read_length:
+                    too_short += 1
+                    continue
+                candidate += 1
+                row = f">r{candidate}\n{sequence[:read_length]}\n"
+                encoded = row.encode("ascii")
+                row_bytes = len(encoded)
+                if staged_bytes + row_bytes > MAX_CANDIDATE_FASTA_BYTES:
+                    raise RuntimeError(
+                        "microbial candidate FASTA exceeds the local staging budget: "
+                        f"read {candidate} needs {staged_bytes + row_bytes} bytes, "
+                        f"limit {MAX_CANDIDATE_FASTA_BYTES} bytes")
+                out.write(encoded)
+                staged_bytes += row_bytes
+    except BaseException:
+        try:
+            fasta.unlink(missing_ok=True)
+        except OSError:
+            pass  # Preserve the original error; the worker scratch is still removed.
+        raise
     return denominator, candidate, too_short, missing_sequence
 
 
 @dataclass
 class Microbial(Base):
-    version: str = "3"
+    version: str = "4"
     family: str = "non-human"
     consumes: str = "full_bam"
     cost: str = "slow"
@@ -180,6 +198,7 @@ class Microbial(Base):
         "clipping": "first registered Bracken read-length bases",
         "bracken_level": "S", "bracken_threshold": 1,
         "microbial_roots": _ROOTS, "max_taxa": MAX_TAXA,
+        "candidate_fasta_budget_bytes": MAX_CANDIDATE_FASTA_BYTES,
     })
 
     @property  # type: ignore[override]

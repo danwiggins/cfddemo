@@ -733,6 +733,34 @@ def test_run_clips_only_unmapped_eligible_reads_and_uses_primary_denominator(tmp
     assert b"private-id" not in artifact and b"candidate-private-id" not in artifact
 
 
+def test_candidate_staging_refuses_budget_and_removes_partial_file(tmp_path, monkeypatch) -> None:
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    bam = input_dir / "aligned.bam"
+    fasta = tmp_path / "candidate.fa"
+    header = {"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 1000}]}
+    with pysam.AlignmentFile(bam, "wb", header=header) as stream:
+        for name in ("first", "second"):
+            read = pysam.AlignedSegment()
+            read.query_name = name
+            read.query_sequence = "A" * 75
+            read.flag = 4
+            read.reference_id = -1
+            read.reference_start = -1
+            stream.write(read)
+    monkeypatch.setattr(algorithm, "MAX_CANDIDATE_FASTA_BYTES", 80)
+    with pytest.raises(RuntimeError, match="read 2 needs 160 bytes, limit 80 bytes"):
+        algorithm._write_candidates(bam, fasta, 75)
+    assert not fasta.exists()
+    store, _ = _database(tmp_path)
+    monkeypatch.setattr(algorithm, "_tool", lambda name: (name, "a" * 64))
+    monkeypatch.setattr(algorithm.subprocess, "run", lambda *args, **kwargs: pytest.fail("classifier ran"))
+    ctx = InputContext(store.root, "a" * 64, "b" * 64, "ref", "c" * 64, input_dir)
+    with pytest.raises(RuntimeError, match="candidate FASTA exceeds.*staging budget"):
+        algorithm.MICROBIAL.run(ctx, _private_out(store))
+    assert not list((store.lab / "tmp" / "test-worker").glob("microbial-*"))
+
+
 def test_all_unclassified_candidates_yield_zero_without_bracken(tmp_path, monkeypatch) -> None:
     store, _ = _database(tmp_path)
     input_dir = tmp_path / "input"
