@@ -80,6 +80,7 @@ def test_exact_ocf_like_sign_and_preferred_end_support(tmp_path: Path) -> None:
     assert artifact["u_count"][40] == 1 and artifact["d_count"][160] == 1
     assert artifact["ocf_like_left"] == -1 and artifact["ocf_like_right"] == -1
     assert artifact["ocf_like_measurement_ends"] == 2
+    assert artifact["ocf_like_left_ends"] == artifact["ocf_like_right_ends"] == 1
     assert artifact["valid_molecules"] == 1 and artifact["preferred_u_hits"] == 1
     assert artifact["preferred_d_hits"] == 1
     assert artifact["observed_depth_x"] == 10.0
@@ -122,6 +123,20 @@ def test_profile_ends_outside_measurement_windows_are_unscorable(tmp_path: Path)
     artifact = json.loads(output.artifacts["aligned_end_structure.json"])
     assert artifact["u_count"][0] == 1 and artifact["d_count"][200] == 1
     assert artifact["ocf_like_measurement_ends"] == 0
+
+
+def test_one_sided_window_coverage_is_unscorable(tmp_path: Path) -> None:
+    root, _, _ = _catalogues(tmp_path)
+    summary_parent = tmp_path / "read-summary"
+    _summary(summary_parent)
+    columns = summary_parent / "columns"
+    np.asarray([440, 440, 440], dtype=COLUMNS["start"]).tofile(columns / "start.bin")
+    np.asarray([901, 901, 901], dtype=COLUMNS["end"]).tofile(columns / "end.bin")
+    output = ALIGNED_END_STRUCTURE.run(_context(root, summary_parent), tmp_path / "out")
+    metric = next(item for item in output.metrics if item["metric_id"] == "ocf_like_end_asymmetry")
+    assert metric["value"] is None and metric["n"] == 1
+    artifact = json.loads(output.artifacts["aligned_end_structure.json"])
+    assert artifact["ocf_like_left_ends"] == 1 and artifact["ocf_like_right_ends"] == 0
 
 
 def test_depth_full_input_and_pinned_asset_gates(tmp_path: Path) -> None:
@@ -173,6 +188,34 @@ def test_oversized_registration_does_not_replace_pinned_manifest(tmp_path: Path,
                                 centers_source="synthetic-centers-v1", preferred_source="synthetic-sites-v1",
                                 terms="unknown", license_id=None)
     assert registration.read_bytes() == original
+
+
+def test_final_catalogue_validation_precedes_manifest_replace(tmp_path: Path, monkeypatch) -> None:
+    root, centers, preferred = _catalogues(tmp_path)
+    registration = root / "lab" / "assets" / "aligned-ends" / "registration.json"
+    original = registration.read_bytes()
+
+    def fail_validation(*args):
+        raise EndCatalogueError("final validation failed")
+
+    monkeypatch.setattr(end_catalog_assets, "_load_catalogues", fail_validation)
+    with pytest.raises(EndCatalogueError, match="final validation failed"):
+        register_end_catalogues(root, centers=centers, preferred=preferred,
+                                source_label="synthetic hg38 end catalogues",
+                                centers_source="synthetic-centers-v1", preferred_source="synthetic-sites-v1",
+                                terms="unknown", license_id=None)
+    assert registration.read_bytes() == original
+
+
+def test_cache_identity_rehashes_bytes_without_parsing_catalogue_rows(tmp_path: Path, monkeypatch) -> None:
+    root, _, _ = _catalogues(tmp_path)
+    identity = inspect_end_catalogues(root).identity
+
+    def fail_parse(*args, **kwargs):
+        raise AssertionError("cache identity must not parse catalogue rows")
+
+    monkeypatch.setattr(end_catalog_assets, "_parse_rows", fail_parse)
+    assert ALIGNED_END_STRUCTURE.asset_sha256s(root) == [identity]
 
 
 def test_same_coordinate_can_have_distinct_preferred_end_directions(tmp_path: Path) -> None:

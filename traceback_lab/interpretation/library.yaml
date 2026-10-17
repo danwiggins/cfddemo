@@ -2541,7 +2541,7 @@ entries:
     performance: null
     performance_missing_reason: "No calibrated reference range or tissue-origin performance for this ONT estimator"
     meaning_high: "More D−U ends left of catalogued centers and U−D ends right of them; no tissue fraction is inferred."
-    meaning_low: "Less of this directional asymmetry in the pinned regions; no tissue fraction is inferred."
+    meaning_low: "More negative values indicate the opposite directional end-count pattern in the pinned regions; no tissue fraction is inferred."
     confounders: ["catalogue tissue and assay", "alignment clipping", "ONT library preparation", "depth and region coverage"]
     next_steps:
       analytical: ["Inspect eligible centers and raw U/D end counts", "Compare only with the same pinned catalogue and protocol"]
@@ -2549,7 +2549,7 @@ entries:
     license_ids: [method-patents]
     flags: [LEGAL]
     headline: true
-    stability: {kind: absolute, tolerance: 1}
+    stability: {kind: scales_with_depth, tolerance: 0.50}
     citations: ["doi:10.1101/gr.242719.118"]
     citation_checked: {by: "Lab S5 evidence audit", date: "2026-10-17", note: "Sun 2019 Genome Research (PMID 30808726) defines D−U at −60 bp and U−D at +60 bp in 20-bp windows around tissue-specific open chromatin. This Lab score uses ONT aligned-span ends and operator-pinned hg38 regions; it does not reproduce short-read tissue calibration."}
 

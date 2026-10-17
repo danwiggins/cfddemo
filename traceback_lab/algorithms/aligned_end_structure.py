@@ -13,7 +13,7 @@ from typing import Any
 
 import numpy as np
 
-from ..end_catalog_assets import EndCatalogueError, inspect_end_catalogues
+from ..end_catalog_assets import EndCatalogueError, end_catalogue_identity, inspect_end_catalogues
 from ..read_summary import CHUNK_ROWS, FLAG_EXCLUDE, MIN_MAPQ
 from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip
 from ._base import Base, load_summary, metric, ratio
@@ -64,7 +64,7 @@ class AlignedEndStructure(Base):
 
     def asset_sha256s(self, root: Path) -> list[str]:
         try:
-            return [inspect_end_catalogues(root).identity]
+            return [end_catalogue_identity(root)]
         except EndCatalogueError:
             return []
 
@@ -84,10 +84,15 @@ class AlignedEndStructure(Base):
         # Only the native ONT aligner publishes kind=aligned; imported BAMs are prealigned.
         if ctx.approx_depth_x is None or not np.isfinite(ctx.approx_depth_x) or ctx.approx_depth_x < MIN_DEPTH_X:
             return Skip("depth", "aligned-end structure needs at least 10x observed eligible depth")
-        try:
-            inspect_end_catalogues(ctx.root)
-        except EndCatalogueError:
-            return Skip("missing_asset", "verified hg38 open-chromatin and preferred-end catalogues are required")
+        expected = ctx.extras.get("execution_asset_sha256s")
+        if expected is not None:
+            if not expected:
+                return Skip("missing_asset", "verified hg38 open-chromatin and preferred-end catalogues are required")
+        else:
+            try:
+                end_catalogue_identity(ctx.root)
+            except EndCatalogueError:
+                return Skip("missing_asset", "verified hg38 open-chromatin and preferred-end catalogues are required")
         return Ready()
 
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
@@ -150,9 +155,10 @@ class AlignedEndStructure(Base):
         # Original OCF direction; these are ONT aligned-end proxies, so use an explicit OCF-like name.
         left = int((d_counts[30:50] - u_counts[30:50]).sum())
         right = int((u_counts[150:170] - d_counts[150:170]).sum())
-        measurement_ends = int(u_counts[30:50].sum() + d_counts[30:50].sum()
-                               + u_counts[150:170].sum() + d_counts[150:170].sum())
-        ocf_like = left + right if valid_centers and measurement_ends else None
+        left_ends = int(u_counts[30:50].sum() + d_counts[30:50].sum())
+        right_ends = int(u_counts[150:170].sum() + d_counts[150:170].sum())
+        measurement_ends = left_ends + right_ends
+        ocf_like = left + right if valid_centers and left_ends and right_ends else None
         ends_total = 2 * valid_molecules
         artifact = {
             "schema": "traceback.lab.aligned-end-structure.v1",
@@ -168,6 +174,7 @@ class AlignedEndStructure(Base):
             "offset_bp": list(range(-RADIUS, RADIUS + 1)),
             "u_count": u_counts.tolist(), "d_count": d_counts.tolist(),
             "ocf_like_left": left, "ocf_like_right": right,
+            "ocf_like_left_ends": left_ends, "ocf_like_right_ends": right_ends,
             "ocf_like_measurement_ends": measurement_ends,
             "catalogue_centers": catalogues.center_count, "eligible_centers": valid_centers,
             "catalogue_preferred_sites": catalogues.preferred_count,

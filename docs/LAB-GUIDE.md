@@ -250,7 +250,10 @@ aligned ends exactly matching the pinned U/D site catalogue; this is a
 support count, not de novo site discovery or enrichment against a calibrated
 background. The raw count difference scales with depth, eligible-region count
 and end coverage; it is null when no aligned ends fall in its measurement
-windows. Both are ONT aligned-span proxies, not confirmed physical
+windows or when either side of the center lacks window observations. The
+reported 10x minimum is an input gate, not a validated adequacy threshold.
+The stability setting is a provisional depth-scaled engineering comparison,
+not a biological acceptance interval. Both are ONT aligned-span proxies, not confirmed physical
 cleavage positions. The [OCF study](https://pubmed.ncbi.nlm.nih.gov/30808726/)
 used tissue-specific short-read open-chromatin signals, while the
 [size-tagged preferred-end study](https://www.pnas.org/doi/10.1073/pnas.1804134115)

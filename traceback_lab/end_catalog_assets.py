@@ -133,11 +133,15 @@ def _valid_source_label(label: object) -> bool:
             and all(ord(char) >= 32 for char in label))
 
 
-def _load_catalogues(data: dict) -> EndCatalogues:
+def _verified_bytes(data: dict) -> tuple[bytes, bytes]:
     center_raw = _read_regular(Path(data["centers_path"]), MAX_CATALOGUE_BYTES)
     preferred_raw = _read_regular(Path(data["preferred_path"]), MAX_CATALOGUE_BYTES)
     if hashlib.sha256(center_raw).hexdigest() != data["centers_sha256"] or hashlib.sha256(preferred_raw).hexdigest() != data["preferred_sha256"]:
         raise EndCatalogueError("registered catalogue bytes changed")
+    return center_raw, preferred_raw
+
+
+def _load_catalogues(data: dict, center_raw: bytes, preferred_raw: bytes) -> EndCatalogues:
     centers = _parse_rows(center_raw, preferred=False)
     preferred_u, preferred_d = _parse_rows(preferred_raw, preferred=True)
     return EndCatalogues(
@@ -151,7 +155,7 @@ def _load_catalogues(data: dict) -> EndCatalogues:
     )
 
 
-def inspect_end_catalogues(root: Path) -> EndCatalogues:
+def _read_registration(root: Path) -> dict:
     raw = _read_regular(_location(root), MAX_MANIFEST_BYTES)
     try:
         data = json.loads(raw)
@@ -179,7 +183,20 @@ def inspect_end_catalogues(root: Path) -> EndCatalogues:
         data["identity"] = identity
     except (KeyError, TypeError, ValueError) as exc:
         raise EndCatalogueError("end catalogue registration is invalid") from exc
-    return _load_catalogues(data)
+    return data
+
+
+def end_catalogue_identity(root: Path) -> str:
+    """Rehash pinned bytes for cache identity without parsing millions of rows."""
+
+    data = _read_registration(root)
+    _verified_bytes(data)
+    return data["identity"]
+
+
+def inspect_end_catalogues(root: Path) -> EndCatalogues:
+    data = _read_registration(root)
+    return _load_catalogues(data, *_verified_bytes(data))
 
 
 def register_end_catalogues(
@@ -195,8 +212,6 @@ def register_end_catalogues(
         raise EndCatalogueError("invalid license ID")
     center_raw = _read_regular(centers, MAX_CATALOGUE_BYTES)
     preferred_raw = _read_regular(preferred, MAX_CATALOGUE_BYTES)
-    _parse_rows(center_raw, preferred=False)
-    _parse_rows(preferred_raw, preferred=True)
     data = {
         "schema": SCHEMA, "assembly": "hg38", "centers_path": str(Path(os.path.abspath(centers))),
         "centers_sha256": hashlib.sha256(center_raw).hexdigest(),
@@ -209,6 +224,7 @@ def register_end_catalogues(
     encoded = _canonical(data)
     if len(encoded) > MAX_MANIFEST_BYTES:
         raise EndCatalogueError("end catalogue registration exceeds its size limit")
+    prepared = _load_catalogues(data, center_raw, preferred_raw)
     location = _location(root)
     if any(parent.is_symlink() for parent in (root, location.parent.parent.parent, location.parent.parent, location.parent)):
         raise EndCatalogueError("Lab asset directory contains a symlink")
@@ -226,4 +242,4 @@ def register_end_catalogues(
                 os.unlink(temporary)
     except OSError as exc:
         raise EndCatalogueError("end catalogue registration could not be published") from exc
-    return _load_catalogues(data)
+    return prepared
