@@ -204,6 +204,8 @@ def test_synthetic_calibration_skips_and_verified_mechanics_use_nonpar_y(tmp_pat
     assert donor.DD_CFDNA_CHRY.preflight(replace(verified_ctx, approx_depth_x=float("nan"))).reason_code == "depth"
     assert donor.DD_CFDNA_CHRY.preflight(replace(verified_ctx, derived={"half": "A"})).reason_code == "unsupported_input"
     assert donor.DD_CFDNA_CHRY.preflight(replace(verified_ctx, extras={})).reason_code == "missing_asset"
+    extra_asset = replace(verified_ctx, extras={"planned_asset_sha256s": [verified.manifest_sha256, "f" * 64]})
+    assert donor.DD_CFDNA_CHRY.preflight(extra_asset).reason_code == "missing_asset"
     assert donor.DD_CFDNA_CHRY.preflight(replace(verified_ctx, source_id="f" * 64)).reason_code == "unsupported_input"
     assert donor.DD_CFDNA_CHRY.preflight(replace(verified_ctx, reference_sha256="f" * 64)).reason_code == "reference"
     lengths[23] -= 1
