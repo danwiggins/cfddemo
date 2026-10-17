@@ -3,9 +3,10 @@
 Each algorithm runs in a worker process in its own process group with a
 timeout, so a failure is isolated and nothing it started outlives it.  A
 failure is written as ``status: failed`` with the last 50 scrubbed stderr
-lines; there is no automatic retry.  A rerun recomputes only results that are
-missing or failed (``force`` recomputes all); skipped results are preflighted
-again every time, because depth can change.
+lines; there is no automatic retry. A rerun recomputes missing or failed
+results and dependents whose selected upstream attempt changed, even when
+the D19 execution identity is unchanged. ``force`` recomputes all results;
+skipped results are preflighted again every time, because depth can change.
 """
 
 from __future__ import annotations
@@ -52,6 +53,8 @@ class StepResult:
     cached: bool = False
     input_label: str = "full"
     artifacts_dir: str | None = None
+    input_id: str | None = None
+    attempt_id: str | None = None
 
     def public(self) -> dict[str, Any]:
         return {
@@ -143,6 +146,27 @@ def _envelope(
     )
 
 
+def _selected_upstream_attempts(
+    store: LabStore, done: Mapping[str, StepResult], names: Sequence[str],
+) -> tuple[dict[str, str], ...] | None:
+    """Pin direct attempts actually consumed, including parent-input aliases."""
+
+    rows: list[dict[str, str]] = []
+    for name in sorted(names):
+        result = done.get(name)
+        if (result is None or result.status != "ok" or result.input_id is None
+                or result.attempt_id is None):
+            return None
+        selected = store.selected_attempt(result.input_id, name, result.parameters_sha256)
+        if selected is None or selected.name != result.attempt_id:
+            return None
+        rows.append({
+            "algorithm_id": name, "input_id": result.input_id,
+            "parameters_sha256": result.parameters_sha256, "attempt_id": result.attempt_id,
+        })
+    return tuple(rows)
+
+
 def run_plan(
     store: LabStore,
     lock: WriterLock | None,
@@ -183,10 +207,18 @@ def run_plan(
         )
         step = algorithm.id if target.label == "full" else f"{algorithm.id}@{target.label}"
         existing = store.read_result(target.input_id, algorithm.id, identity)
-        if existing is not None and existing.status == "ok" and not force:
+        blocked = [name for name in algorithm.upstream if done.get(name) is None or done[name].status != "ok"]
+        consumed = _selected_upstream_attempts(store, done, algorithm.upstream) if not blocked else None
+        cache_valid = not algorithm.upstream or (
+            consumed is not None
+            and store.selected_upstream_selections(target.input_id, algorithm.id, identity) == consumed
+        )
+        if existing is not None and existing.status == "ok" and not force and not blocked and cache_valid:
             store.reselect_cached_result(target.input_id, algorithm.id, identity)
+            selected = store.selected_attempt(target.input_id, algorithm.id, identity)
             result = StepResult(
-                algorithm.id, "ok", item.upstream_only, identity, cached=True, input_label=target.label
+                algorithm.id, "ok", item.upstream_only, identity, cached=True, input_label=target.label,
+                input_id=target.input_id, attempt_id=selected.name if selected is not None else None,
             )
             _after_ok(store, target, algorithm, identity, result, existing)
             results.append(result)
@@ -194,7 +226,6 @@ def run_plan(
             if progress:
                 progress(f"{step:<24} ok (cached)")
             continue
-        blocked = [name for name in algorithm.upstream if done.get(name) is None or done[name].status != "ok"]
         target.extras["upstream"] = {
             name: done[name].artifacts_dir
             for name in algorithm.upstream
@@ -255,6 +286,8 @@ def run_plan(
                 skip_reason=decision.reason_code,
                 skip_message=decision.message,
                 input_label=target.label,
+                input_id=target.input_id,
+                attempt_id=attempt_id,
             )
             results.append(result)
             done[algorithm.id] = result
@@ -316,6 +349,7 @@ def run_plan(
                         envelope,
                         input_id=target.input_id,
                         artifacts_dir=scratch / "artifacts",
+                        upstream_selections=consumed,
                     )
                     log.append(
                         "step_end",
@@ -336,6 +370,8 @@ def run_plan(
                         duration_s=outcome.duration_s,
                         peak_rss_bytes=outcome.peak_rss_bytes,
                         input_label=target.label,
+                        input_id=target.input_id,
+                        attempt_id=attempt_id,
                     )
                     _after_ok(store, target, algorithm, identity, result, envelope)
             else:
@@ -440,6 +476,8 @@ def _publish_failure(
         duration_s=duration_s,
         peak_rss_bytes=peak_rss,
         input_label=target.label,
+        input_id=target.input_id,
+        attempt_id=attempt_id,
     )
 
 
