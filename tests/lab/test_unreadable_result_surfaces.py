@@ -77,6 +77,41 @@ def _ambiguous_store(tmp_path) -> LabStore:
     return store
 
 
+def _older_malformed_store(tmp_path, *, legacy_order: bool = False) -> LabStore:
+    store = LabStore(tmp_path)
+    store.ensure()
+    _aligned_ont_input(store)
+    store.sources_dir.mkdir(parents=True)
+    (store.sources_dir / f"{SOURCE}.json").write_text(json.dumps({
+        "source_id": SOURCE, "example": False, "excluded": [], "derived": [],
+        "inputs": [{"input_id": INPUT, "used_utc": "2026-10-16T00:00:00Z"}],
+    }))
+    store.publish_result(_result("a" * 64, 167), input_id=INPUT)
+    store.publish_result(_result("d" * 64, 168), input_id=INPUT)
+    selected = store.result_dir(INPUT, "fragment-size", "a" * 64)
+    selector = selected / "selected.json"
+    choice = json.loads(selector.read_bytes())
+    if legacy_order:
+        choice.pop("publication_order")
+        selector.write_text(json.dumps(choice))
+    (selected / "attempts" / choice["attempt_id"] / "result.json").write_bytes(b"{ malformed")
+    return store
+
+
+def test_corrupt_older_identity_does_not_hide_newer_valid_result(tmp_path) -> None:
+    sample = LabApi(_older_malformed_store(tmp_path)).sample(SOURCE[:12])
+    assert sample["unreadable_results"] == []
+    result = next(row for row in sample["algorithms"] if row["algorithm_id"] == "fragment-size")
+    assert result["status"] == "ok"
+    assert next(metric for metric in result["metrics"] if metric["metric_id"] == "mode_bp")["value"] == 168
+
+
+def test_corrupt_older_identity_with_unknown_order_withholds_result(tmp_path) -> None:
+    sample = LabApi(_older_malformed_store(tmp_path, legacy_order=True)).sample(SOURCE[:12])
+    assert sample["unreadable_results"] == ["fragment-size"]
+    assert all(row["algorithm_id"] != "fragment-size" for row in sample["algorithms"])
+
+
 def test_malformed_newest_result_is_disclosed_without_stale_fallback(tmp_path) -> None:
     store = _malformed_store(tmp_path)
 
