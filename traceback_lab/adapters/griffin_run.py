@@ -27,6 +27,7 @@ from .griffin import GriffinFormatError, GriffinProfile, read_corrected_profiles
 GRIFFIN_COMMIT = "b624c7a2ea7b8758b6eebd424066c815bfeece61"
 SNAKEMAKE_VERSION = "5.19.2"
 MIN_ELIGIBLE_AUTOSOMAL_PAIRS = 5_000_000
+PROFILE_TLEN_RANGE = (100, 200)
 D21_PAIR_PREDICATE = {
     "version": "griffin-d21-autosomal-pairs-v1",
     "contigs": "canonical chr1–chr22 or 1–22",
@@ -216,7 +217,8 @@ def _require_paired_input(bam: Path, keep_name: Callable[[str], bool] | None = N
             paired += bool(read.is_paired)
             positive += bool(read.is_paired and not read.is_reverse and read.template_length > 0)
             usable += bool(
-                read.is_paired and not read.is_reverse and 100 <= read.template_length <= 200
+                read.is_paired and not read.is_reverse
+                and PROFILE_TLEN_RANGE[0] <= read.template_length <= PROFILE_TLEN_RANGE[1]
                 and read.mapping_quality >= 20 and not read.is_duplicate and not read.is_qcfail
             )
     if primary < 100 or paired / primary < 0.95 or positive == 0:
@@ -490,6 +492,7 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
     profile_config.update({
         "tmp_dir": "tmp", "results_dir": "results", "mappability_correction": False,
         "sites_yaml": "config/sites.yaml", "samples_yaml": "config/samples.GC.yaml",
+        "size_range": f"{PROFILE_TLEN_RANGE[0]} {PROFILE_TLEN_RANGE[1]}",
         "chroms": " ".join(chromosomes),
     })
     _write_yaml(profile_dir / "config" / "config.yaml", profile_config)
