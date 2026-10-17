@@ -89,7 +89,7 @@ def _sample() -> dict:
         "run_utc": "2026-10-16T00:00:00Z", "depth": {"approx_depth_x": 1.0},
         "excluded_chunks": [], "interpretation_version": LIBRARY.version,
         "cohort_version": None, "cohort_n": 0,
-        "algorithms": algorithms, "catalog": catalog,
+        "algorithms": algorithms, "catalog": catalog, "unreadable_results": [],
         "licenses": [{"license_id": key, **LIBRARY.licenses[key]} for key in sorted(LICENSE_IDS)],
         "curve": {"downsampled": True, "run_depth_x": 1.0, "fractions": [1.0], "rows": []},
         "stability": [
@@ -117,6 +117,7 @@ def _server(tmp_path, sample):
         "id12": ID12, "run_utc": sample["run_utc"], "depth_x": 1.0,
         "example": False, "counts": {"ok": len(REGISTRY), "skipped": 0, "failed": 0},
         "outside_reference": len(REGISTRY), "controls": {"spike": None, "split": False},
+        "unreadable_results": sample["unreadable_results"],
     }], "root_has_runs": True}
     server.app.api.sample = lambda id12: copy.deepcopy(sample) if id12 == ID12 else {"found": False, "candidates": []}
     server.app.api.cohorts = lambda: {"cohorts": [], "unavailable": []}
@@ -365,16 +366,14 @@ def test_empty_copy_and_complete_example_commands(tmp_path) -> None:
 
 
 @needs_chrome
-@pytest.mark.xfail(strict=True, reason="AC21 gap: unreadable-result copy is absent from the Lab client")
 @pytest.mark.parametrize("route,copy_text", [
     ("home", f"result unreadable (run {ID12})"),
     ("findings", f"bam-qc: result unreadable (run {ID12})"),
 ])
 def test_unreadable_result_copy_on_each_required_surface(route, copy_text, tmp_path) -> None:
     sample = _sample()
-    broken = sample["algorithms"][0]
-    broken["status"] = "unreadable"
-    broken["metrics"] = []
+    sample["unreadable_results"] = ["bam-qc"]
+    sample["algorithms"] = [a for a in sample["algorithms"] if a["algorithm_id"] != "bam-qc"]
     path = None if route == "home" else f"/sample/{ID12}/{route}"
     with _server(tmp_path, sample) as server:
         dom = _dom(server, tmp_path / "browser", route=path)

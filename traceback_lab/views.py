@@ -36,6 +36,14 @@ _TIER_ORDER = {"PROVEN": 0, "NEWER": 1, "SPECULATIVE": 2, None: 3}
 def selected_results(
     store: LabStore, input_id: str, identities: Mapping[str, str] | None = None
 ) -> dict[str, ResultEnvelope]:
+    """Return only validated selected results; never fall back past an invalid selection."""
+
+    return _selected_results_with_unreadable(store, input_id, identities)[0]
+
+
+def _selected_results_with_unreadable(
+    store: LabStore, input_id: str, identities: Mapping[str, str] | None = None
+) -> tuple[dict[str, ResultEnvelope], set[str]]:
     """The selected result per algorithm for one input.
 
     Without ``identities`` the latest published execution identity wins; with them (a
@@ -51,7 +59,7 @@ def selected_results(
     ambiguous: set[str] = set()
     unreadable: set[str] = set()
     if not base.is_dir():
-        return {}
+        return {}, set()
     for algorithm_dir in sorted(base.iterdir()):
         if not algorithm_dir.is_dir():
             continue
@@ -88,7 +96,7 @@ def selected_results(
     return {
         key: value for key, (_, value) in out.items()
         if key not in ambiguous and key not in unreadable
-    }
+    }, unreadable
 
 
 @dataclass
@@ -99,6 +107,7 @@ class InputView:
     parameters: Mapping[str, Any]
     results: dict[str, ResultEnvelope]
     fraction: float = 1.0
+    unreadable: set[str] = field(default_factory=set)
 
     def depth_x(self) -> float | None:
         for envelope in self.results.values():
@@ -127,7 +136,8 @@ def load_sample(store: LabStore, source_id: str) -> SampleView | None:
     full_input = next((entry["input_id"] for entry in inputs if input_manifest(store, entry["input_id"])), None)
     if full_input is None:
         return None
-    full = InputView("full", full_input, None, {}, selected_results(store, full_input))
+    full_results, unreadable = _selected_results_with_unreadable(store, full_input)
+    full = InputView("full", full_input, None, {}, full_results, unreadable=unreadable)
     identities = {alg: envelope.provenance.parameters_sha256 for alg, envelope in full.results.items()}
     derived = []
     for entry in record.get("derived", []):

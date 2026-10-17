@@ -195,6 +195,7 @@ class LabApi:
                         "spike": None if not spikes else all(row["recovered"] for row in spikes if row["tf_expected"] >= 0.1),
                         "split": bool(sample.by_transform("split")),
                     },
+                    "unreadable_results": sorted(sample.full.unreadable),
                 }
             )
         rows.sort(key=lambda row: row["run_utc"], reverse=True)
@@ -282,6 +283,7 @@ class LabApi:
             "cohort_version": None,
             "cohort_n": 0,
             "algorithms": algorithms,
+            "unreadable_results": sorted(sample.full.unreadable),
             "curve": curve,
             "stability": panels,
             "repeatability": views.repeatability(panels),
@@ -290,7 +292,7 @@ class LabApi:
             "headline": headline_block,
             "derived": [{"label": view.label, "transform": view.transform} for view in sample.derived],
             "licenses": [{"license_id": key, **library.licenses[key]} for key in _all_used(used_licenses, library, order)],
-            "catalog": _catalog(library, order, algorithms),
+            "catalog": _catalog(library, order, algorithms, sample.full.unreadable),
             "excluded": EXCLUDED,
             "library_health": {
                 **self.libraries.health(),
@@ -565,10 +567,14 @@ def _all_used(used: list[str], library: Library, order: list[str]) -> list[str]:
     return out
 
 
-def _catalog(library: Library, order: list[str], algorithms: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _catalog(
+    library: Library, order: list[str], algorithms: list[dict[str, Any]],
+    unreadable: set[str] | None = None,
+) -> list[dict[str, Any]]:
     """Every registered (non-hidden) algorithm with its tier, footnote and status here."""
 
     by_id = {row["algorithm_id"]: row for row in algorithms}
+    unreadable = unreadable or set()
     rows = []
     for algorithm_id in order:
         if algorithm_id in library.hidden_algorithms:
@@ -582,6 +588,7 @@ def _catalog(library: Library, order: list[str], algorithms: list[dict[str, Any]
                         licenses.append(license_id)
         performance = entry.get("performance") if entry else None
         result = by_id.get(algorithm_id)
+        status = result["status"] if result else ("unreadable" if algorithm_id in unreadable else "not run")
         rows.append(
             {
                 "algorithm_id": algorithm_id,
@@ -594,7 +601,7 @@ def _catalog(library: Library, order: list[str], algorithms: list[dict[str, Any]
                 "min_depth_x": entry.get("min_depth_x") if entry else None,
                 "license_ids": licenses,
                 "citation_checked": bool(entry and entry.citation_verified),
-                "status": result["status"] if result else "not run",
+                "status": status,
                 "skip_reason": result["skip_reason"] if result else None,
             }
         )

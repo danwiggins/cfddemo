@@ -276,7 +276,8 @@
     const table = h("table", {}, h("caption", {}, "All samples (by run date, newest first)"),
       h("thead", {}, h("tr", {}, ...["ID", "Run date", "Approx depth", "OK / skipped / failed", "Outside a reference", "Controls", ""].map((t) => h("th", { scope: "col" }, t)))),
       h("tbody", {}, ...rows.map((row) => h("tr", {},
-        h("th", { scope: "row" }, h("a", { href: `#/sample/${row.id12}/findings` }, row.id12), row.example ? h("span", { class: "flag-pill example-pill" }, " EXAMPLE (synthetic)") : ""),
+        h("th", { scope: "row" }, h("a", { href: `#/sample/${row.id12}/findings` }, row.id12), row.example ? h("span", { class: "flag-pill example-pill" }, " EXAMPLE (synthetic)") : "",
+          row.unreadable_results && row.unreadable_results.length ? h("span", { class: "problem" }, ` result unreadable (run ${row.id12})`) : ""),
         h("td", {}, row.run_utc ? row.run_utc.slice(0, 10) : "—"),
         h("td", { class: "num" }, row.depth_x !== null ? `${row.depth_x.toPrecision(3)}x` : "—"),
         h("td", {}, `${row.counts.ok} / ${row.counts.skipped} / ${row.counts.failed}`),
@@ -420,6 +421,10 @@
       h("p", { class: "findings-summary" }, `${outside} outside a reference · ${groups.not_interpretable.length} not interpretable · ${groups.no_reference.length} awaiting a reference (cohort n = ${sample.cohort_n} of 10) · ${groups.in_range.length} in range`),
     ];
     if (sample.excluded_chunks && sample.excluded_chunks.length) out.push(h("p", { class: "status-line" }, `Provisional: this input excludes ${sample.excluded_chunks.length} truncated chunks; depth reflects the reads present.`));
+    for (const id of sample.unreadable_results || []) {
+      out.push(h("article", { class: "finding-card problem" },
+        h("h2", {}, `${id}: result unreadable (run ${sample.id12})`)));
+    }
     for (const a of sample.algorithms.filter((x) => x.status === "failed")) {
       out.push(h("div", { class: "problem" }, `${a.algorithm_id} failed: ${a.failure ? a.failure.first_line : ""}. `, h("a", { href: `#/sample/${sample.id12}/trust-qc` }, "Details in Trust/QC →")));
     }
