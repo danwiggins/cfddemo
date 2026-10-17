@@ -251,6 +251,7 @@ class Methylbert(Base):
                 [sys.executable, "-I", "-X", f"pycache_prefix={private / 'pycache'}", str(child), str(request)],
                 scratch=private, env=_offline_env(private), aggregate_path=aggregate_path,
                 model_id=bundle.model_id, eligible_reads=int(ctx.eligible_reads),
+                min_classified_reads=int(ctx.extras["methylbert_min_classified_reads"]),
             )
             if aggregate.classified_reads < int(ctx.extras["methylbert_min_classified_reads"]):
                 raise RuntimeError("MethylBERT classified-read support is below the qualified floor")

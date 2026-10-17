@@ -10,6 +10,7 @@ import pytest
 
 import traceback_lab.methylbert_runtime as runtime
 from traceback_lab.methylbert_bundle import Bundle
+from traceback_lab.methylbert_child import _save_support_refusal
 from traceback_runner.contained_process import ContainedResult
 
 
@@ -282,4 +283,28 @@ def test_worker_launch_uses_contained_deadline_and_private_aggregate(tmp_path, m
             [sys.executable, "worker.py"], scratch=scratch, env={**offline, "PYTHONPATH": "/tmp/inject"},
             aggregate_path=aggregate, model_id="tumour-normal",
             eligible_reads=runtime.MIN_ELIGIBLE_READS,
+        )
+
+
+def test_child_under_floor_reports_only_counts_and_never_publishes_an_aggregate(tmp_path, monkeypatch):
+    scratch = tmp_path / "private"
+    scratch.mkdir()
+    aggregate = scratch / "aggregate.json"
+    _save_support_refusal(scratch, classified=99, minimum=100)
+    monkeypatch.setattr(runtime, "run_contained", lambda argv, **_kwargs: ContainedResult(
+        tuple(argv), "exited", 1, 1.0, b"", b"", 0, 0, False, False,
+    ))
+    offline = {"HF_HUB_OFFLINE": "1", "HF_DATASETS_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
+    with pytest.raises(runtime.RuntimeRefusal, match="support 99 is below qualified floor 100"):
+        runtime.run_worker(
+            [sys.executable, "worker.py"], scratch=scratch, env=offline, aggregate_path=aggregate,
+            model_id="tumour-normal", eligible_reads=runtime.MIN_ELIGIBLE_READS,
+            min_classified_reads=100,
+        )
+    assert not aggregate.exists()
+    with pytest.raises(runtime.RuntimeRefusal, match="worker failed"):
+        runtime.run_worker(
+            [sys.executable, "worker.py"], scratch=scratch, env=offline, aggregate_path=aggregate,
+            model_id="tumour-normal", eligible_reads=runtime.MIN_ELIGIBLE_READS,
+            min_classified_reads=101,
         )

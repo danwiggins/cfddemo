@@ -101,6 +101,17 @@ def _save_aggregate(path: Path, *, model_id: str, tumour: float, normal: float, 
         stream.write(body)
 
 
+def _save_support_refusal(scratch: Path, *, classified: int, minimum: int) -> None:
+    """Report only counts when coverage misses the operator's floor."""
+
+    body = json.dumps({"reason": "below_floor", "classified_reads": classified,
+                       "min_classified_reads": minimum}, separators=(",", ":")).encode("ascii")
+    path = scratch / "support-refusal.json"
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    with os.fdopen(descriptor, "wb") as stream:
+        stream.write(body)
+
+
 def main(argv: list[str]) -> int:
     if len(argv) != 1:
         return 2
@@ -202,7 +213,10 @@ def main(argv: list[str]) -> int:
     rows["P_ctype"] = logits[:, 1]
     rows = rows[rows["methyl_seq"].str.count("[01]") > 0]
     classified = int(rows["name"].nunique())
-    if not request["min_classified_reads"] <= classified <= request["eligible_reads"]:
+    if classified < request["min_classified_reads"]:
+        _save_support_refusal(scratch, classified=classified, minimum=request["min_classified_reads"])
+        raise ValueError("MethylBERT classified-read support is below the qualified floor")
+    if classified > request["eligible_reads"]:
         raise ValueError("MethylBERT classified-read support is invalid")
     estimate, _fisher = purity_estimation(rows, margins, n_grid=10000, adjustment=False)
     fractions = dict(zip(estimate["cell_type"], estimate["pred"]))

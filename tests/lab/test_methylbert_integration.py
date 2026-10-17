@@ -253,7 +253,7 @@ def test_private_worker_lifecycle_publishes_only_aggregate(tmp_path, monkeypatch
     monkeypatch.setattr(adapter, "unpack_bundle", lambda _archive, _destination: bundle)
     private_path = None
 
-    def fake_worker(argv, *, scratch, env, aggregate_path, model_id, eligible_reads):
+    def fake_worker(argv, *, scratch, env, aggregate_path, model_id, eligible_reads, min_classified_reads):
         nonlocal private_path
         private_path = scratch
         assert argv[1] == "-I"
@@ -262,6 +262,7 @@ def test_private_worker_lifecycle_publishes_only_aggregate(tmp_path, monkeypatch
         assert aggregate_path.parent == scratch
         assert model_id == "model-1"
         assert eligible_reads == MIN_ELIGIBLE_READS
+        assert min_classified_reads == 100000
         assert (scratch / "request.json").exists()
         assert json.loads((scratch / "request.json").read_text())["numerical_runtime"] == {"packages": {"torch": "fixture"}}
         return Aggregate("model-1", 0.25, 0.75, 500000)

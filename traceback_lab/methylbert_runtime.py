@@ -244,9 +244,33 @@ def read_aggregate(path: Path, *, model_id: str, eligible_reads: int) -> Aggrega
     return Aggregate(model_id, float(fractions[0]), float(fractions[1]), count)
 
 
+def _support_refusal(path: Path, minimum: int, eligible: int) -> str | None:
+    """Accept only the private child's bounded, count-only refusal record."""
+
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(descriptor, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > 256:
+                return None
+            raw = json.loads(stream.read(257))
+    except (OSError, ValueError, UnicodeError):
+        return None
+    if (not isinstance(raw, dict)
+            or set(raw) != {"reason", "classified_reads", "min_classified_reads"}
+            or raw["reason"] != "below_floor"
+            or type(raw["classified_reads"]) is not int
+            or type(raw["min_classified_reads"]) is not int
+            or raw["min_classified_reads"] != minimum
+            or not 0 <= raw["classified_reads"] < minimum <= eligible):
+        return None
+    return f"MethylBERT classified-read support {raw['classified_reads']} is below qualified floor {minimum}"
+
+
 def run_worker(
     argv: Sequence[str], *, scratch: Path, env: Mapping[str, str],
     aggregate_path: Path, model_id: str, eligible_reads: int,
+    min_classified_reads: int | None = None,
     should_abort: Callable[[], bool] | None = None,
 ) -> Aggregate:
     """Run a supplied command with bounded time, logs, and aggregate output.
@@ -276,6 +300,10 @@ def run_worker(
         log_limit_bytes=MAX_LOG_BYTES, should_abort=should_abort,
     )
     if not result.succeeded:
+        if result.outcome == "exited" and min_classified_reads is not None:
+            diagnostic = _support_refusal(scratch / "support-refusal.json", min_classified_reads, eligible_reads)
+            if diagnostic is not None:
+                raise RuntimeRefusal(diagnostic)
         raise RuntimeRefusal("MethylBERT worker failed, timed out, or was aborted")
     try:
         if not aggregate_path.parent.resolve(strict=True).is_relative_to(scratch_root):
