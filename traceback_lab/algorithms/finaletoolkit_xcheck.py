@@ -306,7 +306,7 @@ class FinaleToolkitXcheck(Base):
             raise RuntimeError("FinaleToolkit tool changed since execution planning")
         bam_path, fasta, contigs = _inputs(ctx)
         work = out.parent / "finaletoolkit-work"
-        work.mkdir()
+        work.mkdir(exist_ok=True)
         sizes, bins = work / "autosomes.chrom.sizes", work / "autosomes.100kb.bed"
         expected: set[tuple[str, int]] = set()
         with sizes.open("w") as size_stream, bins.open("w") as bin_stream:
@@ -318,6 +318,10 @@ class FinaleToolkitXcheck(Base):
                     bin_stream.write(f"{name}\t{start}\t{min(start + BIN, length)}\n")
                     expected.add((name, start))
         motif_path, delfi_path = work / "motifs.tsv", work / "delfi.tsv"
+        # A direct retry may reuse this scratch parent. Never parse an output
+        # left by an earlier, failed invocation.
+        motif_path.unlink(missing_ok=True)
+        delfi_path.unlink(missing_ok=True)
         override = os.environ.get("TRACEBACK_FINALETOOLKIT_PYTHON")
         command_base = _command_base(Path(tool[0]), Path(override).absolute() if override else Path(tool[0]),
                                      overridden=bool(override))
@@ -371,8 +375,9 @@ class FinaleToolkitXcheck(Base):
                       "comparable_bins": len(delfi_keys),
                       "upstream_counts_equal": counts_equal},
             "pairs": pairs, "motif_ends": total,
-            "verdict": ("concordant" if motif_r >= 0.95 and delfi_r >= 0.90 and counts_equal
-                                          else "discordant") if comparable else "insufficient_variation",
+            "verdict": ("discordant" if not counts_equal else
+                        "insufficient_variation" if not comparable else
+                        "concordant" if motif_r >= 0.95 and delfi_r >= 0.90 else "discordant"),
             "note": "Uncorrected 100-kb paired-end method parity; not the ONT Lab ratio track, original GC-corrected DELFI classifier, or clinical validation.",
         }
         return AlgorithmOutput(

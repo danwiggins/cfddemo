@@ -247,6 +247,9 @@ def test_pinned_tool_outputs_exercise_run_without_external_install(
     assert panel["delfi"]["upstream_counts_equal"]
     assert panel["verdict"] == "concordant"
 
+    # Direct retries under the same scratch parent must replace prior output.
+    assert FINALETOOLKIT_XCHECK.run(ctx, tmp_path / "out").artifacts == result.artifacts
+
     # Exact-count agreement is an additional gate even when ratios still
     # correlate perfectly. Keep this distinct from the correlation thresholds.
     def replay_count_mismatch(command: list[str], **kwargs: object) -> SimpleNamespace:
@@ -264,6 +267,24 @@ def test_pinned_tool_outputs_exercise_run_without_external_install(
     changed = json.loads(FINALETOOLKIT_XCHECK.run(ctx, mismatch / "out").artifacts["finaletoolkit_xcheck.json"])
     assert changed["motif"]["r"] == pytest.approx(1.0)
     assert changed["delfi"]["r"] == pytest.approx(1.0)
+    assert changed["delfi"]["upstream_counts_equal"] is False
+    assert changed["verdict"] == "discordant"
+
+    # An exact count mismatch is discordant even when the upstream ratios
+    # have no variance and Pearson cannot be computed.
+    def replay_constant_ratios(command: list[str], **kwargs: object) -> SimpleNamespace:
+        completed = replay(command, **kwargs)
+        if "delfi" in command:
+            path = Path(command[command.index("-o") + 1])
+            rows = path.read_text().splitlines()
+            path.write_text("\n".join([rows[0], *(f"chr1\t{start}\t{start + 100000}\tchr1\t1\t1\t0.5\t2\t1" for start in (0, 100000, 200000))]) + "\n")
+        return completed
+
+    monkeypatch.setattr(module.subprocess, "run", replay_constant_ratios)
+    no_variation = tmp_path / "no-variation"
+    no_variation.mkdir()
+    changed = json.loads(FINALETOOLKIT_XCHECK.run(ctx, no_variation / "out").artifacts["finaletoolkit_xcheck.json"])
+    assert changed["delfi"]["r"] is None
     assert changed["delfi"]["upstream_counts_equal"] is False
     assert changed["verdict"] == "discordant"
 
