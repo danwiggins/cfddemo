@@ -19,9 +19,11 @@ the official `Healthy_demo.GC_corrected.coverage.tsv` (one CTCF list, 132
 checkout, rather than approximating the measurement. It runs Griffin's GC
 correction and nucleosome-profiling Snakemake workflows on one Lab aligned
 BAM **when the BAM is paired-end WGS**. Griffin's scripts require paired
-reads with positive template length in both GC counting and coverage. Native
-ONT single-end BAMs have no such records; the adapter detects and rejects
-them before creating an attempt. A scientifically reviewed ONT fragment
+reads with positive template length in both GC counting and coverage. The
+adapter requires every BAM read group to declare `PL:ILLUMINA` and scans the
+full BAM for paired and usable records before creating an attempt. It does
+not infer library type from an early coordinate-sorted slice. Native ONT
+single-end BAMs are rejected. A scientifically reviewed ONT fragment
 adapter remains necessary for the Lab's primary input. The caller supplies
 the registered hg38 FASTA and its SHA-256, Griffin's
 reference assets (including mappability BigWig, exclusion BEDs and all
