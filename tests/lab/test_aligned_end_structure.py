@@ -84,6 +84,24 @@ def test_exact_ocf_like_sign_and_preferred_end_support(tmp_path: Path) -> None:
     assert "no tissue-origin calibration" in artifact["interpretation"]
 
 
+def test_no_usable_catalogue_coordinates_are_unscorable_not_zero(tmp_path: Path) -> None:
+    root, centers, preferred = _catalogues(tmp_path)
+    centers.write_text("chr2\t490\t510\n", encoding="ascii")
+    preferred.write_text("chr2\t440\t441\tU\n", encoding="ascii")
+    register_end_catalogues(root, centers=centers, preferred=preferred,
+                            source_label="synthetic hg38 end catalogues",
+                            centers_source="synthetic-centers-v2", preferred_source="synthetic-sites-v2",
+                            terms="unknown", license_id=None)
+    summary_parent = tmp_path / "read-summary"
+    _summary(summary_parent)
+    output = ALIGNED_END_STRUCTURE.run(_context(root, summary_parent), tmp_path / "out")
+    assert {item["metric_id"]: item["value"] for item in output.metrics} == {
+        "ocf_like_end_asymmetry": None, "preferred_end_support_fraction": None,
+    }
+    artifact = json.loads(output.artifacts["aligned_end_structure.json"])
+    assert artifact["eligible_centers"] == 0 and artifact["eligible_preferred_sites"] == 0
+
+
 def test_depth_full_input_and_pinned_asset_gates(tmp_path: Path) -> None:
     root, centers, _ = _catalogues(tmp_path)
     summary_parent = tmp_path / "read-summary"
