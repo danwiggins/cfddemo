@@ -2540,7 +2540,7 @@ entries:
     reference: {kind: none}
     performance: null
     performance_missing_reason: "No validated ONT cfDNA viral-read cutoff or performance estimate"
-    missing_value_caption: "Viral RPM unavailable: no human-unmapped primaries or at least one lacks stored sequence; inspect the aggregate counts."
+    missing_value_caption: "Viral RPM unavailable; inspect availability_reason and read counts in the aggregate artifact."
     meaning_high: "More human-unmapped reads align to the registered EBV sequences; this does not establish infection or cancer."
     meaning_low: "Few or no reads align to those EBV sequences; absence is not established."
     confounders: ["reference coverage", "cross-mapping", "contamination", "unmapped-read denominator"]
@@ -2548,7 +2548,7 @@ entries:
       analytical: ["Review the registered accession list and alignment evidence", "Confirm a signal with an independent assay"]
       clinical_setting: null
     license_ids: [viral-reference-terms-vary]
-    flags: []
+    flags: [LEGAL]
     headline: true
     citations: []
     citation_checked: {by: "Lab method contract", date: "2026-10-16", note: "No ONT cfDNA assay citation or clinical cutoff is claimed; qPCR context comes from the approved D10 catalog."}
@@ -2564,7 +2564,7 @@ entries:
     reference: {kind: none}
     performance: null
     performance_missing_reason: "No validated ONT cfDNA viral-read cutoff or performance estimate"
-    missing_value_caption: "Viral RPM unavailable: no human-unmapped primaries or at least one lacks stored sequence; inspect the aggregate counts."
+    missing_value_caption: "Viral RPM unavailable; inspect availability_reason and read counts in the aggregate artifact."
     meaning_high: "More human-unmapped reads align to the HPV types included in this registered bundle; other types are not assessed."
     meaning_low: "Few or no reads align to the included HPV types; absence is not established."
     confounders: ["included HPV types", "cross-mapping", "contamination", "unmapped-read denominator"]
@@ -2572,7 +2572,7 @@ entries:
       analytical: ["Review which HPV accession versions are registered", "Confirm a signal with an independent assay"]
       clinical_setting: null
     license_ids: [viral-reference-terms-vary]
-    flags: []
+    flags: [LEGAL]
     headline: false
     citations: []
     citation_checked: {by: "Lab method contract", date: "2026-10-16", note: "No ONT cfDNA assay citation or clinical cutoff is claimed; HPV coverage is bundle-specific."}
@@ -2588,7 +2588,7 @@ entries:
     reference: {kind: none}
     performance: null
     performance_missing_reason: "No validated ONT cfDNA viral-read cutoff or performance estimate"
-    missing_value_caption: "Viral RPM unavailable: no human-unmapped primaries or at least one lacks stored sequence; inspect the aggregate counts."
+    missing_value_caption: "Viral RPM unavailable; inspect availability_reason and read counts in the aggregate artifact."
     meaning_high: "More human-unmapped reads align to the registered HBV sequences; this does not establish infection."
     meaning_low: "Few or no reads align to those HBV sequences; absence is not established."
     confounders: ["reference coverage", "cross-mapping", "contamination", "unmapped-read denominator"]
@@ -2596,7 +2596,7 @@ entries:
       analytical: ["Review the registered accession list and alignment evidence", "Confirm a signal with an independent assay"]
       clinical_setting: null
     license_ids: [viral-reference-terms-vary]
-    flags: []
+    flags: [LEGAL]
     headline: false
     citations: []
     citation_checked: {by: "Lab method contract", date: "2026-10-16", note: "No ONT cfDNA assay citation or clinical cutoff is claimed; qPCR context is separate."}

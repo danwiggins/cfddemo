@@ -32,6 +32,11 @@ from ._base import Base, metric
 UNIT = "reads / 1M unmapped primaries"
 MIN_MINIMAP2 = (2, 28)
 MAX_QUERY_FASTA_BYTES = 512 << 20
+MAX_PAF_BYTES = 1 << 30
+
+
+class ViralBudgetExceeded(RuntimeError):
+    """Private side-alignment output exceeded its local disk budget."""
 
 
 def _minimap2() -> tuple[str | None, str | None, tuple[int, int] | None]:
@@ -87,7 +92,7 @@ def _write_queries(ctx: InputContext, path: Path) -> tuple[int, int, bool]:
             if not sequence:
                 continue
             queries += 1
-            row_bytes = len(sequence) + len(str(queries)) + 3
+            row_bytes = len(sequence) + len(str(queries)) + 4
             if staged_bytes + row_bytes > MAX_QUERY_FASTA_BYTES:
                 complete = False
                 continue
@@ -108,9 +113,13 @@ def _copy_reference(reference: ViralReference, destination: Path) -> None:
 
 
 def _count_hits(paf: Path, reference: ViralReference, queries: int, db: Path) -> dict[str, int]:
+    if paf.stat().st_size > MAX_PAF_BYTES:
+        raise ViralBudgetExceeded("viral PAF exceeds its size budget")
     by_contig = {contig: virus for contig, virus, _ in reference.targets}
     counts = dict.fromkeys(VIRUSES, 0)
     with closing(sqlite3.connect(db)) as connection:
+        # Scratch data is never reused; avoid a second large rollback journal.
+        connection.execute("PRAGMA journal_mode=OFF")
         connection.execute("CREATE TABLE hits (qid INTEGER NOT NULL, virus TEXT NOT NULL, PRIMARY KEY (qid, virus))")
         connection.execute("CREATE TABLE primary_hits (qid INTEGER NOT NULL, virus TEXT NOT NULL, PRIMARY KEY (qid, virus))")
         with paf.open("r", encoding="ascii") as stream:
@@ -145,7 +154,7 @@ class ViralReads(Base):
     cost: str = "slow"
     upstream: tuple[str, ...] = ()
     parameters: dict[str, Any] = field(default_factory=lambda: {
-        "side_alignment": "minimap2 -x map-ont -t 1 (reported secondary hits retained)",
+        "side_alignment": "minimap2 -x map-ont --secondary=yes -N 100 -p 0.8 -t 1",
         "input": "human_unmapped_primary_sequences",
         "denominator": "human_unmapped_primary_reads",
         "assignment": "one_virus_group_per_query",
@@ -205,27 +214,40 @@ class ViralReads(Base):
             work = Path(temporary)
             reads = work / "unmapped.fasta"
             denominator, queries, complete = _write_queries(ctx, reads)
-            counts = dict.fromkeys(VIRUSES, 0)
-            if queries and complete:
+            missing_sequences = denominator - queries
+            reason = (
+                "query_budget_exceeded" if not complete else
+                "missing_sequence" if missing_sequences else "no_unmapped_primaries" if not denominator else None
+            )
+            counts: dict[str, int] | None = None
+            if reason is None:
                 staged_fasta = work / "viral.fasta"
                 _copy_reference(reference, staged_fasta)
                 paf = work / "hits.paf"
-                result = run_pipeline(
-                    [Stage("minimap2", (
-                        path, "-x", "map-ont", "-t", "1",
-                        str(staged_fasta), str(reads),
-                    ))],
-                    timeout_s=3600, env=os.environ, cwd=work, stdout_path=paf, disk_path=work,
-                )
-                if not result.ok:
-                    raise RuntimeError("viral side alignment failed or timed out")
-                counts = _count_hits(paf, reference, queries, work / "hits.sqlite")
+                def check_paf_budget(_elapsed: float) -> None:
+                    if paf.exists() and paf.stat().st_size > MAX_PAF_BYTES:
+                        raise ViralBudgetExceeded("viral PAF exceeds its size budget")
+
+                try:
+                    result = run_pipeline(
+                        [Stage("minimap2", (
+                            path, "-x", "map-ont", "--secondary=yes", "-N", "100", "-p", "0.8", "-t", "1",
+                            str(staged_fasta), str(reads),
+                        ))],
+                        timeout_s=3600, env=os.environ, cwd=work, stdout_path=paf, disk_path=work,
+                        on_tick=check_paf_budget,
+                    )
+                    if result.ok:
+                        counts = _count_hits(paf, reference, queries, work / "hits.sqlite")
+                    else:
+                        reason = "alignment_timeout" if result.timed_out else "alignment_failed"
+                except ViralBudgetExceeded:
+                    reason = "alignment_budget_exceeded"
             if (_digest(reference.fasta)[0], _digest(reference.fasta.parent / TARGETS_NAME)[0]) != reference.asset_sha256s:
                 raise RuntimeError("viral reference changed during side alignment")
-        missing_sequences = denominator - queries
-        available = denominator > 0 and missing_sequences == 0 and complete
+        available = reason is None and counts is not None
         metrics = [
-            metric(f"{virus.lower()}_rpm", counts[virus] * 1_000_000 / denominator if available else None,
+            metric(f"{virus.lower()}_rpm", counts[virus] * 1_000_000 / denominator if available and counts is not None else None,
                    unit=UNIT, n=denominator)
             for virus in VIRUSES
         ]
@@ -233,10 +255,7 @@ class ViralReads(Base):
             "denominator_unmapped_primaries": denominator,
             "queries_with_sequence": queries,
             "missing_sequences": missing_sequences,
-            "availability_reason": (
-                "query_budget_exceeded" if not complete else
-                "missing_sequence" if missing_sequences else "no_unmapped_primaries" if not denominator else None
-            ),
+            "availability_reason": reason,
             "hits": counts,
             "reference_sha256": reference.sha256,
             "targets_sha256": reference.targets_sha256,

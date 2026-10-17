@@ -8,6 +8,7 @@ import json
 import random
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pysam
 import pytest
@@ -170,7 +171,9 @@ def test_derived_membership_is_deterministic(tmp_path: Path) -> None:
     names = [f"read-{index}" for index in range(100)]
     ds_hashes = np.array([h64(DS_SALT, name) for name in names], dtype=np.uint64)
     split_hashes = np.array([h64(SPLIT_SALT, name) for name in names], dtype=np.uint64)
-    assert [_derived_keep(downsample, name) for name in names] == downsample_mask(ds_hashes, 0.5).tolist()
+    for fraction in (0.1, 0.3, 0.5, 0.9):
+        derived = _context(tmp_path, tmp_path, derived={"transform": "downsample", "fraction": fraction})
+        assert [_derived_keep(derived, name) for name in names] == downsample_mask(ds_hashes, fraction).tolist()
     assert [_derived_keep(half_a, name) for name in names] == split_mask(split_hashes, "A").tolist()
     assert [_derived_keep(half_b, name) for name in names] == split_mask(split_hashes, "B").tolist()
 
@@ -294,8 +297,7 @@ def test_missing_sequence_never_looks_like_a_negative_result(
     assert summary["denominator_unmapped_primaries"] == len(sequences)
     assert summary["missing_sequences"] == sequences.count(None)
     assert summary["availability_reason"] == expected_reason
-    if "virus" in sequences:
-        assert summary["hits"]["EBV"] == 1
+    assert summary["hits"] == ({"EBV": 0, "HPV": 0, "HBV": 0} if expected_reason is None else None)
 
 
 def test_query_budget_returns_unavailable_without_running_aligner(tmp_path: Path, monkeypatch) -> None:
@@ -322,4 +324,45 @@ def test_query_budget_returns_unavailable_without_running_aligner(tmp_path: Path
     summary = json.loads(result.artifacts["viral_reads.json"])
     assert summary["availability_reason"] == "query_budget_exceeded"
     assert summary["queries_with_sequence"] == 2
-    assert summary["hits"] == {"EBV": 0, "HPV": 0, "HBV": 0}
+    assert summary["hits"] is None
+
+
+def test_aligner_failure_and_paf_budget_return_unavailable(tmp_path: Path, monkeypatch) -> None:
+    store = LabStore(tmp_path / "root")
+    fasta, targets, viruses = _sources(tmp_path)
+    _add(store, fasta, targets)
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    with pysam.AlignmentFile(str(input_dir / "aligned.bam"), "wb", header={
+        "HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 10000}],
+    }) as bam:
+        record = pysam.AlignedSegment()
+        record.query_name = "private-read"
+        record.flag = 4
+        record.query_sequence = viruses["EBV"][200:1400]
+        bam.write(record)
+    monkeypatch.setattr(viral_reads, "_minimap2", lambda: (sys.executable, "2.28", (2, 28)))
+    output = tmp_path / "output"
+    output.mkdir()
+
+    def failed(*args, **kwargs):
+        return SimpleNamespace(ok=False, timed_out=True)
+
+    monkeypatch.setattr(viral_reads, "run_pipeline", failed)
+    result = VIRAL_READS.run(_context(store.root, input_dir), output)
+    summary = json.loads(result.artifacts["viral_reads.json"])
+    assert summary["availability_reason"] == "alignment_timeout"
+    assert summary["hits"] is None
+    assert all(item["value"] is None for item in result.metrics)
+
+    def oversized(*args, **kwargs):
+        kwargs["stdout_path"].write_bytes(b"x" * 2)
+        kwargs["on_tick"](0.0)
+        pytest.fail("oversized PAF must abort the side aligner")
+
+    monkeypatch.setattr(viral_reads, "MAX_PAF_BYTES", 1)
+    monkeypatch.setattr(viral_reads, "run_pipeline", oversized)
+    result = VIRAL_READS.run(_context(store.root, input_dir), output)
+    summary = json.loads(result.artifacts["viral_reads.json"])
+    assert summary["availability_reason"] == "alignment_budget_exceeded"
+    assert summary["hits"] is None
