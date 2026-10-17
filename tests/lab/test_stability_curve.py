@@ -6,6 +6,7 @@ import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pysam
 import pytest
 
 from tests.lab.test_landing import _dom, needs_chrome
@@ -217,7 +218,13 @@ def _published_split_store(tmp_path, *, split_identity=None):
     source_id, full_id, split_id, identity = (character * 64 for character in "abcd")
     manifest = store.inputs_dir / full_id / "manifest.json"
     manifest.parent.mkdir(parents=True)
-    manifest.write_text('{"kind":"prealigned"}')
+    manifest.write_text('{"kind":"prealigned","platform":"ont"}')
+    with pysam.AlignmentFile(
+        str(manifest.parent / "aligned.bam"), "wb",
+        header={"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 1000}],
+                "RG": [{"ID": "ont", "PL": "ONT"}]},
+    ):
+        pass
     store.sources_dir.mkdir(parents=True, exist_ok=True)
     (store.sources_dir / f"{source_id}.json").write_text(json.dumps({
         "source_id": source_id,

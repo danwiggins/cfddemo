@@ -172,6 +172,7 @@ def test_shipped_library_is_valid_and_covers_every_registered_metric_family() ->
         (lambda d: d["entries"][6].pop("stability"), "explicit stability"),
         (lambda d: d["entries"][0].update(reference={"kind": "published_range", "lo": 2, "hi": 1}), "lo <= hi"),
         (lambda d: d["entries"][0].update(performance=None, performance_missing_reason=None), "performance"),
+        (lambda d: d["entries"][0].update(citations=[{"doi": "10.1234/example"}]), "citations must be nonempty strings"),
         (lambda d: d["entries"].append(dict(d["entries"][0])), "duplicate"),
     ],
 )

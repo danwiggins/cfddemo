@@ -1,0 +1,124 @@
+"""Exploratory Weidner three-CpG clock on ONT CpG calls.
+
+The published model was fitted to whole-blood array methylation.  Applying
+it to cfDNA ONT calls is a research transfer, with no clinical calibration.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pysam
+
+from ..epi_clock_model import (
+    COEFFICIENTS_SHA256, WEIDNER_INTERCEPT, WEIDNER_WEIGHTS,
+    ClockModelError, inspect_map,
+)
+from ..meth_calls import HAS_H, HAS_M, argmax_state
+from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip
+from ._base import load_summary, metric
+from ._meth import MethBase, load_calls
+
+# GRC GRCh38 primary assembly chromosome lengths. Check every mapped site,
+# since a chr1-only build check misses mixed-build BAMs and FASTAs.
+HG38_AUTOSOME_LENGTHS = dict(zip(
+    (f"chr{i}" for i in range(1, 23)),
+    (248_956_422, 242_193_529, 198_295_559, 190_214_555, 181_538_259,
+     170_805_979, 159_345_973, 145_138_636, 138_394_717, 133_797_422,
+     135_086_622, 133_275_309, 114_364_328, 107_043_718, 101_991_189,
+     90_338_345, 83_257_441, 80_373_285, 58_617_616, 64_444_167,
+     46_709_983, 50_818_468),
+))
+HG38_CHR1_LENGTH = HG38_AUTOSOME_LENGTHS["chr1"]
+MIN_SITE_CALLS = 5  # engineering completeness gate, not a published clinical threshold
+
+
+@dataclass
+class EpiClock(MethBase):
+    requires: Requirements = field(default_factory=lambda: Requirements(mm_tags=True, min_eligible_reads=5_000_000))
+    parameters: dict[str, Any] = field(default_factory=lambda: {
+        "model": "Weidner-3", "coefficient_asset_sha256": COEFFICIENTS_SHA256,
+        "intercept": WEIDNER_INTERCEPT, "weights": WEIDNER_WEIGHTS,
+        "call": "argmax_5mc_plus_5hmc", "min_calls_per_site": MIN_SITE_CALLS,
+    })
+
+    def asset_sha256s(self, root: Path) -> list[str]:
+        from ..store import LabStore
+
+        try:
+            return [inspect_map(LabStore(root)).sha256]
+        except ClockModelError:
+            return []
+
+    def preflight(self, ctx: InputContext) -> Ready | Skip:
+        decision = super().preflight(ctx)
+        if isinstance(decision, Skip):
+            return decision
+        summary, _ = load_summary(ctx)
+        lengths = dict(zip(summary.contigs, summary.lengths))
+        if lengths.get("chr1") != HG38_CHR1_LENGTH:
+            return Skip("reference", "Weidner assay-site coordinates require hg38")
+        from ..store import LabStore
+
+        try:
+            model = inspect_map(LabStore(ctx.root))
+            if any(lengths.get(chrom) != HG38_AUTOSOME_LENGTHS[chrom]
+                   for _, chrom, _ in model.sites):
+                return Skip("reference", "Weidner assay-site chromosome is not hg38 in the aligned input")
+            if model.sha256 not in ctx.extras.get("planned_asset_sha256s", ()):
+                return Skip("missing_asset", "Weidner map changed after execution identity was planned")
+            reference = ctx.extras.get("reference_fasta")
+            if not reference:
+                return Skip("reference", "reference FASTA is unavailable")
+            with pysam.FastaFile(str(reference)) as fasta:
+                if fasta.get_reference_length("chr1") != HG38_CHR1_LENGTH:
+                    return Skip("reference", "clock coordinate map requires an hg38-length FASTA")
+                for _, chrom, pos0 in model.sites:
+                    if fasta.get_reference_length(chrom) != HG38_AUTOSOME_LENGTHS[chrom]:
+                        return Skip("reference", "Weidner assay-site chromosome is not hg38 in the FASTA")
+                    if pos0 + 2 > fasta.get_reference_length(chrom) or fasta.fetch(chrom, pos0, pos0 + 2).upper() != "CG":
+                        return Skip("missing_asset", "registered Weidner position is not an hg38 CpG")
+        except (ClockModelError, OSError, ValueError, KeyError):
+            return Skip("missing_asset", "verified hg38 Weidner coordinate map or reference unavailable")
+        return Ready()
+
+    def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
+        from ..store import LabStore
+
+        model = inspect_map(LabStore(ctx.root))
+        if model.sha256 not in ctx.extras.get("planned_asset_sha256s", ()):
+            raise RuntimeError("Weidner map changed after execution identity was planned")
+        if not isinstance(self.preflight(ctx), Ready):
+            raise RuntimeError("Weidner reference or input changed after preflight")
+        calls, mask = load_calls(ctx)
+        summary, _ = load_summary(ctx)
+        lengths = dict(zip(summary.contigs, summary.lengths))
+        if lengths.get("chr1") != HG38_CHR1_LENGTH or any(
+                lengths.get(chrom) != HG38_AUTOSOME_LENGTHS[chrom]
+                for _, chrom, _ in model.sites):
+            raise RuntimeError("Weidner BAM reference layout changed after preflight")
+        counts = np.zeros(3, dtype=np.int64)
+        modified = np.zeros(3, dtype=np.int64)
+        positions = [(summary.contigs.index(chrom), pos0) for _, chrom, pos0 in model.sites]
+        for chunk in calls.chunks(mask):
+            for index, (contig, pos0) in enumerate(positions):
+                rows = chunk[(chunk["contig"] == contig) & (chunk["ref_pos0"] == pos0)
+                             & ((chunk["channels"] & (HAS_M | HAS_H)) != 0)]
+                counts[index] += rows.size
+                modified[index] += (argmax_state(rows) != 0).sum()
+        fractions = [float(modified[i] / counts[i]) if counts[i] >= MIN_SITE_CALLS else None for i in range(3)]
+        age = (WEIDNER_INTERCEPT + sum(weight * fraction for weight, fraction in zip(WEIDNER_WEIGHTS, fractions))) if all(fraction is not None for fraction in fractions) else None
+        # A registration changed after planning must never produce a result under an older identity.
+        if inspect_map(LabStore(ctx.root)).sha256 != model.sha256:
+            raise RuntimeError("Weidner coordinate map changed during execution")
+        return AlgorithmOutput(metrics=[
+            metric("epigenetic_age_years", age, unit="years", n=int(counts.min())),
+            *[metric(f"{site}_modified_fraction", fraction, unit="fraction", n=int(counts[i]))
+              for i, ((site, _, _), fraction) in enumerate(zip(model.sites, fractions))],
+        ])
+
+
+EPI_CLOCK = EpiClock("epi-clock")
