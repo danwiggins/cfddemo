@@ -452,6 +452,8 @@
       h("p", {}, `no_library_entry: ${health.no_library_entry} · UNVERIFIED citations: ${health.unverified_citations} · interpretation v${health.version} · cohort ${sample.cohort_version || "none yet"} (members = ${sample.cohort_n})`),
       ["cohort_unavailable", "target_unavailable", "stale_target"].includes(sample.cohort_state)
         ? h("p", { class: "problem" }, `Cohort reference unavailable (${sample.cohort_state.replace(/_/g, " ")}); sample measurements remain visible without cohort states. ${sample.cohort_problem ? sample.cohort_problem.fix : "Check cohort build and reload."}`) : "",
+      sample.cohort_state === "ready" && sample.cohort_problem
+        ? h("p", { class: "problem" }, `Panel of normals unavailable: copy-number and dependent cohort comparisons are withheld; independent metrics remain comparable. ${sample.cohort_problem.fix}`) : "",
       health.error ? h("div", { class: "problem" }, `Interpretation library on disk is invalid (${health.error}). Showing v${health.version}, loaded at ${health.loaded_at}.`) : ""));
     out.push(sizeDensity(sample));
     return out;

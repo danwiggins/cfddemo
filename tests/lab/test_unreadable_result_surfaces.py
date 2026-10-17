@@ -4,17 +4,29 @@ from __future__ import annotations
 
 import json
 
+import pysam
 import pytest
 
+from tests.lab.test_cohort_store import _sample
 from tests.lab.test_landing import _dom, needs_chrome
 from traceback_lab.envelope import ResultEnvelope, provenance
 from traceback_lab.store import LabStore
+from traceback_lab.views import load_sample
 from traceback_lab.web.api import LabApi
 from traceback_lab.web.server import RunningLabServer
 
-
 SOURCE = "b" * 64
 INPUT = "c" * 64
+
+
+def _aligned_ont_input(store: LabStore) -> None:
+    input_dir = store.inputs_dir / INPUT
+    input_dir.mkdir(parents=True)
+    (input_dir / "manifest.json").write_text('{"kind":"aligned","platform":"ont"}')
+    header = {"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 1000}],
+              "RG": [{"ID": "synthetic", "PL": "ONT"}]}
+    with pysam.AlignmentFile(str(input_dir / "aligned.bam"), "wb", header=header):
+        pass
 
 
 def _result(identity: str, value: int, input_id: str = INPUT) -> ResultEnvelope:
@@ -32,9 +44,7 @@ def _result(identity: str, value: int, input_id: str = INPUT) -> ResultEnvelope:
 def _malformed_store(tmp_path) -> LabStore:
     store = LabStore(tmp_path)
     store.ensure()
-    manifest = store.inputs_dir / INPUT / "manifest.json"
-    manifest.parent.mkdir(parents=True)
-    manifest.write_text('{"kind":"aligned"}')
+    _aligned_ont_input(store)
     store.sources_dir.mkdir(parents=True)
     (store.sources_dir / f"{SOURCE}.json").write_text(json.dumps({
         "source_id": SOURCE, "example": False, "excluded": [], "derived": [],
@@ -51,9 +61,7 @@ def _malformed_store(tmp_path) -> LabStore:
 def _ambiguous_store(tmp_path) -> LabStore:
     store = LabStore(tmp_path)
     store.ensure()
-    manifest = store.inputs_dir / INPUT / "manifest.json"
-    manifest.parent.mkdir(parents=True)
-    manifest.write_text('{"kind":"aligned"}')
+    _aligned_ont_input(store)
     store.sources_dir.mkdir(parents=True)
     (store.sources_dir / f"{SOURCE}.json").write_text(json.dumps({
         "source_id": SOURCE, "example": False, "excluded": [], "derived": [],
@@ -99,9 +107,7 @@ def test_unreadable_derived_result_is_named_in_stability(tmp_path) -> None:
     store = LabStore(tmp_path)
     store.ensure()
     derived_input = "d" * 64
-    manifest = store.inputs_dir / INPUT / "manifest.json"
-    manifest.parent.mkdir(parents=True)
-    manifest.write_text('{"kind":"aligned"}')
+    _aligned_ont_input(store)
     store.sources_dir.mkdir(parents=True)
     (store.sources_dir / f"{SOURCE}.json").write_text(json.dumps({
         "source_id": SOURCE, "example": False, "excluded": [],
@@ -123,6 +129,39 @@ def test_unreadable_derived_result_is_named_in_stability(tmp_path) -> None:
     assert point["state"] == "unavailable" and point["reason"] == "result unreadable"
     row = next(row for row in sample["curve"]["rows"] if row["algorithm_id"] == "fragment-size")
     assert row["cells"][0]["reason"] == "result unreadable"
+
+
+def test_unreadable_selected_copy_number_blocks_its_pon_consumer(tmp_path) -> None:
+    store = LabStore(tmp_path)
+    source_id = _sample(store, 1)
+    input_id = f"{101:064x}"
+
+    def result(algorithm_id: str, version: str, identity: str) -> ResultEnvelope:
+        return ResultEnvelope(
+            algorithm_id=algorithm_id, algorithm_version=version, status="ok",
+            provenance=provenance(
+                tool="fixture", parameters_sha256=identity,
+                source_id=source_id, input_id=input_id, reference_id="hg38",
+            ),
+        )
+
+    store.publish_result(result("copy-number", "1", "8" * 64), input_id=input_id)
+    current_attempt = store.publish_result(result("copy-number", "2", "9" * 64), input_id=input_id)
+    store.publish_result(
+        result("instability", "1", "a" * 64), input_id=input_id,
+        upstream_selections=[{
+            "algorithm_id": "copy-number", "input_id": input_id,
+            "parameters_sha256": "9" * 64, "attempt_id": current_attempt,
+        }],
+    )
+    current = store.result_dir(input_id, "copy-number", "9" * 64)
+    (current / "attempts" / current_attempt / "result.json").write_bytes(b"{ malformed")
+
+    view = load_sample(store, source_id)
+    assert view is not None
+    assert "copy-number" in view.full.unreadable
+    assert "copy-number" not in view.full.results
+    assert view.full.results["instability"].skip_reason == "superseded_method"
 
 
 @needs_chrome

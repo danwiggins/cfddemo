@@ -1,4 +1,4 @@
-"""CLI hooks for ``traceback lab cohort add/build`` (registered by S5)."""
+"""CLI hooks for ``traceback lab cohort add/remove/build`` (registered by S5)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ from typing import Any
 
 from traceback_runner.cli import _local_envelope, _result, _with_human
 
-from .cohorts import add_sample, build_cohort
+from .cohorts import add_sample, build_cohort, remove_sample
 from .problems import EXIT_OK
 from .store import LabStore
 
@@ -30,6 +30,11 @@ def add_cohort_parser(commands: Any, common: Callable[[argparse.ArgumentParser],
     add.add_argument("--cohort", required=True, type=_cohort_id)
     common(add)
     add.set_defaults(handler=_add)
+    remove = actions.add_parser("remove", help="remove one pending member before rebuilding")
+    remove.add_argument("sample", metavar="ID12|SOURCE_ID")
+    remove.add_argument("--cohort", required=True, type=_cohort_id)
+    common(remove)
+    remove.set_defaults(handler=_remove)
     build = actions.add_parser("build", help="publish an immutable cohort generation")
     build.add_argument("--cohort", required=True, type=_cohort_id)
     build.add_argument("--kind", choices=("internal_cohort", "provisional_external"), default="internal_cohort")
@@ -44,6 +49,17 @@ def _add(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]
         "root": str(store.root), "cohort": args.cohort, "added": added,
     }))
     return EXIT_OK, _with_human(payload, [f"ROOT  {store.root}", f"COHORT  {args.cohort}", summary], replace_data=True)
+
+
+def _remove(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]]:
+    source_id = remove_sample(store, args.cohort, args.sample)
+    summary = "member removed from pending roster; rebuild to publish the change"
+    payload = _local_envelope(_result("lab cohort remove", "ok", summary, data={
+        "root": str(store.root), "cohort": args.cohort, "source_id": source_id,
+    }))
+    return EXIT_OK, _with_human(
+        payload, [f"ROOT  {store.root}", f"COHORT  {args.cohort}", summary], replace_data=True,
+    )
 
 
 def _build(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]]:

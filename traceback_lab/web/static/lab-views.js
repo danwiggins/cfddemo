@@ -455,6 +455,7 @@
     if (cohortIssue) out.push(h("p", { class: "problem" }, `Cohort reference ${sample.cohort_state.replace(/_/g, " ")}. Cohort states are unavailable for this view; measurements and published references remain visible. ${sample.cohort_problem ? sample.cohort_problem.fix : "Check cohort build and reload."}`));
     if (sample.malformed_result_selections) out.push(h("article", { class: "finding-card problem" },
       h("h2", {}, `Malformed result selection (sample ${sample.id12})`)));
+    if (sample.cohort_state === "ready" && sample.cohort_problem) out.push(h("p", { class: "problem" }, `Panel of normals unavailable: copy-number and dependent cohort states are withheld; independent metrics remain comparable. ${sample.cohort_problem.fix}`));
     for (const id of sample.unreadable_results || []) {
       out.push(h("article", { class: "finding-card problem" },
         h("h2", {}, `${id}: result unreadable (sample ${sample.id12})`)));
@@ -1049,6 +1050,7 @@
             results.replaceChildren(...nodes);
             return;
           }
+          if (data.pon_problem) nodes.push(h("p", { class: "problem" }, `Panel of normals unavailable: copy-number and dependent comparisons are withheld; independent metrics remain comparable. ${data.pon_problem.fix}`));
           nodes.push(h("p", {}, `Target aligner: ${data.target_aligner}. Eligible members are counted separately for each metric after self-exclusion.`));
           if (data.target_aligner.startsWith("pre-aligned; provenance unknown")) nodes.push(h("p", { class: "status-line" },
             "Pre-aligned processing provenance is unknown. The cohort store isolates these inputs by input identity; they are not pooled as protocol-matched references."));
