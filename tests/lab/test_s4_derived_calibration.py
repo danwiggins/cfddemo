@@ -52,6 +52,7 @@ def test_calibrated_derived_counts_only_selected_reads(tmp_path: Path, kind: str
         rate_metric = "chry_reads_per_million"
         fraction_metric = "dd_cfdna_fraction"
     else:
+        _stored_input(store)
         path, digest = fetal_file(tmp_path, female_background_y_per_million=0,
                                   full_male_y_per_million=1_000_000,
                                   validated_min_fraction=0, validated_max_fraction=1)

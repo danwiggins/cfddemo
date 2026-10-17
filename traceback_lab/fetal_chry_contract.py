@@ -197,6 +197,20 @@ def register_contract(store: LabStore, source: Path, expected_sha256: str, *,
             )
         return current
 
+    # Validate before publishing: a typo in the operator's source or reference
+    # must not reserve this input's immutable calibration slot.
+    from .ingest import input_manifest
+
+    try:
+        manifest = input_manifest(store, contract.input_id)
+    except OSError as exc:
+        raise FetalChrYContractError("stored input manifest is unreadable") from exc
+    if not isinstance(manifest, dict) or manifest.get("input_id") != contract.input_id:
+        raise FetalChrYContractError("stored input manifest is missing or mismatched")
+    if (manifest.get("source_id") != contract.source_id
+            or manifest.get("reference_sha256") != contract.reference_sha256):
+        raise FetalChrYContractError("fetal calibration does not match stored input provenance")
+
     def build(staging: Path) -> None:
         (staging / "contract.json").write_bytes(raw)
         (staging / "receipt.json").write_bytes(canonical_json_bytes(

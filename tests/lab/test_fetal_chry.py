@@ -61,11 +61,25 @@ def _file(tmp_path: Path, *, status: str = "operator_verified", **changes) -> tu
     return path, hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _stored_input(store: LabStore, *, source_id: str = SOURCE,
+                  reference_sha256: str = REFERENCE) -> None:
+    store.ensure()
+    directory = store.inputs_dir / INPUT
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "manifest.json").write_text(json.dumps({
+        "input_id": INPUT, "source_id": source_id,
+        "reference_sha256": reference_sha256,
+    }))
+
+
 def test_registration_is_immutable_and_cli_keeps_labels_private(tmp_path: Path, capsys) -> None:
     path, digest = _file(tmp_path, calibration_source="private study label")
     store = LabStore(tmp_path / "root")
     with pytest.raises(FetalChrYContractError, match="differs from expected"):
         register_contract(store, path, "0" * 64)
+    with pytest.raises(FetalChrYContractError, match="stored input manifest"):
+        register_contract(store, path, digest)
+    _stored_input(store)
     assert lab_main(["fetal", "chry-register", "--file", str(path), "--sha256", digest,
                      "--root", str(store.root), "--json"]) == 0
     response = json.loads(capsys.readouterr().out)
@@ -86,6 +100,22 @@ def test_registration_is_immutable_and_cli_keeps_labels_private(tmp_path: Path, 
     path.write_bytes(original)
     with pytest.raises(FetalChrYContractError, match="restore its exact original bytes"):
         register_contract(store, path, digest)
+
+
+@pytest.mark.parametrize("manifest_change", [
+    {"source_id": "d" * 64}, {"reference_sha256": "e" * 64},
+])
+def test_registration_refuses_wrong_stored_input_binding(
+    tmp_path: Path, manifest_change: dict,
+) -> None:
+    store = LabStore(tmp_path / "root")
+    _stored_input(store, **manifest_change)
+    path, digest = _file(tmp_path)
+    with pytest.raises(FetalChrYContractError, match="does not match stored input provenance"):
+        register_contract(store, path, digest)
+    assert not (store.lab / "assets" / "fetal-fraction-chry" / INPUT).exists()
+    _stored_input(store)
+    assert register_contract(store, path, digest).manifest_sha256 == digest
 
 
 @pytest.mark.parametrize("change", [
@@ -120,6 +150,7 @@ def test_deeply_nested_calibration_is_structured_failure(tmp_path: Path, capsys)
 def test_deeply_nested_receipt_is_structured_failure(tmp_path: Path) -> None:
     path, digest = _file(tmp_path)
     store = LabStore(tmp_path / "root")
+    _stored_input(store)
     register_contract(store, path, digest)
     receipt = store.lab / "assets" / "fetal-fraction-chry" / INPUT / "receipt.json"
     receipt.write_bytes(b"[" * 2048 + b"]" * 2048)
@@ -133,6 +164,7 @@ def test_synthetic_registration_needs_opt_in_and_cannot_run(tmp_path: Path) -> N
     with pytest.raises(FetalChrYContractError, match="--allow-synthetic"):
         register_contract(store, path, digest)
     assert not (store.lab / "assets" / "fetal-fraction-chry" / INPUT).exists()
+    _stored_input(store)
     contract = register_contract(store, path, digest, allow_synthetic=True)
     assert contract.calibration_status == "synthetic"
     assert inspect_contract(store, INPUT, synthetic=True) == contract
@@ -156,6 +188,7 @@ def test_synthetic_registration_needs_opt_in_and_cannot_run(tmp_path: Path) -> N
 def test_registration_publish_error_is_path_free(tmp_path: Path, monkeypatch, capsys) -> None:
     path, digest = _file(tmp_path)
     root = tmp_path / "root"
+    _stored_input(LabStore(root))
 
     def fail_publish(*_args, **_kwargs):
         raise OSError(f"private path {path}")
@@ -235,6 +268,7 @@ def test_real_summary_counts_nonpar_y_and_calibrates_only_within_bounds(
     ctx = context_for(tmp_path, contigs, reads, eligible_reads=10)
     store = LabStore(tmp_path)
     path, digest = _file(tmp_path)
+    _stored_input(store)
     contract = register_contract(store, path, digest)
     ctx = replace(ctx, source_id=SOURCE, input_id=INPUT, reference_sha256=REFERENCE,
                   approx_depth_x=0.01,
@@ -286,6 +320,7 @@ def test_registry_and_interpretation_keep_chr_y_separate_from_nipter() -> None:
 def test_registered_calibration_enters_identity_and_derived_skip_is_published(tmp_path: Path) -> None:
     store = LabStore(tmp_path / "root")
     path, digest = _file(tmp_path)
+    _stored_input(store)
     contract = register_contract(store, path, digest)
     algorithm = fetal.FETAL_FRACTION_CHRY
     assets = algorithm.asset_sha256s_for_input(store.root, INPUT)
@@ -314,6 +349,7 @@ def test_runner_passes_registered_calibration_to_ready_preflight(tmp_path: Path,
     monkeypatch.setattr(fetal, "load_summary", lambda _ctx: (summary, None))
     store = LabStore(tmp_path / "root")
     path, digest = _file(tmp_path)
+    _stored_input(store)
     contract = register_contract(store, path, digest)
     algorithm = replace(fetal.FETAL_FRACTION_CHRY, upstream=(),
                         requires=Requirements(min_eligible_reads=0))
