@@ -15,6 +15,7 @@ from pathlib import Path
 import pysam
 
 from evidence_inspector.cell_origin_models import CpgCallState, ModkitCpgCall, Strand
+from evidence_inspector.cell_origin_prefilter import RegionIndex
 
 from ..meth_calls import _InvalidRecord, _record_sites
 from ..modbase import mm_tag
@@ -30,6 +31,7 @@ class Extraction:
     invalid_mm: int
     dropped_unaligned: int
     non_reference_cpg: int
+    outside_regions: int
     low_confidence: int
 
 
@@ -39,6 +41,7 @@ def extract_cpg_calls(
     *,
     maximum_calls: int,
     filter_threshold: float,
+    include_regions: RegionIndex | None = None,
 ) -> Extraction:
     """Stream a prefiltered BAM, refusing the locked call cap while reading.
 
@@ -51,7 +54,7 @@ def extract_cpg_calls(
         raise ValueError("cell-origin extraction needs positive cap and threshold in (0, 1)")
     salt = os.urandom(32)
     calls: list[ModkitCpgCall] = []
-    scanned = tagged = invalid = unaligned = non_reference = low_confidence = candidates = 0
+    scanned = tagged = invalid = unaligned = non_reference = outside = low_confidence = candidates = 0
     with pysam.AlignmentFile(str(bam_path), "rb") as bam, pysam.FastaFile(str(reference_fasta)) as fasta:
         for record in bam.fetch(until_eof=True):
             scanned += 1
@@ -72,6 +75,11 @@ def extract_cpg_calls(
             ).hexdigest()
             chromosome = record.reference_name
             for position0, reverse, p_m, p_h, _channels in sites:
+                if include_regions is not None and not include_regions.overlaps(
+                    chromosome, position0, position0 + 1
+                ):
+                    outside += 1
+                    continue
                 candidates += 1
                 if candidates > maximum_calls:
                     raise ValueError("cell-origin MM/ML calls exceed the locked cap")
@@ -94,7 +102,7 @@ def extract_cpg_calls(
                     state=CpgCallState.METHYLATED if methylated else CpgCallState.UNMETHYLATED,
                 ))
     return Extraction(
-        tuple(calls), scanned, tagged, invalid, unaligned, non_reference, low_confidence,
+        tuple(calls), scanned, tagged, invalid, unaligned, non_reference, outside, low_confidence,
     )
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pysam
@@ -87,6 +88,52 @@ def test_inhouse_extraction_matches_the_signed_synthetic_fixture_counts(world) -
     )
 
 
+def test_pinned_modkit_and_inhouse_marker_classes_match(world) -> None:
+    binary = os.environ.get("LAB_MODKIT_PARITY_BINARY")
+    if not binary:
+        pytest.skip("set LAB_MODKIT_PARITY_BINARY to the pinned modkit 0.6.4 binary")
+    from traceback_lab.adapters.cell_origin_inhouse import compute_inhouse
+    from traceback_runner.cell_origin import ModbaseModel, compute_measurement
+    from traceback_runner.cell_origin_method import default_parameters
+    from traceback_runner.toolchain import MODKIT_PINS, PinnedTool, ToolIdentity
+
+    path = Path(binary)
+    digest = __import__("hashlib").sha256(path.read_bytes()).hexdigest()
+    pin = MODKIT_PINS["linux-64"]
+    assert digest == pin.package_binary_sha256
+    tool = PinnedTool(path=path, identity=ToolIdentity(
+        tool_id="modkit", version=pin.version, platform=pin.platform,
+        lock_sha256=pin.lock_sha256, lock_line=pin.lock_line,
+        package_sha256=pin.package_sha256,
+        package_binary_sha256=pin.package_binary_sha256,
+        installed_binary_sha256=digest,
+    ))
+    inputs = world["inputs"]
+    parameters = default_parameters(modbase_model="model-h")
+    paths = {
+        "bam": inputs.bam_path,
+        "fasta": inputs.fasta_path,
+        "atlas": inputs.loyfer_dir / "Atlas.U250.l4.hg38.full.tsv",
+        "markers": inputs.loyfer_dir / "Markers.U250.hg38.tsv",
+        "regions": inputs.loyfer_dir / "Regions.U250.l4.hg38.bed",
+    }
+    signed = compute_measurement(
+        parameters=parameters, reference_id="ref",
+        modbase_model=ModbaseModel(id="model-h", source="header"),
+        job_directory=world["tmp"] / "signed-parity", modkit=tool, **paths,
+    )
+    inhouse = compute_inhouse(
+        parameters=parameters, scratch=world["tmp"] / "inhouse-parity", **paths,
+    )
+    assert [(row.marker_id, row.u, row.m, row.x) for row in signed.marker_counts] == [
+        (row.marker_id, row.u_count, row.m_count, row.x_count)
+        for row in inhouse.marker_counts
+    ]
+    assert {row.contributor_id: row.fraction for row in signed.estimates} == pytest.approx(
+        {row.cell_type_id: row.fraction for row in inhouse.fit.estimates}, abs=1e-6
+    )
+
+
 def test_transient_bam_for_a_split_half_is_a_subset(world) -> None:
     source = world["ctx"].input_dir / "aligned.bam"
     destination = world["tmp"] / "half.bam"
@@ -128,3 +175,14 @@ def test_a_changed_fasta_is_refused(world) -> None:
     out.mkdir(parents=True)
     with pytest.raises(RuntimeError, match="FASTA changed"):
         co.CELL_ORIGIN.run(ctx, out)
+
+
+def test_a_changed_atlas_registration_is_refused_before_extraction(world) -> None:
+    register_loyfer_directory(world["root"], world["inputs"].loyfer_dir)
+    extras = {**world["ctx"].extras, "planned_asset_sha256s": ["f" * 64]}
+    ctx = InputContext(**{**world["ctx"].__dict__, "extras": extras})
+    out = world["tmp"] / "a3" / "artifacts"
+    out.mkdir(parents=True)
+    with pytest.raises(RuntimeError, match="registration changed"):
+        co.CELL_ORIGIN.run(ctx, out)
+    assert not list(out.parent.rglob("*.bam"))

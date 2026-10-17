@@ -132,8 +132,19 @@ class CellOrigin(Base):
             raise RuntimeError("the BAM no longer declares one modified-base model")
         parameters = default_parameters(modbase_model=model_id)
         assets = loyfer_assets(ctx.root)
+        planned = ctx.extras.get("planned_asset_sha256s")
+        actual = sorted(asset.registered.file_sha256 for asset in assets.values())
+        if planned is not None and sorted(planned) != actual:
+            raise RuntimeError("Loyfer atlas registration changed after execution identity was planned")
         with tempfile.TemporaryDirectory(prefix="co-", dir=out.parent) as scratch:
+            from traceback_runner.references import copy_registered_asset
+
             work = Path(scratch)
+            copies = {
+                kind: copy_registered_asset(ctx.root, asset.registered.asset_id, work,
+                                            kind=asset.registered.kind)
+                for kind, asset in assets.items()
+            }
             bam = ctx.input_dir / "aligned.bam"
             if ctx.derived:
                 bam = work / "derived.bam"  # transient: gone when this directory goes
@@ -142,9 +153,9 @@ class CellOrigin(Base):
                 parameters=parameters,
                 bam=bam,
                 fasta=fasta,
-                atlas=Path(assets["loyfer-atlas"].source.file_path),
-                markers=Path(assets["loyfer-markers"].source.file_path),
-                regions=Path(assets["loyfer-regions"].source.file_path),
+                atlas=copies["loyfer-atlas"],
+                markers=copies["loyfer-markers"],
+                regions=copies["loyfer-regions"],
                 scratch=work,
             )
         level = float(parameters.bootstrap_confidence_level)
@@ -183,6 +194,7 @@ class CellOrigin(Base):
                 "invalid_mm": measurement.extraction.invalid_mm,
                 "dropped_unaligned": measurement.extraction.dropped_unaligned,
                 "non_reference_cpg": measurement.extraction.non_reference_cpg,
+                "outside_regions": measurement.extraction.outside_regions,
                 "low_confidence": measurement.extraction.low_confidence,
             },
         }

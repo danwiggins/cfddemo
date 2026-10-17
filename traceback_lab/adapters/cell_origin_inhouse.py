@@ -11,7 +11,7 @@ import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
-from evidence_inspector.cell_origin_models import DigestArtifact, NnlsRowScale
+from evidence_inspector.cell_origin_models import DigestArtifact, MarkerCountRow, NnlsRowScale
 from evidence_inspector.cell_origin_pipeline import (
     PipelineConfig,
     _filtered_atlas,
@@ -31,6 +31,7 @@ class InhouseMeasurement:
     fit: object
     bootstrap: object
     extraction: Extraction
+    marker_counts: tuple[MarkerCountRow, ...]
     classified_fragments: int
     observed_markers: int
     registered_markers: int
@@ -73,14 +74,14 @@ def compute_inhouse(
     resources = _load_loyfer_resources(config)
     scratch.mkdir(mode=0o700, parents=True, exist_ok=True)
     filtered = scratch / "prefiltered.bam"
-    prefilter = write_prefiltered_bam(
-        bam, filtered, read_bed_regions(regions), min_mapq=parameters.min_mapq,
-    )
+    region_index = read_bed_regions(regions)
+    prefilter = write_prefiltered_bam(bam, filtered, region_index, min_mapq=parameters.min_mapq)
     if prefilter.written == 0:
         raise ValueError("no alignment passed the marker-region prefilter")
     extraction = extract_cpg_calls(
         filtered, fasta, maximum_calls=parameters.caps.maximum_calls,
         filter_threshold=parameters.modkit_filter_threshold,
+        include_regions=region_index,
     )
     if not extraction.calls:
         raise ValueError("no known, confident CpG calls overlap marker regions")
@@ -122,7 +123,7 @@ def compute_inhouse(
             record.check.value for record in report.records if not record.passed
         ))
     return InhouseMeasurement(
-        fit, bootstrap, extraction, classified_fragments, len(rows), len(resources.markers),
+        fit, bootstrap, extraction, rows, classified_fragments, len(rows), len(resources.markers),
         prefilter.records_scanned, prefilter.passing,
     )
 
