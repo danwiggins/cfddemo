@@ -13,7 +13,7 @@ from traceback_lab.identity import cohort_compat_key, parameters_sha256
 from traceback_lab.ingest import resolve_sample
 from traceback_lab.problems import LabProblem
 from traceback_lab.registry import ToolPin, execution_identity
-from traceback_lab.store import LabStore
+from traceback_lab.store import MAX_EXECUTION_PLAN_BYTES, LabStore
 from traceback_runner import cli as signed_cli
 
 
@@ -224,6 +224,8 @@ def test_cohort_reads_recorded_effective_identity_without_runtime_probe(
     plan_path.write_text(json.dumps({**plan, "platform": "illumina"}))
     assert build_cohort(store, "healthy").members[0].results == ()
     plan_path.write_bytes(b"[" * 1500 + b"0" + b"]" * 1500)
+    assert build_cohort(store, "healthy").members[0].results == ()
+    plan_path.write_bytes(b" " * (MAX_EXECUTION_PLAN_BYTES + 1))
     assert build_cohort(store, "healthy").members[0].results == ()
 
 
