@@ -7,7 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from tests.lab.test_acceptance_synthetic_routes import ID12, SAMPLE_ROUTES, _run_marker, _sample, _server
+from tests.lab.test_acceptance_synthetic_routes import (
+    ID12,
+    SAMPLE_ROUTES,
+    _run_marker,
+    _sample,
+    _server,
+)
 from tests.lab.test_lab_server import _chrome, _dom_cdp
 from tests.lab.test_landing import _dom, needs_chrome
 
@@ -38,6 +44,32 @@ def test_every_sample_surface_discloses_interrupted_run(route, tmp_path) -> None
         dom = _dom(server, tmp_path / "browser", route=path,
                    want=lambda page: "stopped during bam-qc" in page)
     assert "Results shown are from completed steps" in dom
+
+
+@needs_chrome
+@pytest.mark.parametrize("route", ("home", *SAMPLE_ROUTES))
+@pytest.mark.parametrize("state,copy_text", (
+    ("active", "A Lab run is in progress (step: bam-qc"),
+    ("status-unavailable", "status is unavailable (log unreadable, unsafe, or over 1 MiB)"),
+    ("invalid-library", "Interpretation library on disk is invalid (line 212)"),
+))
+def test_every_sample_surface_discloses_global_run_or_library_problem(state, copy_text, route, tmp_path) -> None:
+    sample = _sample()
+    if state == "invalid-library":
+        sample["library_health"]["error"] = "line 212"
+    path = None if route == "home" else f"/sample/{ID12}/{route}"
+    with _server(tmp_path, sample) as server:
+        status = {"generation": 1, "active": None, "interrupted": None,
+                  "library": sample["library_health"]}
+        if state == "active":
+            status["active"] = {**_run_marker(), "started_utc": "2026-10-16T00:00:00Z"}
+        elif state == "status-unavailable":
+            status["run_log_unavailable"] = {"run_id": _run_marker()["run_id"],
+                                             "reason": "unreadable_or_over_1mib"}
+        server.app.api.status = lambda: status
+        dom = _dom(server, tmp_path / "browser", route=path,
+                   want=lambda page: copy_text in page)
+    assert copy_text in dom
 
 
 @needs_chrome
