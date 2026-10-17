@@ -2201,6 +2201,55 @@ entries:
     citations: ["doi:10.1038/s41586-019-1272-6"]
     citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "PMC6774252: 'sensitivities of detection ranging from 57% to more than 99% among the seven cancer types at 98% specificity, with an overall area under the curve value of 0.94'; short 100-150 bp, long 151-220 bp; '504 windows of 5 Mb'; healthy profiles 'median correlation of 0.99'. Illumina 1-2x."}
 
+  # ------------------------------------------------------------ tss-profile
+  - algorithm_id: tss-profile
+    metric_id: central_flank_ratio
+    label: "TSS central-to-flank coverage ratio"
+    value_kind: positive
+    tier: NEWER
+    origin_tier: NEWER
+    origin_platform: "cfDNA sequencing literature; ONT transfer unvalidated"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No sensitivity, specificity, or ONT calibration established for this gene-set coverage ratio"
+    meaning_low: "A deeper aggregate coverage dip near protein-coding transcription starts; this is not a gene-expression call."
+    meaning_high: "A shallower aggregate coverage dip; library, sequence, and copy-number effects can contribute."
+    confounders: ["ONT library size bias", "GC and mappability", "copy-number changes", "blood-cell mixture", "gene annotation choice"]
+    next_steps:
+      analytical: ["Inspect the strand-oriented coverage profile and its flank denominator", "Compare with a protocol-matched cohort when available"]
+      clinical_setting: null
+    license_ids: [non-commercial-not-adopted]
+    flags: [LEGAL]
+    headline: true
+    stability: {kind: relative, tolerance: 0.20}
+    citations: ["doi:10.1038/s41467-021-22463-y"]
+    citation_checked: {by: "lab build agent", date: "2026-10-16", note: "Nature Communications 2021 reports promoter nucleosome-depleted coverage near −150 to +50 bp and association with expression in cfDNA. This in-house aggregate ONT ratio has no transferred diagnostic performance or cutoff."}
+
+  - algorithm_id: tss-profile
+    metric_id: tss_genes
+    label: "Protein-coding TSSs with complete windows"
+    value_kind: count
+    tier: NEWER
+    origin_tier: NEWER
+    origin_platform: "GENCODE v46 basic CHR (GRCh38.p14)"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "Annotation coverage count, not a diagnostic metric"
+    meaning_low: "Fewer autosomal gene windows were available in the registered reference."
+    meaning_high: "More autosomal gene windows were available in the registered reference."
+    confounders: ["reference contig coverage", "GENCODE release"]
+    next_steps:
+      analytical: ["Check registered reference and annotation identities"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: false
+    stability: {kind: absolute, tolerance: 1}
+    citations: ["https://www.gencodegenes.org/human/release_46"]
+    citation_checked: {by: "lab build agent", date: "2026-10-16", note: "GENCODE v46 release page identifies basic CHR GTF as the main annotation for reference chromosomes."}
+
   # ------------------------------------------------------------ global-5mc
   - algorithm_id: global-5mc
     metric_id: cpg_5mc_fraction

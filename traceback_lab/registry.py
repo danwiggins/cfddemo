@@ -52,6 +52,7 @@ ALGORITHMS: tuple[str, ...] = (
     "end_motifs:END_MOTIFS",
     "breakpoint_motifs:BREAKPOINT_MOTIFS",
     "delfi_ratio:DELFI_RATIO",
+    "tss_profile:TSS_PROFILE",
     "meth_calls:METH_CALLS",
     "modbase_qc:MODBASE_QC",
     "global_5mc:GLOBAL_5MC",
