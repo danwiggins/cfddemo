@@ -45,6 +45,8 @@ def from_bam(path: Path) -> Platform:
 def for_input(manifest: Mapping[str, Any], bam_path: Path) -> Platform:
     """Resolve old manifests safely and verify new ones against their BAM."""
 
+    if not isinstance(manifest, Mapping):
+        raise ValueError("stored Lab input manifest is not an object")
     kind = manifest.get("kind")
     if kind == "aligned":
         if manifest.get("platform", "ont") != "ont":
