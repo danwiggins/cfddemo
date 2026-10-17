@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from ..adapters.griffin_run import (
-    GRIFFIN_COMMIT, MIN_ELIGIBLE_READS, GriffinRun, _require_paired_input,
+    GRIFFIN_COMMIT, MIN_ELIGIBLE_AUTOSOMAL_PAIRS, GriffinRun, _require_paired_input,
     count_d21_pairs, run_upstream,
 )
 from ..griffin_assets import GriffinAssetError, inspect_griffin_assets, registration_available
@@ -39,12 +39,12 @@ class Griffin(Base):
     consumes: str = "full_bam"
     cost: str = "slow"
     requires: Requirements = field(default_factory=lambda: Requirements(
-        min_eligible_reads=MIN_ELIGIBLE_READS, platforms=frozenset({"illumina"}),
+        min_eligible_reads=MIN_ELIGIBLE_AUTOSOMAL_PAIRS, platforms=frozenset({"illumina"}),
     ))
     parameters: dict[str, Any] = field(default_factory=lambda: {
         "method": "upstream-Griffin-v0.2", "reference": "hg38",
         "primary_metric": "GC_corrected_central_coverage",
-        "minimum_d21_eligible": MIN_ELIGIBLE_READS,
+        "minimum_d21_eligible": MIN_ELIGIBLE_AUTOSOMAL_PAIRS,
     })
     tools: tuple[ToolPin, ...] = (
         ToolPin("Griffin", GRIFFIN_COMMIT, "method-patents"),
@@ -98,8 +98,8 @@ class Griffin(Base):
                         "Griffin could not validate the aligned BAM for paired-end Illumina input")
         if profile_reads == 0:
             return Skip("depth", "Griffin's pinned 100–200 bp profile window has no qualifying fragments")
-        if pairs < MIN_ELIGIBLE_READS:
-            return Skip("depth", f"Griffin needs {MIN_ELIGIBLE_READS:,} eligible autosomal pairs; this input has {pairs:,}")
+        if pairs < MIN_ELIGIBLE_AUTOSOMAL_PAIRS:
+            return Skip("depth", f"Griffin needs {MIN_ELIGIBLE_AUTOSOMAL_PAIRS:,} eligible autosomal pairs; this input has {pairs:,}")
         try:
             inspect_griffin_assets(ctx.root)
         except GriffinAssetError as exc:
@@ -111,13 +111,13 @@ class Griffin(Base):
             raise RuntimeError("Griffin cannot run on a non-Illumina input")
         assets = inspect_griffin_assets(ctx.root)
         pairs = count_d21_pairs(ctx.input_dir / "aligned.bam")
-        if pairs < MIN_ELIGIBLE_READS:
+        if pairs < MIN_ELIGIBLE_AUTOSOMAL_PAIRS:
             raise RuntimeError("Griffin pair count fell below the required 5M after preflight")
         profiles = run_upstream(GriffinRun(
             input_id=ctx.input_id, bam=ctx.input_dir / "aligned.bam",
             reference_fasta=Path(ctx.extras["reference_fasta"]),
             reference_id=ctx.reference_id, reference_sha256=ctx.reference_sha256,
-            eligible_reads=pairs, upstream_root=assets.upstream_root,
+            eligible_autosomal_pairs=pairs, upstream_root=assets.upstream_root,
             ref_assets=assets.ref_assets, site_lists=assets.site_lists,
             attempt_dir=out.parent / "griffin-attempt",
             registration_sha256=assets.sha256,

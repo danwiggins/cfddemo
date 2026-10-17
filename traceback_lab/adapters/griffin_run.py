@@ -13,16 +13,19 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
+from importlib.metadata import version
 from pathlib import Path
 from typing import Mapping
 
 import yaml
 
-from .griffin import GriffinProfile, read_corrected_profiles
+from .griffin import GriffinFormatError, GriffinProfile, read_corrected_profiles
 
 GRIFFIN_COMMIT = "b624c7a2ea7b8758b6eebd424066c815bfeece61"
-MIN_ELIGIBLE_READS = 5_000_000
+SNAKEMAKE_VERSION = "5.19.2"
+MIN_ELIGIBLE_AUTOSOMAL_PAIRS = 5_000_000
 _SAFE_TOKEN = re.compile(r"^[A-Za-z0-9_./-]+$")
 _REF_FILES = (
     "hg38.standard.chrom.sizes", "k100.Umap.MultiTrackMappability.bw",
@@ -39,7 +42,7 @@ class GriffinRun:
     reference_fasta: Path
     reference_id: str
     reference_sha256: str
-    eligible_reads: int
+    eligible_autosomal_pairs: int
     upstream_root: Path
     ref_assets: Path
     site_lists: Mapping[str, Path]
@@ -54,6 +57,15 @@ def _digest(path: Path) -> str:
     with path.open("rb") as stream:
         for block in iter(lambda: stream.read(8 << 20), b""):
             h.update(block)
+    return h.hexdigest()
+
+
+def _tree_digest(root: Path) -> str:
+    h = hashlib.sha256()
+    for path in sorted(path for path in root.rglob("*") if path.is_file()):
+        h.update(path.relative_to(root).as_posix().encode("utf-8"))
+        h.update(b"\0")
+        h.update(bytes.fromhex(_digest(path)))
     return h.hexdigest()
 
 
@@ -123,8 +135,46 @@ def _require_paired_input(bam: Path) -> int:
     return usable
 
 
+def _require_reference_header(bam: Path, reference: Path) -> None:
+    """Require the BAM coordinate space to match the registered FASTA index."""
+
+    import pysam
+
+    with pysam.FastaFile(str(reference)) as fasta:
+        expected = dict(zip(fasta.references, fasta.lengths))
+    with pysam.AlignmentFile(str(bam), "rb") as alignments:
+        sq = alignments.header.to_dict().get("SQ", [])
+    observed = {entry["SN"]: entry["LN"] for entry in sq}
+    if not expected or len(observed) != len(sq) or observed != expected:
+        raise ValueError("BAM @SQ does not match the registered reference FASTA")
+
+
+def _require_chrom_sizes(reference: Path, chrom_sizes: Path) -> None:
+    """Every coverage-space contig must match the registered FASTA index."""
+
+    import pysam
+
+    with pysam.FastaFile(str(reference)) as fasta:
+        expected = dict(zip(fasta.references, fasta.lengths))
+    seen: set[str] = set()
+    with chrom_sizes.open("r", encoding="ascii") as stream:
+        for line in stream:
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) != 2 or not fields[0] or fields[0] in seen:
+                raise ValueError("Griffin chromosome sizes are malformed")
+            try:
+                length = int(fields[1])
+            except ValueError as exc:
+                raise ValueError("Griffin chromosome sizes are malformed") from exc
+            if length <= 0 or expected.get(fields[0]) != length:
+                raise ValueError("Griffin chromosome sizes differ from the registered FASTA")
+            seen.add(fields[0])
+    if not seen:
+        raise ValueError("Griffin chromosome sizes are empty")
+
+
 def count_d21_pairs(bam: Path) -> int:
-    """Count one D21-eligible autosomal molecule per proper Illumina pair."""
+    """Count one eligible autosomal molecule per proper Illumina pair."""
 
     import pysam
 
@@ -161,8 +211,8 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
     runner removes after a failed attempt.
     """
 
-    if config.eligible_reads < MIN_ELIGIBLE_READS:
-        raise ValueError("Griffin requires at least 5,000,000 D21 eligible autosomal molecules")
+    if config.eligible_autosomal_pairs < MIN_ELIGIBLE_AUTOSOMAL_PAIRS:
+        raise ValueError("Griffin requires at least 5,000,000 caller-supplied eligible autosomal pairs")
     if config.reference_id != "hg38":
         raise ValueError("upstream Griffin is validated for hg38 only")
     if not re.fullmatch(r"[a-z0-9]{12,64}", config.input_id):
@@ -189,17 +239,26 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
     bam = _safe_path(config.bam)
     reference = _safe_path(config.reference_fasta)
     assets = _safe_path(config.ref_assets)
-    scripts = _safe_path(upstream / "scripts")
+    scripts_source = _safe_path(upstream / "scripts")
     if _digest(reference) != config.reference_sha256:
         raise ValueError("reference FASTA differs from the registered Lab reference")
-    if not bam.with_suffix(bam.suffix + ".bai").is_file() and not bam.with_suffix(".bai").is_file():
+    bam_index_candidates = (bam.with_suffix(bam.suffix + ".bai"), bam.with_suffix(".bai"))
+    bam_indexes = tuple(_safe_path(path) for path in bam_index_candidates if path.is_file())
+    if not bam_indexes:
         raise ValueError("the aligned BAM needs an index for Griffin")
-    if not reference.with_suffix(reference.suffix + ".fai").is_file():
+    reference_index = reference.with_suffix(reference.suffix + ".fai")
+    if not reference_index.is_file():
         raise ValueError("the registered reference FASTA needs an index for Griffin")
     if _require_paired_input(bam) == 0:
         raise ValueError("Griffin's pinned 100–200 bp profile window has no qualifying fragments")
+    reference_index = _safe_path(reference_index)
+    _require_reference_header(bam, reference)
+    measured_pairs = count_d21_pairs(bam)
+    if measured_pairs != config.eligible_autosomal_pairs:
+        raise ValueError("caller-supplied eligible autosomal pair count differs from the BAM")
     for filename in _REF_FILES:
         _safe_path(assets / filename)
+    _require_chrom_sizes(reference, assets / "hg38.standard.chrom.sizes")
     frequency = _safe_path(assets / "genome_GC_frequency")
     if not frequency.is_dir():
         raise ValueError("Griffin genome GC-frequency reference is absent")
@@ -223,7 +282,9 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
         raise ValueError("Griffin attempt needs a shell-safe POSIX path")
     fingerprints = {
         "bam_sha256": _digest(bam),
+        "bam_indexes_sha256": {path.name: _digest(path) for path in bam_indexes},
         "reference_sha256": config.reference_sha256,
+        "reference_index_sha256": _digest(reference_index),
         "site_lists_sha256": {name: _digest(Path(path)) for name, path in site_paths.items()},
         "assets_sha256": {name: _digest(assets / name) for name in _REF_FILES},
         "gc_frequency_sha256": {path.name: _digest(path) for path in frequency_files},
@@ -231,20 +292,32 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
     snakemake_version = subprocess.run(
         [config.snakemake, "--version"], check=True, capture_output=True, text=True, timeout=10,
     ).stdout.strip()
-    if snakemake_version != "5.19.2":
-        raise ValueError("Griffin requires pinned Snakemake 5.19.2")
+    if snakemake_version != SNAKEMAKE_VERSION:
+        raise ValueError(f"Griffin requires pinned Snakemake {SNAKEMAKE_VERSION}")
+    runtime = {"snakemake": snakemake_version, "python": sys.version.split()[0],
+               "pysam": version("pysam"), "pyyaml": yaml.__version__, "cores": config.cores}
     attempt.mkdir()
+    scripts = attempt / "upstream_scripts"
+    shutil.copytree(scripts_source, scripts, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    scripts = _safe_path(scripts)
+    fingerprints["upstream_scripts_sha256"] = _tree_digest(scripts)
     workflows = (
         "griffin_GC_and_mappability_correction", "griffin_nucleosome_profiling"
     )
+    snakefiles: list[Path] = []
+    upstream_configs: dict[str, str] = {}
     for workflow in workflows:
-        shutil.copytree(upstream / "snakemakes" / workflow, attempt / workflow)
-        cluster_path = attempt / workflow / "config" / "cluster_slurm.yaml"
-        cluster = yaml.safe_load(cluster_path.read_text(encoding="utf-8"))
-        for settings in cluster.values():
-            if isinstance(settings, dict) and "ncpus" in settings:
-                settings["ncpus"] = min(int(settings["ncpus"]), config.cores)
-        _write_yaml(cluster_path, cluster)
+        source = upstream / "snakemakes" / workflow
+        destination = attempt / workflow
+        (destination / "config").mkdir(parents=True)
+        snakefile = destination / f"{workflow}.snakefile"
+        shutil.copy2(source / snakefile.name, snakefile)
+        snakefiles.append(snakefile)
+        upstream_configs[workflow] = _digest(source / "config" / "config.yaml")
+    fingerprints["upstream_configs_sha256"] = upstream_configs
+    fingerprints["snakefiles_sha256"] = {
+        str(path.relative_to(attempt)): _digest(path) for path in snakefiles
+    }
     gc_dir = attempt / workflows[0]
     profile_dir = attempt / workflows[1]
     gc_config = _load_default(upstream, workflows[0])
@@ -265,12 +338,22 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
     _write_yaml(profile_dir / "config" / "samples.GC.yaml", {
         "samples": {sample: {"bam": str(bam), "GC_bias": str(gc_bias)}}
     })
+    generated_configs = (
+        gc_dir / "config" / "config.yaml", gc_dir / "config" / "samples.yaml",
+        profile_dir / "config" / "config.yaml", profile_dir / "config" / "sites.yaml",
+        profile_dir / "config" / "samples.GC.yaml",
+    )
+    fingerprints["generated_configs_sha256"] = {
+        str(path.relative_to(attempt)): _digest(path) for path in generated_configs
+    }
     (attempt / "provenance.json").write_text(json.dumps({
         "status": "attempt", "input_id": config.input_id,
         "upstream_commit": commit, "reference_id": config.reference_id,
         "platform": "illumina", "registration_sha256": config.registration_sha256,
-        "eligible_autosomal_pairs": config.eligible_reads, "snakemake_version": snakemake_version,
-        "cores": config.cores,
+        "sample": sample, "eligible_autosomal_pairs": config.eligible_autosomal_pairs,
+        "minimum_eligible_autosomal_pairs": MIN_ELIGIBLE_AUTOSOMAL_PAIRS,
+        "eligibility_source": "bam_verified",
+        "snakemake_version": snakemake_version, "runtime": runtime,
         "fingerprints": fingerprints,
     }, sort_keys=True), encoding="utf-8")
     for directory, snakefile in (
@@ -285,6 +368,23 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
             )
     if _digest(bam) != fingerprints["bam_sha256"] or _digest(reference) != config.reference_sha256:
         raise RuntimeError("BAM or reference changed during Griffin computation")
+    if (_tree_digest(scripts) != fingerprints["upstream_scripts_sha256"]
+            or {str(path.relative_to(attempt)): _digest(path) for path in snakefiles}
+            != fingerprints["snakefiles_sha256"]
+            or {str(path.relative_to(attempt)): _digest(path) for path in generated_configs}
+            != fingerprints["generated_configs_sha256"]):
+        raise RuntimeError("Griffin workflow source or generated configuration changed during computation")
+    if (subprocess.run(["git", "-C", str(upstream), "rev-parse", "HEAD"], check=True,
+                       capture_output=True, text=True).stdout.strip() != commit
+            or subprocess.run(["git", "-C", str(upstream), "status", "--porcelain"], check=True,
+                              capture_output=True, text=True).stdout.strip()):
+        raise RuntimeError("pinned Griffin checkout changed during computation")
+    if (tuple(_safe_path(path) for path in bam_index_candidates if path.is_file()) != bam_indexes
+            or {path.name: _digest(path) for path in bam_indexes} != fingerprints["bam_indexes_sha256"]
+            or not reference_index.is_file()
+            or _safe_path(reference.with_suffix(reference.suffix + ".fai")) != reference_index
+            or _digest(reference_index) != fingerprints["reference_index_sha256"]):
+        raise RuntimeError("BAM or reference index changed during Griffin computation")
     if any(_digest(Path(path)) != fingerprints["site_lists_sha256"][name] for name, path in site_paths.items()):
         raise RuntimeError("TF-site list changed during Griffin computation")
     if any(_digest(assets / name) != fingerprints["assets_sha256"][name] for name in _REF_FILES):
@@ -293,12 +393,16 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
         raise RuntimeError("Griffin genome GC frequencies changed during computation")
     output = profile_dir / "results" / sample / f"{sample}.GC_corrected.coverage.tsv"
     profiles = read_corrected_profiles(output, expected_sample=sample)
+    if {profile.site_name for profile in profiles} != set(site_paths):
+        raise GriffinFormatError("Griffin output site lists do not match the requested site lists")
     manifest = {
         "status": "complete", "input_id": config.input_id,
         "upstream_commit": commit, "reference_id": config.reference_id,
         "platform": "illumina", "registration_sha256": config.registration_sha256,
-        "eligible_autosomal_pairs": config.eligible_reads, "snakemake_version": snakemake_version,
-        "cores": config.cores,
+        "sample": sample, "eligible_autosomal_pairs": config.eligible_autosomal_pairs,
+        "minimum_eligible_autosomal_pairs": MIN_ELIGIBLE_AUTOSOMAL_PAIRS,
+        "eligibility_source": "bam_verified",
+        "snakemake_version": snakemake_version, "runtime": runtime,
         "fingerprints": fingerprints,
         "gc_bias_sha256": _digest(gc_bias), "output_sha256": _digest(output),
         "profile_count": len(profiles),
