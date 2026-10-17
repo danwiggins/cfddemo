@@ -14,6 +14,8 @@ from traceback_lab.algorithms.instability import INSTABILITY, segment_tmad
 from traceback_lab.algorithms._base import Base
 from traceback_lab.controls import derived_plan_items
 from traceback_lab.derived import DerivedInput, cna, downsample, split
+from traceback_lab.envelope import ResultEnvelope, provenance
+from traceback_lab.interpretation.engine import Cohort, interpret_result, load_library
 from traceback_lab.registry import AlgorithmOutput, InputContext, PlanItem, Skip, execution_identity, intermediate_ids, load_registry, plan
 from traceback_lab.run_command import _parent_intermediates
 from traceback_lab.runner import RunTarget, StepResult, run_plan
@@ -51,6 +53,27 @@ def test_tmad_weights_each_segment_by_supporting_bins() -> None:
     assert (missing.value, missing.bins_used, missing.segments_used) == (0.0, 5, 1)
     assert (missing.bins_missing_estimate, missing.segments_missing_estimate) == (8, 1)
     assert segment_tmad([]).value is None
+
+
+def test_tmad_uses_only_a_compatible_internal_cohort_reference() -> None:
+    envelope = ResultEnvelope(
+        algorithm_id="instability", algorithm_version="1", status="ok",
+        provenance=provenance(
+            tool="fixture", parameters_sha256="a" * 64, source_id="b" * 64,
+            input_id="c" * 64, reference_id="hg38",
+        ),
+        metrics=[{"metric_id": "tmad", "value": 0.2, "unit": "log2", "n": 10}],
+    )
+    library = load_library()
+    missing = interpret_result(envelope, library)[0].interpretation
+    assert (missing.state, missing.reason, missing.reference_kind) == (
+        "no_reference", "cohort_too_small", "internal_cohort",
+    )
+    cohort = Cohort(values=[0.1 + index * 0.02 for index in range(10)], version="healthy-v1:1")
+    supplied = interpret_result(envelope, library, cohorts={"tmad": cohort})[0].interpretation
+    assert (supplied.state, supplied.reference_kind, supplied.exploratory_n) == (
+        "in_range", "internal_cohort", 10,
+    )
 
 
 @pytest.mark.parametrize("segment", [

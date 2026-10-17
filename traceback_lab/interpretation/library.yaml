@@ -614,7 +614,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "Illumina WGS; this estimator is an ONT Lab adaptation"
     min_depth_x: null
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance: null
     performance_missing_reason: "No qualified ONT interval or cutoff for this bin-weighted estimator"
     meaning_high: "More variation among copy-number segment log2 values; without a panel of normals, noise can have the same effect."
