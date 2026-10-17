@@ -9,6 +9,7 @@ import sys
 from argparse import Namespace
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -232,6 +233,31 @@ def test_missing_toolchain_skips_before_scanning_bam(tmp_path: Path, monkeypatch
                        extras={"reference_fasta": str(tmp_path / "hg38.fa")})
     decision = GRIFFIN.preflight(ctx)
     assert isinstance(decision, Skip) and decision.reason_code == "missing_toolchain"
+
+
+def test_preflight_probes_snakemake_with_execution_interpreter(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import traceback_lab.algorithms.griffin as module
+
+    _available_toolchain(monkeypatch)
+    calls: list[tuple[list[str], dict[str, str]]] = []
+
+    def probe(argv: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        calls.append((argv, kwargs["env"]))
+        return subprocess.CompletedProcess(argv, 0, "5.19.2\n")
+
+    monkeypatch.setattr(module.subprocess, "run", probe)
+    monkeypatch.setattr(module, "registration_available", lambda root: False)
+    ctx = InputContext(root=tmp_path, source_id="1" * 64, input_id="2" * 64,
+                       reference_id="hg38", reference_sha256="3" * 64,
+                       input_dir=tmp_path, platform="illumina", eligible_reads=5_000_000,
+                       extras={"reference_fasta": str(tmp_path / "hg38.fa")})
+    assert GRIFFIN.preflight(ctx).reason_code == "missing_asset"
+    assert calls[0][0] == [module.sys.executable, "/tools/snakemake", "--version"]
+    assert calls[0][1]["PYTHONPATH"].split(module.os.pathsep)[0] == str(
+        Path(module.__file__).parents[1] / "adapters" / "griffin_compat"
+    )
 
 
 def test_missing_registration_skips_before_scanning_bam(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
