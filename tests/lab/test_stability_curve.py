@@ -152,6 +152,8 @@ def _assert_default_scalar_selection(store, sample, payload) -> None:
         stamp = depth_stamp(summary, mask)
         for algorithm_id, result in view.results.items():
             assert result.status in {"ok", "skipped", "failed"}
+            if algorithm_id in {"bam-qc", "depth", "fragment-size"}:
+                assert result.status == "ok", (label, algorithm_id, result.status)
             assert result.status == steps[label, algorithm_id]["status"]
             assert result.provenance.input_id == view.input_id
             assert result.provenance.source_id == sample.source_id
@@ -175,7 +177,8 @@ def _assert_default_scalar_selection(store, sample, payload) -> None:
     downs = sorted(sample.by_transform("downsample"), key=lambda view: view.fraction)
     counts = [view.results["bam-qc"].depth.eligible_reads for view in downs]
     assert counts[0] < counts[1] < counts[2] < full_count
-    assert all(abs(count / full_count - view.fraction) < 0.08 for count, view in zip(counts, downs))
+    assert all(abs(count / full_count - view.fraction) < min(0.08, max(0.02, 0.15 * view.fraction))
+               for count, view in zip(counts, downs))
 
     api = LabApi(store).sample(sample.id12)
     assert api["found"] is True and api["source_id"] == sample.source_id
@@ -209,11 +212,13 @@ def _assert_default_scalar_selection(store, sample, payload) -> None:
         assert [cell["label"] for cell in curve_row["cells"]] == ["0.1", "0.25", "0.5", "full"]
         for cell in curve_row["cells"]:
             label = cell["label"]
-            before_cells[algorithm_id, label] = cell
+            before_cells[algorithm_id, label] = json.loads(json.dumps(cell))
             view = views_by_label[label]
             result = view.results[algorithm_id]
             assert cell["state"] in views.CELL_STATES, (algorithm_id, label)
             assert cell["depth_x"] == pytest.approx(view.depth_x())
+            assert result.depth is not None
+            assert cell["depth_x"] == pytest.approx(result.depth.approx_depth_x)
             if result.status != "ok":
                 assert cell["state"] == result.status
                 assert cell.get("value") is None
@@ -226,6 +231,9 @@ def _assert_default_scalar_selection(store, sample, payload) -> None:
             if algorithm_id in {"bam-qc", "depth", "fragment-size"}:
                 assert cell["state"] in {"ok_usable", "ok_unstable"}
                 assert isinstance(metric.value, (int, float)) and math.isfinite(metric.value)
+        if algorithm_id == "depth":
+            xs = [cell["depth_x"] for cell in curve_row["cells"]]
+            assert xs == sorted(set(xs)), xs
 
     # A later selected failure or null value changes the API's measured cell;
     # it must not fall back to the previous successful attempt or disappear.
@@ -257,6 +265,7 @@ def _assert_default_scalar_selection(store, sample, payload) -> None:
     updated_rows = {row["algorithm_id"]: row for row in updated["curve"]["rows"]}
     assert set(updated_rows) == expected_curve_ids
     for algorithm_id, row in updated_rows.items():
+        assert [cell["label"] for cell in row["cells"]] == ["0.1", "0.25", "0.5", "full"]
         for cell in row["cells"]:
             if (algorithm_id, cell["label"]) not in {("bam-qc", "0.1"), ("fragment-size", "0.25")}:
                 assert cell == before_cells[algorithm_id, cell["label"]]
