@@ -94,7 +94,7 @@ def test_planned_result_resolves_into_sample_profile_without_identity_stubs(
     bam = write_bam(tmp_path / "aligned.bam", contigs, [
         Read("mapped", "chr1", 100, "A" * 75),
         Read("unmapped", "chr1", 0, "A" * 75, flag=4),
-    ])
+    ], platform="ONT")
     assert signed_cli.main(["lab", "run", str(bam), "--root", str(store.root),
                             "--only", "microbial", "--no-downsample", "--no-controls", "--json"]) == 0
     source = source_ids(store)[0]
@@ -135,7 +135,7 @@ def test_outer_timeout_removes_private_candidate_files(
     bam = write_bam(tmp_path / "aligned.bam", contigs, [
         Read("mapped", "chr1", 100, "A" * 75),
         Read("candidate", "chr1", 0, "A" * 75, flag=4),
-    ])
+    ], platform="ONT")
     common = [str(bam), "--root", str(store.root), "--no-downsample", "--no-controls", "--json"]
     assert signed_cli.main(["lab", "run", *common, "--only", "read-summary"]) == 0
     signed_cli.main(["lab", "run", *common, "--only", "microbial", "--timeout-s", "15"])
@@ -214,6 +214,14 @@ def test_production_cohort_snapshot_excludes_unassayable_and_changed_db(tmp_path
                                 parameters={}, tools=pins, asset_sha256s=lambda root: db_digest)
     monkeypatch.setattr(cohorts, "load_registry", lambda: (summary, microbial))
     manifest = {"kind": "prealigned", "source_id": source_id, "reference_sha256": reference_sha}
+    input_dir = store.inputs_dir / input_id
+    input_dir.mkdir(parents=True)
+    with pysam.AlignmentFile(str(input_dir / "aligned.bam"), "wb", header={
+        "HD": {"VN": "1.6", "SO": "coordinate"},
+        "SQ": [{"SN": "chr1", "LN": 1000}],
+        "RG": [{"ID": "synthetic", "PL": "ONT"}],
+    }):
+        pass
     summary_identity = execution_identity(summary, reference_sha256=reference_sha)
     microbial_identity = execution_identity(
         microbial, reference_sha256=reference_sha, asset_sha256s=db_digest,
