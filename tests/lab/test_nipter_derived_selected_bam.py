@@ -20,7 +20,7 @@ from traceback_lab.registry import Ready, Requirements
 from traceback_lab.store import LabStore
 
 from .bam_fixtures import Read, context_for
-from .test_fetal_nipter import INPUT, REFERENCE, SOURCE, _contract
+from .test_fetal_nipter import INPUT, REFERENCE, SOURCE, _contract, _stored_input
 
 
 def _selected(name: str, spec) -> bool:
@@ -35,6 +35,7 @@ def test_nipter_derived_bins_selected_bam_with_parent_controls(tmp_path: Path, m
     reads += [Read(f"c13-{i}", "chr13", 1000 + i * 1000, "A" * 75) for i in range(10)]
     context = context_for(tmp_path, contigs, reads, eligible_reads=len(reads))
     store = LabStore(tmp_path)
+    _stored_input(store)
     path, digest, control = _contract(tmp_path)
     contract = register_contract(store, path, digest)
     runtime = tmp_path / "Rscript"
