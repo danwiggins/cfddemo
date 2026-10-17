@@ -45,16 +45,6 @@ def _record(lab: Path, source_id: str) -> dict[str, Any]:
     return record
 
 
-def _file_size(path: Path) -> int:
-    try:
-        info = path.lstat()
-    except OSError as exc:
-        raise InventoryError("required aligned BAM or index is unavailable") from exc
-    if not stat.S_ISREG(info.st_mode):
-        raise InventoryError("required aligned BAM or index is not a regular file")
-    return info.st_size
-
-
 def _inventory(lab: Path, max_entries: int) -> tuple[dict[str, int], int, set[str]]:
     """Count each file once; reject links and capped/incomplete walks."""
     sizes: dict[str, int] = defaultdict(int)
@@ -121,12 +111,14 @@ def account(root: Path, source_id: str, input_id: str | None = None, *,
     derived_ids = [_sha(row.get("input_id"), "derived input_id") for row in derived
                    if isinstance(row, dict) and row.get("parent_input_id") == selected]
     sample_ids = {selected, *derived_ids}
-    bam_bytes = _file_size(lab / "inputs" / selected / "aligned.bam")
-    bai_bytes = _file_size(lab / "inputs" / selected / "aligned.bam.bai")
+    sizes, staging_entries, input_entries = _inventory(lab, max_entries)
+    bam_bytes = sizes.get(f"inputs/{selected}/aligned.bam")
+    bai_bytes = sizes.get(f"inputs/{selected}/aligned.bam.bai")
+    if bam_bytes is None or bai_bytes is None:
+        raise InventoryError("required aligned BAM or index is unavailable")
     denominator = bam_bytes + bai_bytes
     if denominator == 0:
         raise InventoryError("aligned BAM and index have zero combined bytes")
-    sizes, staging_entries, input_entries = _inventory(lab, max_entries)
     other_input_present = bool(input_entries - sample_ids - {"index.json"})
     sample_inputs = 0
     other_inputs = 0
