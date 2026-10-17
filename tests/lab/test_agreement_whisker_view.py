@@ -58,8 +58,8 @@ def test_agreement_points_and_findings_cutoff_whisker(tmp_path, monkeypatch) -> 
                 f"--user-data-dir={profile}", "--window-size=1280,800",
                 server.issue_link() + f"&route=/sample/{id12}/{route}",
             ], profile, ok=lambda page: 'data-ready="1"' in page and
-                ("compatible paired cohort sources" in page if route == "agreement"
-                 else "cutoff-whisker" in page), timeout=60)
+                    ("compatible paired cohort sources" in page and page.count('data-rendered="1"') >= 2
+                     if route == "agreement" else "cutoff-whisker" in page), timeout=60)
 
         agreement = dom("agreement")
         findings = dom("findings")
