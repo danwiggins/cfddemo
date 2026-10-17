@@ -290,6 +290,20 @@
     const runRows = sample.algorithms.map((a) => {
       const status = running === a.algorithm_id ? "running" : a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status;
       const cells = [h("th", { scope: "row" }, a.algorithm_id + (a.hidden ? " (intermediate)" : "")), h("td", { class: a.status === "failed" ? "problem" : null }, status), h("td", { class: "num" }, a.duration_s !== null && a.duration_s !== undefined ? `${a.duration_s.toFixed(1)} s` : "—")];
+      const logLine = h("span", { class: "help", "aria-live": "polite" });
+      const logLink = h("a", { href: `#/sample/${sample.id12}/trust-qc`, onclick: async (event) => {
+        event.preventDefault();
+        logLine.replaceChildren("Loading run log line…");
+        try {
+          const line = await api(`/api/samples/${sample.id12}/run-log/${a.algorithm_id}`);
+          logLine.replaceChildren(line.found
+            ? `${line.run_id} · line ${line.line} · ${line.utc || "time unavailable"} · step_end ${line.step} status=${line.status}${line.skip_reason ? ` (${line.skip_reason})` : ""}${line.duration_s !== null ? ` · ${line.duration_s} s` : ""}`
+            : "No matching line in the 64 most recent runs.");
+        } catch (error) {
+          logLine.replaceChildren(error.session ? "Session expired; reopen Lab." : "Run log line unavailable.");
+        }
+      } }, "Run log line →");
+      cells.push(h("td", {}, logLink, " ", logLine));
       const detail = a.failure
         ? h("details", {}, h("summary", {}, "Last 50 stderr lines (scrubbed)"), h("pre", { class: "stderr" }, a.failure.stderr_tail.join("\n") || a.failure.first_line))
         : a.skip_message ? h("span", {}, a.skip_message) : "";
@@ -297,7 +311,7 @@
       return h("tr", {}, ...cells);
     });
     out.push(h("section", { class: "panel" }, h("h2", {}, "Run"),
-      h("div", { class: "table-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, ...["Algorithm", "Status", "Duration", "Detail"].map((t) => h("th", { scope: "col" }, t)))), h("tbody", {}, ...runRows)))));
+      h("div", { class: "table-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, ...["Algorithm", "Status", "Duration", "Run log", "Detail"].map((t) => h("th", { scope: "col" }, t)))), h("tbody", {}, ...runRows)))));
     // QC bands.
     const banded = [];
     for (const a of sample.algorithms) for (const m of a.metrics) if (m.qc_band) banded.push([m.label, fmt(m.value), m.qc_band]);

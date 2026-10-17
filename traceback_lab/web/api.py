@@ -9,6 +9,9 @@ result's own attempt directory and no component is a symlink.
 from __future__ import annotations
 
 import os
+import json
+import math
+import re
 import shlex
 import stat
 import threading
@@ -299,6 +302,62 @@ class LabApi:
                 "unverified_citations": len(unverified),
             },
         }
+
+    def run_log_line(self, id12: str, algorithm_id: str) -> dict[str, Any]:
+        """Return a bounded, allowlisted step-end line for the selected full result."""
+
+        source_id, _ = self._resolve(id12)
+        if source_id is None:
+            return {"found": False}
+        sample = views.load_sample(self.store, source_id)
+        if sample is None:
+            return {"found": False}
+        result = sample.full.results.get(algorithm_id)
+        if result is None:
+            return {"found": False}
+        identity = result.provenance.parameters_sha256
+        for run_id in self.store.run_ids()[:64]:
+            raw = _read_contained(self.store.runs_dir, [], f"{run_id}.jsonl", limit=1024 * 1024)
+            if raw is None:
+                continue
+            lines = raw.splitlines()
+            if len(lines) > 4096:
+                continue
+            events = []
+            for number, line in enumerate(lines, 1):
+                try:
+                    event = json.loads(line)
+                except (ValueError, UnicodeDecodeError):
+                    continue
+                if isinstance(event, dict):
+                    events.append((number, event))
+            if not any(
+                event.get("event") == "sample"
+                and event.get("source_id") == source_id
+                and event.get("input_id") == sample.full.input_id
+                for _, event in events
+            ):
+                continue
+            for number, event in reversed(events):
+                if (event.get("event") != "step_end" or event.get("step") != algorithm_id
+                        or event.get("parameters_sha256") != identity
+                        or event.get("status") not in ("ok", "skipped", "failed")):
+                    continue
+                utc = event.get("utc")
+                reason = event.get("skip_reason")
+                duration = event.get("duration_s")
+                return {
+                    "found": True,
+                    "run_id": run_id,
+                    "line": number,
+                    "step": algorithm_id,
+                    "utc": utc if isinstance(utc, str) and re.fullmatch(r"[0-9TZ:.+-]{1,40}", utc) else None,
+                    "status": event["status"],
+                    "skip_reason": reason if isinstance(reason, str) and re.fullmatch(r"[a-z0-9_-]{1,64}", reason) else None,
+                    "duration_s": duration if isinstance(duration, (int, float)) and not isinstance(duration, bool)
+                    and math.isfinite(duration) and 0 <= duration <= 1e9 else None,
+                }
+        return {"found": False}
 
     # -- Compare (L1.6): one pinned immutable cohort generation ----------------------
     def cohorts(self) -> dict[str, Any]:
