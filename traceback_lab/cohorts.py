@@ -462,10 +462,12 @@ def _selected_results(
         if len(upstream) != len(algorithm.upstream):
             continue
         assets_of = getattr(algorithm, "asset_sha256s", None)
+        scoped_assets_of = getattr(algorithm, "asset_sha256s_for_input", None)
         identity_assets = getattr(algorithm, "identity_assets", None)
         identity_tools = getattr(algorithm, "identity_tools", None)
         try:
             assets = (None if callable(identity_assets) else
+                      list(scoped_assets_of(store.root, input_id)) if callable(scoped_assets_of) else
                       list(assets_of(store.root) if callable(assets_of) else ()))
             stored = _recorded_selection(store, input_id, algorithm, attempt, latest, manifest,
                                          upstream, assets, platform)
@@ -530,6 +532,10 @@ def _selected_results(
             per_sample_asset_keys=("pon_sha256",) if effective_parameters.get("pon_policy") == "lab_loo_v1" else (),
             platform=platform if platform != "ont" else None,
         )
+        if algorithm.id == "fetal-fraction":
+            # An input-scoped prenatal control is part of the measurement;
+            # never pool z-scores produced against different control RDS bytes.
+            compat = chosen.provenance.parameters_sha256
         found.append(CohortResult(
             algorithm_id=algorithm.id, parameters_sha256=chosen.provenance.parameters_sha256,
             cohort_compat_key=compat, metrics=metrics,

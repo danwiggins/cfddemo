@@ -85,6 +85,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     add_asset_parser(commands, _common)
 
+    from .fetal_command import add_fetal_parser
+
+    add_fetal_parser(commands, _common)
+
+    from .dd_command import add_dd_parser
+
+    add_dd_parser(commands, _common)
+
     from .doctor import add_doctor_parser
 
     add_doctor_parser(commands, _common)

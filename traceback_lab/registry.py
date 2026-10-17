@@ -51,6 +51,7 @@ ALGORITHMS: tuple[str, ...] = (
     "arm_summary:ARM_SUMMARY",
     "long_tail:LONG_TAIL",
     "sex_check:SEX_CHECK",
+    "dd_cfdna_chry:DD_CFDNA_CHRY",
     "identity:IDENTITY",
     "mtdna:MTDNA",
     "viral_reads:VIRAL_READS",
@@ -67,6 +68,8 @@ ALGORITHMS: tuple[str, ...] = (
     "methylbert:METHYLBERT",
     "hypometh_reads:HYPOMETH_READS",
     "frag_x_meth:FRAG_X_METH",
+    "fetal_fraction:FETAL_FRACTION",
+    "fetal_fraction_chry:FETAL_FRACTION_CHRY",
     "epi_clock:EPI_CLOCK",
 )
 

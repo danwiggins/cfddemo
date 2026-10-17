@@ -10,6 +10,10 @@ licenses:
       checkpoint is not distributed with the Lab; its data and model terms
       must be checked separately by the operator before registration.
     url: "https://github.com/CompEpigen/methylbert/blob/main/LICENSE"
+  nipter-lgpl:
+    headline: "LGPL: NIPTeR prenatal analysis"
+    body: "The installed NIPTeR 1.0.2 DESCRIPTION says GNU Lesser General Public License without a version. NIPTeR runs as a separate R process; its license terms and the control cohort's data rights require independent review."
+    url: "https://github.com/molgenis/NIPTeR"
   lionheart-resources-research:
     headline: "RESEARCH-ONLY RESOURCES: LIONHEART cell-type scores"
     body: >-

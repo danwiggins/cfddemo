@@ -3068,6 +3068,192 @@ entries:
     citations: []
     citation_checked: {by: "Lab TLEN engineering review", date: "2026-10-16", note: "Engineering FFT statistic reused over TLEN bins, not an established clinical threshold."}
 
+  - algorithm_id: fetal-fraction
+    metric_id: fetal_fraction
+    label: "Fetal fraction (model unavailable)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: PROVEN
+    origin_platform: "prenatal cfDNA; no ONT-matched fetal-fraction model"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "NIPTeR does not calculate fetal fraction; a separately validated model is required"
+    missing_value_caption: "No validated fetal-fraction model is registered. NIPTeR only calculates chromosome z-scores."
+    meaning_high: "A higher measured fetal fraction would require a separately validated method."
+    meaning_low: "A lower measured fetal fraction would require a separately validated method."
+    confounders: ["gestational age", "maternal factors", "fetal sex", "assay platform"]
+    next_steps:
+      analytical: ["Obtain and validate an independent fetal-fraction model on the matched ONT protocol"]
+      clinical_setting: null
+    license_ids: [nipter-lgpl]
+    flags: [FDA, PRIVACY, LEGAL]
+    headline: true
+    stability: {kind: proportion}
+    citations:
+      - "doi:10.1186/s12859-018-2557-8"
+    citation_checked: {by: "Lab NIPTeR method review", date: "2026-10-17", note: "Package function index and original NIPTeR paper reviewed; fetal fraction is not an NIPTeR output."}
+
+  - algorithm_id: fetal-fraction
+    metric_id: trisomy_13_z
+    label: "Chromosome 13 NIPTeR z-score"
+    value_kind: signed
+    tier: SPECULATIVE
+    origin_tier: PROVEN
+    origin_platform: "short-read prenatal cfDNA with a matched euploid NIPTeR control group"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No ONT-matched clinical cutoff or validation"
+    meaning_high: "Higher chromosome 13 fraction relative to the registered control group."
+    meaning_low: "Lower chromosome 13 fraction relative to the registered control group."
+    confounders: ["control group mismatch", "GC bias", "mapping bias", "fetal fraction"]
+    next_steps: {analytical: ["Inspect control-group match and protocol"], clinical_setting: null}
+    license_ids: [nipter-lgpl]
+    flags: [FDA, PRIVACY, LEGAL]
+    headline: false
+    stability: {kind: absolute, tolerance: 0.1}
+    citations: ["doi:10.1186/s12859-018-2557-8"]
+    citation_checked: {by: "Lab NIPTeR method review", date: "2026-10-17", note: "Package workflow and paper reviewed; ONT transfer lacks matched validation."}
+
+  - algorithm_id: fetal-fraction
+    metric_id: trisomy_18_z
+    label: "Chromosome 18 NIPTeR z-score"
+    value_kind: signed
+    tier: SPECULATIVE
+    origin_tier: PROVEN
+    origin_platform: "short-read prenatal cfDNA with a matched euploid NIPTeR control group"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No ONT-matched clinical cutoff or validation"
+    meaning_high: "Higher chromosome 18 fraction relative to the registered control group."
+    meaning_low: "Lower chromosome 18 fraction relative to the registered control group."
+    confounders: ["control group mismatch", "GC bias", "mapping bias", "fetal fraction"]
+    next_steps: {analytical: ["Inspect control-group match and protocol"], clinical_setting: null}
+    license_ids: [nipter-lgpl]
+    flags: [FDA, PRIVACY, LEGAL]
+    headline: false
+    stability: {kind: absolute, tolerance: 0.1}
+    citations: ["doi:10.1186/s12859-018-2557-8"]
+    citation_checked: {by: "Lab NIPTeR method review", date: "2026-10-17", note: "Package workflow and paper reviewed; ONT transfer lacks matched validation."}
+
+  - algorithm_id: fetal-fraction
+    metric_id: trisomy_21_z
+    label: "Chromosome 21 NIPTeR z-score"
+    value_kind: signed
+    tier: SPECULATIVE
+    origin_tier: PROVEN
+    origin_platform: "short-read prenatal cfDNA with a matched euploid NIPTeR control group"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No ONT-matched clinical cutoff or validation"
+    meaning_high: "Higher chromosome 21 fraction relative to the registered control group."
+    meaning_low: "Lower chromosome 21 fraction relative to the registered control group."
+    confounders: ["control group mismatch", "GC bias", "mapping bias", "fetal fraction"]
+    next_steps: {analytical: ["Inspect control-group match and protocol"], clinical_setting: null}
+    license_ids: [nipter-lgpl]
+    flags: [FDA, PRIVACY, LEGAL]
+    headline: false
+    stability: {kind: absolute, tolerance: 0.1}
+    citations: ["doi:10.1186/s12859-018-2557-8"]
+    citation_checked: {by: "Lab NIPTeR method review", date: "2026-10-17", note: "Package workflow and paper reviewed; ONT transfer lacks matched validation."}
+
+  - &fetal_chry_base
+    algorithm_id: fetal-fraction-chry
+    metric_id: fetal_fraction
+    label: "Male-fetus chrY calibrated fetal fraction"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: PROVEN
+    origin_platform: "short-read maternal plasma sequencing; ONT transfer unvalidated"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No independently verified, ONT-matched accuracy or detection limit"
+    missing_value_caption: "The chrY rate is outside the operator's validated calibration bounds or the method was gated."
+    meaning_high: "More chrY signal under an asserted male-fetus pregnancy and matched calibration."
+    meaning_low: "Less chrY signal; background and assay limits may dominate."
+    confounders: ["fetal-sex assertion", "other male DNA sources", "sex-chromosome variation", "mapping bias", "protocol mismatch"]
+    next_steps: {analytical: ["Review the operator calibration and chrY read count"], clinical_setting: null}
+    license_ids: []
+    flags: [FDA, PRIVACY, LEGAL]
+    headline: true
+    stability: {kind: proportion}
+    citations: ["doi:10.1371/journal.pone.0146997"]
+    citation_checked: {by: "Lab S4 fetal-fraction method review", date: "2026-10-17", note: "Primary method reviewed; no ONT calibration supplied or assumed."}
+
+  - <<: *fetal_chry_base
+    metric_id: fetal_chry_nonpar_reads
+    label: "Male-fetus chrY non-PAR reads"
+    value_kind: count
+    missing_value_caption: "Not measured because the chrY method was gated."
+    meaning_high: "More eligible chrY starts outside pseudoautosomal regions."
+    meaning_low: "Fewer eligible chrY starts; the calibrated fraction may be unavailable."
+    headline: false
+    stability: {kind: scales_with_depth, tolerance: 0.1}
+
+  - <<: *fetal_chry_base
+    metric_id: fetal_chry_reads_per_million
+    label: "Male-fetus chrY non-PAR reads per million eligible"
+    value_kind: positive
+    missing_value_caption: "Not measured because the chrY method was gated."
+    meaning_high: "Higher observed chrY rate before calibration."
+    meaning_low: "Lower observed chrY rate before calibration."
+    headline: false
+    stability: {kind: relative, tolerance: 0.1}
+  - algorithm_id: dd-cfdna-chry
+    metric_id: dd_cfdna_fraction
+    label: "Exploratory male-donor chrY fraction"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "male donor, female recipient, matched ONT transplant cfDNA calibration"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No qualified ONT donor-fraction accuracy or clinical reference interval"
+    missing_value_caption: "No operator-verified matched calibration, insufficient calibrated depth, or chrY rate outside calibration bounds."
+    meaning_high: "More non-PAR chrY reads relative to the registered female background and full male-donor response."
+    meaning_low: "Fewer non-PAR chrY reads relative to that calibration."
+    confounders: ["pregnancy", "sex chromosome variation", "alignment bias", "control mismatch", "low depth"]
+    next_steps: {analytical: ["Verify transplant assertions and calibration provenance", "Validate on matched mixtures before interpretation"], clinical_setting: null}
+    license_ids: []
+    flags: [FDA, PRIVACY]
+    headline: true
+    stability: {kind: absolute, tolerance: 0.10}
+    citations: []
+    citation_checked: {by: "Lab donor calibration review", date: "2026-10-17", note: "Linear response is an explicit operator-supplied engineering calibration, not a published clinical estimator."}
+
+  - algorithm_id: dd-cfdna-chry
+    metric_id: chry_nonpar_reads
+    label: "Eligible chrY non-PAR reads"
+    value_kind: count
+    tier: SPECULATIVE
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "Raw supporting count, not a clinical cutoff"
+    license_ids: []
+    flags: [FDA, PRIVACY]
+    headline: false
+    stability: {kind: scales_with_depth, tolerance: 0.10}
+    citations: []
+
+  - algorithm_id: dd-cfdna-chry
+    metric_id: chry_reads_per_million
+    label: "Eligible chrY non-PAR reads per million"
+    value_kind: positive
+    tier: SPECULATIVE
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "A matched female background is required for interpretation"
+    license_ids: []
+    flags: [FDA, PRIVACY]
+    headline: false
+    stability: {kind: relative, tolerance: 0.10}
+    citations: []
+
   - algorithm_id: epi-clock
     metric_id: epigenetic_age_years
     label: "Exploratory Weidner three-CpG age estimate"
