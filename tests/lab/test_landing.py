@@ -274,6 +274,40 @@ def test_findings_grouping_and_flags(page_root, tmp_path) -> None:
 
 
 @needs_chrome
+def test_next_step_and_identity_privacy_flags_are_local_pills(page_root, tmp_path, monkeypatch) -> None:
+    from traceback_lab.web.api import LabApi
+
+    real_sample = LabApi.sample
+
+    def sample_with_disclosures(api, id12):
+        payload = real_sample(api, id12)
+        metric = next(
+            metric for algorithm in payload["algorithms"] if not algorithm["hidden"]
+            for metric in algorithm["metrics"]
+            if metric.get("entry") and isinstance(metric.get("value"), (int, float))
+        )
+        metric["label"] = "Analytical next-step probe"
+        metric["state"] = "above_typical"
+        metric["entry"]["next_steps"] = {"analytical": ["Inspect the depth curve"]}
+        payload["algorithms"].append({
+            "algorithm_id": "identity", "status": "skipped", "hidden": True, "metrics": [],
+        })
+        return payload
+
+    monkeypatch.setattr(LabApi, "sample", sample_with_disclosures)
+    with RunningLabServer(LabStore(page_root)) as server:
+        findings = _dom(server, tmp_path / "findings-flags", route=f"/sample/{_id12(page_root)}/findings")
+        trust = _dom(server, tmp_path / "identity-flags", route=f"/sample/{_id12(page_root)}/trust-qc")
+
+    card = next(block for block in re.findall(r'<article class="finding-card".*?</article>', findings, re.S)
+                if "Analytical next-step probe" in block)
+    assert re.search(r'<strong>Next steps \(analytical\): </strong>Inspect the depth curve '
+                     r'<span class="flag-pill">FLAG: CLIA — reads as clinical advice', card)
+    identity = re.search(r'<h2>Identity comparisons</h2>(.*?)</section>', trust, re.S).group(1)
+    assert '<span class="flag-pill">FLAG: PRIVACY — pair comparison can reveal family relationships.</span>' in identity
+
+
+@needs_chrome
 def test_about_clia_renders_the_full_copy(page_root, tmp_path) -> None:
     with RunningLabServer(LabStore(page_root)) as server:
         dom = _dom(server, tmp_path, route="/about/clia",
