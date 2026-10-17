@@ -134,14 +134,17 @@ def _canonical(data: dict) -> bytes:
 
 def _valid_source_label(label: object, *, identifier: bool = False) -> bool:
     if (not isinstance(label, str) or not label or len(label) > 160 or label != label.strip()
-            or "\\" in label or any(ord(char) < 32 or 0x202a <= ord(char) <= 0x202e for char in label)):
+            or "\\" in label or any(ord(char) < 32 or 0x7f <= ord(char) <= 0x9f
+                                     or 0x200e <= ord(char) <= 0x200f
+                                     or 0x202a <= ord(char) <= 0x202e
+                                     or 0x2066 <= ord(char) <= 0x2069 for char in label)):
         return False
     if "/" not in label:
         return True
     if not identifier:
         return False
     doi = label.removeprefix("doi:")
-    if re.fullmatch(r"10\.\d{4,9}/[^\s\\]+", doi):
+    if re.fullmatch(r"10\.\d{4,9}/[^\s\\?#@]+", doi):
         return True
     try:
         parsed = urlsplit(label)

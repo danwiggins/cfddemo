@@ -123,6 +123,8 @@ class AlignedEndStructure(Base):
         u_counts = np.zeros(2 * RADIUS + 1, dtype=np.int64)
         d_counts = np.zeros(2 * RADIUS + 1, dtype=np.int64)
         valid_molecules = u_hits = d_hits = 0
+        span_length_bins = {"lt100": 0, "100_200": 0, "201_500": 0,
+                            "501_2000": 0, "gt2000": 0}
         contigs = summary.column("contig")
         starts = summary.column("start")
         ends = summary.column("end")
@@ -147,6 +149,12 @@ class AlignedEndStructure(Base):
                 valid = (first >= 0) & (exclusive_end > first) & (exclusive_end <= lengths[cid])
                 u = first[valid]
                 d = exclusive_end[valid] - 1
+                spans = exclusive_end[valid] - u
+                span_length_bins["lt100"] += int(np.count_nonzero(spans < 100))
+                span_length_bins["100_200"] += int(np.count_nonzero((spans >= 100) & (spans <= 200)))
+                span_length_bins["201_500"] += int(np.count_nonzero((spans > 200) & (spans <= 500)))
+                span_length_bins["501_2000"] += int(np.count_nonzero((spans > 500) & (spans <= 2000)))
+                span_length_bins["gt2000"] += int(np.count_nonzero(spans > 2000))
                 valid_molecules += len(u)
                 u_counts += _relative_counts(u, centers_by_id.get(cid, np.empty(0, dtype=np.int64)))
                 d_counts += _relative_counts(d, centers_by_id.get(cid, np.empty(0, dtype=np.int64)))
@@ -181,6 +189,7 @@ class AlignedEndStructure(Base):
             "catalogue_preferred_sites": catalogues.preferred_count,
             "eligible_preferred_sites": valid_preferred_sites,
             "valid_molecules": valid_molecules, "valid_ends": ends_total,
+            "aligned_span_length_bins_bp": span_length_bins,
             "preferred_u_hits": u_hits, "preferred_d_hits": d_hits,
         }
         return AlgorithmOutput(

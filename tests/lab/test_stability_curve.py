@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from traceback_lab import views
+from traceback_lab.interpretation.engine import load_library
 from traceback_lab.stability import Side, band_at, deviation, stable
 from traceback_lab.store import LabStore
 from traceback_runner import cli as signed_cli
@@ -51,6 +53,17 @@ def test_d32_table(spec, a, b, expected) -> None:
 def test_absolute_needs_a_tolerance() -> None:
     with pytest.raises(ValueError):
         stable({"kind": "absolute"}, Side(1.0), Side(1.0))
+
+
+def test_downsample_without_a_stability_rule_has_no_verdict() -> None:
+    metric = SimpleNamespace(metric_id="unlisted_metric", value=3, n=None, ci=None, ci_level=None)
+    result = SimpleNamespace(status="ok", metrics=[metric], depth=None)
+    full = views.InputView("full", "a" * 64, None, {}, {"unknown-algorithm": result})
+    half = views.InputView("0.5", "b" * 64, "downsample", {},
+                           {"unknown-algorithm": result}, fraction=0.5)
+    assert views.cell_state(half, full, "unknown-algorithm", "unlisted_metric", load_library()) == {
+        "state": "not_interpretable", "reason": "no_stability_verdict", "value": 3,
+    }
 
 
 def test_deviation_and_band_units() -> None:
