@@ -100,6 +100,28 @@ def test_wps_control_values_are_measured_but_not_declared_usable() -> None:
     assert all(row["stable"] is None for row in repeatability["worst"])
 
 
+def test_all_skipped_wps_controls_are_not_called_unstable() -> None:
+    provenance = Provenance(
+        tool="wps", tool_version="1", parameters_sha256="a" * 64,
+        source_id="b" * 64, input_id="c" * 64, reference_id="hg38",
+        timestamp_utc="2026-10-17T00:00:00Z",
+    )
+    full_result = ResultEnvelope(
+        algorithm_id="wps", algorithm_version="1", status="ok", provenance=provenance,
+        depth=Depth(eligible_reads=1_000_000, approx_depth_x=12),
+        metrics=[Metric(metric_id="qualifying_fragment_depth_x", value=0.7)],
+    )
+    skipped_result = full_result.model_copy(update={"status": "skipped", "skip_reason": "depth", "metrics": []})
+    full = views.InputView("full", "c" * 64, None, {}, {"wps": full_result}, 1.0)
+    half = views.InputView("0.5", "d" * 64, "downsample", {}, {"wps": skipped_result}, 0.5)
+    sample = views.SampleView("b" * 64, "b" * 12, False, full, [half])
+
+    panel = next(p for p in views.stability_panels(sample)
+                 if p["algorithm_id"] == "wps" and p["metric_id"] == "qualifying_fragment_depth_x")
+    assert panel["points"][0]["state"] == "skipped"
+    assert panel["verdict"] == "not measured below full depth"
+
+
 def test_deviation_and_band_units() -> None:
     assert deviation(R, 110.0, 100.0) == (10.0, "percent")
     assert deviation(A, 170, 167) == (3, "unit")
