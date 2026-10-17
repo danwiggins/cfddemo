@@ -22,6 +22,7 @@ from pydantic import ValidationError
 from traceback_runner.serialization import canonical_json_bytes
 
 from .asset_contracts import AssetDescriptor
+from .file_access import open_regular_no_follow
 if TYPE_CHECKING:
     from .store import LabStore
 
@@ -113,19 +114,7 @@ def _regular_file(path: Path) -> None:
 def _open_regular(path: Path) -> int:
     """Open without following path-component symlinks where dirfd is available."""
 
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-    if os.name != "posix" or not hasattr(os, "O_NOFOLLOW"):
-        return os.open(path, flags)
-    absolute = Path(os.path.abspath(path))
-    directory = os.open(absolute.anchor, os.O_RDONLY | os.O_DIRECTORY)
-    try:
-        for part in absolute.parts[1:-1]:
-            child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
-            os.close(directory)
-            directory = child
-        return os.open(absolute.name, flags, dir_fd=directory)
-    finally:
-        os.close(directory)
+    return open_regular_no_follow(path)
 
 
 def _file_identity(info: os.stat_result) -> tuple[int, int, int, int, int]:

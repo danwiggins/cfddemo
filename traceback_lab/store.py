@@ -44,6 +44,7 @@ from traceback_runner.serialization import canonical_json_bytes
 
 from . import STORE_VERSION
 from .envelope import ResultEnvelope
+from .file_access import open_regular_no_follow
 from .identity import ALGORITHM_ID_PATTERN, SHA256_PATTERN
 from .problems import LabProblem
 
@@ -1104,6 +1105,7 @@ __all__ = [
     "WriterLock",
     "new_attempt_id",
     "new_run_id",
+    "open_regular_no_follow",
     "pid_alive",
     "summarize_run",
     "write_atomic",
