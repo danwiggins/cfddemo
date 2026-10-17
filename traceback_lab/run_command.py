@@ -302,8 +302,8 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
         source_id = resolve_sample(store, args.inputs[0])
         with_sex_assertion(source_record(store, source_id) or {}, args.sex)
         aligned, _ = _stored_input(store, source_id)
-        data["platform"] = _stored_platform(aligned)
-        data["sample"] = {"id12": id12_for(store, source_id), "input_id": aligned.input_id}
+        data["sample"] = {"id12": id12_for(store, source_id), "input_id": aligned.input_id,
+                          "platform": _stored_platform(aligned)}
         data["alignment"] = "reused (stored sample)"
         lines.append(f"SAMPLE    {id12_for(store, source_id)} (stored)")
         lines.append("ALIGN     reused (stored sample)")
@@ -311,7 +311,8 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
         paths = collect_paths(args.inputs)
         chunkset = inspect_chunks(paths, store, skip_bad_chunks=args.skip_bad_chunks, write_cache=False)
         input_platform = _declared_platform(chunkset)
-        data["platform"] = input_platform if chunkset.aligned else "ont"
+        data["sample"] = {"source_id": chunkset.source_id,
+                          "platform": input_platform if chunkset.aligned else "ont"}
         with_sex_assertion(source_record(store, chunkset.source_id) or {}, args.sex)
         reference = resolve_reference(store.root, args.reference_id)
         data["reference_id"] = reference.reference_id
