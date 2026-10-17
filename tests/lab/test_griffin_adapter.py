@@ -425,6 +425,11 @@ def test_griffin_bam_header_must_match_reference(tmp_path: Path) -> None:
     chrom_sizes = tmp_path / "hg38.standard.chrom.sizes"
     chrom_sizes.write_text("chr1\t100\n", encoding="ascii")
     _require_chrom_sizes(fasta, chrom_sizes)
+    two_autosomes = tmp_path / "two-autosomes.fa"
+    two_autosomes.write_text(">chr1\n" + "A" * 100 + "\n>chr2\n" + "C" * 100 + "\n", encoding="ascii")
+    pysam.faidx(str(two_autosomes))
+    with pytest.raises(ValueError, match="omit autosomes"):
+        _require_chrom_sizes(two_autosomes, chrom_sizes)
     chrom_sizes.write_text("chr1\t101\n", encoding="ascii")
     with pytest.raises(ValueError, match="differ from the registered FASTA"):
         _require_chrom_sizes(fasta, chrom_sizes)
