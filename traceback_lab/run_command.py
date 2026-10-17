@@ -425,6 +425,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                 if stored:
                     source_id = resolve_sample(store, args.inputs[0])
                     aligned, record = _stored_input(store, source_id)
+                    _stored_platform(aligned)
                     record = record_source_sex(store, source_id, args.sex)
                     example = bool(record.get("example"))
                     reference_id = aligned.manifest["reference_id"]
@@ -648,6 +649,7 @@ def _derived_phase(
     runs = run_derived(
         store, lock, log, target, specs, items, by_id, run_id=run_id, read_summary=read_summary,
         force=args.force, timeout_s=args.timeout_s, scrubber=scrubber, progress=progress,
+        echo=_echo(args.verbose),
         parent_upstream=_parent_intermediates(items, results),
     )
     summary["cna"] = synthetic_summary(store, runs)
