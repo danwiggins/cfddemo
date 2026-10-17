@@ -41,7 +41,7 @@ def test_nipter_derived_bins_selected_bam_with_parent_controls(tmp_path: Path, m
     runtime.write_bytes(b"synthetic Rscript")
     runtime_sha = hashlib.sha256(runtime.read_bytes()).hexdigest()
     monkeypatch.setattr(fetal, "_rscript", lambda: (runtime, runtime_sha))
-    monkeypatch.setattr(fetal, "_nipter_package_sha", lambda path: "e" * 64)
+    monkeypatch.setattr(fetal, "_nipter_package_sha", lambda path, **_kwargs: "e" * 64)
     algorithm = replace(fetal.FETAL_FRACTION, requires=Requirements(min_eligible_reads=0))
     assets = algorithm.asset_sha256s_for_input(store.root, INPUT)
     assert assets == [contract.manifest_sha256, contract.control_sha256,
