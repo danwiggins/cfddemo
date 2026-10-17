@@ -18,7 +18,7 @@ from traceback_lab.algorithms.global_5mc import GLOBAL_5MC
 from traceback_lab.algorithms.hypometh_reads import HYPOMETH_READS, classify_reads
 from traceback_lab.algorithms.meth_calls import METH_CALLS
 from traceback_lab.algorithms.pmd_score import ASSET_NAME, PmdScore, inside, read_intervals
-from traceback_lab.meth_calls import DTYPE, HAS_H, HAS_M, SCHEMA, MethCalls, argmax_state
+from traceback_lab.meth_calls import CHUNK_CALLS, DTYPE, HAS_H, HAS_M, SCHEMA, MethCalls, argmax_state
 from traceback_lab.read_summary import ReadSummary
 from traceback_lab.registry import Ready, Skip
 
@@ -261,48 +261,67 @@ def test_methylation_consumers_need_meth_calls_upstream() -> None:
 # ---------------------------------------------------------- bounded RSS
 _PEAK = textwrap.dedent(
     """
-    import resource, sys
+    import json, resource, sys
     from pathlib import Path
-    from traceback_lab.meth_calls import HAS_M, MethCalls, argmax_state
-    store = MethCalls.open(Path(sys.argv[1]))
-    sites = methylated = 0
+    import numpy as np
+    from traceback_lab.algorithms._meth import load_calls
+    from traceback_lab.algorithms.global_5mc import GLOBAL_5MC
+    from traceback_lab.registry import InputContext
+    root = Path(sys.argv[1])
+    ctx = InputContext(root=root, source_id="a" * 64, input_id="b" * 64,
+                       reference_id="hg38", reference_sha256="c" * 64, input_dir=root,
+                       extras={"upstream": {"meth-calls": str(root / "meth-calls"),
+                                            "read-summary": str(root / "read-summary")}})
+    calls, mask = load_calls(ctx)
+    assert mask is None and len(calls.meta["chunks"]) > 1
+    result = None
     if sys.argv[2] == "stream":
-        for chunk in store.chunks(None):
-            chunk = chunk[(chunk["channels"] & HAS_M) != 0]
-            sites += chunk.size
-            methylated += int((argmax_state(chunk) == 1).sum())
+        metric = GLOBAL_5MC.run(ctx, root).metrics[0]
+        result = [metric["value"], metric["n"]]
+    elif sys.argv[2] == "eager":
+        materialized = np.concatenate(list(calls.chunks()))
+        result = [int(materialized.size)]
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    print(peak * (1 if sys.platform == "darwin" else 1024), sites)
+    print(json.dumps({"rss": peak * (1 if sys.platform == "darwin" else 1024), "result": result}))
     """
 )
 
 
 def test_global_5mc_streaming_has_bounded_peak_rss(tmp_path: Path) -> None:
-    """2M calls (30 MB on disk) in 100k-call chunks: streaming stays within a
-    fixed bound over an interpreter that opens the store and reads nothing."""
+    """The production consumer stays below eager loading with >1 normal chunk."""
 
-    n, chunk = 2_000_000, 100_000
-    directory = tmp_path / "calls"
-    directory.mkdir()
-    rng = np.random.default_rng(0)
+    chunk = CHUNK_CALLS
+    n = 3 * chunk
+    directory = tmp_path / "meth-calls" / "calls"
+    directory.mkdir(parents=True)
     for index in range(n // chunk):
         part = np.zeros(chunk, dtype=DTYPE)
         part["read_row"] = np.arange(index * chunk, (index + 1) * chunk) // 8
-        part["p_m"] = rng.integers(0, 256, chunk)
+        part["p_m"][1::4] = 255
+        part["p_m"][3::4] = 255
         part["p_canonical"] = 255 - part["p_m"]
         part["channels"] = HAS_M
+        part["channels"][::4] = 0
         part.tofile(directory / f"calls-{index:05d}.bin")
     (directory / "meta.json").write_text(json.dumps({"schema": SCHEMA, "chunks": [chunk] * (n // chunk), "codes_sampled": ["C+m"]}))
+    summary = tmp_path / "read-summary" / "columns"
+    summary.mkdir(parents=True)
+    from traceback_lab.read_summary import SCHEMA as READ_SUMMARY_SCHEMA
 
-    def peak(mode: str) -> tuple[int, int]:
-        out = subprocess.run([sys.executable, "-c", _PEAK, str(directory), mode], check=True, capture_output=True, text=True)
-        value, sites = out.stdout.split()
-        return int(value), int(sites)
+    (summary / "meta.json").write_text(json.dumps({"schema": READ_SUMMARY_SCHEMA, "rows": n // 8,
+                                                    "contigs": ["chr1"], "lengths": [1_000_000]}))
 
-    baseline, _ = peak("open")
-    streamed, sites = peak("stream")
-    assert sites == n
-    assert streamed - baseline < 24 * 1024 * 1024, (baseline, streamed)
+    def peak(mode: str) -> dict:
+        out = subprocess.run([sys.executable, "-c", _PEAK, str(tmp_path), mode], check=True,
+                             capture_output=True, text=True)
+        return json.loads(out.stdout)
+
+    baseline, eager, streamed = peak("open"), peak("eager"), peak("stream")
+    assert eager["result"] == [n]
+    assert streamed["result"] == [2 / 3, n * 3 // 4]
+    assert streamed["rss"] - baseline["rss"] < eager["rss"] - baseline["rss"] - 8 * 1024 * 1024, (
+        baseline, eager, streamed
+    )
 
 
 def test_every_l1_3_metric_has_a_citation_checked_library_entry() -> None:
