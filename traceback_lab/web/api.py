@@ -21,6 +21,7 @@ from ..cohort_contracts import CohortGeneration, CohortMember, MetricProjection,
 from ..cohorts import list_cohorts, member_from_store, read_current
 from ..identity import resolve_prefix, shortest_unique_prefixes
 from ..ingest import source_ids, source_record
+from ..identity_pair import pairs_for_sample
 from ..interpretation.engine import (
     COHORT_MIN,
     LIBRARY_FILE,
@@ -401,6 +402,7 @@ class LabApi:
             "cohort_state": cohort_state,
             "cohort_problem": cohort_problem,
             "algorithms": algorithms,
+            "identity_pairs": pairs_for_sample(self.store, source_id),
             "curve": curve,
             "stability": panels,
             "repeatability": views.repeatability(panels),
