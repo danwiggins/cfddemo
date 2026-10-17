@@ -76,6 +76,7 @@ class RunTarget:
     input_dir: Path
     reference_id: str
     reference_sha256: str
+    platform: str = "ont"
     label: str = "full"
     eligible_reads: int | None = None
     approx_depth_x: float | None = None
@@ -92,6 +93,7 @@ class RunTarget:
             reference_id=self.reference_id,
             reference_sha256=self.reference_sha256,
             input_dir=self.input_dir,
+            platform=self.platform,
             eligible_reads=self.eligible_reads,
             approx_depth_x=self.approx_depth_x,
             derived=self.derived,
@@ -166,6 +168,7 @@ def run_plan(
     scratch_root = store.lab / "tmp" / run_id
     for item in items:
         algorithm = item.algorithm
+        platform_rejected = target.platform not in algorithm.requires.platforms
         upstream = [
             {"algorithm_id": name, "parameters_sha256": done[name].parameters_sha256}
             for name in algorithm.upstream
@@ -178,11 +181,12 @@ def run_plan(
             upstream=upstream,
             # Consumed assets enter the execution identity (D19), so a
             # re-registered asset never reuses an older result.
-            asset_sha256s=assets_of(store.root) if callable(assets_of) else (),
+            asset_sha256s=assets_of(store.root) if callable(assets_of) and not platform_rejected else (),
+            platform=target.platform if target.platform != "ont" else None,
         )
         step = algorithm.id if target.label == "full" else f"{algorithm.id}@{target.label}"
         existing = store.read_result(target.input_id, algorithm.id, identity)
-        if existing is not None and existing.status == "ok" and not force:
+        if existing is not None and existing.status == "ok" and not force and not platform_rejected:
             store.reselect_cached_result(target.input_id, algorithm.id, identity)
             result = StepResult(
                 algorithm.id, "ok", item.upstream_only, identity, cached=True, input_label=target.label
@@ -201,7 +205,10 @@ def run_plan(
         }
         ctx = target.context(store.root)
         decision: Ready | Skip
-        if blocked:
+        if platform_rejected:
+            supported = ", ".join(sorted(algorithm.requires.platforms))
+            decision = Skip("platform", f"{algorithm.id} supports {supported}; this input declares {target.platform}")
+        elif blocked:
             decision = Skip("upstream", f"upstream not ok: {', '.join(blocked)}")
         else:
             try:

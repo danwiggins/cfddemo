@@ -41,6 +41,7 @@ from .ingest import (
     EXAMPLE_REFERENCE_ID,
 )
 from .identity import aligned_input_id, prealigned_input_id
+from .platforms import for_input, from_rg_lines
 from .problems import (
     EXIT_OK, EXIT_PARTIAL, EXIT_USAGE, LabProblem, problem_lines, problem_payload,
 )
@@ -183,12 +184,20 @@ def _target_from_input(
         extras["reference_fasta"] = str(resolve_reference(store.root, reference_id, example=True).fasta)
     except LabProblem:
         pass  # algorithms that need the FASTA fail or skip on their own
+    try:
+        platform = for_input(aligned.manifest, aligned.directory / "aligned.bam")
+    except (OSError, ValueError) as exc:
+        raise LabProblem(
+            "TBX-LAB-024", cause="stored input platform disagrees with its BAM header",
+            fix="Inspect the stored input and rerun from the original BAM",
+        ) from exc
     return RunTarget(
         input_id=aligned.input_id,
         source_id=aligned.source_id,
         input_dir=aligned.directory,
         reference_id=reference_id,
         reference_sha256=reference_sha256,
+        platform=platform,
         label="full",
         example=example,
         extras=extras,
@@ -268,6 +277,7 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
         source_id = resolve_sample(store, args.inputs[0])
         with_sex_assertion(source_record(store, source_id) or {}, args.sex)
         aligned, _ = _stored_input(store, source_id)
+        data["platform"] = for_input(aligned.manifest, aligned.directory / "aligned.bam")
         data["sample"] = {"id12": id12_for(store, source_id), "input_id": aligned.input_id}
         data["alignment"] = "reused (stored sample)"
         lines.append(f"SAMPLE    {id12_for(store, source_id)} (stored)")
@@ -275,6 +285,11 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
     else:
         paths = collect_paths(args.inputs)
         chunkset = inspect_chunks(paths, store, skip_bad_chunks=args.skip_bad_chunks, write_cache=False)
+        input_platform = from_rg_lines(chunkset.rg_lines)
+        if not chunkset.aligned and input_platform != "ont":
+            raise LabProblem("TBX-LAB-024", cause="unaligned input does not unanimously declare ONT",
+                             fix="Use input with @RG PL:ONT, or align short reads externally and supply a prealigned BAM")
+        data["platform"] = input_platform if chunkset.aligned else "ont"
         with_sex_assertion(source_record(store, chunkset.source_id) or {}, args.sex)
         reference = resolve_reference(store.root, args.reference_id)
         data["reference_id"] = reference.reference_id
@@ -402,6 +417,10 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     chunkset = inspect_chunks(
                         paths, store, skip_bad_chunks=args.skip_bad_chunks, progress=progress
                     )
+                    input_platform = from_rg_lines(chunkset.rg_lines)
+                    if not chunkset.aligned and input_platform != "ont":
+                        raise LabProblem("TBX-LAB-024", cause="unaligned input does not unanimously declare ONT",
+                                         fix="Use input with @RG PL:ONT, or align short reads externally and supply a prealigned BAM")
                     with_sex_assertion(source_record(store, chunkset.source_id) or {}, args.sex)
                     reference = resolve_reference(store.root, args.reference_id, example=args.example)
                     reference_id, reference_sha256 = reference.reference_id, reference.sha256
@@ -423,7 +442,8 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     log.append("step_start", step="align")
                     if chunkset.aligned:
                         prealigned_id = prealigned_input_id(
-                            source_id=chunkset.source_id, reference_sha256=reference.sha256
+                            source_id=chunkset.source_id, reference_sha256=reference.sha256,
+                            platform=input_platform,
                         )
                         if input_manifest(store, prealigned_id) is None:
                             budget = disk_budget(store, chunkset, mmi_needed=False, fasta_bytes=0)
@@ -503,8 +523,9 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                         f"align                    {'reused' if aligned.reused else 'done'} · input {aligned.input_id[:12]}"
                     )
                 id12 = id12_for(store, aligned.source_id)
-                log.append("sample", sample=id12, source_id=aligned.source_id, input_id=aligned.input_id)
                 target = _target_from_input(aligned, reference_id, reference_sha256, example, store)
+                log.append("sample", sample=id12, source_id=aligned.source_id, input_id=aligned.input_id,
+                           platform=target.platform)
                 results = run_plan(
                     store,
                     lock,
@@ -527,7 +548,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                 code, payload = _summary(
                     store, run_id, aligned, id12, chunkset, results, warnings, time.monotonic() - started,
                     depth=target.depth.model_dump() if target.depth is not None else None,
-                    controls=controls["summary"],
+                    controls=controls["summary"], platform=target.platform,
                 )
                 log.append("run_end", status=payload["status"], exit_code=code)
                 return code, payload
@@ -591,11 +612,14 @@ def _derived_phase(
     if args.controls:
         specs.extend(split_specs())
         summary["split"] = True
-        built = cna_specs(store.root, target.input_dir / "aligned.bam", tfs)
-        if isinstance(built, str):
-            summary["cna_skipped"] = "example_reference" if target.example else built
+        if target.platform == "ont":
+            built = cna_specs(store.root, target.input_dir / "aligned.bam", tfs)
+            if isinstance(built, str):
+                summary["cna_skipped"] = "example_reference" if target.example else built
+            else:
+                specs.extend(built)
         else:
-            specs.extend(built)
+            summary["cna_skipped"] = "platform"
     if not specs:
         return {"results": [], "summary": summary}
     runs = run_derived(
@@ -676,6 +700,7 @@ def _summary(
     *,
     depth: dict[str, Any] | None = None,
     controls: dict[str, Any] | None = None,
+    platform: str = "ont",
 ) -> tuple[int, dict[str, Any]]:
     ok = sum(result.status == "ok" for result in results)
     skipped: dict[str, int] = {}
@@ -704,7 +729,8 @@ def _summary(
     data: dict[str, Any] = {
         "root": str(store.root),
         "run_id": run_id,
-        "sample": {"id12": id12, "source_id": aligned.source_id, "input_id": aligned.input_id},
+        "sample": {"id12": id12, "source_id": aligned.source_id, "input_id": aligned.input_id,
+                   "platform": platform},
         "depth": depth,
         "counts": {"ok": ok, "skipped": skipped, "failed": len(failed)},
         "failed": [{"algorithm_id": result.algorithm_id, "first_line": result.first_line} for result in failed],

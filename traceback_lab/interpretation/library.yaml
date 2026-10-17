@@ -7,7 +7,7 @@
 # original evidence (D4).  citation_checked records who confirmed that every
 # DOI resolves and every displayed number matches the source (D27); an entry
 # without it renders an "UNVERIFIED citation" badge.
-version: 0.6.3
+version: 0.6.4
 hidden_algorithms: [read-summary, meth-calls]
 entries:
   # ---------------------------------------------------------------- bam-qc
@@ -2574,3 +2574,126 @@ entries:
       by: "Lab S4 evidence audit"
       date: "2026-10-16"
       note: "No scientific citation or reference interval displayed. Engineering formula: D21 eligible molecules supply aligned-span start and end-1, not claimed physical cleavage sites. Each valid end contributes once to the denominator, including both ends of one read even if they select the same CpG. A reference CG C coordinate within 10 bp inclusive is near; equal-distance ties select the lower C. Endpoint motifs are separate panels and require complete A/C/G/T contexts. LEGAL is a caution flag, not a rights clearance."
+
+  # ----------------------------------------------- short-read-fragment-size
+  - algorithm_id: short-read-fragment-size
+    metric_id: mode_bp
+    label: "Short-read fragment mode (absolute TLEN, 100–250 bp)"
+    value_kind: positive
+    tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "prealigned Illumina paired-end BAM"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No qualified platform-and-protocol-matched healthy interval for this TLEN estimator"
+    missing_value_caption: "No qualifying first-mate templates in the 100–250 bp mode window."
+    meaning_high: "The most frequent qualifying TLEN in the mono-nucleosome window is longer."
+    meaning_low: "The most frequent qualifying TLEN in the mono-nucleosome window is shorter."
+    confounders: ["library insert-size selection", "alignment and pair flags", "pre-analytic handling"]
+    next_steps:
+      analytical: ["Inspect the TLEN histogram and template count", "Compare only with a matched short-read cohort"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: true
+    stability: {kind: relative, tolerance: 0.10}
+    citations: []
+    citation_checked: {by: "Lab TLEN engineering review", date: "2026-10-16", note: "Exact estimator is absolute TLEN on one D21-eligible proper first mate per pair. No published clinical interval is claimed."}
+
+  - algorithm_id: short-read-fragment-size
+    metric_id: short_fraction_lt150
+    label: "Short-read template share (50–149 of 50–1000 bp TLEN)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "prealigned Illumina paired-end BAM"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No qualified platform-and-protocol-matched healthy interval for this TLEN estimator"
+    missing_value_caption: "No qualifying templates in the 50–1000 bp denominator."
+    meaning_high: "A larger share of qualifying TLEN values falls below 150 bp."
+    meaning_low: "A smaller share of qualifying TLEN values falls below 150 bp."
+    confounders: ["library insert-size selection", "alignment and pair flags", "pre-analytic handling"]
+    next_steps:
+      analytical: ["Inspect the TLEN histogram and template count", "Compare only with a matched short-read cohort"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: false
+    stability: {kind: proportion}
+    citations: []
+    citation_checked: {by: "Lab TLEN engineering review", date: "2026-10-16", note: "Engineering numerator 50–149 bp and denominator 50–1000 bp; no healthy interval is claimed."}
+
+  - algorithm_id: short-read-fragment-size
+    metric_id: peak_mono_bp
+    label: "Short-read mono-nucleosome TLEN peak (100–250 bp)"
+    value_kind: positive
+    tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "prealigned Illumina paired-end BAM"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No qualified short-read healthy interval"
+    meaning_high: "The observed mono-nucleosome TLEN peak is longer."
+    meaning_low: "The observed mono-nucleosome TLEN peak is shorter."
+    confounders: ["library insert-size selection", "alignment and pair flags"]
+    next_steps:
+      analytical: ["Inspect the TLEN histogram and template count"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: false
+    stability: {kind: relative, tolerance: 0.10}
+    citations: []
+    citation_checked: {by: "Lab TLEN engineering review", date: "2026-10-16", note: "Same engineering 100–250 bp mode window as the TLEN headline; no healthy interval is claimed."}
+
+  - algorithm_id: short-read-fragment-size
+    metric_id: peak_di_bp
+    label: "Short-read di-nucleosome TLEN peak (250–450 bp)"
+    value_kind: positive
+    tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "prealigned Illumina paired-end BAM"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No qualified short-read healthy interval"
+    meaning_high: "The observed di-nucleosome TLEN peak is longer."
+    meaning_low: "The observed di-nucleosome TLEN peak is shorter."
+    confounders: ["library insert-size selection", "alignment and pair flags"]
+    next_steps:
+      analytical: ["Inspect the TLEN histogram and template count"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: false
+    stability: {kind: relative, tolerance: 0.10}
+    citations: []
+    citation_checked: {by: "Lab TLEN engineering review", date: "2026-10-16", note: "Engineering 250–450 bp mode window; no healthy interval is claimed."}
+
+  - algorithm_id: short-read-fragment-size
+    metric_id: periodicity_10bp_power
+    label: "Short-read TLEN 10 bp periodicity (FFT power share, 50–150 bp)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "prealigned Illumina paired-end BAM"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No qualified short-read healthy interval"
+    meaning_high: "More of the measured short-TLEN histogram power falls in the 10–11 bp band."
+    meaning_low: "Less of the measured short-TLEN histogram power falls in the 10–11 bp band."
+    confounders: ["short-fragment count", "library insert-size selection", "alignment and pair flags"]
+    next_steps:
+      analytical: ["Inspect the 50–150 bp TLEN histogram and count"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: false
+    stability: {kind: proportion}
+    citations: []
+    citation_checked: {by: "Lab TLEN engineering review", date: "2026-10-16", note: "Engineering FFT statistic reused over TLEN bins, not an established clinical threshold."}

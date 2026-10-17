@@ -171,6 +171,7 @@ ROOT, home, login and chunk names redacted) is ever stored.
 | `bam-qc` | primaries, mapped and MAPQ ≥ 20 shares, supplementary share (chimera proxy), mean read Q, share of sampled genome covered ≥ 1x, GC-bias slope, duplicate share (only when marked) |
 | `depth` | eligible reads (primary, MAPQ ≥ 20, chr1–22/X/Y), mean span, approximate depth; the index count is shown only as an upper bound |
 | `fragment-size` | 1-bp aligned-span histogram, mode, short (< 150 bp) share, mono/di peaks, 10 bp periodicity |
+| `short-read-fragment-size` | separate exploratory paired-end Illumina histogram and size summaries from absolute BAM TLEN; requires a prealigned BAM with every `@RG PL:ILLUMINA` |
 | `copy-number` | tumour fraction, ploidy, genome log2 track and segments through the installed ichorCNA toolchain (no panel of normals yet, so read as not interpretable); needs 2M eligible reads, `traceback toolchain install ichor` and `traceback method-asset register --from-toolchain copy-number --root R` |
 | `instability` | bin-weighted median absolute deviation of the selected copy-number result's segment log2 values (`tmad`), with used-bin and null-estimate coverage counts; needs 2M eligible reads and a successful copy-number result for the same input; exploratory and cohort-relative, with no ONT cutoff |
 | `modbase-qc` | mod codes in the MM tags, MM-tagged share, mean ML at aligned CpG calls (read from `meth-calls`), share of those calls below 0.7 confidence, tagged reads with unusable MM/ML; skipped (`missing_tags`) when no read carries MM |
@@ -187,6 +188,35 @@ ROOT, home, login and chunk names redacted) is ever stored.
 | `hypometh-reads` | among reads with ≥ 4 CpG calls, the share under 25% methylated, and U/X/M counts (≤ 25% / between / ≥ 75%); needs 500,000 eligible reads |
 | `frag-x-meth` | descriptive molecule-count matrix of aligned-size bins by per-read 5mC fraction (at least four distinct CpG sites/read); the scalar is long (151–220 bp) mean minus short (100–150 bp) mean, null if either group is empty; no normal range |
 | `breakpoint-motifs` | 4-mer counts at aligned-reference-span start and end−1, stratified by CpG proximity; the scalar is the fraction of ends near a CpG. These are not proven physical cleavage positions, and the methylation link is unavailable without a supported joint input |
+
+**Short-read support.** For a prealigned paired-end Illumina BAM against the
+registered hg38 reference, run the normal Lab command:
+
+```bash
+traceback lab run YOUR_LOCAL_aligned_illumina.bam \
+  --reference hg38 --root R
+```
+
+Every BAM read group must declare `PL:ILLUMINA`. This declaration is recorded
+in the input manifest and run summary; it describes the BAM header, not
+instrument attestation. A prealigned BAM with missing, mixed, or unrecognized
+platform declarations is reported as unknown and platform-specific algorithms
+skip. Unaligned input must unanimously declare `PL:ONT` to use the Lab's
+`map-ont` alignment path. For short reads, align externally and supply a
+prealigned BAM. Each qualifying proper first mate counts one
+template: it must pass the common primary, mapped, nonduplicate, QC-pass,
+MAPQ ≥ 20 and canonical nuclear contig filter (names with or without `chr`),
+have a mapped mate on the same contig,
+and carry nonzero TLEN. The reported length is `abs(TLEN)`, even when the
+first mate's TLEN is negative. Downsample and split selections use the same
+read-name predicate as other Lab full-BAM algorithms. The histogram and
+metrics are keyed to `short-read-fragment-size`; `fragment-size` remains the
+ONT aligned-span measurement. The normal Illumina run also reports read
+summary, aligned-base depth, and BAM QC, including downsample and split views.
+ONT-only algorithms skip with reason `platform`; the CNA spike is omitted for
+Illumina. Result and cohort compatibility identities include platform, so an
+Illumina measurement cannot reuse an ONT result or reference range. No clinical
+cutoff, short-read healthy range, or cross-platform comparison is supplied.
 
 **PMD asset.** `pmd-score` needs an operator-supplied Zhou 2018 hg38
 common-PMD BED.gz file. The repository does not ship or download it; its
@@ -436,6 +466,12 @@ An operator-supplied `--sex` conflicts with an assertion already recorded for
 the same sample, or the local sex metadata is malformed (exit 3). Reuse the
 recorded assertion or omit the flag. Inspect and restore malformed metadata
 from a known-good local backup before rerunning; no measured result is changed.
+
+### TBX-LAB-024
+
+An unaligned input does not unanimously declare `@RG PL:ONT` (exit 3). The
+Lab's alignment path uses the ONT preset. Use an ONT input with declared read
+groups, or align short reads externally and rerun with the prealigned BAM.
 
 ## Adding an algorithm
 

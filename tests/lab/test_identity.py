@@ -59,6 +59,20 @@ def test_prealigned_differs_from_lab_aligned() -> None:
     assert identity.prealigned_input_id(source_id=A, reference_sha256=B) != _aligned()
 
 
+def test_platform_separates_input_result_and_cohort_identities() -> None:
+    old = identity.prealigned_input_id(source_id=A, reference_sha256=B)
+    assert old == identity.prealigned_input_id(source_id=A, reference_sha256=B, platform="unknown")
+    assert old != identity.prealigned_input_id(source_id=A, reference_sha256=B, platform="illumina")
+    assert identity.parameters_sha256(**_params()) != identity.parameters_sha256(
+        **_params(), platform="illumina",
+    )
+    shared = dict(algorithm_id="depth", algorithm_version="1", parameters={}, tools=[],
+                  reference_sha256=B, aligner_identity={"kind": "pre-aligned"})
+    assert identity.cohort_compat_key(**shared, platform="ont") != identity.cohort_compat_key(
+        **shared, platform="illumina",
+    )
+
+
 def test_derived_input_ids_differ_by_transform_parameters_and_salt() -> None:
     parent = _aligned()
     half = identity.derived_input_id(
