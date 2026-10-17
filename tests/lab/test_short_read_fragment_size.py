@@ -251,11 +251,15 @@ def test_normal_lab_run_dispatches_illumina_without_ont_results(
         assert steps[algorithm_id]["status"] == "skipped"
         assert steps[algorithm_id]["skip_reason"] == "platform"
     from traceback_lab.store import LabStore
-    from traceback_lab.views import load_sample
+    from traceback_lab.views import depth_curve, load_sample
 
     sample = load_sample(LabStore(root), payload["data"]["sample"]["source_id"])
     assert sample is not None
     assert sample.full.results["cell-origin"].skip_reason == "platform"
+    fragment_row = next(row for row in depth_curve(sample)["rows"]
+                        if row["algorithm_id"] == "fragment-size")
+    assert all(cell["state"] == "skipped" and cell["reason"] == "platform"
+               for cell in fragment_row["cells"])
     assert payload["data"]["counts"]["failed"] == 0
     assert payload["data"]["controls"]["cna_skipped"] == "platform"
     assert payload["data"]["controls"]["split"] is True
