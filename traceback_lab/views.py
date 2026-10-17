@@ -45,7 +45,7 @@ def selected_results(
 
 def _selected_results_with_unreadable(
     store: LabStore, input_id: str, identities: Mapping[str, str] | None = None
-) -> tuple[dict[str, ResultEnvelope], set[str]]:
+) -> tuple[dict[str, ResultEnvelope], set[str], set[str]]:
     """The selected result per algorithm for one input.
 
     Without ``identities`` the latest published execution identity wins; with them (a
@@ -61,7 +61,7 @@ def _selected_results_with_unreadable(
     ambiguous: set[str] = set()
     unreadable: set[str] = set()
     if not base.is_dir():
-        return {}, set()
+        return {}, set(), set()
     for algorithm_dir in sorted(base.iterdir()):
         if not algorithm_dir.is_dir():
             continue
@@ -98,7 +98,7 @@ def _selected_results_with_unreadable(
     return {
         key: value for key, (_, value) in out.items()
         if key not in ambiguous and key not in unreadable
-    }, unreadable
+    }, unreadable, ambiguous - unreadable
 
 
 @dataclass
@@ -110,6 +110,7 @@ class InputView:
     results: dict[str, ResultEnvelope]
     fraction: float = 1.0
     unreadable: set[str] = field(default_factory=set)
+    ambiguous: set[str] = field(default_factory=set)
 
     def depth_x(self) -> float | None:
         for envelope in self.results.values():
@@ -140,8 +141,8 @@ def load_sample(store: LabStore, source_id: str) -> SampleView | None:
     full_input = next((entry["input_id"] for entry in inputs if input_manifest(store, entry["input_id"])), None)
     if full_input is None:
         return None
-    full_results, unreadable = _selected_results_with_unreadable(store, full_input)
-    full = InputView("full", full_input, None, {}, full_results, unreadable=unreadable)
+    full_results, unreadable, ambiguous = _selected_results_with_unreadable(store, full_input)
+    full = InputView("full", full_input, None, {}, full_results, unreadable=unreadable, ambiguous=ambiguous)
     identities = {alg: envelope.provenance.parameters_sha256 for alg, envelope in full.results.items()}
     derived = []
     for entry in record.get("derived", []):
