@@ -2872,3 +2872,65 @@ entries:
     headline: false
     stability: {kind: relative, tolerance: 0.10}
     citations: []
+
+  - algorithm_id: epi-clock
+    metric_id: epigenetic_age_years
+    label: "Exploratory Weidner three-CpG age estimate"
+    value_kind: signed
+    tier: SPECULATIVE
+    origin_tier: PROVEN
+    origin_platform: "whole-blood Illumina discovery and bisulfite pyrosequencing model fit"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No cfDNA ONT calibration, clinical reference, or matched validation"
+    missing_value_caption: "Fewer than five eligible cytosine modification calls at one or more of the three CpGs."
+    meaning_high: "The transferred model yields a higher exploratory age estimate."
+    meaning_low: "The transferred model yields a lower exploratory age estimate."
+    confounders: ["cell mixture", "cfDNA tissue origin", "array-to-ONT transfer", "low site coverage"]
+    next_steps:
+      analytical: ["Check all three probe counts and map provenance", "Validate against a matched cfDNA ONT cohort before interpretation"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: true
+    stability: {kind: absolute, tolerance: 1.0}
+    citations:
+      - "doi:10.1186/gb-2014-15-2-r24"
+    citation_checked: {by: "Lab published-model review", date: "2026-10-17", note: "Coefficient asset methylclockData coefWeidner.rda SHA-256 9a3feb7d0c500f9ccdb61ffe243775587fa21b082536142bb1260c566cd39645; ONT cfDNA transfer unvalidated."}
+
+  - algorithm_id: epi-clock
+    metric_id: cg02228185_modified_fraction
+    label: "cg02228185 5mC+5hmC fraction"
+    value_kind: proportion
+    tier: SPECULATIVE
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No matched cfDNA ONT reference"
+    missing_value_caption: "Fewer than five eligible calls at this CpG."
+    headline: false
+    citations: []
+
+  - algorithm_id: epi-clock
+    metric_id: cg25809905_modified_fraction
+    label: "cg25809905 5mC+5hmC fraction"
+    value_kind: proportion
+    tier: SPECULATIVE
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No matched cfDNA ONT reference"
+    missing_value_caption: "Fewer than five eligible calls at this CpG."
+    headline: false
+    citations: []
+
+  - algorithm_id: epi-clock
+    metric_id: pde4c_upstream_of_cg17861230_modified_fraction
+    label: "Weidner PDE4C upstream CpG 5mC+5hmC fraction"
+    value_kind: proportion
+    tier: SPECULATIVE
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No matched cfDNA ONT reference"
+    missing_value_caption: "Fewer than five eligible calls at this CpG."
+    headline: false
+    citations: []
