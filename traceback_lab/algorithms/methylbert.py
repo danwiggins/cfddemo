@@ -61,6 +61,11 @@ def _ont_header(path: Path) -> bool:
     return from_bam(path) == "ont"
 
 
+def _has_canonical_contigs(path: Path) -> bool:
+    with pysam.AlignmentFile(str(path), "rb") as bam:
+        return any(_CANONICAL.fullmatch(name) for name in bam.references)
+
+
 def _eligible_tagged(ctx: InputContext) -> tuple[int, int]:
     summary, mask = load_summary(ctx)
     eligible = summary.eligible()
@@ -167,6 +172,8 @@ class Methylbert(Base):
         try:
             if not _ont_header(bam):
                 return Skip("platform", "every BAM read group must declare ONT")
+            if not _has_canonical_contigs(bam):
+                return Skip("reference", "MethylBERT needs chr-prefixed canonical nuclear contigs")
             if header_model(bam) is None:
                 return Skip("missing_tags", "the BAM has no single header-declared modified-base model")
             eligible, tagged = _eligible_tagged(ctx)
