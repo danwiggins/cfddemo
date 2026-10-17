@@ -176,7 +176,7 @@
     const route = state.route;
     if (state.loading) {
       setStatus("Loading Lab results…");
-      main.append(h("h1", { class: "view-title" }, "Loading…"));
+      main.append(h("h1", { class: route.name === "home" ? "visually-hidden" : "view-title" }, "Loading…"));
       if (route.name === "home") {
         main.append(
           h("section", { class: "clia-panel loading-clia" },
@@ -599,6 +599,7 @@
       const listing = await api("/api/samples");
       state.samples = listing.samples;
       state.loading = false;
+      setStatus("");
       await poll();
       await navigate();
     } catch (error) {

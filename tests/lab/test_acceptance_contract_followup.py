@@ -48,14 +48,14 @@ def test_findings_show_every_strip_variant_and_missing_library_entry(tmp_path) -
         ("none", {"reference_kind": "none", "interval": None,
                   "exploratory_n": None, "percentile": None}, 'class="help"'),
     )
-    for (_algorithm_id, metric), (name, fields, _marker) in zip(metrics, variants, strict=False):
+    for (_algorithm_id, metric), (name, fields, _marker) in zip(metrics[:4], variants, strict=True):
         metric.update(fields, state="above_typical", caption=f"{name} strip fixture")
     metrics[4][1].update(state="no_reference", reason="no_library_entry", entry=None,
                          label="Missing library entry fixture", caption="No library entry fixture")
     with _server(tmp_path, sample) as server:
         dom = _dom(server, tmp_path / "browser", route=f"/sample/{ID12}/findings")
     cards = re.findall(r'<article class="finding-card">(.*?)</article>', dom, re.DOTALL)
-    for (algorithm_id, metric), (name, _fields, marker) in zip(metrics, variants, strict=False):
+    for (algorithm_id, metric), (name, _fields, marker) in zip(metrics[:4], variants, strict=True):
         card_id = f'id="card-{algorithm_id}-{metric["metric_id"]}"'
         card = next(card for card in cards if card_id in card)
         assert f"{name} strip fixture" in card and marker in card
@@ -102,4 +102,20 @@ def test_sample_switcher_round_trips_through_home_deep_link(tmp_path) -> None:
     assert observed == {"hash": f"#/?sample={second_id}", "selected": second_id,
                         "heading": f"Traceback Lab — {second_id}"}
     assert f"Traceback Lab — {second_id}" in deep_link
-    assert re.search(rf'<option[^>]*value="{second_id}"[^>]*selected', deep_link)
+    option = re.search(rf'<option[^>]*value="{second_id}"[^>]*>', deep_link)
+    assert option is not None and "selected" in option.group()
+
+
+@needs_chrome
+def test_loading_status_clears_when_the_first_status_poll_fails(tmp_path) -> None:
+    sample = _sample()
+    with _server(tmp_path, sample) as server:
+        def unavailable_status():
+            raise OSError("status temporarily unavailable")
+
+        server.app.api.status = unavailable_status
+        dom = _dom(server, tmp_path / "browser", route="/",
+                   want=lambda page: f"Traceback Lab — {ID12}" in page)
+    status = re.search(r'<p(?=[^>]*id="status")[^>]*>(.*?)</p>', dom, re.DOTALL)
+    assert status is not None and re.sub(r"<[^>]+>", "", status.group(1)).strip() == ""
+    assert "Loading Lab results…" not in dom
