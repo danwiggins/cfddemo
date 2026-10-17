@@ -24,6 +24,15 @@ def test_shell_unsafe_upstream_paths_are_rejected(tmp_path: Path, unsafe: str) -
         _safe_path(candidate)
 
 
+def test_missing_upstream_path_does_not_disclose_operator_path(tmp_path: Path) -> None:
+    from traceback_lab.adapters.griffin_run import _safe_path
+
+    candidate = tmp_path / "DonorName_2026" / "missing.bam"
+    with pytest.raises(ValueError, match="unavailable or unsafe") as error:
+        _safe_path(candidate)
+    assert "DonorName_2026" not in str(error.value)
+
+
 def _write(path: Path, *, correction: str = "GC_corrected", sample: str = "S1",
            site_count: int = 1000) -> Path:
     path.write_text(

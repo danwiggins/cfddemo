@@ -360,7 +360,7 @@ def _consumed_attempts_current(
     if recorded is None or [
         {"algorithm_id": row["algorithm_id"], "parameters_sha256": row["parameters_sha256"]}
         for row in recorded
-    ] != sorted(upstream, key=lambda row: row["algorithm_id"]):
+    ] != upstream:
         return False
     for row in recorded:
         if row["input_id"] == input_id:

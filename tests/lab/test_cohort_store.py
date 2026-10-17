@@ -1,6 +1,7 @@
 """Synthetic Lab cohort storage and publication checks."""
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -267,6 +268,28 @@ def test_cohort_omits_dependent_after_same_identity_upstream_reselection(
     assert [result.algorithm_id for result in build_cohort(store, "healthy").members[0].results] == [
         "fragment-size",
     ]
+
+
+def test_consumed_attempts_use_declared_upstream_order() -> None:
+    input_id = _sha(143)
+    rows = [
+        {"algorithm_id": name, "input_id": input_id,
+         "parameters_sha256": _sha(index), "attempt_id": f"attempt-{name}"}
+        for index, name in ((1, "read-summary"), (2, "meth-calls"))
+    ]
+    snapshots = {
+        row["algorithm_id"]: (Path(row["attempt_id"]), SimpleNamespace(
+            provenance=SimpleNamespace(parameters_sha256=row["parameters_sha256"])))
+        for row in rows
+    }
+    fake_store = SimpleNamespace(upstream_selections_at=lambda _attempt: rows)
+    upstream = [
+        {"algorithm_id": row["algorithm_id"], "parameters_sha256": row["parameters_sha256"]}
+        for row in rows
+    ]
+    assert cohorts._consumed_attempts_current(
+        fake_store, Path("dependent"), upstream, snapshots, input_id,
+    )
 
 
 def test_cohort_cli_reports_distinct_aligner_versions(store: LabStore, capsys) -> None:

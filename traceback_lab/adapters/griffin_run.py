@@ -79,7 +79,11 @@ def _tree_digest(root: Path) -> str:
 
 
 def _safe_path(path: Path) -> Path:
-    resolved = path.resolve(strict=True)
+    try:
+        resolved = path.resolve(strict=True)
+    except OSError:
+        # A vanished asset can include a local donor path in the exception.
+        raise ValueError("Griffin upstream path is unavailable or unsafe") from None
     # Griffin's own Snakemake shell rules interpolate config paths without
     # quoting. Reject paths its shell cannot consume safely.
     if not _SAFE_TOKEN.fullmatch(str(resolved)):
