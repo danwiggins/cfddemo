@@ -604,6 +604,7 @@
       await navigate();
     } catch (error) {
       state.loading = false;
+      setStatus("");
       const main = document.getElementById("main");
       main.replaceChildren(h("h1", { class: "view-title" }, "Traceback Lab"),
         h("p", { class: "problem" }, error.session || error.message === "bootstrap"
