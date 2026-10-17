@@ -310,7 +310,7 @@ def test_copy_number_algorithm_run_in_process(tmp_path, monkeypatch) -> None:
     from traceback_lab.envelope import ResultEnvelope, provenance
 
     envelope = ResultEnvelope.model_validate({
-        "algorithm_id": "copy-number", "algorithm_version": "1", "status": "ok",
+        "algorithm_id": "copy-number", "algorithm_version": cn_module.COPY_NUMBER.version, "status": "ok",
         "provenance": provenance(tool="t", parameters_sha256="d" * 64, source_id="a" * 64, input_id="b" * 64,
                                  reference_id="ref", timestamp_utc="2026-10-15T00:00:00Z"),
         "metrics": output.metrics,
