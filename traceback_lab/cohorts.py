@@ -324,9 +324,10 @@ def _selected_results(
             continue
         assets_of = getattr(algorithm, "asset_sha256s", None)
         try:
+            asset_digests = assets_of(store.root) if callable(assets_of) else ()
             identity = execution_identity(
                 algorithm, reference_sha256=manifest["reference_sha256"], upstream=upstream,
-                asset_sha256s=assets_of(store.root) if callable(assets_of) else (),
+                asset_sha256s=asset_digests,
             )
         except (OSError, ValueError, KeyError, LabProblem):
             # An unresolved asset cannot make an old result current-compatible.
@@ -342,12 +343,17 @@ def _selected_results(
             for metric in chosen.metrics
             if metric.value is None or (isinstance(metric.value, (int, float)) and not isinstance(metric.value, bool))
         }
+        compat_tools = [tool.identity() for tool in algorithm.tools]
+        if algorithm.id == "arm-summary":
+            # Unlike member-specific PoNs, the arm-definition bytes are shared
+            # by controls and must participate in cohort compatibility.
+            compat_tools.extend({"name": "arm-centromere-sha256", "version": digest} for digest in asset_digests)
         compat = cohort_compat_key(
             algorithm_id=algorithm.id, algorithm_version=algorithm.version,
-            parameters=algorithm.parameters, tools=[tool.identity() for tool in algorithm.tools],
+            parameters=algorithm.parameters, tools=compat_tools,
             reference_sha256=manifest["reference_sha256"], aligner_identity=aligner,
             pon_policy=("lab_loo_v1" if pon_selection is not None
-                        and algorithm.id in ("copy-number", "instability") else "none"),
+                        and algorithm.id in ("copy-number", "instability", "arm-summary") else "none"),
             per_sample_asset_keys=("pon_sha256",) if algorithm.parameters.get("pon_policy") == "lab_loo_v1" else (),
         )
         found.append(CohortResult(

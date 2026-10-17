@@ -692,6 +692,28 @@ entries:
     citations: []
     citation_checked: {by: "lab build agent", date: "2026-10-16", note: "No citation displayed; missing-estimate bin count."}
 
+  # ------------------------------------------------------------ arm-summary
+  - algorithm_id: arm-summary
+    metric_id: arms_with_value
+    label: "Autosomal arms with an estimable corrected log2"
+    value_kind: count
+    tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "ONT Lab PoN-corrected ichorCNA bins"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "Exploratory coverage count; no validated ONT arm-z performance or cutoff"
+    meaning_high: "More arms had finite, unmasked copy-number bins for cohort comparison."
+    meaning_low: "Few arms could be summarized; inspect the copy-number track and masks."
+    confounders: ["low depth", "masked bins", "centromere geometry", "copy-number noise"]
+    next_steps: {analytical: ["Use arm-zscores only with a compatible published cohort and at least ten controls after source exclusion"], clinical_setting: null}
+    license_ids: [gpl-copyleft]
+    flags: []
+    headline: false
+    citations: []
+    citation_checked: {by: "lab build agent", date: "2026-10-16", note: "No citation displayed; a descriptive Lab bin-coverage count, not a biological threshold."}
+
   # ------------------------------------------------------------ modbase-qc
   - algorithm_id: modbase-qc
     metric_id: mm_tagged_fraction

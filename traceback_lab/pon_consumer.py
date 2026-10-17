@@ -186,7 +186,7 @@ def recompute_member(
     )
     entries = registry.registry_entries()
     by_id = {algorithm.id: entry for entry, algorithm in entries}
-    items = registry.plan([algorithm for _, algorithm in entries], only=["instability"])
+    items = registry.plan([algorithm for _, algorithm in entries], only=["instability", "arm-summary"])
     items = bind_copy_number(items, selection)
     target = RunTarget(
         input_id=input_id, source_id=source_id, input_dir=store.inputs_dir / input_id,

@@ -46,6 +46,7 @@ ALGORITHMS: tuple[str, ...] = (
     "fragment_size:FRAGMENT_SIZE",
     "copy_number:COPY_NUMBER",
     "instability:INSTABILITY",
+    "arm_summary:ARM_SUMMARY",
     "long_tail:LONG_TAIL",
     "sex_check:SEX_CHECK",
     "mtdna:MTDNA",

@@ -289,11 +289,26 @@ percentile denominator.
 
 For a verified internal cohort with at least ten eligible aligned members,
 `cohort build` creates one full panel and one leave-one-out panel per member.
-It recomputes each member's copy-number and instability results against that
+It recomputes each member's copy-number, instability, and arm-summary results against that
 member's panel before publishing the generation. `pon_n` counts all panel
 sources; a selected member panel uses `pon_n - 1` sources. A nonmember uses
 the full panel. Both copy-number and instability still require 2M eligible
 reads on the target input.
+
+`arm-summary` summarizes PoN-corrected copy-number bins on autosomal p/q arms.
+It derives boundaries from the locally registered ichorCNA GRCh38 centromere
+asset and input reference lengths. A bin contributes only if finite, unmasked,
+and wholly inside an arm; the arm value is the median of contributing bins.
+It requires at least 2 million eligible reads and a selected PoN. The pinned
+arm-definition bytes enter both result identity and cohort compatibility.
+
+`traceback lab arm-zscores ID12 --cohort ID --root R` compares the selected
+arm summaries against one published cohort generation. It excludes the target
+source and requires ten remaining controls with the same protocol and arm
+definition. A member of an exactly-ten-source cohort has nine controls and
+receives `no_reference`. Each arm reports n, the cohort mean and population
+SD, z, or a named unavailable state. This is exploratory: no abnormality
+cutoff, donor-independence claim, or clinical reference is assigned.
 
 `lab run` and `lab simulate` use a built `healthy-v1` cohort by default when
 one exists. Pass `--cohort ID` to pin another built cohort; an explicit cohort
