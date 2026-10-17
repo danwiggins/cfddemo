@@ -96,10 +96,20 @@ parser.add_argument('--n_jobs')
 parser.add_argument('--single_end_mode', action='store_true')
 args = parser.parse_args()
 assert args.command == 'extract_features' and args.single_end_mode
-assert pathlib.Path(args.bam_file).read_bytes() == b'BAM from selected input'
+if os.environ.get('TRACEBACK_LIONHEART_CAPTURE_NAMES'):
+    import json
+    import pysam
+    with pysam.AlignmentFile(args.bam_file, 'rb') as bam:
+        names = [record.query_name for record in bam.fetch(until_eof=True)]
+        assert names == [record.query_name for record in bam.fetch('chr1', 0, 100_000)]
+    (pathlib.Path(args.out_dir) / 'seen-names.json').write_text(json.dumps(names))
+else:
+    assert pathlib.Path(args.bam_file).read_bytes() == b'BAM from selected input'
 assert pathlib.Path(args.resources_dir).is_dir()
 assert pathlib.Path(args.mosdepth_path).is_file()
 assert pathlib.Path(args.ld_library_path).is_dir()
+if os.environ.get('TRACEBACK_LIONHEART_FAIL'):
+    sys.exit(7)
 if os.environ.get('TRACEBACK_LIONHEART_MUTATE_RESOURCES'):
     (pathlib.Path(args.resources_dir) / 'gc_contents_bin_edges.npy').write_bytes(b'mutated')
 if os.environ.get('TRACEBACK_LIONHEART_MUTATE_LIBHTS'):
@@ -161,6 +171,68 @@ def test_lionheart_invokes_upstream_extraction_on_selected_bam_and_emits_raw_sco
     after = execution_identity(lionheart.LIONHEART, reference_sha256=ctx.reference_sha256,
                                asset_sha256s=lionheart.LIONHEART.asset_sha256s(ctx.root))
     assert before != after
+
+
+def test_lionheart_derived_inputs_use_nested_read_masks_and_disjoint_halves(tmp_path, monkeypatch) -> None:
+    from traceback_lab.read_summary import DS_SALT, SPLIT_SALT, h64
+
+    ctx, _ = _setup(tmp_path, monkeypatch)
+    names = [f"ont-read-{index}" for index in range(64)]
+    header = {"HD": {"VN": "1.6", "SO": "coordinate"}, "SQ": [{"SN": "chr1", "LN": 100_000}]}
+    with pysam.AlignmentFile(str(ctx.input_dir / "aligned.bam"), "wb", header=header) as bam:
+        for index, name in enumerate(names):
+            read = pysam.AlignedSegment()
+            read.query_name = name
+            read.query_sequence = "A" * 50
+            read.flag = 0
+            read.reference_id = 0
+            read.reference_start = index * 100
+            read.mapping_quality = 60
+            read.cigartuples = [(0, 50)]
+            read.query_qualities = pysam.qualitystring_to_array("I" * 50)
+            bam.write(read)
+    pysam.index(str(ctx.input_dir / "aligned.bam"))
+    monkeypatch.setenv("TRACEBACK_LIONHEART_CAPTURE_NAMES", "1")
+
+    observed = {}
+    for label, derived in (
+        ("0.5", {"transform": "downsample", "fraction": 0.5}),
+        ("0.25", {"transform": "downsample", "fraction": 0.25}),
+        ("A", {"transform": "split", "half": "A"}),
+        ("B", {"transform": "split", "half": "B"}),
+    ):
+        selected = replace(ctx, input_id=hashlib.sha256(label.encode()).hexdigest(), derived=derived)
+        assert isinstance(lionheart.LIONHEART.preflight(selected), Ready)
+        out = tmp_path / label / "artifacts"
+        out.mkdir(parents=True)
+        result = lionheart.LIONHEART.run(selected, out)
+        assert result.metrics[0]["value"] == 898
+        observed[label] = json.loads((out.parent / "lionheart-extraction" / "seen-names.json").read_text())
+        assert not list(out.parent.glob("lionheart-bam-*"))
+
+    expected_half = [name for name in names if h64(DS_SALT, name) < 2**63]
+    expected_quarter = [name for name in names if h64(DS_SALT, name) < 2**62]
+    expected_a = [name for name in names if h64(SPLIT_SALT, name) < 2**63]
+    expected_b = [name for name in names if h64(SPLIT_SALT, name) >= 2**63]
+    assert observed == {"0.5": expected_half, "0.25": expected_quarter, "A": expected_a, "B": expected_b}
+    assert set(observed["0.25"]) <= set(observed["0.5"])
+    assert set(observed["A"]).isdisjoint(observed["B"])
+    assert set(observed["A"]) | set(observed["B"]) == set(names)
+
+    below_gate = replace(ctx, derived={"transform": "split", "half": "A"}, eligible_reads=4_999_999)
+    assert lionheart.LIONHEART.preflight(below_gate).reason_code == "depth"
+    assert lionheart.LIONHEART.preflight(replace(ctx, derived={})).reason_code == "derived_not_supported"
+    for invalid in ({"transform": "downsample"}, {"transform": "downsample", "fraction": 0},
+                    {"transform": "downsample", "fraction": float("nan")},
+                    {"transform": "split", "half": "C"}):
+        assert lionheart.LIONHEART.preflight(replace(ctx, derived=invalid)).reason_code == "derived_not_supported"
+
+    monkeypatch.setenv("TRACEBACK_LIONHEART_FAIL", "1")
+    out = tmp_path / "failed" / "artifacts"
+    out.mkdir(parents=True)
+    with pytest.raises(RuntimeError, match=r"feature extraction failed \(exit 7\)"):
+        lionheart.LIONHEART.run(replace(ctx, derived={"transform": "split", "half": "A"}), out)
+    assert not list(out.parent.glob("lionheart-bam-*"))
 
 
 def test_lionheart_preflight_requires_opt_in_depth_reference_and_pinned_assets(tmp_path, monkeypatch) -> None:

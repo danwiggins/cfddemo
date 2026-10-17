@@ -263,6 +263,13 @@ export TRACEBACK_LIONHEART_ENABLE_ONT=1
 traceback lab run SAMPLE_ID12 --only lionheart --timeout-s 7200 --root ROOT
 ```
 
+When downsample and split controls are selected, LIONHEART extracts each
+eligible derived input from a temporary BAM containing only that fraction's
+or half's reads. The same opt-in, ONT platform, resources, and measured
+5-million-eligible-read gate apply independently to each input. A derived
+result below that gate is labelled skipped; it is not replaced by the full
+input's score.
+
 The binary's `--version` must report Lionheart 2.2.0; the modified mosdepth must expose
 `--single-end-length`. Install `samtools` and `unpigz` on `PATH` for upstream's
 BAM validation and coverage decompression. The library-directory setting supplies

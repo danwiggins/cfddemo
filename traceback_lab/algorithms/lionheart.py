@@ -18,6 +18,8 @@ import shlex
 import shutil
 import subprocess
 import tarfile
+import tempfile
+from contextlib import nullcontext
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -315,8 +317,18 @@ class Lionheart(Base):
     def preflight(self, ctx: InputContext) -> Ready | Skip:
         if ctx.example:
             return Skip("example_reference", "LIONHEART needs hg38 resources; not in the synthetic example")
-        if ctx.derived:
-            return Skip("derived_not_supported", "LIONHEART raw scores are extracted only from the full input")
+        if ctx.derived is not None:
+            transform = ctx.derived.get("transform")
+            if transform == "downsample":
+                fraction = ctx.derived.get("fraction")
+                if (not isinstance(fraction, (int, float)) or isinstance(fraction, bool)
+                        or not 0 < fraction <= 1):
+                    return Skip("derived_not_supported", "LIONHEART downsample needs a fraction above 0 and at most 1")
+            elif transform == "split":
+                if ctx.derived.get("half") not in {"A", "B"}:
+                    return Skip("derived_not_supported", "LIONHEART split needs half A or B")
+            else:
+                return Skip("derived_not_supported", "LIONHEART supports downsample and split derived inputs")
         if ctx.reference_id.lower() not in {"hg38", "grch38"}:
             return Skip("reference", "LIONHEART v2.2.0 requires an hg38-aligned BAM")
         if ctx.eligible_reads is None:
@@ -390,12 +402,20 @@ class Lionheart(Base):
         shutil.copytree(directory, snapshot)
         if validated_resource_digest(snapshot, archive) != expected[0]:
             raise RuntimeError("LIONHEART resources changed since execution planning")
-        command = [str(executable), "extract_features", "--bam_file", str(ctx.input_dir / "aligned.bam"),
-                   "--resources_dir", str(snapshot), "--out_dir", str(work),
-                   "--mosdepth_path", str(mosdepth), "--ld_library_path", str(library_dir),
-                   "--n_jobs", "1", "--single_end_mode"]
-        with (out.parent / "lionheart.log").open("wb") as log:
-            completed = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=False)
+        selected = tempfile.TemporaryDirectory(prefix="lionheart-bam-", dir=out.parent) if ctx.derived is not None else nullcontext(None)
+        with selected as scratch:
+            bam = ctx.input_dir / "aligned.bam"
+            if scratch is not None:
+                from .cell_origin import write_transient_bam
+
+                bam = Path(scratch) / "selected.bam"
+                write_transient_bam(ctx.input_dir / "aligned.bam", bam, dict(ctx.derived))
+            command = [str(executable), "extract_features", "--bam_file", str(bam),
+                       "--resources_dir", str(snapshot), "--out_dir", str(work),
+                       "--mosdepth_path", str(mosdepth), "--ld_library_path", str(library_dir),
+                       "--n_jobs", "1", "--single_end_mode"]
+            with (out.parent / "lionheart.log").open("wb") as log:
+                completed = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=False)
         if completed.returncode != 0:
             raise RuntimeError(f"LIONHEART feature extraction failed (exit {completed.returncode})")
         if planned_tools != {pin.name: pin.version for pin in self.tools}:
