@@ -115,7 +115,8 @@ def _dom(server, tmp_path, *, size="1280,800", route=None, want=None) -> str:
 
     if want is None:
         want = (lambda d: True) if route else (lambda d: "data-measured" in d)
-    good = lambda d: 'data-ready="1"' in d and want(d)
+    def good(d: str) -> bool:
+        return 'data-ready="1"' in d and want(d)
     link = server.issue_link() + (f"&route={route}" if route else "")
     tmp_path.mkdir(parents=True, exist_ok=True)
     profile = tmp_path / "profile"
