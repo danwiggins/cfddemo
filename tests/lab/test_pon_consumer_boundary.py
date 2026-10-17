@@ -14,10 +14,12 @@ from traceback_lab.adapters.ichor import CopyNumberError, LabCopyNumberParameter
 from traceback_lab.algorithms import copy_number as cn_module
 from traceback_lab import cohorts, pon, pon_consumer
 from traceback_lab.cohorts import add_sample, build_cohort, read_current
+from traceback_lab.envelope import ResultEnvelope, provenance
 from traceback_lab.identity import cohort_compat_key
 from traceback_lab.pon_consumer import bind_copy_number
-from traceback_lab.registry import InputContext, execution_identity, load_registry, plan
-from traceback_lab.runner import RunTarget
+from traceback_lab.registry import InputContext, PlanItem, execution_identity, load_registry, plan
+from traceback_lab.runner import RunTarget, run_plan
+from traceback_lab.scrub import Scrubber
 from traceback_lab.store import LabStore, new_run_id, summarize_run
 from traceback_lab.web.api import LabApi
 from traceback_lab.problems import LabProblem
@@ -332,6 +334,81 @@ def test_explicit_ont_panel_refuses_other_input_kinds_before_binding(
         )
     assert error.value.code == code and error.value.data["field"] == field
     assert "pon_selection" not in target.extras
+
+
+@pytest.mark.parametrize("field,reason", [
+    ("toolchain", "missing_toolchain"), ("method assets", "missing_asset"),
+])
+def test_implicit_unavailable_panel_marks_only_copy_number_for_skip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str, reason: str,
+) -> None:
+    problem = LabProblem(
+        "TBX-LAB-020", cause="selected panel method is unavailable",
+        fix="Restore the method", data={"field": field},
+    )
+    monkeypatch.setattr(
+        pon_consumer, "selection_for_target",
+        lambda *_, **__: (_ for _ in ()).throw(problem),
+    )
+    target = RunTarget(
+        input_id="4" * 64, source_id="5" * 64, input_dir=tmp_path,
+        reference_id="hg38", reference_sha256="b" * 64,
+    )
+    manifest = {
+        "kind": "aligned", "tools": {"minimap2": "2.28", "samtools": "1.20"},
+        "mmi_sha256": "6" * 64, "aligner_argv": ["minimap2", "-ax", "map-ont"],
+    }
+    items = plan(load_registry(), only=["instability"])
+    assert pon_consumer.bind_target(
+        LabStore(tmp_path), items, target, manifest, cohort_id=None,
+    ) == list(items)
+    assert target.extras["pon_unavailable"]["reason_code"] == reason
+    with pytest.raises(LabProblem):
+        pon_consumer.bind_target(
+            LabStore(tmp_path), items, target, manifest, cohort_id="healthy-v1",
+        )
+
+
+def test_unavailable_panel_skip_cannot_reuse_uncorrected_cached_copy_number(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    monkeypatch.setattr(cn_module, "toolchain_or_none", lambda: None)
+    algorithm = cn_module.COPY_NUMBER
+    target = RunTarget(
+        input_id="4" * 64, source_id="5" * 64, input_dir=tmp_path,
+        reference_id="hg38", reference_sha256="b" * 64,
+        extras={"pon_unavailable": {
+            "reason_code": "missing_toolchain", "message": "built panel unavailable",
+        }},
+    )
+    identity = execution_identity(
+        algorithm, reference_sha256=target.reference_sha256,
+        tool_pins=[tool.identity() for tool in algorithm.tools],
+    )
+    cached = ResultEnvelope(
+        algorithm_id="copy-number", algorithm_version=algorithm.version, status="ok",
+        provenance=provenance(
+            tool="fixture", parameters_sha256=identity,
+            source_id=target.source_id, input_id=target.input_id,
+            reference_id=target.reference_id,
+        ),
+    )
+    store.publish_result(cached, input_id=target.input_id)
+    monkeypatch.setattr(
+        cn_module.CopyNumber, "preflight",
+        lambda *_: pytest.fail("unavailable panel must skip before preflight"),
+    )
+    run_id = new_run_id()
+    result = run_plan(
+        store, None, store.run_log(run_id), target,
+        [PlanItem(algorithm, False)], {"copy-number": "traceback_lab.algorithms.copy_number:COPY_NUMBER"},
+        run_id=run_id, scrubber=Scrubber(root=store.root),
+    )[0]
+    assert result.status == "skipped" and result.skip_reason == "missing_toolchain"
+    assert not result.cached
+    assert store.read_result(target.input_id, "copy-number", identity).status == "skipped"
 
 
 def test_member_recompute_runs_pinned_loo_chain_and_requires_success(

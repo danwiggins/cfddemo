@@ -163,13 +163,26 @@ def bind_target(
         # The implicit ONT kit panel does not apply to short-read or EXAMPLE
         # inputs. Explicit --cohort still validates or refuses its selection.
         return list(items)
+    target.extras.pop("pon_unavailable", None)
     from .cohorts import _aligner
 
     aligner_label, _ = _aligner(manifest, target.input_id)
-    selection = selection_for_target(
-        store, cohort_id=cohort_id, source_id=target.source_id,
-        reference_sha256=target.reference_sha256, aligner_identity=aligner_label,
-    )
+    try:
+        selection = selection_for_target(
+            store, cohort_id=cohort_id, source_id=target.source_id,
+            reference_sha256=target.reference_sha256, aligner_identity=aligner_label,
+        )
+    except LabProblem as problem:
+        if (cohort_id is not None or problem.code != "TBX-LAB-020"
+                or problem.data.get("field") not in ("toolchain", "method assets")):
+            raise
+        # Preserve the built panel's fail-closed boundary: the runner must
+        # publish a CN skip, never reuse or execute an uncorrected CN result.
+        target.extras["pon_unavailable"] = {
+            "reason_code": "missing_toolchain" if problem.data["field"] == "toolchain" else "missing_asset",
+            "message": f"built panel unavailable: {problem.cause}",
+        }
+        return list(items)
     if selection is None:
         return list(items)
     if not has_copy_number:

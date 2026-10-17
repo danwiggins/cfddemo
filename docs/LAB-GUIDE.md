@@ -380,8 +380,11 @@ that implicit ONT panel. An explicit ONT cohort refuses those inputs. Pass
 `--cohort ID` to pin another built cohort; an explicit cohort
 with no compatible verified panel fails rather than falling back. If the
 implicit `healthy-v1` is unbuilt, copy-number keeps its no-PoN baseline.
-If that implicit panel is built but later becomes unverifiable, a real ONT run
-stops before executing rather than silently substituting no-PoN copy number.
+If a built implicit panel's toolchain or registered method assets are missing,
+copy-number records `missing_toolchain` or `missing_asset`, its dependents
+skip upstream, and independent algorithms continue. An older uncorrected
+copy-number result is never reused. Other panel verification failures stop
+the run rather than silently substituting no-PoN copy number.
 An explicit `--cohort` is checked even when `--only` omits copy-number.
 
 If a selected cohort cannot be verified, **Compare** lists it as unavailable

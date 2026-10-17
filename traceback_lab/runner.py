@@ -193,6 +193,7 @@ def run_plan(
     for item in items:
         algorithm = item.algorithm
         platform_rejected = target.platform not in algorithm.requires.platforms
+        pon_unavailable = target.extras.get("pon_unavailable") if algorithm.id == "copy-number" else None
         upstream = [
             {"algorithm_id": name, "parameters_sha256": done[name].parameters_sha256}
             for name in algorithm.upstream
@@ -220,7 +221,7 @@ def run_plan(
             and store.selected_upstream_selections(target.input_id, algorithm.id, identity) == consumed
         )
         if (existing is not None and existing.status == "ok" and not force
-                and not platform_rejected and not blocked and cache_valid):
+                and not platform_rejected and not pon_unavailable and not blocked and cache_valid):
             store.reselect_cached_result(target.input_id, algorithm.id, identity)
             selected = store.selected_attempt(target.input_id, algorithm.id, identity)
             result = StepResult(
@@ -245,6 +246,8 @@ def run_plan(
         if platform_rejected:
             supported = ", ".join(sorted(algorithm.requires.platforms))
             decision = Skip("platform", f"{algorithm.id} supports {supported}; this input declares {target.platform}")
+        elif pon_unavailable:
+            decision = Skip(pon_unavailable["reason_code"], pon_unavailable["message"])
         elif blocked:
             decision = Skip("upstream", f"upstream not ok: {', '.join(blocked)}")
         else:
