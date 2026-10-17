@@ -370,10 +370,14 @@ sources; a selected member panel uses `pon_n - 1` sources. A nonmember uses
 the full panel. Both copy-number and instability still require 2M eligible
 reads on the target input. Copy-number also enforces the signed 1M counted-read
 floor after filtering, with or without a panel.
+The corrected copy-number method version does not reuse older copy-number or
+dependent instability attempts. Rerun affected inputs and rebuild existing
+cohorts to restore current-version comparisons.
 
 `lab run` and `lab simulate` use a built `healthy-v1` cohort by default when
 one exists for a real ONT input. Illumina and EXAMPLE inputs do not select
-that implicit ONT panel. Pass `--cohort ID` to pin another built cohort; an explicit cohort
+that implicit ONT panel. An explicit ONT cohort refuses those inputs. Pass
+`--cohort ID` to pin another built cohort; an explicit cohort
 with no compatible verified panel fails rather than falling back. If the
 implicit `healthy-v1` is unbuilt, copy-number keeps its no-PoN baseline.
 If that implicit panel is built but later becomes unverifiable, a real ONT run

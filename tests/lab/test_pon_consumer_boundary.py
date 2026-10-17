@@ -308,6 +308,32 @@ def test_implicit_ont_panel_does_not_block_other_input_kinds(
     assert "pon_selection" not in target.extras
 
 
+@pytest.mark.parametrize("platform,example,code,field", [
+    ("illumina", False, "TBX-LAB-024", "platform"),
+    ("ont", True, "TBX-LAB-021", "EXAMPLE"),
+])
+def test_explicit_ont_panel_refuses_other_input_kinds_before_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str, example: bool,
+    code: str, field: str,
+) -> None:
+    monkeypatch.setattr(
+        pon_consumer, "selection_for_target",
+        lambda *_, **__: pytest.fail("incompatible input must be refused first"),
+    )
+    target = RunTarget(
+        input_id="4" * 64, source_id="5" * 64, input_dir=tmp_path,
+        reference_id="hg38", reference_sha256="b" * 64,
+        platform=platform, example=example,
+    )
+    with pytest.raises(LabProblem) as error:
+        pon_consumer.bind_target(
+            LabStore(tmp_path), plan(load_registry(), only=["instability"]),
+            target, {}, cohort_id="healthy-v1",
+        )
+    assert error.value.code == code and error.value.data["field"] == field
+    assert "pon_selection" not in target.extras
+
+
 def test_member_recompute_runs_pinned_loo_chain_and_requires_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
