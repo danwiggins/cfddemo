@@ -15,14 +15,16 @@ from .meth_tf_reference import KIND as METH_TF_KIND
 from .meth_tf_reference import add_reference, inspect_reference
 from .problems import EXIT_BLOCKED, EXIT_OK
 from .store import LabStore, new_run_id
+from .viral_assets import add_viral_reference, inspect_viral_reference
 
 
 def add_asset_parser(commands: Any, common: Callable[[argparse.ArgumentParser], None]) -> None:
     asset = commands.add_parser("asset", help="register or inspect local Lab assets")
     actions = asset.add_subparsers(dest="asset_action", required=True)
     add = actions.add_parser("add", help="register operator-supplied pinned bytes")
-    add.add_argument("kind", choices=("pmd", METH_TF_KIND, "tss-annotation"))
+    add.add_argument("kind", choices=("pmd", METH_TF_KIND, "tss-annotation", "viral-fasta"))
     add.add_argument("--file", type=Path, required=True, help="local pinned asset file")
+    add.add_argument("--targets", type=Path, help="viral-fasta TSV: contig, virus, accession")
     add.add_argument(
         "--source-label", "--provenance", dest="source_label", required=True,
         help="short public source description, never a donor path",
@@ -32,7 +34,7 @@ def add_asset_parser(commands: Any, common: Callable[[argparse.ArgumentParser], 
     common(add)
     add.set_defaults(handler=_add)
     inspect = actions.add_parser("inspect", help="rehash and describe a local asset")
-    inspect.add_argument("kind", choices=("pmd", METH_TF_KIND, "tss-annotation"))
+    inspect.add_argument("kind", choices=("pmd", METH_TF_KIND, "tss-annotation", "viral-fasta"))
     common(inspect)
     inspect.set_defaults(handler=_inspect)
 
@@ -47,15 +49,26 @@ def _add(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]
     store.check_version()
     try:
         with store.writer("asset add", new_run_id(), step=args.kind):
-            if args.kind == METH_TF_KIND:
+            if args.kind == "viral-fasta":
+                if getattr(args, "targets", None) is None:
+                    raise AssetError("viral-fasta needs --targets TSV")
+                record = add_viral_reference(
+                    store, args.file, args.targets,
+                    source_label=args.source_label, terms=args.terms, license_id=args.license_id,
+                )
+            elif args.kind == METH_TF_KIND:
+                if getattr(args, "targets", None) is not None:
+                    raise AssetError("only viral-fasta accepts --targets")
                 record = add_reference(
                     store, args.file, source_label=args.source_label,
                     terms=args.terms, license_id=args.license_id,
                 )
             else:
+                if getattr(args, "targets", None) is not None:
+                    raise AssetError("only viral-fasta accepts --targets")
                 record = add_asset(
-                    store, args.kind, args.file, source_label=args.source_label,
-                    terms=args.terms, license_id=args.license_id,
+                    store, args.kind, args.file,
+                    source_label=args.source_label, terms=args.terms, license_id=args.license_id,
                 )
     except AssetPublishUncertain as exc:
         payload = _result_payload(
@@ -87,7 +100,9 @@ def _add(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]
 def _inspect(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]]:
     store.check_version()
     try:
-        record = inspect_reference(store) if args.kind == METH_TF_KIND else inspect_asset(store, args.kind)
+        record = (inspect_reference(store) if args.kind == METH_TF_KIND else
+                  inspect_viral_reference(store) if args.kind == "viral-fasta" else
+                  inspect_asset(store, args.kind))
     except AssetError as exc:
         payload = _result_payload(
             "lab asset inspect", "blocked", "Asset unavailable", store,
@@ -103,7 +118,7 @@ def _inspect(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, 
         [
             f"ASSET   {record.asset_id}",
             f"SHA256  {record.sha256}",
-            f"TERMS   {record.descriptor.terms}" + (" (legacy file)" if record.legacy else ""),
+            f"TERMS   {record.descriptor.terms}" + (" (legacy file)" if getattr(record, "legacy", False) else ""),
             f"FILE    {record.file}",
         ],
     )
