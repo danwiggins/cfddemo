@@ -18,6 +18,9 @@ class ArmZReport:
     cohort_id: str
     cohort_version: str | None
     arm_asset_sha256: str | None
+    target_panel_sha256: str
+    target_panel_n: int
+    target_excluded: bool
     scores: dict[str, ArmScore]
 
     def public(self) -> dict[str, Any]:
@@ -25,6 +28,9 @@ class ArmZReport:
             "source_id": self.source_id, "cohort_id": self.cohort_id,
             "cohort_version": self.cohort_version,
             "arm_asset_sha256": self.arm_asset_sha256,
+            "target_panel_sha256": self.target_panel_sha256,
+            "target_panel_n": self.target_panel_n,
+            "target_excluded": self.target_excluded,
             "scores": {arm: asdict(score) for arm, score in self.scores.items()},
         }
 
@@ -54,6 +60,9 @@ def report_arm_zscores(store: LabStore, cohort_id: str, source_id: str) -> ArmZR
     asset_sha256 = asset_digests[0] if len(asset_digests) == 1 else None
 
     target = member_for_generation(store, generation, source_id)
+    target_excluded = target.pon_asset_sha256 is not None
+    target_panel_sha256 = target.pon_asset_sha256 or generation.pon_asset_sha256
+    target_panel_n = generation.pon_n - int(target_excluded)
     selected = {result.algorithm_id: result for result in target.results}
     arm_result = selected.get("arm-summary")
     depth_result = selected.get("read-summary")
@@ -82,7 +91,10 @@ def report_arm_zscores(store: LabStore, cohort_id: str, source_id: str) -> ArmZR
             target_protocol_key=protocol, eligible_reads=eligible,
             arm_asset_sha256=asset_sha256, observations=observations,
         )
-    return ArmZReport(source_id, cohort_id, generation.version_id, asset_sha256, scores)
+    return ArmZReport(
+        source_id, cohort_id, generation.version_id, asset_sha256,
+        target_panel_sha256, target_panel_n, target_excluded, scores,
+    )
 
 
 __all__ = ["ArmZReport", "report_arm_zscores"]

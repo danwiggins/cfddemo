@@ -498,7 +498,7 @@ cohorts to restore current-version comparisons.
 `arm-summary` summarizes PoN-corrected copy-number bins on autosomal p/q arms.
 It derives boundaries from the locally registered ichorCNA GRCh38 centromere
 asset and input reference lengths. A bin contributes only if finite, unmasked,
-and wholly inside an arm; the arm value is the median of contributing bins.
+and wholly inside an arm; the arm value is the median only when at least three bins contribute.
 It requires at least 2 million eligible reads and a selected PoN. The pinned
 arm-definition bytes enter both result identity and cohort compatibility.
 
@@ -506,9 +506,13 @@ arm-definition bytes enter both result identity and cohort compatibility.
 arm summaries against one published cohort generation. It excludes the target
 source and requires ten remaining controls with the same protocol and arm
 definition. A member of an exactly-ten-source cohort has nine controls and
-receives `no_reference`. Each arm reports n, the cohort mean and population
-SD, z, or a named unavailable state. This is exploratory: no abnormality
+receives `no_reference`. The JSON reports n, the cohort mean and population
+SD, z, or a named unavailable state; the human view shows z and n. This is exploratory: no abnormality
 cutoff, donor-independence claim, or clinical reference is assigned.
+The JSON response names the target panel digest and source count and whether
+the target was excluded. A nonmember uses the full panel while cohort members
+use leave-one-out panels, so their correction baselines differ; the z score
+is a descriptive cohort comparison, not a calibrated test statistic.
 
 `lab run` and `lab simulate` use a built `healthy-v1` cohort by default when
 one exists for a real ONT input. Illumina and EXAMPLE inputs do not select

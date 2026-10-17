@@ -25,7 +25,8 @@ from ._base import Base, metric
 from .copy_number import toolchain_or_none
 
 ARMS = tuple(f"chr{chrom}{side}" for chrom in range(1, 23) for side in ("p", "q"))
-POLICY = "finite-unmasked-whole-bin-median-v1"
+POLICY = "finite-unmasked-whole-bin-median-min3-v2"
+MIN_ARM_BINS = 3
 
 
 def centromeres_from_table(path: Path) -> dict[str, tuple[int, int]]:
@@ -44,14 +45,17 @@ def arm_intervals(
     intervals: dict[str, tuple[str, int, int]] = {}
     for chrom in range(1, 23):
         contig = f"chr{chrom}"
-        if contig not in centromeres or contig not in lengths:
+        bare = str(chrom)
+        centromere_key = contig if contig in centromeres else bare
+        length_key = contig if contig in lengths else bare
+        if centromere_key not in centromeres or length_key not in lengths:
             raise ValueError(f"{contig} is missing from the arm definition or reference")
-        start, end = centromeres[contig]
-        length = lengths[contig]
+        start, end = centromeres[centromere_key]
+        length = lengths[length_key]
         if any(type(value) is not int for value in (start, end, length)) or not 0 < start < end < length:
             raise ValueError(f"{contig} has invalid arm boundaries")
-        intervals[f"{contig}p"] = (contig, 0, start)
-        intervals[f"{contig}q"] = (contig, end, length)
+        intervals[f"{contig}p"] = (length_key, 0, start)
+        intervals[f"{contig}q"] = (length_key, end, length)
     return intervals
 
 
@@ -81,7 +85,7 @@ def summarize_arms(
                 selected[arm].append(float(value))
                 break
     return {
-        arm: (float(statistics.median(values)) if values else None, len(values))
+        arm: (float(statistics.median(values)) if len(values) >= MIN_ARM_BINS else None, len(values))
         for arm, values in selected.items()
     }
 
@@ -164,4 +168,4 @@ class ArmSummary(Base):
 
 ARM_SUMMARY = ArmSummary("arm-summary")
 
-__all__ = ["ARM_SUMMARY", "ARMS", "POLICY", "arm_intervals", "summarize_arms"]
+__all__ = ["ARM_SUMMARY", "ARMS", "MIN_ARM_BINS", "POLICY", "arm_intervals", "summarize_arms"]

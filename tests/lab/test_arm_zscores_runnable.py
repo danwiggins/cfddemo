@@ -34,16 +34,24 @@ def test_registered_arm_summary_and_whole_bin_mask_policy() -> None:
     assert intervals["chr1p"] == ("chr1", 0, 4)
     assert intervals["chr1q"] == ("chr1", 6, 10)
     bins = [
-        {"chr": "chr1", "start": 0, "end": 2, "log2": -1.0, "mask": None},
+        {"chr": "chr1", "start": 0, "end": 1, "log2": -1.0, "mask": None},
+        {"chr": "chr1", "start": 1, "end": 2, "log2": 0.0, "mask": None},
         {"chr": "chr1", "start": 2, "end": 4, "log2": 1.0, "mask": None},
         {"chr": "chr1", "start": 3, "end": 5, "log2": 500.0, "mask": None},
         {"chr": "chr1", "start": 6, "end": 8, "log2": 2.0, "mask": None},
         {"chr": "chr1", "start": 8, "end": 10, "log2": 500.0, "mask": "low-map"},
     ]
     result = arm_summary.summarize_arms(bins, intervals)
-    assert result["chr1p"] == (0.0, 2)
-    assert result["chr1q"] == (2.0, 1)
+    assert result["chr1p"] == (0.0, 3)
+    assert result["chr1q"] == (None, 1)
     assert result["chr2p"] == (None, 0)
+    bare_intervals = arm_summary.arm_intervals(
+        centromeres, {str(index): 10 for index in range(1, 23)},
+    )
+    assert bare_intervals["chr1p"] == ("1", 0, 4)
+    assert arm_summary.summarize_arms(
+        [dict(item, chr="1") for item in bins], bare_intervals,
+    )["chr1p"] == (0.0, 3)
     with pytest.raises(ValueError, match="duplicate"):
         arm_summary.summarize_arms(bins + bins[:1], intervals)
     with pytest.raises(ValueError, match="invalid log2"):
@@ -68,7 +76,8 @@ def test_arm_summary_run_uses_pinned_centromere_and_selected_track(
     cn = tmp_path / "copy-number"
     cn.mkdir()
     (cn / "cn_bins.json").write_text(json.dumps({"bins": [
-        {"chr": "chr1", "start": 0, "end": 2, "log2": -1.0, "mask": None},
+        {"chr": "chr1", "start": 0, "end": 1, "log2": -1.0, "mask": None},
+        {"chr": "chr1", "start": 1, "end": 2, "log2": 0.0, "mask": None},
         {"chr": "chr1", "start": 2, "end": 4, "log2": 1.0, "mask": None},
     ]}))
     digest = hashlib.sha256(centromere.read_bytes()).hexdigest()
@@ -181,10 +190,21 @@ def test_read_side_arm_z_requires_ten_controls_after_self_exclusion(
     monkeypatch.setattr(arm_zscores, "member_for_generation", lambda *_: target)
     monkeypatch.setattr(arm_zscores.ARM_SUMMARY, "asset_sha256s", lambda *_: ["9" * 64])
     report = report_arm_zscores(store, "synthetic", target.source_id)
+    assert report.public()["target_panel_sha256"] == target.pon_asset_sha256
+    assert report.public()["target_panel_n"] == 10
+    assert report.public()["target_excluded"] is True
     score = report.scores["chr1p"]
     assert score.state == "ok" and score.reference_n == 10
     assert score.reference_mean == 6.5
     assert score.z == pytest.approx((1 - 6.5) / math.sqrt(8.25))
+
+    external = target.model_copy(update={"source_id": _source(99), "pon_asset_sha256": None})
+    monkeypatch.setattr(arm_zscores, "member_for_generation", lambda *_: external)
+    full_report = report_arm_zscores(store, "synthetic", external.source_id)
+    assert full_report.public()["target_panel_sha256"] == generation.pon_asset_sha256
+    assert full_report.public()["target_panel_n"] == 11
+    assert full_report.public()["target_excluded"] is False
+    monkeypatch.setattr(arm_zscores, "member_for_generation", lambda *_: target)
 
     ten_member_generation = generation_for(members[:10])
     assert CohortGeneration.model_validate(ten_member_generation.model_dump()) == ten_member_generation

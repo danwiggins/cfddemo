@@ -486,12 +486,14 @@ def pon_inputs_for_members(store: LabStore, members: tuple[CohortMember, ...]) -
     return tuple(eligible)
 
 
-def _member_selection_paths(store: LabStore, input_ids: tuple[str, ...]) -> set[Path]:
+def _member_selection_paths(
+    store: LabStore, input_ids: tuple[str, ...], algorithm_ids: tuple[str, ...],
+) -> set[Path]:
     """Find mutable selectors that a member recomputation can change."""
 
     paths: set[Path] = set()
     for input_id in input_ids:
-        for algorithm_id in ("read-summary", "copy-number", "instability"):
+        for algorithm_id in algorithm_ids:
             directory = store.results_dir / input_id / algorithm_id
             if directory.is_symlink():
                 raise ValueError("member result directory is a symlink")
@@ -513,9 +515,11 @@ def _member_selection_paths(store: LabStore, input_ids: tuple[str, ...]) -> set[
     return paths
 
 
-def _snapshot_member_selections(store: LabStore, input_ids: tuple[str, ...]) -> dict[Path, bytes]:
+def _snapshot_member_selections(
+    store: LabStore, input_ids: tuple[str, ...], algorithm_ids: tuple[str, ...],
+) -> dict[Path, bytes]:
     before: dict[Path, bytes] = {}
-    for selector in _member_selection_paths(store, input_ids):
+    for selector in _member_selection_paths(store, input_ids, algorithm_ids):
         with os.fdopen(open_regular_no_follow(selector), "rb") as stream:
             content = stream.read(16 * 1024 + 1)
         if len(content) > 16 * 1024:
@@ -524,11 +528,13 @@ def _snapshot_member_selections(store: LabStore, input_ids: tuple[str, ...]) -> 
     return before
 
 
-def _restore_member_selections(store: LabStore, input_ids: tuple[str, ...], before: dict[Path, bytes]) -> None:
+def _restore_member_selections(
+    store: LabStore, input_ids: tuple[str, ...], algorithm_ids: tuple[str, ...], before: dict[Path, bytes],
+) -> None:
     """Keep immutable attempts, but undo selectors from an unpublished build."""
 
     changed_dirs: set[Path] = set()
-    for selector in _member_selection_paths(store, input_ids) - before.keys():
+    for selector in _member_selection_paths(store, input_ids, algorithm_ids) - before.keys():
         selector.unlink()
         changed_dirs.add(selector.parent)
     for selector, content in before.items():
@@ -646,12 +652,14 @@ def build_cohort(store: LabStore, cohort_id: str, *, kind: str = "internal_cohor
         version = max(versions, default=0) + 1
         snapshot = CohortGeneration(cohort_id=cohort_id, version=version, kind=kind, members=members)
         selected_input_ids: tuple[str, ...] = ()
+        selected_algorithm_ids: tuple[str, ...] = ()
         selections_before: dict[Path, bytes] | None = None
         if kind == "internal_cohort":
             inputs = pon_inputs_for_members(store, members)
             if len(inputs) >= 10:
                 from .pon import build_panels
-                from .pon_consumer import recompute_member
+                from .pon_consumer import member_recompute_plan, recompute_member
+                from .registry import registry_entries
                 from .runner import DEFAULT_TIMEOUT_S
 
                 built = build_panels(store, inputs)
@@ -666,7 +674,12 @@ def build_cohort(store: LabStore, cohort_id: str, *, kind: str = "internal_cohor
                 selected_input_ids = tuple(
                     member.input_id for member in members if member.source_id in built.source_ids
                 )
-                selections_before = _snapshot_member_selections(store, selected_input_ids)
+                selected_algorithm_ids = tuple(
+                    item.algorithm.id for item in member_recompute_plan(registry_entries())
+                )
+                selections_before = _snapshot_member_selections(
+                    store, selected_input_ids, selected_algorithm_ids,
+                )
                 try:
                     updated = {
                         source_id: recompute_member(
@@ -682,7 +695,9 @@ def build_cohort(store: LabStore, cohort_id: str, *, kind: str = "internal_cohor
                         pon_build=built.provenance(),
                     )
                 except BaseException:
-                    _restore_member_selections(store, selected_input_ids, selections_before)
+                    _restore_member_selections(
+                        store, selected_input_ids, selected_algorithm_ids, selections_before,
+                    )
                     raise
 
         def write(staging: Path) -> None:
@@ -693,7 +708,9 @@ def build_cohort(store: LabStore, cohort_id: str, *, kind: str = "internal_cohor
             write_atomic(directory / "current.json", canonical_json_bytes({"version": version}))
         except BaseException:
             if selections_before is not None:
-                _restore_member_selections(store, selected_input_ids, selections_before)
+                _restore_member_selections(
+                    store, selected_input_ids, selected_algorithm_ids, selections_before,
+                )
             raise
         store.bump_generation()
         return snapshot

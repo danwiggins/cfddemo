@@ -18,6 +18,7 @@ from .registry import Algorithm, PlanItem
 from .store import LabStore
 
 DEFAULT_COHORT = "healthy-v1"
+MEMBER_RECOMPUTE_TERMINALS = ("instability", "arm-summary")
 
 
 class SelectedPon(Protocol):
@@ -44,6 +45,14 @@ def bind_copy_number(items: Sequence[PlanItem], selection: SelectedPon) -> list[
         if item.algorithm.id == "copy-number" else item
         for item in items
     ]
+
+
+def member_recompute_plan(entries: Sequence[tuple[str, Algorithm]]) -> list[PlanItem]:
+    """One dependency-expanded plan for member work and selector rollback."""
+
+    from . import registry
+
+    return registry.plan([algorithm for _, algorithm in entries], only=list(MEMBER_RECOMPUTE_TERMINALS))
 
 
 def selection_for_target(
@@ -217,7 +226,7 @@ def recompute_member(
     )
     entries = registry.registry_entries()
     by_id = {algorithm.id: entry for entry, algorithm in entries}
-    items = registry.plan([algorithm for _, algorithm in entries], only=["instability", "arm-summary"])
+    items = member_recompute_plan(entries)
     items = bind_copy_number(items, selection)
     target = RunTarget(
         input_id=input_id, source_id=source_id, input_dir=store.inputs_dir / input_id,
@@ -232,7 +241,10 @@ def recompute_member(
         store, lock, log, target, items, by_id, run_id=run_id,
         timeout_s=timeout_s, scrubber=Scrubber(root=store.root),
     )
-    failed = [result.algorithm_id for result in results if result.status != "ok"]
+    failed = [
+        result.algorithm_id for result in results
+        if result.status != "ok" and not (result.algorithm_id == "arm-summary" and result.status == "skipped")
+    ]
     if failed:
         raise LabProblem(
             "TBX-LAB-020", cause=f"PoN member recomputation did not finish: {', '.join(failed)}",

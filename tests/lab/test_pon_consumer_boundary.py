@@ -468,6 +468,15 @@ def test_member_recompute_runs_pinned_loo_chain_and_requires_success(
     assert observed["target"].extras["pon_selection"]["cohort_version"] == "healthy-v1:2"
 
     monkeypatch.setattr(runner, "run_plan", lambda *_, **__: [
+        SimpleNamespace(algorithm_id="copy-number", status="ok"),
+        SimpleNamespace(algorithm_id="instability", status="ok"),
+        SimpleNamespace(algorithm_id="arm-summary", status="skipped"),
+    ])
+    assert pon_consumer.recompute_member(
+        store, generation, source_id, lock=None, log=None, run_id="synthetic", timeout_s=1,
+    ) is expected
+
+    monkeypatch.setattr(runner, "run_plan", lambda *_, **__: [
         SimpleNamespace(algorithm_id="copy-number", status="failed")
     ])
     with pytest.raises(LabProblem, match="TBX-LAB-020"):
@@ -611,18 +620,23 @@ def test_failed_generation_publish_restores_member_selections(
     old_identity, pending_identity = "8" * 64, "9" * 64
     first, second = previous.members[:2]
 
-    def cn_result(source_id: str, input_id: str, identity: str) -> ResultEnvelope:
+    def result_for(algorithm_id: str, source_id: str, input_id: str, identity: str) -> ResultEnvelope:
         return ResultEnvelope(
-            algorithm_id="copy-number", algorithm_version="2", status="ok",
+            algorithm_id=algorithm_id, algorithm_version="2" if algorithm_id == "copy-number" else "1",
+            status="ok",
             provenance=provenance(
                 tool="fixture", parameters_sha256=identity,
                 source_id=source_id, input_id=input_id, reference_id="hg38",
             ),
         )
 
-    store.publish_result(cn_result(first.source_id, first.input_id, old_identity), input_id=first.input_id)
+    store.publish_result(result_for("copy-number", first.source_id, first.input_id, old_identity), input_id=first.input_id)
     original_selected = store.selected_attempt(first.input_id, "copy-number", old_identity)
     assert original_selected is not None
+    old_arm_identity, pending_arm_identity = "c" * 64, "d" * 64
+    store.publish_result(result_for("arm-summary", first.source_id, first.input_id, old_arm_identity), input_id=first.input_id)
+    original_arm_selected = store.selected_attempt(first.input_id, "arm-summary", old_arm_identity)
+    assert original_arm_selected is not None
     attempted: list[str] = []
 
     def fake_recompute(store, pending, source_id, **kwargs):
@@ -631,7 +645,9 @@ def test_failed_generation_publish_restores_member_selections(
         kwargs["log"].append("sample", sample=source_id[:12], source_id=source_id, input_id=member.input_id)
         if source_id in (first.source_id, second.source_id):
             identity = old_identity if source_id == first.source_id else pending_identity
-            store.publish_result(cn_result(source_id, member.input_id, identity), input_id=member.input_id)
+            store.publish_result(result_for("copy-number", source_id, member.input_id, identity), input_id=member.input_id)
+            arm_identity = old_arm_identity if source_id == first.source_id else pending_arm_identity
+            store.publish_result(result_for("arm-summary", source_id, member.input_id, arm_identity), input_id=member.input_id)
         return member
 
     monkeypatch.setattr(pon_consumer, "recompute_member", fake_recompute)
@@ -659,9 +675,17 @@ def test_failed_generation_publish_restores_member_selections(
     assert read_current(store, "healthy-v1") == previous
     assert selected_results(store, first.input_id)["copy-number"].provenance.parameters_sha256 == old_identity
     assert store.selected_attempt(first.input_id, "copy-number", old_identity) == original_selected
+    assert selected_results(store, first.input_id)["arm-summary"].provenance.parameters_sha256 == old_arm_identity
+    assert store.selected_attempt(first.input_id, "arm-summary", old_arm_identity) == original_arm_selected
     assert "copy-number" not in selected_results(store, second.input_id)
+    assert "arm-summary" not in selected_results(store, second.input_id)
     assert store.selected_attempt(second.input_id, "copy-number", pending_identity) is None
+    assert store.selected_attempt(second.input_id, "arm-summary", pending_arm_identity) is None
     for member, identity in ((first, old_identity), (second, pending_identity)):
         attempts = store.result_dir(member.input_id, "copy-number", identity) / "attempts"
         assert any((path / "result.json").is_file() for path in attempts.iterdir())
     assert len(list((store.result_dir(first.input_id, "copy-number", old_identity) / "attempts").iterdir())) >= 2
+    for member, identity in ((first, old_arm_identity), (second, pending_arm_identity)):
+        attempts = store.result_dir(member.input_id, "arm-summary", identity) / "attempts"
+        assert any((path / "result.json").is_file() for path in attempts.iterdir())
+    assert len(list((store.result_dir(first.input_id, "arm-summary", old_arm_identity) / "attempts").iterdir())) >= 2
