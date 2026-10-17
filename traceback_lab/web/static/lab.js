@@ -310,20 +310,23 @@
       !sample.algorithms.some((a) => a.algorithm_id === run.step));
     const runRows = sample.algorithms.map((a) => {
       const status = a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status;
-      const matches = (run) => run && run.step === a.algorithm_id && run.source_id === sample.source_id && run.input_id === a.provenance.input_id;
+      const matches = (run) => run && run.step === a.algorithm_id && run.source_id === sample.source_id && run.input_id === a.provenance?.input_id;
       const runNote = matches(active) ? "latest run in progress" : matches(interrupted) ? interruptedLabel : null;
       const cells = [h("th", { scope: "row" }, a.algorithm_id + (a.hidden ? " (intermediate)" : "")),
         h("td", { class: a.status === "failed" ? "problem" : null }, status, runNote ? " " : "",
           runNote ? h("span", { class: "state-chip run-note" }, runNote) : ""),
         h("td", { class: "num" }, a.duration_s !== null && a.duration_s !== undefined ? `${a.duration_s.toFixed(1)} s` : "—")];
-      const logKey = `${sample.id12}:${a.algorithm_id}:${a.provenance.input_id}:${a.provenance.parameters_sha256}`;
+      const pin = a.provenance;
+      const canPin = pin && /^[0-9a-f]{64}$/.test(pin.input_id) && /^[0-9a-f]{64}$/.test(pin.parameters_sha256) &&
+        /^a-\d{8}T\d{12}-[0-9a-f]{8}$/.test(pin.attempt_id);
+      const logKey = `${sample.id12}:${a.algorithm_id}:${pin?.input_id}:${pin?.parameters_sha256}:${pin?.attempt_id}`;
       const logLine = h("span", { class: "help", "aria-live": "polite" }, state.runLogLines.get(logKey) || "");
       const showLogLine = (message) => {
         state.runLogLines.set(logKey, message);
         if (logLine.isConnected) logLine.replaceChildren(message);
         else if (state.route.name === "lens" && state.sample && state.sample.id12 === sample.id12) render();
       };
-      const logLink = h("a", { href: `#/sample/${sample.id12}/trust-qc`, onclick: async (event) => {
+      const logLink = canPin ? h("a", { href: `#/sample/${sample.id12}/trust-qc`, onclick: async (event) => {
         event.preventDefault();
         if (state.lastStatus && state.generationAtLoad !== null && state.lastStatus.generation > state.generationAtLoad) {
           showLogLine("Results changed on disk; reload before viewing this run log line.");
@@ -331,14 +334,14 @@
         }
         showLogLine("Loading run log line…");
         try {
-          const line = await api(`/api/samples/${sample.id12}/run-log/${a.algorithm_id}/${a.provenance.input_id}/${a.provenance.parameters_sha256}`);
+          const line = await api(`/api/samples/${sample.id12}/run-log/${a.algorithm_id}/${pin.input_id}/${pin.parameters_sha256}/${pin.attempt_id}`);
           showLogLine(line.found
             ? `${line.run_id} · line ${line.line} · ${line.utc || "time unavailable"} · step_end ${line.step} status=${line.status}${line.skip_reason ? ` (${line.skip_reason})` : ""}${line.duration_s !== null ? ` · ${line.duration_s} s` : ""}`
             : "Run log line unavailable (searched up to 64 recently updated runs; logs over 1 MiB or 4,096 lines are not shown).");
         } catch (error) {
           showLogLine(error.session ? "Session expired; reopen Lab." : "Run log line unavailable.");
         }
-      } }, "Run log line →");
+      } }, "Run log line →") : h("span", { class: "help" }, "Run log line unavailable for this result");
       cells.push(h("td", {}, logLink, " ", logLine));
       const detail = a.failure
         ? h("details", {}, h("summary", {}, "Last 50 stderr lines (scrubbed)"), h("pre", { class: "stderr" }, a.failure.stderr_tail.join("\n") || a.failure.first_line))

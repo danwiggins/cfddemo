@@ -17,12 +17,12 @@ SOURCE = "b" * 64
 INPUT = "c" * 64
 
 
-def _result(identity: str, value: int) -> ResultEnvelope:
+def _result(identity: str, value: int, input_id: str = INPUT) -> ResultEnvelope:
     return ResultEnvelope.model_validate({
         "algorithm_id": "fragment-size", "algorithm_version": "1", "status": "ok",
         "provenance": provenance(
             tool="synthetic-fixture", parameters_sha256=identity,
-            source_id=SOURCE, input_id=INPUT, reference_id="synthetic",
+            source_id=SOURCE, input_id=input_id, reference_id="synthetic",
             timestamp_utc="2026-10-16T00:00:00Z",
         ),
         "metrics": [{"metric_id": "mode_bp", "value": value}],
@@ -93,6 +93,51 @@ def test_ambiguous_legacy_results_are_disclosed_without_guessing(tmp_path) -> No
     assert all(row["algorithm_id"] != "fragment-size" for row in sample["algorithms"])
     assert next(row for row in sample["catalog"] if row["algorithm_id"] == "fragment-size")["status"] == "ambiguous"
     assert sample["defended"]["rows"] == []
+
+
+def test_unreadable_derived_result_is_named_in_stability(tmp_path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    derived_input = "d" * 64
+    manifest = store.inputs_dir / INPUT / "manifest.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"kind":"aligned"}')
+    store.sources_dir.mkdir(parents=True)
+    (store.sources_dir / f"{SOURCE}.json").write_text(json.dumps({
+        "source_id": SOURCE, "example": False, "excluded": [],
+        "inputs": [{"input_id": INPUT, "used_utc": "2026-10-16T00:00:00Z"}],
+        "derived": [{"input_id": derived_input, "parent_input_id": INPUT, "label": "0.5",
+                     "transform": "downsample", "parameters": {"fraction": 0.5}}],
+    }))
+    identity = "a" * 64
+    store.publish_result(_result(identity, 167), input_id=INPUT)
+    store.publish_result(_result(identity, 170, derived_input), input_id=derived_input)
+    selected = store.result_dir(derived_input, "fragment-size", identity)
+    attempt = json.loads((selected / "selected.json").read_bytes())["attempt_id"]
+    (selected / "attempts" / attempt / "result.json").write_bytes(b"{ malformed")
+
+    sample = LabApi(store).sample(SOURCE[:12])
+    panel = next(panel for panel in sample["stability"] if panel["algorithm_id"] == "fragment-size"
+                 and panel["metric_id"] == "mode_bp")
+    point = next(point for point in panel["points"] if point["fraction"] == 0.5)
+    assert point["state"] == "unavailable" and point["reason"] == "result unreadable"
+    row = next(row for row in sample["curve"]["rows"] if row["algorithm_id"] == "fragment-size")
+    assert row["cells"][0]["reason"] == "result unreadable"
+
+
+@needs_chrome
+def test_unreadable_derived_result_is_visible_on_stability_page(tmp_path) -> None:
+    # The API case above owns the malformed-store setup; this checks the
+    # renderer's explicit state copy with a lightweight synthetic response.
+    from tests.lab.test_acceptance_synthetic_routes import _sample, _server
+
+    sample = _sample()
+    sample["stability"][0]["points"] = [{"fraction": 0.5, "label": "0.5", "state": "unavailable",
+                                           "reason": "result unreadable", "value": None, "deviation": None,
+                                           "unit": "percent", "band": None}]
+    with _server(tmp_path, sample) as server:
+        dom = _dom(server, tmp_path / "browser", route=f"/sample/{sample['id12']}/stability")
+    assert "result unreadable" in dom
 
 
 @needs_chrome

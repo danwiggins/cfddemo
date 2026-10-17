@@ -1085,10 +1085,11 @@ def test_run_log_line_is_authenticated_matched_and_allowlisted(tmp_path, monkeyp
         assert payload == {"found": True, "run_id": run_id, "line": 3, "step": "sex-check",
                            "utc": payload["utc"], "status": "ok", "skip_reason": None,
                            "duration_s": 1.25}
-        pinned = f"{path}/{input_id}/{identity}"
+        pinned = f"{path}/{input_id}/{identity}/{attempt_id}"
         assert json.loads(_get(running, pinned, cookie)[1])["run_id"] == run_id
-        assert _get(running, f"{path}/{'e' * 64}/{identity}", cookie)[0].status == 404
-        assert _get(running, f"{path}/{input_id}/{'d' * 64}", cookie)[0].status == 404
+        assert _get(running, f"{path}/{'e' * 64}/{identity}/{attempt_id}", cookie)[0].status == 404
+        assert _get(running, f"{path}/{input_id}/{'d' * 64}/{attempt_id}", cookie)[0].status == 404
+        assert _get(running, f"{path}/{input_id}/{identity}/a-20261015T010100000000-deadbeef", cookie)[0].status == 404
         with log.path.open("ab") as stream:
             stream.write(b'{"event":"step_end"')
         assert json.loads(_get(running, path, cookie)[1])["line"] == 3
@@ -1124,6 +1125,8 @@ def test_run_log_line_uses_only_the_selected_attempt(tmp_path, monkeypatch) -> N
     monkeypatch.setattr(api_module.views, "load_sample", lambda _store, _source: sample)
     api = api_module.LabApi(store)
     assert api.run_log_line(source_id[:12], "sex-check")["run_id"] == new.run_id
+    assert api.run_log_line(source_id[:12], "sex-check", input_id, identity, first) == {"found": False}
+    assert api.run_log_line(source_id[:12], "sex-check", input_id, identity, second)["run_id"] == new.run_id
     latest = store.run_log("r-20261015-0101-0000")
     latest.append("sample", source_id=source_id, input_id=input_id)
     latest.append("step_end", step="sex-check", parameters_sha256=identity, input_id=input_id,
