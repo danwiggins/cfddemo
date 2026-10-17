@@ -79,15 +79,15 @@ class ShortReadFragmentSize(Base):
         try:
             manifest = json.loads((ctx.input_dir / "manifest.json").read_bytes())
         except (OSError, ValueError):
-            return Skip("input_kind", "short-read TLEN needs a stored prealigned BAM")
+            return Skip("platform", "short-read TLEN needs a stored prealigned BAM")
         if manifest.get("kind") != "prealigned":
-            return Skip("input_kind", "short-read TLEN needs a prealigned BAM; Lab alignment is ONT-only")
+            return Skip("platform", "short-read TLEN needs a prealigned BAM; Lab alignment is ONT-only")
         try:
             with pysam.AlignmentFile(str(ctx.input_dir / "aligned.bam"), "rb") as bam:
                 if not _declared_illumina(bam):
                     return Skip("platform", "all BAM read groups must declare PL:ILLUMINA")
         except (OSError, ValueError):
-            return Skip("input_kind", "short-read TLEN needs a readable prealigned BAM")
+            return Skip("platform", "short-read TLEN needs a readable prealigned BAM")
         return Ready()
 
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:

@@ -797,6 +797,7 @@ def align(
             "input_id": input_id,
             "source_id": source_id,
             "kind": "aligned",
+            "platform": "ont",
             "reference_id": reference.reference_id,
             "reference_sha256": reference.sha256,
             "mmi_sha256": mmi_sha256,
@@ -837,7 +838,10 @@ def ingest_prealigned(
     chunk = chunkset.chunks[0]
     check_sq(chunk, reference)
     source_id = chunkset.source_id
-    input_id = prealigned_input_id(source_id=source_id, reference_sha256=reference.sha256)
+    from .platforms import from_rg_lines
+
+    platform = from_rg_lines(chunkset.rg_lines)
+    input_id = prealigned_input_id(source_id=source_id, reference_sha256=reference.sha256, platform=platform)
     existing = input_manifest(store, input_id)
     if existing is not None:
         return AlignedInput(input_id, source_id, store.inputs_dir / input_id, existing, reused=True)
@@ -862,6 +866,7 @@ def ingest_prealigned(
             "input_id": input_id,
             "source_id": source_id,
             "kind": "prealigned",
+            "platform": platform,
             "reference_id": reference.reference_id,
             "reference_sha256": reference.sha256,
             "basecall_model": chunkset.basecall_model,
@@ -908,6 +913,7 @@ def write_source(
         {
             "input_id": aligned.input_id,
             "kind": aligned.manifest.get("kind"),
+            "platform": aligned.manifest.get("platform", "ont" if aligned.manifest.get("kind") == "aligned" else "unknown"),
             "tools": aligned.manifest.get("tools"),
             "reference_id": aligned.manifest.get("reference_id"),
             "used_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
