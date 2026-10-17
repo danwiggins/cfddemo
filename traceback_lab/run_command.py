@@ -321,6 +321,15 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
     ]
     data: dict[str, Any] = {"root": str(store.root), "dry_run": True, "plan": plan_rows}
     lines = [f"ROOT      {store.root}"]
+
+    def mark_platform_skips(platform: str) -> None:
+        for row, item in zip(plan_rows, items):
+            if platform not in item.algorithm.requires.platforms:
+                row["decision"] = "skip expected (platform)"
+        if args.controls and platform != "ont":
+            data["controls"] = {"cna_skipped": "platform"}
+            lines.append("CONTROL   CNA spike not built (platform)")
+
     if len(args.inputs) == 1 and _is_stored(args.inputs[0]):
         source_id = resolve_sample(store, args.inputs[0])
         aligned, record = _stored_input(store, source_id)
@@ -373,9 +382,7 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
             "(reused; not a sufficiency check)"
         )
         lines.append("ANALYSIS  scratch disk not predicted")
-        for row, item in zip(plan_rows, items):
-            if platform not in item.algorithm.requires.platforms:
-                row["decision"] = "skip expected (platform)"
+        mark_platform_skips(platform)
         summary = next((item.algorithm for item in items if item.algorithm.id == "read-summary"), None)
         if summary is not None and not args.force:
             identity = execution_identity(
@@ -413,8 +420,10 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
         paths = collect_paths(args.inputs)
         chunkset = inspect_chunks(paths, store, skip_bad_chunks=args.skip_bad_chunks, write_cache=False)
         input_platform = _declared_platform(chunkset)
+        platform = input_platform if chunkset.aligned else "ont"
         data["sample"] = {"source_id": chunkset.source_id,
-                          "platform": input_platform if chunkset.aligned else "ont"}
+                          "platform": platform}
+        mark_platform_skips(platform)
         with_sex_assertion(source_record(store, chunkset.source_id) or {}, args.sex)
         reference = resolve_reference(store.root, args.reference_id)
         data["reference_id"] = reference.reference_id

@@ -390,8 +390,12 @@ def test_valid_dry_run_reports_platform_in_sample(tmp_path: Path, capsys: pytest
     root, bam_path = _prealigned_world(tmp_path, ("ILLUMINA",))
     code = signed_cli.main([
         "lab", "run", str(bam_path), "--root", str(root), "--reference", "hg38",
-        "--dry-run", "--json",
+        "--dry-run", "--controls", "--json",
     ])
     payload = json.loads(capsys.readouterr().out)
     assert code == 0, payload
     assert payload["data"]["sample"]["platform"] == "illumina"
+    decisions = {row["algorithm_id"]: row["decision"] for row in payload["data"]["plan"]}
+    assert decisions["copy-number"] == "skip expected (platform)"
+    assert decisions["read-summary"] == "decided after alignment"
+    assert payload["data"]["controls"]["cna_skipped"] == "platform"
