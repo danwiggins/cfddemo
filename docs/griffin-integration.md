@@ -56,11 +56,15 @@ the profile panel. The primary registered TF list supplies the scalar
 ONT, example, and derived inputs skip explicitly. No arbitrary TF activity or
 diagnostic threshold is asserted.
 
-An end-to-end upstream run has not yet been completed in this environment:
-tested Snakemake 5.19.2, pyBigWig, pybedtools, and the required mappability
-BigWig are absent. Native ONT input is incompatible with the exact upstream
-code. A scientifically reviewed ONT fragment adapter is still needed before
-this method can run on the Lab's principal assay.
+Both complete pinned Snakemake workflows have run in an isolated synthetic
+toolchain on 500 toy paired-end fragments, with a generated reference, site
+list, and mappability track. The corrected output passed the Lab parser. That
+proof used a compatibility shim for Snakemake 5.19.2 under Python 3.11 and
+does not satisfy the Lab's 5M eligible-pair gate or validate a production hg38
+sample. A production run still needs registered hg38 assets and a compatible
+toolchain. Native ONT input is incompatible with the exact upstream code; a
+scientifically reviewed ONT fragment adapter would be needed for the Lab's
+principal assay.
 
 Griffin's source is BSD-3-Clause-Clear, which expressly grants no patent
 rights. The Lab's existing `method-patents` callout applies, and no
