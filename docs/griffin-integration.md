@@ -27,8 +27,11 @@ adapter requires at least one BAM read group and every group to declare
 profile-window gate before creating an attempt. It does
 not infer library type from an early coordinate-sorted slice. Native ONT
 single-end BAMs are rejected. It compares the BAM's `@SQ` names and lengths
-and the workflow chromosome sizes with the registered FASTA index; this checks
-coordinate-space compatibility, not exact sequence identity. A scientifically reviewed ONT fragment
+and the workflow chromosome sizes with the registered FASTA index. Every
+autosome in that index must appear in the workflow sizes, so the coverage
+space cannot omit autosomes included in the depth count. This checks
+coordinate-space compatibility, not exact sequence identity. A scientifically
+reviewed ONT fragment
 adapter remains necessary for the Lab's primary input. The caller supplies
 the registered hg38 FASTA and its SHA-256, Griffin's
 reference assets (including mappability BigWig, exclusion BEDs and all

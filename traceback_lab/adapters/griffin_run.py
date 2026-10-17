@@ -210,8 +210,14 @@ def _require_chrom_sizes(reference: Path, chrom_sizes: Path) -> tuple[str, ...]:
                 autosomes.append(fields[0])
     if not seen:
         raise ValueError("Griffin chromosome sizes are empty")
+    expected_autosomes = {
+        name for name in expected
+        if re.fullmatch(r"(?:chr)?(?:[1-9]|1[0-9]|2[0-2])", name)
+    }
     if not autosomes:
         raise ValueError("Griffin chromosome sizes have no canonical autosomes")
+    if set(autosomes) != expected_autosomes:
+        raise ValueError("Griffin chromosome sizes omit autosomes in the registered FASTA")
     return tuple(autosomes)
 
 
