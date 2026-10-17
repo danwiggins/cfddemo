@@ -346,7 +346,7 @@ STATUS_CASES = [
 
 
 def _run_marker() -> dict:
-    return {"run_id": "r-20261015-0101-abcd", "step": "bam-qc",
+    return {"run_id": "r-20261015-0101-abcd", "command": "run", "step": "bam-qc",
             "source_id": "c" * 64, "input_id": "b" * 64}
 
 
@@ -486,7 +486,9 @@ def test_stale_run_log_link_refuses_to_mix_new_attempt_with_loaded_results(tmp_p
               state.lastStatus.generation = 2;
               const link = [...document.querySelectorAll('main a')]
                 .find((a) => a.textContent.includes('Run log line →'));
+              if (!link) return false;
               link.click();
+              return true;
             })()""",
         )
     assert "Results changed on disk; reload before viewing this run log line." in dom

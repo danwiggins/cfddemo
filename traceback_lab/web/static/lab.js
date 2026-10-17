@@ -290,6 +290,8 @@
     // Run table.
     const active = state.lastStatus && state.lastStatus.active;
     const interrupted = state.lastStatus && state.lastStatus.interrupted;
+    const interruptedLabel = active && interrupted && active.run_id !== interrupted.run_id
+      ? "earlier run interrupted" : "latest run interrupted";
     const unavailable = new Set([...(sample.unreadable_results || []), ...(sample.ambiguous_results || [])]);
     const pending = [active, interrupted].find((run) => run && run.step && run.source_id === sample.source_id &&
       run.input_id === sample.full_input_id && !unavailable.has(run.step) &&
@@ -297,9 +299,9 @@
     const runRows = sample.algorithms.map((a) => {
       const status = a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status;
       const matches = (run) => run && run.step === a.algorithm_id && run.source_id === sample.source_id && run.input_id === a.provenance.input_id;
-      const runNote = matches(active) ? "latest run in progress" : matches(interrupted) ? "latest run interrupted" : null;
+      const runNote = matches(active) ? "latest run in progress" : matches(interrupted) ? interruptedLabel : null;
       const cells = [h("th", { scope: "row" }, a.algorithm_id + (a.hidden ? " (intermediate)" : "")),
-        h("td", { class: a.status === "failed" ? "problem" : null }, status,
+        h("td", { class: a.status === "failed" ? "problem" : null }, status, runNote ? " " : "",
           runNote ? h("span", { class: "state-chip run-note" }, runNote) : ""),
         h("td", { class: "num" }, a.duration_s !== null && a.duration_s !== undefined ? `${a.duration_s.toFixed(1)} s` : "—")];
       const logKey = `${sample.id12}:${a.algorithm_id}:${a.provenance.input_id}:${a.provenance.parameters_sha256}`;
@@ -341,7 +343,7 @@
         h("td", {}, "—"), h("td", {}, "—"), h("td", {}, "More than one selected result was found.")));
     }
     out.push(h("section", { class: "panel" }, h("h2", {}, "Run"),
-      pending ? h("p", { class: "status-line" }, `Latest run ${pending === active ? "in progress" : "interrupted"} during ${pending.step}; no result was published for this step.`) : "",
+      pending ? h("p", { class: "status-line" }, `${pending === active ? "Latest run in progress" : interruptedLabel.replace(/^./, (letter) => letter.toUpperCase())} during ${pending.step}; no result was published for this step.`) : "",
       h("div", { class: "table-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, ...["Algorithm", "Status", "Duration", "Run log", "Detail"].map((t) => h("th", { scope: "col" }, t)))), h("tbody", {}, ...runRows)))));
     // QC bands.
     const banded = [];
@@ -431,6 +433,7 @@
         over_4096_lines: "log over 4,096 lines", malformed_or_empty: "log malformed or empty",
         latest_run_pointer_unavailable: "latest-run pointer unavailable" }[logIssue.reason] || "log unavailable");
       if (state.generationAtLoad === null) state.generationAtLoad = status.generation;
+      if (status.generation > state.generationAtLoad) state.runLogLines.clear();
       if (status.active) {
         const minutes = Math.max(0, Math.round((Date.now() - Date.parse(status.active.started_utc)) / 60000));
         const priorInterrupted = status.interrupted && status.interrupted.run_id !== status.active.run_id
