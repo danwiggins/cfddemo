@@ -410,6 +410,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                 if memory_warning:
                     warnings.append(memory_warning)
                     progress(f"WARN {memory_warning['summary']}")
+                    progress(f"     {memory_warning['fix']}")
                 example = False
                 if stored:
                     source_id = resolve_sample(store, args.inputs[0])
@@ -791,13 +792,12 @@ def _summary(
         lines.append(f"FAILED  {result.algorithm_id}: {result.first_line}")
         lines.append(f"        details: traceback lab runs {run_id} --step {result.algorithm_id}")
     for warning in warnings:
+        if warning.get("kind") == "low_memory":
+            continue  # already shown before alignment, including the next action
         lines.append(f"WARN    {warning['summary']}")
-        if "code" in warning:
-            lines.extend(problem_lines(LabProblem(
-                warning["code"], cause=warning["cause"], fix=warning["fix"],
-            )))
-        else:
-            lines.append(f"        {warning['fix']}")
+        lines.extend(problem_lines(LabProblem(
+            warning["code"], cause=warning["cause"], fix=warning["fix"],
+        )))
     partial_problem = None
     if failed:
         partial_problem = LabProblem(

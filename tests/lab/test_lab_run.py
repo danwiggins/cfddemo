@@ -77,10 +77,13 @@ def test_low_memory_warning_is_advisory_in_run_and_dry_run(lab_world, capsys, mo
     code, dry = _json(capsys, *argv, "--dry-run")
     assert code == 0 and dry["data"]["warnings"][0]["kind"] == "low_memory"
     code, human, _ = _lab(capsys, *argv)
-    assert code == 0 and "Less than 16 GiB" in human
+    assert code == 0 and human.count("Less than 16 GiB") == 1
+    assert "Use a machine with at least 16 GiB RAM" in human
     code, payload = _json(capsys, *argv)
     assert code == 0
-    (warning,) = payload["data"]["warnings"]
+    low_memory = [row for row in payload["data"]["warnings"] if row.get("kind") == "low_memory"]
+    assert len(low_memory) == 1
+    (warning,) = low_memory
     assert warning["kind"] == "low_memory"
     assert warning["physical_ram_bytes"] == 8 * doctor.GIB
     assert warning["recommended_bytes"] == doctor.MIN_RAM
