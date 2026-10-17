@@ -20,7 +20,6 @@ from ..meth_calls import HAS_M, argmax_state
 from ..meth_tf_reference import CALL_DEFINITION, RegisteredReference, inspect_reference
 from ..read_summary import ReadSummary
 from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip
-from ..store import LabStore
 from ._base import Base, metric
 from ._meth import MethBase, load_calls
 
@@ -132,12 +131,16 @@ class MethTF(MethBase):
     })
 
     def asset_sha256s(self, root: Path) -> list[str]:
+        from ..store import LabStore
+
         try:
             return [inspect_reference(LabStore(root)).sha256]
         except (OSError, ValueError):
             return []
 
     def preflight(self, ctx: InputContext) -> Ready | Skip:
+        from ..store import LabStore
+
         if ctx.example:
             return Skip("example_reference", "meth-TF needs a registered, non-example marker reference")
         decision = Base.preflight(self, ctx)
@@ -162,6 +165,8 @@ class MethTF(MethBase):
         return super().preflight(ctx)
 
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
+        from ..store import LabStore
+
         reference = inspect_reference(LabStore(ctx.root))
         if ctx.extras.get("planned_asset_sha256s") != [reference.sha256]:
             raise ValueError("the meth-TF reference changed after execution planning")
