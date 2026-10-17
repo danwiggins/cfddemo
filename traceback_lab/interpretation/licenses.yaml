@@ -7,6 +7,14 @@ licenses:
     headline: "LGPL: NIPTeR prenatal analysis"
     body: "The installed NIPTeR 1.0.2 DESCRIPTION says GNU Lesser General Public License without a version. NIPTeR runs as a separate R process; its license terms and the control cohort's data rights require independent review."
     url: "https://github.com/molgenis/NIPTeR"
+  lionheart-resources-research:
+    headline: "RESEARCH-ONLY RESOURCES: LIONHEART cell-type scores"
+    body: >-
+      LIONHEART code is MIT, but Zenodo record 15747531 says its shared scores
+      and models derive from data restricted to non-commercial research use.
+      The resource pack is operator-supplied and is never bundled here.
+      ONT single-end extraction is experimental and is not a validated cancer test.
+    url: "https://zenodo.org/records/15747531"
   somalier-mit:
     headline: "MIT: Somalier"
     body: >-

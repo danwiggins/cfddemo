@@ -45,23 +45,30 @@ def from_bam(path: Path) -> Platform:
 def for_input(manifest: Mapping[str, Any], bam_path: Path) -> Platform:
     """Resolve old manifests safely and verify new ones against their BAM."""
 
+    if not isinstance(manifest, Mapping):
+        raise ValueError("stored Lab input manifest is not an object")
     kind = manifest.get("kind")
     if kind == "aligned":
         if manifest.get("platform", "ont") != "ont":
             raise ValueError("Lab-aligned input platform must be ONT")
         actual = from_bam(bam_path)
         if actual != "ont":
-            # Earlier Lab versions could align an unaligned BAM without @RG.
-            # Accept only that exact old map-ont recipe and an absent RG;
-            # ambiguous or contrary declarations still fail closed.
-            from .ingest import ALIGNER_IDENTITY_ARGV
+            # Earlier Lab versions carried source read groups through map-ont
+            # without requiring a recognized PL. Match the exact recorded
+            # recipe for the BAM's read-group count, but reject any explicit
+            # Illumina declaration.
+            from .ingest import aligner_argv_identity
 
-            legacy = "platform" not in manifest and manifest.get("aligner_argv") == list(ALIGNER_IDENTITY_ARGV)
-            if not legacy or actual != "unknown":
+            if "platform" in manifest or actual != "unknown":
                 raise ValueError("Lab-aligned BAM does not declare ONT")
             with pysam.AlignmentFile(str(bam_path), "rb", check_sq=False) as bam:
-                if bam.header.get("RG"):
-                    raise ValueError("Lab-aligned BAM does not declare ONT")
+                rg_lines = [line for line in str(bam.header).splitlines() if line.startswith("@RG\t")]
+            has_illumina = any(
+                tag.upper() == "PL:ILLUMINA"
+                for line in rg_lines for tag in line.split("\t")[1:]
+            )
+            if has_illumina or manifest.get("aligner_argv") != aligner_argv_identity(rg_lines):
+                raise ValueError("Lab-aligned BAM does not declare ONT")
         return "ont"
     if kind != "prealigned":
         raise ValueError("unknown Lab input kind")
