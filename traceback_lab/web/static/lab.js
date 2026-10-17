@@ -174,10 +174,21 @@
     }
     const lens = route.name === "lens" ? route.lens : null;
     const views = window.TracebackLabViews || {};
-    if (route.name === "home" && views.landing) { main.append(...views.landing(sample)); return; }
+    const appendSample = (nodes) => {
+      main.append(...nodes);
+      if (sample.excluded_chunks && sample.excluded_chunks.length) {
+        const notice = h("div", { class: "status-line" },
+          h("p", {}, `Provisional: this input excludes ${sample.excluded_chunks.length} truncated chunks; depth reflects the reads present.`),
+          h("details", {}, h("summary", {}, `Excluded chunk indexes (${sample.excluded_chunks.length})`),
+            h("p", {}, `Excluded chunk indexes: ${sample.excluded_chunks.join(", ")}.`)));
+        const heading = main.querySelector("h1");
+        if (heading) heading.after(notice); else main.prepend(notice);
+      }
+    };
+    if (route.name === "home" && views.landing) { appendSample(views.landing(sample)); return; }
     const chosen = lens || LENSES[0].id;
-    if (chosen === "trust-qc") { main.append(...trustQc(sample)); return; }
-    if (views[chosen]) { main.append(...views[chosen](sample)); return; }
+    if (chosen === "trust-qc") { appendSample(trustQc(sample)); return; }
+    if (views[chosen]) { appendSample(views[chosen](sample)); return; }
     main.append(h("h1", { class: "view-title" }, "Unknown sample"), h("p", {}, "No such lens. ", h("a", { href: "#/" }, "Back to Lab home")));
   }
 
@@ -267,8 +278,7 @@
       h("h1", { class: "view-title" }, "Trust / QC"),
     ];
     if (sample.excluded_chunks && sample.excluded_chunks.length) {
-      out.push(h("p", { class: "status-line" }, `Provisional: this input excludes ${sample.excluded_chunks.length} truncated chunks; depth reflects the reads present.`));
-      out.push(h("p", { class: "help" }, `Excluded chunk indexes: ${sample.excluded_chunks.join(", ")}.`));
+      out.push(h("p", { class: "help" }, "See the excluded chunk indexes in the provisional input notice above."));
     }
     // Depth vs minimum-depth bars.
     const visible = sample.algorithms.filter((a) => !a.hidden);

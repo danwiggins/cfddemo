@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -62,3 +63,44 @@ def test_echarts_scatter_values_match_adjacent_table_without_animation(route, ex
         # Home's first two table columns are the pair; Agreement has a sample-ID column.
         table_pairs = [row[:2] if route == "/" else row[1:3] for row in chart["rows"]]
         assert [[float(value) for value in pair] for pair in table_pairs] == chart["points"]
+
+
+@needs_chrome
+@pytest.mark.parametrize("route", (f"/sample/{ID12}/trust-qc", f"/sample/{ID12}/signals"))
+def test_fragment_density_line_values_match_adjacent_table_without_animation(route, tmp_path) -> None:
+    sample = _sample()
+    data = json.dumps({"span_bp": [49, 50, 167, 700, 701], "count": [9, 2, 10, 3, 7]}).encode()
+    observed = []
+    with _server(tmp_path, sample) as server:
+        server.app.api.artifact = lambda id12, label, algorithm_id, panel_id: (
+            data if (id12, label, algorithm_id, panel_id) ==
+            (ID12, "full", "fragment-size", "size-density") else None
+        )
+        profile = Path(tmp_path / "browser-profile")
+
+        def inspect(_command, evaluate) -> None:
+            observed.extend(evaluate("""(() => [...document.querySelectorAll('#main .chart-wrap')].filter((wrap) =>
+              wrap.querySelector('.echart[aria-label*="density"]')).map((wrap) => {
+              const chart = wrap.querySelector('.echart');
+              const table = wrap.querySelector(':scope > details.chart-table table');
+              const option = window.echarts.getInstanceByDom(chart)?.getOption();
+              return {
+                adjacent: wrap.children[0] === chart && wrap.children[1]?.contains(table),
+                animation: option?.animation,
+                points: option?.series.filter((series) => series.type === 'line').flatMap((series) => series.data),
+                rows: [...table.querySelectorAll('tbody tr')].map((row) =>
+                  [...row.querySelectorAll('td')].map((cell) => cell.textContent.trim())),
+              };
+            }))()"""))
+
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route={route}"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'data-rendered="1"' in dom,
+            interact=inspect,
+        )
+    assert len(observed) == 1
+    chart = observed[0]
+    assert chart["adjacent"] and chart["animation"] is False
+    assert chart["points"] == [[50, 2], [167, 10], [700, 3]]
+    assert [[float(value) for value in row] for row in chart["rows"]] == chart["points"]

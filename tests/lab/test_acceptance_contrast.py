@@ -8,10 +8,14 @@ from pathlib import Path
 import pytest
 
 from tests.web.longitudinal_env import _contrast
+from tests.lab.test_acceptance_synthetic_routes import ID12, _sample, _server
+from tests.lab.test_lab_server import _chrome, _dom_cdp
+from tests.lab.test_landing import needs_chrome
 
 
-BASE = Path("traceback_runner/web/static/styles.css").read_text()
-LAB = Path("traceback_lab/web/static/lab.css").read_text()
+ROOT = Path(__file__).resolve().parents[2]
+BASE = (ROOT / "traceback_runner/web/static/styles.css").read_text()
+LAB = (ROOT / "traceback_lab/web/static/lab.css").read_text()
 
 
 def _token(name: str, css: str = BASE) -> str:
@@ -42,4 +46,81 @@ def test_lab_nontext_mark_tokens_meet_3_to_1(token) -> None:
 
 def test_lab_badge_text_pairs_meet_4_5_to_1() -> None:
     assert _contrast("#ffffff", _token("--ink")) >= 4.5
-    assert _contrast("#573b00", "#fff1c7") >= 4.5
+    unverified = re.search(r"\.unverified\s*\{([^}]+)\}", LAB)
+    assert unverified is not None
+    color = re.search(r"\bcolor:\s*(#[0-9a-f]{6})", unverified.group(1))
+    background = re.search(r"\bbackground:\s*(#[0-9a-f]{6})", unverified.group(1))
+    assert color is not None and background is not None
+    assert _contrast(color.group(1), background.group(1)) >= 4.5
+
+
+def _rgb_hex(value: str) -> str:
+    numbers = re.findall(r"\d+", value)
+    assert len(numbers) >= 3, value
+    return "#" + "".join(f"{int(number):02x}" for number in numbers[:3])
+
+
+@needs_chrome
+def test_rendered_lab_badge_text_has_computed_4_5_to_1_contrast(tmp_path) -> None:
+    rendered = []
+    with _server(tmp_path, _sample()) as server:
+        profile = tmp_path / "browser-profile"
+
+        def inspect(_command, evaluate) -> None:
+            rendered.extend(evaluate("""(() => [...document.querySelectorAll('#main .flag-pill, #main .state-chip, #main .tier, #main .unverified')].map((node) => {
+              const style = getComputedStyle(node);
+              let ancestor = node;
+              let background = 'rgba(0, 0, 0, 0)';
+              while (ancestor && (background === 'transparent' || background === 'rgba(0, 0, 0, 0)')) {
+                background = getComputedStyle(ancestor).backgroundColor;
+                ancestor = ancestor.parentElement;
+              }
+              return {kind: node.className, foreground: style.color, background};
+            }))()"""))
+
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/findings"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'class="finding-card"' in dom,
+            interact=inspect,
+        )
+    kinds = {item["kind"] for item in rendered}
+    assert any("flag-pill" in kind for kind in kinds)
+    assert any("state-chip" in kind for kind in kinds)
+    assert any("tier" in kind for kind in kinds)
+    for item in rendered:
+        assert _contrast(_rgb_hex(item["foreground"]), _rgb_hex(item["background"])) >= 4.5, item
+
+
+@needs_chrome
+def test_reduced_motion_disables_rendered_lab_transition_and_animation(tmp_path) -> None:
+    observed = {}
+    with _server(tmp_path, _sample()) as server:
+        profile = tmp_path / "browser-profile"
+
+        def inspect(command, evaluate) -> None:
+            evaluate("""(() => {
+              const chip = document.querySelector('#main .state-chip');
+              chip.style.transition = 'opacity 1s linear';
+              chip.style.animation = 'pulse 1s infinite';
+            })()""")
+            observed["ordinary"] = evaluate("""(() => {
+              const style = getComputedStyle(document.querySelector('#main .state-chip'));
+              return {transition: style.transitionDuration, animation: style.animationName};
+            })()""")
+            command("Emulation.setEmulatedMedia", {"features": [
+                {"name": "prefers-reduced-motion", "value": "reduce"},
+            ]})
+            observed["reduced"] = evaluate("""(() => {
+              const style = getComputedStyle(document.querySelector('#main .state-chip'));
+              return {transition: style.transitionDuration, animation: style.animationName};
+            })()""")
+
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/findings"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'class="finding-card"' in dom,
+            interact=inspect,
+        )
+    assert observed["ordinary"]["transition"] == "1s"
+    assert observed["reduced"] == {"transition": "0s", "animation": "none"}
