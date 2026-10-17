@@ -9,6 +9,7 @@ result's own attempt directory and no component is a symlink.
 from __future__ import annotations
 
 import json
+import heapq
 import math
 import os
 import re
@@ -168,24 +169,66 @@ def _read_run_log(path: Path, *, limit: int = 1024 * 1024) -> bytes | None:
         os.close(descriptor)
 
 
-def _run_events(store: LabStore, run_id: str) -> list[tuple[int, dict[str, Any]]]:
+def _run_events(store: LabStore, run_id: str) -> tuple[list[tuple[int, dict[str, Any]]], str | None]:
     if not isinstance(run_id, str) or not re.fullmatch(r"r-\d{8}-\d{4}-[0-9a-f]{4,8}", run_id):
-        return []
+        return [], "invalid_run_id"
     raw = _read_run_log(store.runs_dir / f"{run_id}.jsonl")
     if raw is None:
-        return []
+        return [], "unreadable_or_over_1mib"
     lines = raw.splitlines()
     if len(lines) > 4096:
-        return []
+        return [], "over_4096_lines"
     events = []
     for number, line in enumerate(lines, 1):
         try:
             event = json.loads(line)
         except (ValueError, UnicodeDecodeError):
-            continue
-        if isinstance(event, dict):
-            events.append((number, event))
-    return events
+            return [], "malformed_or_empty"
+        if not isinstance(event, dict):
+            return [], "malformed_or_empty"
+        if event.get("run_id") != run_id or not isinstance(event.get("event"), str):
+            return [], "malformed_or_empty"
+        events.append((number, event))
+    return (events, None) if events else ([], "malformed_or_empty")
+
+
+def _recent_run_ids(store: LabStore, *, limit: int = 64) -> list[str]:
+    """Keep only the newest regular run-log entries while scanning the directory."""
+
+    try:
+        if not stat.S_ISDIR(os.lstat(store.runs_dir).st_mode):
+            return []
+        with os.scandir(store.runs_dir) as entries:
+            def candidates() -> Iterable[tuple[int, str]]:
+                for entry in entries:
+                    if not re.fullmatch(r"r-\d{8}-\d{4}-[0-9a-f]{4,8}\.jsonl", entry.name):
+                        continue
+                    try:
+                        info = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    if stat.S_ISREG(info.st_mode):
+                        yield info.st_mtime_ns, entry.name[:-6]
+
+            return [run_id for _, run_id in heapq.nlargest(limit, candidates())]
+    except OSError:
+        return []
+
+
+def _latest_analysis_run(store: LabStore) -> str | None:
+    """A small pointer read; other writer commands need not emit run logs."""
+
+    raw = _read_run_log(store.last_run_file, limit=4096)
+    if raw is None:
+        return None
+    try:
+        pointer = json.loads(raw)
+    except ValueError:
+        return None
+    if not isinstance(pointer, dict) or pointer.get("command") != "run":
+        return None
+    run_id = pointer.get("run_id")
+    return run_id if isinstance(run_id, str) and re.fullmatch(r"r-\d{8}-\d{4}-[0-9a-f]{4,8}", run_id) else None
 
 
 def _run_sample_identity(events: list[tuple[int, dict[str, Any]]]) -> dict[str, str]:
@@ -209,15 +252,27 @@ class LabApi:
     def status(self) -> dict[str, Any]:
         status = self.store.status()
         interrupted = None
-        if status["active"] is not None:
-            events = _run_events(self.store, status["active"]["run_id"])
+        run_log_unavailable = None
+        if status["active"] is not None and status["active"].get("command") == "run":
+            run_id = status["active"]["run_id"]
+            events, reason = _run_events(self.store, run_id)
+            if not reason and events[0][1]["event"] != "run_start":
+                reason = "malformed_or_empty"
+                events = []
+            if reason:
+                run_log_unavailable = {"run_id": run_id, "reason": reason}
             status["active"] = {**status["active"], **_run_sample_identity(events)}
         else:
             # Bounded (D22): one pointer file and that one run's log, never a scan.
-            last = self.store.last_run_id()
+            last = _latest_analysis_run(self.store)
             if last is not None:
-                events = _run_events(self.store, last)
-                if events:
+                events, reason = _run_events(self.store, last)
+                if not reason and events[0][1]["event"] != "run_start":
+                    reason = "malformed_or_empty"
+                    events = []
+                if reason:
+                    run_log_unavailable = {"run_id": last, "reason": reason}
+                else:
                     summary = summarize_run([event for _, event in events], self.store)
                     if summary["status"] == "interrupted":
                         interrupted = {"run_id": last, "step": summary["open_step"],
@@ -226,7 +281,8 @@ class LabApi:
             self.libraries.get()
         except (LibraryError, OSError):
             pass
-        return {**status, "interrupted": interrupted, "library": self.libraries.health()}
+        return {**status, "interrupted": interrupted, "run_log_unavailable": run_log_unavailable,
+                "library": self.libraries.health()}
 
     # -- samples -------------------------------------------------------------------
     def _id12s(self) -> dict[str, str]:
@@ -502,16 +558,10 @@ class LabApi:
         selected = self.store.selected_attempt(sample.full.input_id, algorithm_id, identity)
         if selected is None:
             return {"found": False}
-        recent = []
-        for run_id in self.store.run_ids():
-            try:
-                info = os.stat(self.store.runs_dir / f"{run_id}.jsonl", follow_symlinks=False)
-            except OSError:
+        for run_id in _recent_run_ids(self.store):
+            events, reason = _run_events(self.store, run_id)
+            if reason:
                 continue
-            if stat.S_ISREG(info.st_mode):
-                recent.append((info.st_mtime_ns, run_id))
-        for _, run_id in sorted(recent, reverse=True)[:64]:
-            events = _run_events(self.store, run_id)
             if not any(
                 event.get("event") == "sample"
                 and event.get("source_id") == source_id
