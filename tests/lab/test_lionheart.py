@@ -222,6 +222,10 @@ def test_lionheart_derived_inputs_use_nested_read_masks_and_disjoint_halves(tmp_
     below_gate = replace(ctx, derived={"transform": "split", "half": "A"}, eligible_reads=4_999_999)
     assert lionheart.LIONHEART.preflight(below_gate).reason_code == "depth"
     assert lionheart.LIONHEART.preflight(replace(ctx, derived={})).reason_code == "derived_not_supported"
+    for invalid in ({"transform": "downsample"}, {"transform": "downsample", "fraction": 0},
+                    {"transform": "downsample", "fraction": float("nan")},
+                    {"transform": "split", "half": "C"}):
+        assert lionheart.LIONHEART.preflight(replace(ctx, derived=invalid)).reason_code == "derived_not_supported"
 
     monkeypatch.setenv("TRACEBACK_LIONHEART_FAIL", "1")
     out = tmp_path / "failed" / "artifacts"

@@ -317,8 +317,18 @@ class Lionheart(Base):
     def preflight(self, ctx: InputContext) -> Ready | Skip:
         if ctx.example:
             return Skip("example_reference", "LIONHEART needs hg38 resources; not in the synthetic example")
-        if ctx.derived is not None and ctx.derived.get("transform") not in {"downsample", "split"}:
-            return Skip("derived_not_supported", "LIONHEART supports downsample and split derived inputs")
+        if ctx.derived is not None:
+            transform = ctx.derived.get("transform")
+            if transform == "downsample":
+                fraction = ctx.derived.get("fraction")
+                if (not isinstance(fraction, (int, float)) or isinstance(fraction, bool)
+                        or not 0 < fraction <= 1):
+                    return Skip("derived_not_supported", "LIONHEART downsample needs a fraction above 0 and at most 1")
+            elif transform == "split":
+                if ctx.derived.get("half") not in {"A", "B"}:
+                    return Skip("derived_not_supported", "LIONHEART split needs half A or B")
+            else:
+                return Skip("derived_not_supported", "LIONHEART supports downsample and split derived inputs")
         if ctx.reference_id.lower() not in {"hg38", "grch38"}:
             return Skip("reference", "LIONHEART v2.2.0 requires an hg38-aligned BAM")
         if ctx.eligible_reads is None:
