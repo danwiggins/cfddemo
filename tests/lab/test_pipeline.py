@@ -5,8 +5,10 @@ from __future__ import annotations
 import os
 import signal
 import sys
+import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -153,6 +155,30 @@ def test_rss_sampler_failure_preserves_worker_result(monkeypatch: pytest.MonkeyP
     assert result.ok
     assert result.peak_rss_bytes is not None and result.peak_rss_bytes > 0
     assert result.sampled_tree_peak_rss_bytes is None
+
+
+def test_slow_rss_sampler_does_not_delay_worker_polling(monkeypatch: pytest.MonkeyPatch) -> None:
+    import traceback_lab.pipeline as pipeline
+
+    release = threading.Event()
+    def slow(_pid: int) -> None:
+        release.wait(4)
+
+    monkeypatch.setattr(pipeline, "_process_tree_rss_bytes", slow)
+    started = time.monotonic()
+    try:
+        result = run_pipeline([Stage("ok", [PY, "-c", "print('done')"])], timeout_s=10)
+    finally:
+        release.set()
+    assert result.ok
+    assert time.monotonic() - started < 3
+
+
+def test_ps_sampler_does_not_report_zero_for_unmeasured_tree(monkeypatch: pytest.MonkeyPatch) -> None:
+    import traceback_lab.pipeline as pipeline
+
+    monkeypatch.setattr(pipeline.subprocess, "run", lambda *_, **__: SimpleNamespace(returncode=0, stdout=""))
+    assert pipeline._ps_tree_rss_bytes(12345) is None
 
 
 def test_direct_and_sampled_tree_memory_remain_distinct() -> None:

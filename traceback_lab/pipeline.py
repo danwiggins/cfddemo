@@ -26,6 +26,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from queue import Empty, SimpleQueue
 from typing import IO, Any
 
 from traceback_runner.toolchain import kill_process_group
@@ -217,14 +218,16 @@ def _ps_tree_rss_bytes(root_pid: int) -> int | None:
             continue
         processes[pid] = (ppid, pgid)
         rss_kib[pid] = rss
-    return sum(rss_kib.get(pid, 0) for pid in _tree_members(root_pid, processes)) * 1024
+    total = sum(rss_kib.get(pid, 0) for pid in _tree_members(root_pid, processes))
+    return total * 1024 if total > 0 else None
 
 
 def _process_tree_rss_bytes(root_pid: int) -> int | None:
     """Sample the worker and native descendants, including new sessions.
 
-    wait4 covers direct children only. Linux uses /proc resident pages;
-    macOS uses bounded ps RSS (KiB). A sampler failure leaves wait4 intact.
+    The caller separately records each direct child's wait4 maximum, which
+    may include descendants that child waited for. Linux uses /proc resident
+    pages; macOS uses ps RSS (KiB). A sampler failure leaves wait4 intact.
     """
 
     sampled = _proc_tree_rss_bytes(root_pid)
@@ -333,6 +336,8 @@ def run_pipeline(
     interrupted = False
     peak_disk: int | None = None
     peak_tree_rss: int | None = None
+    rss_samples: SimpleQueue[int | None] = SimpleQueue()
+    rss_thread: threading.Thread | None = None
     sink: IO[bytes] | None = None
     leader: subprocess.Popen[bytes] | None = None
     try:
@@ -381,13 +386,22 @@ def run_pipeline(
                 _terminate(leader, processes, outcomes)
                 break
             now = time.monotonic()
-            if now >= next_rss:
-                try:
-                    rss = _process_tree_rss_bytes(leader.pid)
-                except Exception:  # noqa: BLE001 - optional telemetry cannot fail the worker
-                    rss = None
-                if rss is not None:
-                    peak_tree_rss = rss if peak_tree_rss is None else max(peak_tree_rss, rss)
+            try:
+                while True:
+                    rss = rss_samples.get_nowait()
+                    if rss is not None:
+                        peak_tree_rss = rss if peak_tree_rss is None else max(peak_tree_rss, rss)
+            except Empty:
+                pass
+            if now >= next_rss and (rss_thread is None or not rss_thread.is_alive()):
+                def sample_rss() -> None:
+                    try:
+                        rss_samples.put(_process_tree_rss_bytes(leader.pid))
+                    except Exception:  # noqa: BLE001 - optional telemetry cannot fail the worker
+                        rss_samples.put(None)
+
+                rss_thread = threading.Thread(target=sample_rss, daemon=True)
+                rss_thread.start()
                 next_rss = time.monotonic() + RSS_SAMPLE_S
             if (disk_path is not None or disk_usage is not None) and now >= next_disk:
                 try:
@@ -431,6 +445,13 @@ def run_pipeline(
             size = None
         if size is not None:
             peak_disk = size if peak_disk is None else max(peak_disk, size)
+    try:
+        while True:
+            rss = rss_samples.get_nowait()
+            if rss is not None:
+                peak_tree_rss = rss if peak_tree_rss is None else max(peak_tree_rss, rss)
+    except Empty:
+        pass
     return PipelineResult(
         stages=outcomes,
         duration_s=time.monotonic() - started,

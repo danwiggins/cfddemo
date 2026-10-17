@@ -324,10 +324,14 @@ def run_plan(
         )
         microbial_root = store.lab / "tmp"
 
-        microbial_before = _microbial_tmp_bytes(microbial_root)
+        try:
+            microbial_before = _microbial_tmp_bytes(microbial_root)
+        except Exception:  # noqa: BLE001 - optional telemetry cannot fail the worker
+            microbial_before = None
 
         def step_disk_bytes() -> int:
-            return _step_disk_bytes(scratch, microbial_root, microbial_before)
+            return (directory_bytes(scratch) if microbial_before is None
+                    else _step_disk_bytes(scratch, microbial_root, microbial_before))
 
         try:
             outcome = run_pipeline(

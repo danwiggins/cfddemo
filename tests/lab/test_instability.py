@@ -238,6 +238,30 @@ def test_algorithm_run_records_resource_measurements(tmp_path: Path) -> None:
     assert cached.public()["cached"] is True
 
 
+def test_unavailable_microbial_baseline_does_not_fail_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from traceback_lab import runner
+
+    def unavailable(_root: Path) -> int:
+        raise ValueError("unavailable")
+
+    monkeypatch.setattr(runner, "_microbial_tmp_bytes", unavailable)
+    store = LabStore(tmp_path / "store")
+    store.ensure()
+    log = store.run_log(new_run_id())
+    target = RunTarget(
+        input_id="a" * 64, source_id="b" * 64, input_dir=tmp_path,
+        reference_id="hg38", reference_sha256="c" * 64, eligible_reads=2_000_000,
+    )
+    result = run_plan(
+        store, None, log, target, [PlanItem(FAKE_CN, False)],
+        {"copy-number": "tests.lab.test_instability:FAKE_CN"},
+        run_id=log.run_id, scrubber=Scrubber(root=store.root),
+    )[0]
+    assert result.status == "ok" and result.peak_disk_bytes is not None
+
+
 def test_non_ok_copy_number_propagates_as_upstream_skip(tmp_path: Path) -> None:
     @dataclass
     class SkippingCopyNumber(FakeCopyNumber):
