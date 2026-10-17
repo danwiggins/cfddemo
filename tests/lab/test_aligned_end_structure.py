@@ -17,7 +17,7 @@ from traceback_lab.cli import build_parser
 from traceback_lab import end_catalog_assets
 from traceback_lab.end_catalog_assets import EndCatalogueError, inspect_end_catalogues, register_end_catalogues
 from traceback_lab.interpretation.engine import load_library
-from traceback_lab.read_summary import COLUMNS, SCHEMA
+from traceback_lab.read_summary import COLUMNS, SCHEMA, ReadSummary, derived_mask
 from traceback_lab.registry import InputContext, PlanItem, Ready, registry_entries
 from traceback_lab.runner import RunTarget, run_plan
 from traceback_lab.scrub import Scrubber
@@ -119,6 +119,7 @@ def test_exact_ocf_like_sign_and_preferred_end_support(tmp_path: Path) -> None:
     }
     assert artifact["preferred_d_hits"] == 1
     assert artifact["observed_depth_x"] == 10.0
+    assert artifact["depth_basis"] == "run_target" and artifact["derived_selection"] is None
     assert len(artifact["centers_sha256"]) == 64 and len(artifact["preferred_sha256"]) == 64
     assert artifact["source_label"] == "synthetic hg38 end catalogues"
     assert artifact["centers_source"] == "synthetic-centers-v1"
@@ -248,7 +249,7 @@ def test_depth_full_input_and_pinned_asset_gates(tmp_path: Path) -> None:
     (root / "input" / "manifest.json").write_text(json.dumps({"kind": "prealigned"}), encoding="utf-8")
     assert ALIGNED_END_STRUCTURE.preflight(_context(root, summary_parent)).reason_code == "input_kind"
     (root / "input" / "manifest.json").write_text(json.dumps({"kind": "aligned"}), encoding="utf-8")
-    assert ALIGNED_END_STRUCTURE.preflight(_context(root, summary_parent, derived={"transform": "split", "half": "A"})).reason_code == "derived_input"
+    assert ALIGNED_END_STRUCTURE.preflight(_context(root, summary_parent, derived={"transform": "split", "half": "A"})).reason_code == "upstream"
     assert ALIGNED_END_STRUCTURE.preflight(_context(root, summary_parent, example=True)).reason_code == "example_reference"
     old_identity = inspect_end_catalogues(root).identity
     centers.write_text("chr1\t491\t511\n", encoding="ascii")
@@ -257,6 +258,79 @@ def test_depth_full_input_and_pinned_asset_gates(tmp_path: Path) -> None:
     assert ALIGNED_END_STRUCTURE.asset_sha256s(root) == []
     assert ALIGNED_END_STRUCTURE.preflight(_context(root, summary_parent)).reason_code == "missing_asset"
     assert old_identity
+
+
+def test_downsample_and_split_use_selected_depth_and_rows(tmp_path: Path) -> None:
+    root, _, _ = _catalogues(tmp_path)
+    parent = tmp_path / "read-summary"
+    _summary(parent)
+    columns = parent / "columns"
+    rows = 200
+    values = {
+        "contig": [0] * rows, "start": [440] * rows, "end": [561] * rows,
+        "flag": [0] * rows, "mapq": [60] * rows,
+        "h_ds": [0, 2**62, 2**62, 3 * 2**62] * (rows // 4),
+        "h_split": [0, 2**63] * (rows // 2),
+    }
+    for name, dtype in COLUMNS.items():
+        np.asarray(values.get(name, [0] * rows), dtype=dtype).tofile(columns / f"{name}.bin")
+    meta = json.loads((columns / "meta.json").read_text(encoding="utf-8"))
+    meta["rows"] = rows
+    (columns / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+
+    summary = ReadSummary.open(columns)
+    split_a = derived_mask(summary, {"transform": "split", "half": "A"})
+    split_b = derived_mask(summary, {"transform": "split", "half": "B"})
+    assert split_a is not None and split_b is not None
+    assert not np.any(split_a & split_b) and np.all(split_a | split_b)
+
+    for derived in ({"transform": "downsample", "fraction": 0.5},
+                    {"transform": "split", "half": "A"},
+                    {"transform": "split", "half": "B"}):
+        ctx = _context(root, parent, derived=derived, depth=99.0)
+        assert isinstance(ALIGNED_END_STRUCTURE.preflight(ctx), Ready)
+        artifact = json.loads(ALIGNED_END_STRUCTURE.run(ctx, tmp_path / "out").artifacts["aligned_end_structure.json"])
+        selected = 150 if derived["transform"] == "downsample" else 100
+        assert artifact["valid_molecules"] == selected
+        assert artifact["observed_depth_x"] == (18.15 if selected == 150 else 12.1)
+        assert artifact["depth_basis"] == "selected_read_summary"
+        assert artifact["derived_selection"] == derived
+        assert artifact["preferred_u_hits"] == artifact["preferred_d_hits"] == selected
+
+    # Excluded selected rows cannot supply the subset's 10x eligibility.
+    flags = np.zeros(rows, dtype=COLUMNS["flag"])
+    flags[:40] = 0x400
+    flags.tofile(columns / "flag.bin")
+    assert ALIGNED_END_STRUCTURE.preflight(_context(
+        root, parent, derived={"transform": "split", "half": "A"}, depth=99.0,
+    )).reason_code == "depth"
+    with pytest.raises(RuntimeError, match="below 10x"):
+        ALIGNED_END_STRUCTURE.run(_context(
+            root, parent, derived={"transform": "split", "half": "A"}, depth=99.0,
+        ), tmp_path / "out")
+
+    # An untrusted depth hint cannot make a low-depth subset eligible.
+    assert ALIGNED_END_STRUCTURE.preflight(_context(
+        root, parent, derived={"transform": "downsample", "fraction": 0.1}, depth=99.0,
+    )).reason_code == "depth"
+    assert ALIGNED_END_STRUCTURE.preflight(_context(
+        root, parent, derived={"transform": "cna", "tf": 0.1}, depth=99.0,
+    )).reason_code == "derived_input"
+    assert ALIGNED_END_STRUCTURE.preflight(_context(
+        root, parent, derived={"transform": "split", "half": "invalid"}, depth=99.0,
+    )).reason_code == "derived_input"
+    assert ALIGNED_END_STRUCTURE.preflight(_context(
+        root, parent, derived={"transform": "split", "half": "A", "unexpected": True}, depth=99.0,
+    )).reason_code == "derived_input"
+
+    # A corrupt selected summary must fail loudly instead of looking like an
+    # unavailable upstream step.
+    meta["schema"] = "corrupt"
+    (columns / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    with pytest.raises(ValueError, match="not a traceback read summary"):
+        ALIGNED_END_STRUCTURE.preflight(_context(
+            root, parent, derived={"transform": "split", "half": "B"}, depth=99.0,
+        ))
 
 
 @pytest.mark.parametrize("bad", [
@@ -469,7 +543,7 @@ def test_cli_registration_and_inspection_return_path_free_results(tmp_path: Path
 
 
 @pytest.mark.parametrize("condition,expected", [
-    ("depth", "depth"), ("derived", "derived_input"), ("missing_manifest", "input_kind"),
+    ("depth", "depth"), ("derived", "upstream"), ("missing_manifest", "input_kind"),
     ("reference", "reference"), ("example", "example_reference"),
 ])
 def test_preflight_skip_publishes_through_runner(
@@ -500,7 +574,14 @@ def test_preflight_skip_publishes_through_runner(
     assert envelope is not None and envelope.status == "skipped" and envelope.skip_reason == expected
 
 
-def test_ten_x_synthetic_ont_bam_runs_read_summary_and_end_worker(tmp_path: Path) -> None:
+@pytest.mark.parametrize("derived", [
+    None,
+    {"transform": "downsample", "fraction": 0.75},
+    {"transform": "split", "half": "A"},
+])
+def test_ten_x_synthetic_ont_bam_runs_read_summary_and_end_worker(
+    tmp_path: Path, derived: dict[str, object] | None,
+) -> None:
     import pysam
 
     root, _, _ = _catalogues(tmp_path)
@@ -508,13 +589,13 @@ def test_ten_x_synthetic_ont_bam_runs_read_summary_and_end_worker(tmp_path: Path
     with pysam.AlignmentFile(str(bam), "wb", header={
         "HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 1000}],
     }) as stream:
-        for index in range(100):
+        for index in range(100 if derived is None else 250):
             record = pysam.AlignedSegment()
             record.query_name = f"synthetic-{index}"
             record.query_sequence = "A" * 121
             record.flag = 0
             record.reference_id = 0
-            record.reference_start = 440 if index == 0 else 0
+            record.reference_start = 440 if derived is not None or index == 0 else 0
             record.mapping_quality = 60
             record.cigarstring = "121M"
             stream.write(record)
@@ -523,6 +604,7 @@ def test_ten_x_synthetic_ont_bam_runs_read_summary_and_end_worker(tmp_path: Path
     target = RunTarget(
         input_id="2" * 64, source_id="1" * 64, input_dir=bam.parent,
         reference_id="hg38", reference_sha256="3" * 64,
+        derived=derived,
     )
     registered = registry_entries(["read_summary:READ_SUMMARY", "aligned_end_structure:ALIGNED_END_STRUCTURE"])
     entries = {algorithm.id: entry for entry, algorithm in registered}
@@ -533,13 +615,29 @@ def test_ten_x_synthetic_ont_bam_runs_read_summary_and_end_worker(tmp_path: Path
         run_id=run_id, scrubber=Scrubber(root=root), timeout_s=60,
     )
     assert [result.status for result in results] == ["ok", "ok"], results
-    assert target.approx_depth_x == 12.1
+    assert target.approx_depth_x == (12.1 if derived is None else None)
     envelope = store.read_result(target.input_id, ALIGNED_END_STRUCTURE.id, results[1].parameters_sha256)
     assert envelope is not None and envelope.status == "ok"
     metrics = {item.metric_id: item.value for item in envelope.metrics}
-    assert metrics["ocf_like_end_asymmetry"] == -2
-    assert metrics["preferred_end_support_fraction"] == 0.01
+    if derived is None:
+        assert metrics["ocf_like_end_asymmetry"] == -2
+        assert metrics["preferred_end_support_fraction"] == 0.01
     attempt = store.selected_attempt(target.input_id, ALIGNED_END_STRUCTURE.id, results[1].parameters_sha256)
     assert attempt is not None
     artifact = json.loads((attempt / "artifacts" / "aligned_end_structure.json").read_bytes())
-    assert artifact["valid_molecules"] == 100 and artifact["eligible_centers"] == 1
+    assert artifact["eligible_centers"] == 1
+    if derived is None:
+        assert artifact["valid_molecules"] == 100
+        assert artifact["depth_basis"] == "run_target"
+    else:
+        selected = artifact["valid_molecules"]
+        if derived["transform"] == "downsample":
+            assert 160 <= selected <= 210
+        else:
+            assert 100 <= selected <= 150
+        assert artifact["preferred_u_hits"] == artifact["preferred_d_hits"] == selected
+        assert metrics["preferred_end_support_fraction"] == 1.0
+        assert metrics["ocf_like_end_asymmetry"] == -2 * selected
+        assert artifact["observed_depth_x"] >= 10.0
+        assert artifact["depth_basis"] == "selected_read_summary"
+        assert artifact["derived_selection"] == derived
