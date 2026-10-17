@@ -433,7 +433,7 @@
       const previous = state.lastStatus;
       state.lastStatus = status;
       const logIssue = status.run_log_unavailable;
-      const logReason = logIssue && ({ invalid_run_id: "invalid run ID", unreadable_or_over_1mib: "log unreadable, unsafe, or over 1 MiB",
+      const logReason = logIssue && ({ invalid_run_id: "invalid run ID", missing: "log missing", unreadable_or_over_1mib: "log unreadable, unsafe, or over 1 MiB",
         over_4096_lines: "log over 4,096 lines", malformed_or_empty: "log malformed or empty",
         latest_run_pointer_unavailable: "latest-run pointer unavailable" }[logIssue.reason] || "log unavailable");
       if (state.generationAtLoad === null) state.generationAtLoad = status.generation;
