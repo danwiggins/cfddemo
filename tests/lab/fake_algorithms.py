@@ -117,10 +117,16 @@ class InnerRTimeout(_Base):
 
 @dataclass
 class Waits(_Base):
-    """Writes LAB_TEST_READY, then sleeps (for interrupt tests)."""
+    """Writes LAB_TEST_READY, then waits until interrupted or resumed by the test."""
 
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
         Path(os.environ["LAB_TEST_READY"]).write_text("ready")
+        if os.environ.get("LAB_TEST_RESUME") == "1":
+            marker = os.environ.get("LAB_TEST_MARKER")
+            if marker:
+                with open(marker, "a", encoding="ascii") as stream:
+                    stream.write(self.id + "\n")
+            return AlgorithmOutput()
         time.sleep(600)
         return AlgorithmOutput()
 

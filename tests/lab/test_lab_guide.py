@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.lab.test_landing import _body, needs_chrome
+from tests.lab.test_landing import _body
 from traceback_lab.doctor import lab_checks
 from traceback_lab.store import LabStore
 from traceback_runner import cli as signed_cli
@@ -104,6 +104,7 @@ def journey_root(tmp_path_factory) -> dict:
     import os
 
     root = tmp_path_factory.mktemp("journey") / "root"
+    run_cwd = tmp_path_factory.mktemp("journey-run-cwd")
     previous = os.environ.get("TRACEBACK_ROOT")
     os.environ["TRACEBACK_ROOT"] = str(root)
     outputs = {}
@@ -117,15 +118,21 @@ def journey_root(tmp_path_factory) -> dict:
 
             buffer = io.StringIO()
             started = time.monotonic()
-            with contextlib.redirect_stdout(buffer):
-                code = signed_cli.main(argv[3:])
+            previous_cwd = Path.cwd()
+            try:
+                if argv[-2:] == ["run", "--example"]:
+                    os.chdir(run_cwd)
+                with contextlib.redirect_stdout(buffer):
+                    code = signed_cli.main(argv[3:])
+            finally:
+                os.chdir(previous_cwd)
             outputs[" ".join(argv[3:])] = (code, buffer.getvalue(), time.monotonic() - started)
     finally:
         if previous is None:
             os.environ.pop("TRACEBACK_ROOT", None)
         else:
             os.environ["TRACEBACK_ROOT"] = previous
-    return {"root": root, "outputs": outputs}
+    return {"root": root, "run_cwd": run_cwd, "outputs": outputs}
 
 
 def test_doctor_step_passes_with_fixes_on_every_warning(journey_root) -> None:
@@ -141,7 +148,9 @@ def test_example_step_runs_within_budget_and_prints_the_summary(journey_root) ->
     code, out, elapsed = journey_root["outputs"]["lab run --example"]
     assert code == 0, out
     assert elapsed < EXAMPLE_BUDGET_S, f"lab run --example took {elapsed:.0f} s"
+    assert out.splitlines()[0] == f"ROOT  {journey_root['root']}"
     block = out[out.index("ROOT    ") :].splitlines()
+    assert block[0] == f"ROOT    {journey_root['root']}"
     sample = next(line for line in block if line.startswith("SAMPLE  "))
     assert re.match(r"SAMPLE  [0-9a-f]{12,} ", sample)
     assert any(line == "NEXT    traceback lab serve --open" for line in block)
@@ -172,9 +181,8 @@ def test_no_input_prints_the_three_line_quickstart(tmp_path, capsys) -> None:
     assert out.splitlines()[-3:] == ["  traceback lab doctor", "  traceback lab run --example", "  traceback lab serve --open"]
 
 
-@needs_chrome
-def test_serve_step_reaches_the_landing_with_curve_repeatability_and_example_pill(journey_root, tmp_path) -> None:
-    """The guide's own serve command, launched as a process (BROWSER=true keeps --open headless)."""
+def test_serve_step_uses_the_same_root_across_cwds_and_reaches_the_landing(journey_root, tmp_path) -> None:
+    """Run from a different cwd, then serve the guide's example from the repo cwd."""
 
     import os
     import signal
@@ -183,11 +191,13 @@ def test_serve_step_reaches_the_landing_with_curve_repeatability_and_example_pil
     from tests.lab.test_lab_server import _chrome
 
     argv = next(a for a in journey() if a[-2:] == ["serve", "--open"])
+    assert journey_root["run_cwd"] != REPO
     env = {**os.environ, "TRACEBACK_ROOT": str(journey_root["root"]), "BROWSER": "true", "PYTHONPATH": str(REPO)}
     stdout_path = tmp_path / "serve-stdout.log"
     stderr_path = tmp_path / "serve-stderr.log"
     stdout = stdout_path.open("w")
     stderr = stderr_path.open("w")
+    dom = None
     try:
         process = subprocess.Popen(
             argv,
@@ -203,14 +213,17 @@ def test_serve_step_reaches_the_landing_with_curve_repeatability_and_example_pil
         assert lines[0] == f"ROOT  {journey_root['root']}", (lines, stderr_path.read_text()[-2000:])
         link = lines[1]
         assert re.match(r"^http://127\.0\.0\.1:\d+/#bootstrap=[A-Za-z0-9_-]{43,}$", link), lines
-        from tests.lab.test_lab_server import _dom_cdp
+        assert "has no Lab runs" not in stdout_path.read_text()
+        chrome = _chrome()
+        if chrome is not None:
+            from tests.lab.test_lab_server import _dom_cdp
 
-        profile = tmp_path / "profile"
-        dom = _dom_cdp(
-            [_chrome(), "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run",
-             f"--user-data-dir={profile}", "--window-size=1280,800", link], profile,
-            ok=lambda d: 'data-ready="1"' in d and "Depth → utility" in d,
-        )
+            profile = tmp_path / "profile"
+            dom = _dom_cdp(
+                [chrome, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run",
+                 f"--user-data-dir={profile}", "--window-size=1280,800", link], profile,
+                ok=lambda d: 'data-ready="1"' in d and "Depth → utility" in d,
+            )
     finally:
         try:
             if os.name == "nt":
@@ -245,12 +258,13 @@ def test_serve_step_reaches_the_landing_with_curve_repeatability_and_example_pil
         finally:
             stdout.close()
             stderr.close()
-    body = _body(dom)
-    assert body["csp-violations"] == "0"
-    assert "Depth → utility" in dom and 'class="curve-grid"' in dom
-    assert "REPEATABILITY" in dom and "Median split-half" in dom
-    assert "EXAMPLE (synthetic)" in dom
-    assert "Not in the synthetic example: copy-number needs hg38 assets." in dom
+    if dom is not None:
+        body = _body(dom)
+        assert body["csp-violations"] == "0"
+        assert "Depth → utility" in dom and 'class="curve-grid"' in dom
+        assert "REPEATABILITY" in dom and "Median split-half" in dom
+        assert "EXAMPLE (synthetic)" in dom
+        assert "Not in the synthetic example: copy-number needs hg38 assets." in dom
 
 
 def test_doctor_blocks_only_on_the_example_journey(tmp_path, monkeypatch, capsys) -> None:

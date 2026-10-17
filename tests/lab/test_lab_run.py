@@ -897,16 +897,17 @@ def test_interrupt_exits_6_and_rerun_recomputes_only_the_interrupted(lab_world, 
     events = store.run_log(run_id).events()
     assert events[-1]["event"] == "run_end" and events[-1]["status"] == "interrupted"
     assert store.read_active() is None
-    # Rerun (without the waiting plug-in): the two finished results are cached.
-    script2 = script.replace(f', "{FAKES}:WAITS"', "")
+    # Rerun the same plan: finished results are cached and only cell-origin runs.
     rerun = subprocess.run(
-        [sys.executable, "-c", script2, "lab", "run", "latest", "--root", str(root), "--json", *QUIET],
-        cwd=REPO, env=env, capture_output=True, text=True, timeout=120,
+        [sys.executable, "-c", script, "lab", "run", "latest", "--root", str(root), "--json", *QUIET],
+        cwd=REPO, env={**env, "LAB_TEST_RESUME": "1"}, capture_output=True, text=True, timeout=120,
     )
     assert rerun.returncode == 0, rerun.stdout + rerun.stderr
-    steps = json.loads(rerun.stdout)["data"]["steps"]
-    assert all(step["cached"] for step in steps)
-    assert marker.read_text().split() == ["read-summary", "fragment-size"]
+    steps = {step["algorithm_id"]: step for step in json.loads(rerun.stdout)["data"]["steps"]}
+    assert set(steps) == {"read-summary", "fragment-size", "cell-origin"}
+    assert steps["read-summary"]["cached"] and steps["fragment-size"]["cached"]
+    assert steps["cell-origin"]["status"] == "ok" and not steps["cell-origin"]["cached"]
+    assert marker.read_text().split() == ["read-summary", "fragment-size", "cell-origin"]
 
 
 def test_sigterm_is_an_interrupt_too(lab_world, shared_mmi, tmp_path) -> None:
