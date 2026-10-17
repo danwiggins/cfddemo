@@ -178,6 +178,25 @@ def test_run_error_does_not_publish_an_input_path(tmp_path: Path, monkeypatch: p
     assert "DonorName_2026" not in str(error.value)
 
 
+@pytest.mark.parametrize("error_type", [ValueError, KeyError])
+def test_run_parse_error_does_not_publish_an_input_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_type: type[Exception],
+) -> None:
+    import traceback_lab.algorithms.finaletoolkit_xcheck as module
+
+    ctx = _fixture(tmp_path / "DonorName_2026")
+    monkeypatch.setattr(module, "_tool", lambda: ("pinned-fixture", "e" * 64))
+    ctx.extras["planned_tool_pins"] = [pin.identity() for pin in FINALETOOLKIT_XCHECK.tools]
+
+    def invalid_input(_ctx: InputContext) -> None:
+        raise error_type(f"invalid {ctx.input_dir}")
+
+    monkeypatch.setattr(module, "_inputs", invalid_input)
+    with pytest.raises(RuntimeError, match="input or output became unreadable") as error:
+        FINALETOOLKIT_XCHECK.run(ctx, tmp_path / "out")
+    assert "DonorName_2026" not in str(error.value)
+
+
 def test_tool_timeout_does_not_publish_an_input_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import traceback_lab.algorithms.finaletoolkit_xcheck as module
 

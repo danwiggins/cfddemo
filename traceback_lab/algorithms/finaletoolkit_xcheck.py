@@ -295,7 +295,7 @@ class FinaleToolkitXcheck(Base):
             return self._run(ctx, out)
         except subprocess.TimeoutExpired:
             raise RuntimeError("FinaleToolkit execution timed out") from None
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, ValueError, KeyError, subprocess.SubprocessError):
             # Workers scrub stderr, but direct callers must not receive local
             # sample paths in an exception either.
             raise RuntimeError("FinaleToolkit input or output became unreadable") from None
