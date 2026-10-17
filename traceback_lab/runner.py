@@ -183,6 +183,7 @@ def run_plan(
         step = algorithm.id if target.label == "full" else f"{algorithm.id}@{target.label}"
         existing = store.read_result(target.input_id, algorithm.id, identity)
         if existing is not None and existing.status == "ok" and not force:
+            store.reselect_cached_result(target.input_id, algorithm.id, identity)
             result = StepResult(
                 algorithm.id, "ok", item.upstream_only, identity, cached=True, input_label=target.label
             )

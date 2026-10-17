@@ -10,6 +10,7 @@ skip algorithms.
 from __future__ import annotations
 
 import os
+import shlex
 import sys
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ from traceback_runner.cli import (
 )
 
 from . import STORE_VERSION
+from .assets import AssetError, inspect_asset
 from .ingest import BUDGET_FACTOR, GIB, MARGIN_BYTES, MMI_FACTOR, mmi_path, resolve_reference
 from .problems import EXIT_BLOCKED, EXIT_OK, LabProblem
 from .store import LabStore
@@ -67,6 +69,44 @@ def _writable(path: Path) -> bool:
     while not candidate.exists() and candidate != candidate.parent:
         candidate = candidate.parent
     return candidate.is_dir() and os.access(candidate, os.W_OK | os.X_OK)
+
+
+def _pmd_asset_check(store: LabStore) -> dict[str, Any]:
+    """Verify the operator-supplied PMD bytes used by ``pmd-score``."""
+
+    unreadable_fix = (
+        "Check access to <ROOT>/lab/assets/pmd, then run "
+        "traceback lab asset inspect pmd --root <ROOT>"
+    )
+    try:
+        asset = inspect_asset(store)
+    except AssetError as exc:
+        directory = store.lab / "assets" / "pmd"
+        register = (
+            "traceback lab asset add pmd --file YOUR_LOCAL_PMD_coordinates_hg38.bed.gz "
+            "--source-label Zhou-2018-operator-supplied --terms unknown --root <ROOT>"
+        )
+        try:
+            if directory.is_symlink():
+                fix = f"unlink <ROOT>/lab/assets/pmd && {register}  # leave the link target untouched"
+            elif not directory.exists():
+                fix = register
+            elif directory.is_dir() and not any(directory.iterdir()):
+                # Registration never replaces an existing directory, even an empty one.
+                fix = f"rmdir <ROOT>/lab/assets/pmd && {register}"
+            else:
+                fix = (
+                    "Restore the original pinned PMD bytes from the approved local source, "
+                    "then run traceback lab asset inspect pmd --root <ROOT>"
+                )
+        except OSError:
+            fix = unreadable_fix
+        return _check("pmd_asset", "warn", f"PMD asset unavailable or invalid: {exc} (pmd-score will skip)", fix)
+    except OSError:
+        # Path inspection can fail before assets.py converts an error to AssetError.
+        # Never persist an OSError message: it may contain an absolute path.
+        return _check("pmd_asset", "warn", "PMD asset could not be inspected (pmd-score is not ready)", unreadable_fix)
+    return _check("pmd_asset", "pass", f"PMD asset verified ({asset.sha256[:12]})")
 
 
 def lab_checks(store: LabStore) -> list[dict[str, Any]]:
@@ -147,6 +187,7 @@ def lab_checks(store: LabStore) -> list[dict[str, Any]]:
         checks.append(_check("loyfer_assets", "pass", "Loyfer atlas assets registered"))
     else:
         checks.append(_check("loyfer_assets", "warn", "Loyfer atlas assets not registered (cell-origin will skip; Phase 0b)", "traceback method-asset register --from-dir LOYFER_DIR --root <ROOT>"))
+    checks.append(_pmd_asset_check(store))
     active = store.read_active()
     if active is not None and not active.active:
         checks.append(_check("active", "warn", f"stale heartbeat from {active.run_id} (pid {active.pid} gone); the run was interrupted", "rerun the same lab command; only missing results recompute"))
@@ -169,15 +210,16 @@ def doctor_command(args: Any, store: LabStore) -> tuple[int, dict[str, Any]]:
         _result("lab doctor", "blocked" if blocked else "ok", summary, data={"root": str(store.root), "checks": checks, "setup_steps": steps})
     )
     real = str(store.root)
+    quoted_root = shlex.quote(real)
     lines = [f"ROOT  {real}"]
     for check in checks:
         label = {"pass": "PASS", "warn": "WARN", "blocked": "BLOCKED"}.get(check["status"], check["status"].upper())
         lines.append(f"{label:<8} {check['name']:<16} {check['detail']}")
         if check["status"] != "pass":
-            lines.append(f"{'':<8} {'':<16} fix: {check['fix'].replace('<ROOT>', real)}")
+            lines.append(f"{'':<8} {'':<16} fix: {check['fix'].replace('<ROOT>', quoted_root)}")
     if steps:
         lines.append("Missing setup steps, in order:")
-        lines.extend(f"  {number}. {step.replace('<ROOT>', real)}" for number, step in enumerate(steps, start=1))
+        lines.extend(f"  {number}. {step.replace('<ROOT>', quoted_root)}" for number, step in enumerate(steps, start=1))
     return (EXIT_BLOCKED if blocked else EXIT_OK), _with_human(payload, lines, replace_data=True)
 
 
