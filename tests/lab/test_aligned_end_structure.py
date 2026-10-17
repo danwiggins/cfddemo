@@ -65,7 +65,7 @@ def _catalogues(tmp_path: Path) -> tuple[Path, Path, Path]:
     return root, centers, preferred
 
 
-def _summary(parent: Path) -> None:
+def _summary(parent: Path, *, contig_name: str = "chr1") -> None:
     columns = parent / "columns"
     columns.mkdir(parents=True)
     # One valid molecule has U at −60 and D at +60. Duplicate and low-MAPQ
@@ -77,7 +77,7 @@ def _summary(parent: Path) -> None:
     for name, dtype in COLUMNS.items():
         np.asarray(values.get(name, [0, 0, 0]), dtype=dtype).tofile(columns / f"{name}.bin")
     (columns / "meta.json").write_text(json.dumps({
-        "schema": SCHEMA, "rows": 3, "columns": COLUMNS, "contigs": ["chr1"],
+        "schema": SCHEMA, "rows": 3, "columns": COLUMNS, "contigs": [contig_name],
         "lengths": [1000], "index_mapped_upper_bound": 3,
     }), encoding="utf-8")
 
@@ -125,6 +125,16 @@ def test_exact_ocf_like_sign_and_preferred_end_support(tmp_path: Path) -> None:
     assert artifact["preferred_source"] == "synthetic-sites-v1"
     assert artifact["terms"] == "unknown"
     assert "no tissue-origin calibration" in artifact["interpretation"]
+
+
+def test_unprefixed_hg38_contig_uses_registered_chr_catalogues(tmp_path: Path) -> None:
+    root, _, _ = _catalogues(tmp_path)
+    summary_parent = tmp_path / "read-summary"
+    _summary(summary_parent, contig_name="1")
+    output = ALIGNED_END_STRUCTURE.run(_context(root, summary_parent), tmp_path / "out")
+    metrics = {item["metric_id"]: item["value"] for item in output.metrics}
+    assert metrics["ocf_like_end_asymmetry"] == -2
+    assert metrics["preferred_end_support_fraction"] == 1.0
 
 
 def test_positive_direction_and_mirrored_window_boundaries(tmp_path: Path) -> None:
