@@ -36,6 +36,19 @@ _SAFE_BAM_VALIDATION_MESSAGES = frozenset({
 })
 
 
+def _public_provenance(manifest: dict[str, Any], raw_sha256: str) -> bytes:
+    """Publish a path-free receipt; the full runtime record stays in the attempt."""
+    fields = (
+        "status", "input_id", "upstream_commit", "reference_id", "platform",
+        "eligible_autosomal_pairs", "minimum_eligible_autosomal_pairs",
+        "eligibility_source", "eligibility_predicate", "snakemake_version",
+        "registration_sha256", "gc_bias_sha256", "output_sha256", "profile_count",
+    )
+    public = {key: manifest[key] for key in fields if key in manifest}
+    public["full_provenance_sha256"] = raw_sha256
+    return json.dumps(public, sort_keys=True, separators=(",", ":")).encode()
+
+
 @dataclass
 class Griffin(Base):
     family: str = "fragmentomics"
@@ -195,7 +208,9 @@ class Griffin(Base):
             artifacts={
                 "griffin_profile.json": json.dumps(panel, separators=(",", ":")).encode(),
                 "griffin_corrected_coverage.tsv": corrected_bytes,
-                "griffin_provenance.json": provenance_bytes,
+                "griffin_provenance.json": _public_provenance(
+                    provenance, hashlib.sha256(provenance_bytes).hexdigest(),
+                ),
             },
         )
 
