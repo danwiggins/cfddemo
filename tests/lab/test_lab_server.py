@@ -877,6 +877,16 @@ def test_status_does_not_echo_malformed_active_run_id(tmp_path, monkeypatch) -> 
     assert "invalid/secret" not in json.dumps(status)
 
 
+def test_status_does_not_echo_malformed_nonanalysis_run_id(tmp_path, monkeypatch) -> None:
+    store = LabStore(tmp_path)
+    monkeypatch.setattr(store, "status", lambda: {"generation": 0, "active": {
+        "command": "cohort add", "run_id": "invalid/secret", "step": "start",
+    }})
+    status = api_module.LabApi(store).status()
+    assert status["active"]["run_id"] is None
+    assert "invalid/secret" not in json.dumps(status)
+
+
 def test_status_reports_deeply_nested_latest_run_pointer_without_crashing(tmp_path) -> None:
     store = LabStore(tmp_path)
     store.ensure()
