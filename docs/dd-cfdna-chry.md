@@ -38,6 +38,10 @@ not from this example. A file marked `synthetic` supports test arithmetic but
 cannot run on an input. `operator_verified` is an assertion, not independent
 verification by the software. The Lab binds the exact calibration bytes to the
 input and reference SHA-256 and refuses changes to a registered input.
+Keep patient identifiers out of free-text labels; the Lab stores those labels
+in the private contract and does not echo them in CLI output. The registration
+directory itself is sensitive transplant-related metadata, so protect the Lab
+root accordingly.
 Synthetic calibration needs `--allow-synthetic` at registration. That option
 irreversibly reserves the input's calibration slot for mechanics-only testing;
 it does not permit a numeric donor-fraction result. If an existing registration

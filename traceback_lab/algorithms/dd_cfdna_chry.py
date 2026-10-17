@@ -26,7 +26,7 @@ def _protocol_matches() -> bool:
     """Reject a pinned calibration if shared counting semantics change."""
 
     return (MIN_MAPQ == _D21_MIN_MAPQ and FLAG_EXCLUDE == _D21_FLAG_EXCLUDE
-            and HG38_CHRY_PARS == _D21_PARS)
+            and HG38_CHRY_PARS == _D21_PARS and HG38_CHRY_LENGTH == 57_227_415)
 
 
 def _fraction(y_reads: int, eligible_reads: int, contract: DonorContract) -> float | None:

@@ -54,7 +54,7 @@ def _file(tmp_path: Path, *, status: str = "operator_verified", **changes) -> tu
 
 
 def test_registration_is_input_scoped_immutable_and_cli_inspectable(tmp_path: Path, capsys) -> None:
-    path, digest = _file(tmp_path)
+    path, digest = _file(tmp_path, calibration_source="private study label")
     original = path.read_bytes()
     store = LabStore(tmp_path / "root")
     with pytest.raises(DonorContractError, match="expected"):
@@ -63,8 +63,11 @@ def test_registration_is_input_scoped_immutable_and_cli_inspectable(tmp_path: Pa
                      "--root", str(store.root), "--json"]) == 0
     data = json.loads(capsys.readouterr().out)
     assert data["data"]["manifest_sha256"] == digest
+    assert "private study label" not in json.dumps(data)
     assert lab_main(["donor", "inspect", INPUT, "--root", str(store.root), "--json"]) == 0
-    assert json.loads(capsys.readouterr().out)["data"]["min_depth_x"] == 4
+    inspected = json.loads(capsys.readouterr().out)
+    assert inspected["data"]["min_depth_x"] == 4
+    assert "private study label" not in json.dumps(inspected)
     assert register_contract(store, path, digest) == inspect_contract(store, INPUT)
     changed, changed_digest = _file(tmp_path, male_full_donor_y_per_million=4000)
     with pytest.raises(DonorContractError, match="different calibration"):
