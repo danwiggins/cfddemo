@@ -15,7 +15,7 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Mapping
 
@@ -26,6 +26,13 @@ from .griffin import GriffinFormatError, GriffinProfile, read_corrected_profiles
 GRIFFIN_COMMIT = "b624c7a2ea7b8758b6eebd424066c815bfeece61"
 SNAKEMAKE_VERSION = "5.19.2"
 MIN_ELIGIBLE_AUTOSOMAL_PAIRS = 5_000_000
+D21_PAIR_PREDICATE = {
+    "version": "griffin-d21-autosomal-pairs-v1",
+    "contigs": "canonical chr1–chr22 or 1–22",
+    "counted_record": "first mate only; primary, mapped, proper pair, same-contig mapped mate",
+    "excluded": "secondary, supplementary, duplicate, QC-fail",
+    "minimum_mapq": 20,
+}
 _SAFE_TOKEN = re.compile(r"^[A-Za-z0-9_./-]+$")
 _REF_FILES = (
     "hg38.standard.chrom.sizes", "k100.Umap.MultiTrackMappability.bw",
@@ -75,6 +82,35 @@ def _safe_path(path: Path) -> Path:
     if not _SAFE_TOKEN.fullmatch(str(resolved)):
         raise ValueError(f"Griffin upstream requires shell-safe POSIX paths: {resolved}")
     return resolved
+
+
+def _tool_path(command: str, *, path: str | None = None) -> Path:
+    found = shutil.which(command, path=path)
+    if found is None:
+        raise ValueError(f"Griffin workflow tool is unavailable: {command}")
+    return _safe_path(Path(found))
+
+
+def _runtime_identity(snakemake: Path, python: Path, samtools: Path, bedtools: Path,
+                      workflow_path: str) -> dict:
+    packages = {}
+    for name in ("numpy", "pandas", "scipy", "pysam", "PyYAML", "pybedtools", "pyBigWig", "matplotlib"):
+        try:
+            packages[name] = version(name)
+        except PackageNotFoundError:
+            packages[name] = "unavailable"
+    executables = {"snakemake": snakemake, "python": python,
+                   "samtools": samtools, "bedtools": bedtools}
+    return {
+        "executables": {name: {"path": str(path), "sha256": _digest(path)}
+                        for name, path in executables.items()},
+        "python_version": sys.version.split()[0],
+        "packages": packages,
+        "pyyaml": yaml.__version__,
+        "environment": {**{key: os.environ.get(key, "") for key in
+                           ("PYTHONPATH", "LD_LIBRARY_PATH", "CONDA_PREFIX")},
+                        "PATH": workflow_path},
+    }
 
 
 def _write_yaml(path: Path, data: dict) -> None:
@@ -282,13 +318,20 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
         "assets_sha256": {name: _digest(assets / name) for name in _REF_FILES},
         "gc_frequency_sha256": {path.name: _digest(path) for path in frequency_files},
     }
+    snakemake = _tool_path(config.snakemake)
+    python = Path(sys.executable).parent / "python"
+    if not python.is_file() or not _SAFE_TOKEN.fullmatch(str(python.absolute())):
+        raise ValueError("Griffin shell scripts need a shell-safe Lab Python launcher")
+    workflow_path = str(python.parent) + os.pathsep + os.environ.get("PATH", "")
+    samtools = _tool_path("samtools", path=workflow_path)
+    bedtools = _tool_path("bedtools", path=workflow_path)
     snakemake_version = subprocess.run(
-        [config.snakemake, "--version"], check=True, capture_output=True, text=True, timeout=10,
+        [str(snakemake), "--version"], check=True, capture_output=True, text=True, timeout=10,
     ).stdout.strip()
     if snakemake_version != SNAKEMAKE_VERSION:
         raise ValueError(f"Griffin requires pinned Snakemake {SNAKEMAKE_VERSION}")
-    runtime = {"snakemake": snakemake_version, "python": sys.version.split()[0],
-               "pysam": version("pysam"), "pyyaml": yaml.__version__, "cores": config.cores}
+    runtime = _runtime_identity(snakemake, python, samtools, bedtools, workflow_path)
+    runtime.update({"snakemake_version": snakemake_version, "cores": config.cores})
     attempt.mkdir()
     scripts = attempt / "upstream_scripts"
     shutil.copytree(scripts_source, scripts, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
@@ -344,7 +387,7 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
         "upstream_commit": commit, "reference_id": config.reference_id,
         "sample": sample, "eligible_autosomal_pairs": config.eligible_autosomal_pairs,
         "minimum_eligible_autosomal_pairs": MIN_ELIGIBLE_AUTOSOMAL_PAIRS,
-        "eligibility_source": "bam_verified",
+        "eligibility_source": "bam_verified", "eligibility_predicate": D21_PAIR_PREDICATE,
         "snakemake_version": snakemake_version, "runtime": runtime,
         "fingerprints": fingerprints,
     }, sort_keys=True), encoding="utf-8")
@@ -354,10 +397,17 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
     ):
         with (directory / "workflow.log").open("wb") as log:
             subprocess.run(
-                [config.snakemake, "-s", snakefile, "--cores", str(config.cores)],
+                [str(snakemake), "-s", snakefile, "--cores", str(config.cores)],
                 cwd=directory, stdout=log, stderr=subprocess.STDOUT, check=True,
-                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+                env={**os.environ, "PATH": workflow_path,
+                     "PYTHONDONTWRITEBYTECODE": "1"},
             )
+    if (_tool_path("samtools", path=workflow_path) != samtools
+            or _tool_path("bedtools", path=workflow_path) != bedtools
+            or _runtime_identity(snakemake, python, samtools, bedtools, workflow_path) != {
+        key: value for key, value in runtime.items() if key not in ("snakemake_version", "cores")
+    }):
+        raise RuntimeError("Griffin workflow runtime changed during computation")
     if _digest(bam) != fingerprints["bam_sha256"] or _digest(reference) != config.reference_sha256:
         raise RuntimeError("BAM or reference changed during Griffin computation")
     if (_tree_digest(scripts) != fingerprints["upstream_scripts_sha256"]
@@ -392,7 +442,7 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
         "upstream_commit": commit, "reference_id": config.reference_id,
         "sample": sample, "eligible_autosomal_pairs": config.eligible_autosomal_pairs,
         "minimum_eligible_autosomal_pairs": MIN_ELIGIBLE_AUTOSOMAL_PAIRS,
-        "eligibility_source": "bam_verified",
+        "eligibility_source": "bam_verified", "eligibility_predicate": D21_PAIR_PREDICATE,
         "snakemake_version": snakemake_version, "runtime": runtime,
         "fingerprints": fingerprints,
         "gc_bias_sha256": _digest(gc_bias), "output_sha256": _digest(output),
