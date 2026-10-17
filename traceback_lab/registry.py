@@ -60,6 +60,7 @@ ALGORITHMS: tuple[str, ...] = (
     "pmd_score:PMD_SCORE",
     "hypometh_reads:HYPOMETH_READS",
     "frag_x_meth:FRAG_X_METH",
+    "griffin:GRIFFIN",
 )
 
 

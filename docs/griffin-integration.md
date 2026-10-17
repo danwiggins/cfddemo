@@ -26,7 +26,8 @@ adapter remains necessary for the Lab's primary input. The caller supplies
 the registered hg38 FASTA and its SHA-256, Griffin's
 reference assets (including mappability BigWig, exclusion BEDs and all
 15–500 bp genome GC-frequency tables), and high-mappability TF-site lists.
-It requires the 5M D21 gate, a clean upstream checkout at the pinned commit,
+It requires the 5M D21 gate, counted as eligible autosomal **pairs** on an
+Illumina-declared BAM (one first mate per molecule), a clean upstream checkout at the pinned commit,
 and a fresh per-input attempt directory. The attempt stores hashes for BAM,
 reference, site lists and reference assets, and only marks its manifest
 complete after Griffin returns a valid corrected TSV. Partial outputs remain
@@ -34,17 +35,30 @@ inspectable after failure. Griffin's upstream shell rules interpolate paths
 without quoting, so the adapter refuses paths containing shell-special
 characters. The runner is POSIX-only, matching upstream's environment.
 
-The current Lab does **not** register or display Griffin as an available
-algorithm. The adapter is an invocation boundary, and an end-to-end run has
-not been completed: this environment lacks the upstream Snakemake and
-pyBigWig dependencies and the required mappability BigWig. Native ONT input
-is incompatible with the exact upstream code. There is no
-registered TF-site set yet. Before publication, the Lab must bind the
-per-input attempt manifest, verified corrected TSV, asset digests and
-upstream commit to its execution identity and result cache. Runner identity
-currently receives only `ROOT`, not `input_id`; a static global TSV asset
-would risk assigning one sample's profile to another. Derived and example
-inputs need explicit same-input upstream execution or must skip.
+The Lab now registers the exact upstream checkout, Griffin reference inputs,
+and operator-supplied TF-site lists with:
+
+```text
+traceback lab asset griffin-register --upstream-root GRIFFIN_CHECKOUT \
+  --ref-assets GRIFFIN_REF --site-list CTCF=FILTERED_CTCF_SITES \
+  --primary-site CTCF --source-label operator-supplied --terms unknown --root ROOT
+```
+
+`traceback lab asset griffin-inspect --root ROOT` rehashes the registered
+inputs. The registration digest enters the algorithm's execution identity,
+while the Lab's input ID keeps cached results sample-specific. The algorithm
+requires the 5M D21 paired-molecule gate and a paired-end hg38 BAM, runs the exact workflow,
+and saves the validated corrected TSV and input-bound provenance alongside
+the profile panel. The primary registered TF list supplies the scalar
+`central_coverage`; all registered lists remain visible in the panel. Native
+ONT, example, and derived inputs skip explicitly. No arbitrary TF activity or
+diagnostic threshold is asserted.
+
+An end-to-end upstream run has not yet been completed in this environment:
+tested Snakemake 5.19.2, pyBigWig, pybedtools, and the required mappability
+BigWig are absent. Native ONT input is incompatible with the exact upstream
+code. A scientifically reviewed ONT fragment adapter is still needed before
+this method can run on the Lab's principal assay.
 
 Griffin's source is BSD-3-Clause-Clear, which expressly grants no patent
 rights. The Lab's existing `method-patents` callout applies, and no

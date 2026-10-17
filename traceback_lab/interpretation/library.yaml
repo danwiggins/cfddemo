@@ -2500,6 +2500,53 @@ entries:
       note: "No scientific citation or reference interval displayed. Engineering formula: D21 eligible molecules with at least four C+m CpG calls; per-molecule 5mC fraction is argmax-5mC calls divided by C+m CpG calls; group means are unweighted by call count; delta is mean for 151-220 bp minus mean for 100-150 bp. Null when either group is empty. Stability tolerance is an engineering comparison rule, not a biological threshold."
 
 
+  # -------------------------------------------------------------- griffin
+  - algorithm_id: griffin
+    metric_id: central_coverage
+    label: "Griffin GC-corrected central TF-site coverage"
+    value_kind: positive
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "paired-end cfDNA WGS, hg38"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No validated performance or reference range for this TF-site list and sample"
+    meaning_high: "More corrected nucleosome protection at the registered primary TF-site list; this is not a TF expression call."
+    meaning_low: "Less corrected nucleosome protection at the registered primary TF-site list; this is not a TF expression call."
+    confounders: ["TF binding-site selection", "GC correction and mappability filtering", "cell-type mixture", "sequencing depth", "fragment-size selection"]
+    next_steps:
+      analytical: ["Inspect the full site-centered profile and registered TF-site list", "Compare only against protocol-matched samples"]
+      clinical_setting: null
+    license_ids: [method-patents]
+    flags: [LEGAL]
+    headline: true
+    stability: {kind: relative, tolerance: 0.10}
+    citations: ["doi:10.1038/s41467-022-35076-w"]
+    citation_checked: {by: "Lab S5 method audit", date: "2026-10-16", note: "Doebley et al. Griffin reports GC-corrected central TF-site coverage for paired-end cfDNA WGS. The Lab's registered primary site list determines this scalar; no threshold or diagnostic interpretation is asserted."}
+
+  - algorithm_id: griffin
+    metric_id: site_count
+    label: "Sites in primary Griffin TF list"
+    value_kind: count
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "paired-end cfDNA WGS, hg38"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "Site count is coverage metadata, not a diagnostic"
+    meaning_high: "The registered primary site list contains more sites."
+    meaning_low: "The registered primary site list contains fewer sites."
+    confounders: ["TF-site annotation and filtering"]
+    next_steps: {analytical: ["Inspect the registered site list"], clinical_setting: null}
+    license_ids: [method-patents]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: absolute, tolerance: 1}
+    citations: ["doi:10.1038/s41467-022-35076-w"]
+    citation_checked: {by: "Lab S5 method audit", date: "2026-10-16", note: "Griffin output reports number_of_sites for each site list. The one-site stability tolerance is an engineering comparison rule, not a biological threshold."}
+
   # ------------------------------------------------------ breakpoint-motifs
   - algorithm_id: breakpoint-motifs
     metric_id: cpg_near_end_fraction

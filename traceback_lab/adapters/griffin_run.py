@@ -44,6 +44,7 @@ class GriffinRun:
     ref_assets: Path
     site_lists: Mapping[str, Path]
     attempt_dir: Path
+    registration_sha256: str | None = None
     snakemake: str = "snakemake"
     cores: int = 1
 
@@ -116,6 +117,34 @@ def _require_paired_input(bam: Path) -> None:
         )
 
 
+def count_d21_pairs(bam: Path) -> int:
+    """Count one D21-eligible autosomal molecule per proper Illumina pair."""
+
+    import pysam
+
+    with pysam.AlignmentFile(str(bam), "rb") as alignments:
+        groups = alignments.header.to_dict().get("RG", [])
+        if not groups or any(group.get("PL", "").upper() != "ILLUMINA" for group in groups):
+            raise ValueError("Griffin requires unanimously Illumina-declared read groups")
+        autosomes = {
+            index for index, name in enumerate(alignments.references)
+            if re.fullmatch(r"(?:chr)?(?:[1-9]|1[0-9]|2[0-2])", name)
+        }
+        if not autosomes:
+            raise ValueError("Griffin requires canonical hg38 autosomes")
+        count = 0
+        for read in alignments.fetch(until_eof=True):
+            if (read.is_paired and read.is_proper_pair and read.is_read1 and
+                    not read.is_unmapped and not read.mate_is_unmapped and
+                    not read.is_secondary and not read.is_supplementary and
+                    not read.is_duplicate and not read.is_qcfail and
+                    read.mapping_quality >= 20 and
+                    read.reference_id == read.next_reference_id and
+                    read.reference_id in autosomes):
+                count += 1
+        return count
+
+
 def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
     """Execute upstream GC correction and profiling, then validate its TSV.
 
@@ -131,6 +160,8 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
         raise ValueError("upstream Griffin is validated for hg38 only")
     if not re.fullmatch(r"[a-z0-9]{12,64}", config.input_id):
         raise ValueError("input_id must be a Lab hex identifier")
+    if config.registration_sha256 is not None and not re.fullmatch(r"[a-f0-9]{64}", config.registration_sha256):
+        raise ValueError("invalid Griffin registration digest")
     if not config.site_lists or config.cores < 1:
         raise ValueError("Griffin needs TF-site lists and at least one core")
     if os.name != "posix":
@@ -218,6 +249,7 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
     (attempt / "provenance.json").write_text(json.dumps({
         "status": "attempt", "input_id": config.input_id,
         "upstream_commit": commit, "reference_id": config.reference_id,
+        "platform": "illumina", "registration_sha256": config.registration_sha256,
         "fingerprints": fingerprints,
     }, sort_keys=True), encoding="utf-8")
     for directory, snakefile in (
@@ -242,6 +274,7 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
     manifest = {
         "status": "complete", "input_id": config.input_id,
         "upstream_commit": commit, "reference_id": config.reference_id,
+        "platform": "illumina", "registration_sha256": config.registration_sha256,
         "fingerprints": fingerprints,
         "gc_bias_sha256": _digest(gc_bias), "output_sha256": _digest(output),
         "profile_count": len(profiles),

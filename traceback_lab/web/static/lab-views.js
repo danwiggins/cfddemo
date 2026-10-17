@@ -688,7 +688,7 @@
     };
     families.forEach(([, label], i) => tabs.append(h("button", { type: "button", class: "control subtab", "aria-pressed": "false", onclick: () => show(i) }, label)));
     out.push(tabs, body);
-    const initial = ["fragment-size", "end-motifs", "delfi-ratio", "long-tail", "mtdna", "breakpoint-motifs"].some((id) => algo(sample, id))
+    const initial = ["fragment-size", "end-motifs", "delfi-ratio", "long-tail", "mtdna", "breakpoint-motifs", "griffin"].some((id) => algo(sample, id))
       ? 0 : algo(sample, "copy-number") ? 1 : 2;
     show(initial);
     return out;
@@ -731,7 +731,7 @@
   function fragmentSignals(sample) {
     const a = algo(sample, "fragment-size");
     const section = h("section", { class: "panel" }, h("h2", {}, "Size density"));
-    if (!a || a.status !== "ok") return [section, absent(a, "fragment-size"), ...breakpointMotifSignals(sample)];
+    if (!a || a.status !== "ok") return [section, absent(a, "fragment-size"), ...breakpointMotifSignals(sample), ...griffinSignals(sample)];
     const slot = h("div", {}, h("p", {}, "Loading…"));
     const short = a.metrics.find((m) => m.metric_id === "short_fraction_lt150");
     section.append(h("p", { class: "help" }, `No size-density cohort band yet; 167 bp marked. Short-fragment reference: ${cohortReadiness(sample, short ? [short] : [])}.`), ...context(sample, "fragment-size", new Set()), slot);
@@ -749,7 +749,40 @@
         ? h("table", { class: "data-table" }, h("tbody", {}, ...other.metrics.filter((m) => m.value === null || typeof m.value !== "object").map((m) => h("tr", {}, h("th", { scope: "row" }, m.label), h("td", {}, fmt(m.value, m.unit))))))
         : absent(other, id), id === "end-motifs" || id === "delfi-ratio" ? flagPill("LEGAL") : ""));
     }
-    return [section, ...more, ...breakpointMotifSignals(sample)];
+    return [section, ...more, ...breakpointMotifSignals(sample), ...griffinSignals(sample)];
+  }
+
+  function griffinSignals(sample) {
+    const a = algo(sample, "griffin");
+    if (!a) return [];
+    const section = h("section", { class: "panel" },
+      h("div", { class: "findings-head" }, h("h2", {}, "Griffin TF-site profile"), flagPill("LEGAL")));
+    if (a.status !== "ok") return [section, absent(a, "griffin")];
+    section.append(h("p", { class: "help" }, "GC-corrected nucleosome protection from the pinned Griffin workflow on a compatible paired-end WGS BAM. The primary TF list is an operator-registered choice; this is not a TF expression call."));
+    const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading Griffin profile…"));
+    section.append(...context(sample, "griffin", new Set()), slot);
+    artifact(sample, "griffin", "tf-site-profile").then((data) => {
+      const profiles = Array.isArray(data.profiles) ? data.profiles : [];
+      const primary = profiles.find((profile) => profile.site_name === data.primary_site);
+      if (!primary || !Array.isArray(primary.bin_start_bp) || !Array.isArray(primary.gc_corrected_coverage) ||
+          primary.bin_start_bp.length !== primary.gc_corrected_coverage.length || primary.bin_start_bp.length < 3) {
+        throw new Error("primary Griffin profile is incomplete");
+      }
+      const step = primary.bin_start_bp[1] - primary.bin_start_bp[0];
+      const points = primary.bin_start_bp.map((start, i) => [start + step / 2, primary.gc_corrected_coverage[i]]);
+      const rows = profiles.map((profile) => [profile.site_name, profile.site_count, profile.central_coverage, profile.amplitude]);
+      slot.replaceWith(
+        h("p", {}, `Primary TF list: ${data.primary_site}; ${fmt(primary.site_count)} sites. Bin coordinates below are starts, while chart points are bin centers.`),
+        chart(`GC-corrected Griffin nucleosome coverage at ${data.primary_site} sites.`, {
+          grid: { left: 65, right: 20, top: 20, bottom: 45 },
+          xAxis: { type: "value", name: "bp from site" }, yAxis: { type: "value", name: "relative coverage" },
+          series: [{ type: "line", showSymbol: false, data: points, lineStyle: { color: "#1f5f8b" } }],
+        }, dataTable(`Griffin ${data.primary_site} corrected profile`, ["Bin start (bp)", "Relative coverage"],
+          primary.bin_start_bp.map((start, i) => [start, primary.gc_corrected_coverage[i]]))),
+        dataTable("Griffin TF-site lists", ["Site list", "Sites", "Central coverage", "Amplitude"], rows),
+      );
+    }).catch((error) => slot.replaceWith(h("p", { class: "problem" }, `Griffin profile unavailable (${error.message}).`)));
+    return [section];
   }
 
   function copyNumberSignals(sample) {
