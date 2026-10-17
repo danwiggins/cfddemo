@@ -308,7 +308,7 @@
       const canPin = pin && /^[0-9a-f]{64}$/.test(pin.input_id) && /^[0-9a-f]{64}$/.test(pin.parameters_sha256) &&
         /^a-\d{8}T\d{12}-[0-9a-f]{8}$/.test(pin.attempt_id);
       const logKey = `${sample.id12}:${a.algorithm_id}:${pin?.input_id}:${pin?.parameters_sha256}:${pin?.attempt_id}`;
-      const logLine = h("span", { class: "help", "aria-live": "polite" }, state.runLogLines.get(logKey) || "");
+      const logLine = h("span", { class: "help", "aria-live": "polite", "data-run-log-line": "" }, state.runLogLines.get(logKey) || "");
       const showLogLine = (message) => {
         state.runLogLines.set(logKey, message);
         if (logLine.isConnected) logLine.replaceChildren(message);
@@ -339,7 +339,7 @@
     });
     for (const id of sample.unreadable_results || []) {
       runRows.push(h("tr", {}, h("th", { scope: "row" }, id), h("td", { class: "problem" }, "result unreadable"),
-        h("td", {}, "—"), h("td", {}, "—"), h("td", {}, "Selected result could not be read.")));
+        h("td", {}, "—"), h("td", {}, "A stored result could not be read; selection cannot be determined.")));
     }
     for (const id of sample.ambiguous_results || []) {
       runRows.push(h("tr", {}, h("th", { scope: "row" }, id), h("td", { class: "problem" }, "result selection ambiguous"),
@@ -436,7 +436,10 @@
         over_4096_lines: "log over 4,096 lines", malformed_or_empty: "log malformed or empty",
         latest_run_pointer_unavailable: "latest-run pointer unavailable" }[logIssue.reason] || "log unavailable");
       if (state.generationAtLoad === null) state.generationAtLoad = status.generation;
-      if (status.generation > state.generationAtLoad) state.runLogLines.clear();
+      if (status.generation > state.generationAtLoad) {
+        state.runLogLines.clear();
+        document.querySelectorAll("[data-run-log-line]").forEach((node) => node.replaceChildren());
+      }
       if (status.active) {
         const minutes = Math.max(0, Math.round((Date.now() - Date.parse(status.active.started_utc)) / 60000));
         const priorInterrupted = status.interrupted && status.interrupted.run_id !== status.active.run_id
@@ -470,8 +473,7 @@
       const runMarker = (row) => row ? [row.run_id, row.step, row.source_id, row.input_id].join(":") : null;
       if (state.route.name === "lens" &&
           (runMarker(previous && previous.active) !== runMarker(status.active) ||
-           runMarker(previous && previous.interrupted) !== runMarker(status.interrupted) ||
-           (previous && previous.generation <= state.generationAtLoad && status.generation > state.generationAtLoad))) render();
+           runMarker(previous && previous.interrupted) !== runMarker(status.interrupted))) render();
     } catch (error) {
       if (error.session) { setStatus("Session expired. Restart `traceback lab serve --open`; it opens a fresh page."); return; }
       state.missed += 1;
