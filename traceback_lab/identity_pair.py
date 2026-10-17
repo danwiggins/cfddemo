@@ -186,7 +186,8 @@ def _selected_pair(store: LabStore, pair_id: str) -> dict[str, Any] | None:
     if (any(not isinstance(metrics[key], float) or not math.isfinite(metrics[key])
             for key in ("relatedness", "concordance"))
             or any(isinstance(metrics[key], bool) or not isinstance(metrics[key], int)
-                   or metrics[key] < 0 for key in ("ibs0", "ibs2", "n"))):
+                   or metrics[key] < 0 for key in ("ibs0", "ibs2", "n"))
+            or metrics["n"] == 0):
         return None
     return summary
 

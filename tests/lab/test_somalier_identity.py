@@ -203,14 +203,21 @@ def test_pair_attempt_binds_both_selected_fingerprints_and_caches(tmp_path, monk
     with store.writer("identity compare", "r-20261016-0000-aabb", step="relate"):
         first = compare_pair(store, a[:12], b[:12])
         cached = compare_pair(store, b[:12], a[:12])
+        old_summary = (store.lab / "identity-pairs" / first["pair_id"] / "attempts"
+                       / first["attempt_id"] / "summary.json")
+        invalid = json.loads(old_summary.read_text())
+        invalid["metrics"]["n"] = 0
+        old_summary.write_text(json.dumps(invalid))
+        recovered = compare_pair(store, a[:12], b[:12])
         sketches[b] = SelectedSketch(b, sketches[b].input_id,
                                      "a-20261016T000000000000-cccccccc", "e" * 64,
                                      sketches[b].sketch_sha256, sketches[b].data)
         changed = compare_pair(store, a[:12], b[:12])
     assert first["cached"] is False and cached["cached"] is True
+    assert recovered["cached"] is False and recovered["attempt_id"] != first["attempt_id"]
     assert changed["cached"] is False and changed["execution_id"] != first["execution_id"]
     assert cached["attempt_id"] == first["attempt_id"] != changed["attempt_id"]
-    assert len(calls) == 2
+    assert len(calls) == 3
     assert first["participants"][0]["source_id"] == a
     assert first["interpretation"].startswith("exploratory")
 
@@ -294,6 +301,10 @@ def test_malformed_stored_pair_is_ignored_by_sample_read(tmp_path, monkeypatch) 
 
     summary_file.write_text(json.dumps(summary))
     assert len(pairs_for_sample(store, source)) == 1
+    summary["metrics"]["n"] = 0
+    summary_file.write_text(json.dumps(summary))
+    assert pairs_for_sample(store, source) == []
+    summary["metrics"]["n"] = 10
     summary["metrics"] = None
     summary_file.write_text(json.dumps(summary))
     assert pairs_for_sample(store, source) == []
