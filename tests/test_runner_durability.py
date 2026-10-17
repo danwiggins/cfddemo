@@ -9,7 +9,6 @@ import sqlite3
 import stat
 import threading
 import time
-from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Condition, Event
@@ -1317,34 +1316,36 @@ def test_store_pins_no_sidecar_before_its_anchor_exists(
     # recreates them with new inodes.  B must not have pinned A's sidecars.
     first, job_id = _submitted_store(tmp_path)
     wal = Path(f"{first.path}-wal")
-    # On POSIX, keep the old inode allocated after SQLite unlinks the WAL;
-    # Windows file handles can prevent that unlink, so check recreation there.
-    with (wal.open("rb") if os.name != "nt" else nullcontext()) as original_wal:
-        before = os.fstat(original_wal.fileno()).st_ino if original_wal else None
-        other: list[sqlite3.Connection] = []
-        real_connect = JobStore._connect
+    other: list[sqlite3.Connection] = []
+    real_connect = JobStore._connect
 
-        def connect(self, *, anchor: bool = False):
-            if anchor and not other:
+    def connect(self, *, anchor: bool = False):
+        if anchor and not other:
+            # Secure-storage validation has completed. Keep the old inode
+            # allocated across unlink without blocking deletion on Windows.
+            pinned = tmp_path / "old-wal"
+            os.link(wal, pinned)
+            try:
+                before = pinned.stat().st_ino
                 first.close()
                 gc.collect()
                 assert not wal.exists()
                 recreated = sqlite3.connect(first.path, check_same_thread=False)
                 recreated.execute("SELECT count(*) FROM jobs").fetchall()
                 other.append(recreated)
-                assert wal.exists()
-                if before is not None:
-                    assert wal.stat().st_ino != before
-            return real_connect(self, anchor=anchor)
+                assert wal.exists() and wal.stat().st_ino != before
+            finally:
+                pinned.unlink()
+        return real_connect(self, anchor=anchor)
 
-        monkeypatch.setattr(JobStore, "_connect", connect)
-        second = JobStore(first.path)
-        monkeypatch.setattr(JobStore, "_connect", real_connect)
-        try:
-            assert second.get(job_id).job_id == job_id
-        finally:
-            second.close()
-            other[0].close()
+    monkeypatch.setattr(JobStore, "_connect", connect)
+    second = JobStore(first.path)
+    monkeypatch.setattr(JobStore, "_connect", real_connect)
+    try:
+        assert second.get(job_id).job_id == job_id
+    finally:
+        second.close()
+        other[0].close()
 
 
 def test_close_waits_for_admitted_operations_and_refuses_new_ones(
