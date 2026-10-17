@@ -620,8 +620,7 @@ def test_candidate_staging_refuses_budget_without_partial_second_read(tmp_path, 
     monkeypatch.setattr(algorithm, "MAX_CANDIDATE_FASTA_BYTES", 80)
     with pytest.raises(RuntimeError, match="candidate FASTA exceeds.*staging budget"):
         algorithm._write_candidates(bam, fasta, 75)
-    assert fasta.read_text() == ">r1\n" + "A" * 75 + "\n"
-    assert fasta.stat().st_size == 80
+    assert not fasta.exists()
     store, _ = _database(tmp_path)
     monkeypatch.setattr(algorithm, "_tool", lambda name: (name, "a" * 64))
     monkeypatch.setattr(algorithm.subprocess, "run", lambda *args, **kwargs: pytest.fail("classifier ran"))

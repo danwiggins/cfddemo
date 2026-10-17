@@ -151,27 +151,32 @@ def _bracken_species(path: Path, lineages: dict[int, str], denominator: int) -> 
 def _write_candidates(bam: Path, fasta: Path, read_length: int) -> tuple[int, int, int, int]:
     denominator = candidate = too_short = missing_sequence = 0
     staged_bytes = 0
-    with pysam.AlignmentFile(bam, "rb", check_sq=False) as stream, fasta.open("wt", encoding="ascii") as out:
-        for read in stream.fetch(until_eof=True):
-            if read.is_secondary or read.is_supplementary or read.is_qcfail or read.is_duplicate:
-                continue
-            denominator += 1
-            if not read.is_unmapped:
-                continue
-            sequence = read.query_sequence
-            if sequence is None:
-                missing_sequence += 1
-                continue
-            if len(sequence) < read_length:
-                too_short += 1
-                continue
-            candidate += 1
-            row = f">r{candidate}\n{sequence[:read_length]}\n"
-            row_bytes = len(row)
-            if staged_bytes + row_bytes > MAX_CANDIDATE_FASTA_BYTES:
-                raise RuntimeError("microbial candidate FASTA exceeds the local 512 MiB staging budget")
-            out.write(row)
-            staged_bytes += row_bytes
+    try:
+        with pysam.AlignmentFile(bam, "rb", check_sq=False) as stream, fasta.open("wb") as out:
+            for read in stream.fetch(until_eof=True):
+                if read.is_secondary or read.is_supplementary or read.is_qcfail or read.is_duplicate:
+                    continue
+                denominator += 1
+                if not read.is_unmapped:
+                    continue
+                sequence = read.query_sequence
+                if sequence is None:
+                    missing_sequence += 1
+                    continue
+                if len(sequence) < read_length:
+                    too_short += 1
+                    continue
+                candidate += 1
+                row = f">r{candidate}\n{sequence[:read_length]}\n"
+                encoded = row.encode("ascii")
+                row_bytes = len(encoded)
+                if staged_bytes + row_bytes > MAX_CANDIDATE_FASTA_BYTES:
+                    raise RuntimeError("microbial candidate FASTA exceeds the local staging budget")
+                out.write(encoded)
+                staged_bytes += row_bytes
+    except BaseException:
+        fasta.unlink(missing_ok=True)
+        raise
     return denominator, candidate, too_short, missing_sequence
 
 
