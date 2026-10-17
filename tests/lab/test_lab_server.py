@@ -141,7 +141,7 @@ def _sample_with_unvalidated_wps(server, monkeypatch):
         wps = source.model_copy(update={
             "algorithm_id": "wps",
             "depth": Depth(eligible_reads=1_000_000, approx_depth_x=200 * view.fraction),
-            "metrics": [Metric(metric_id="mean_wps", value=12.0), Metric(metric_id="positive_bin_fraction", value=value)],
+            "metrics": [Metric(metric_id="qualifying_fragment_depth_x", value=value)],
             "panels": [],
         })
         # The read-side sample depth comes from the first result; put the
@@ -155,13 +155,13 @@ def _sample_with_unvalidated_wps(server, monkeypatch):
 def test_sample_api_keeps_unvalidated_wps_values_without_stability_verdict(server, monkeypatch) -> None:
     id12 = _sample_with_unvalidated_wps(server, monkeypatch)
     payload = json.loads(_get(server, f"/api/samples/{id12}", _session(server))[1])
-    panel = next(p for p in payload["stability"] if p["algorithm_id"] == "wps" and p["metric_id"] == "positive_bin_fraction")
+    panel = next(p for p in payload["stability"] if p["algorithm_id"] == "wps" and p["metric_id"] == "qualifying_fragment_depth_x")
     assert panel["verdict"] == "stability not validated"
     assert panel["points"][0]["value"] == 0.4
     assert panel["points"][0]["state"] == "ok_unvalidated"
     assert panel["points"][0]["deviation"] is None
     assert panel["split"]["stable"] is None
-    assert not any(p["algorithm_id"] == "wps" and p["metric_id"] == "positive_bin_fraction" for p in payload.get("defended", {}).get("rows", []))
+    assert not any(p["algorithm_id"] == "wps" and p["metric_id"] == "qualifying_fragment_depth_x" for p in payload.get("defended", {}).get("rows", []))
 
 
 def test_stability_dom_names_unvalidated_wps_without_false_verdict(server, tmp_path, monkeypatch) -> None:
@@ -174,7 +174,7 @@ def test_stability_dom_names_unvalidated_wps_without_false_verdict(server, tmp_p
          server.issue_link() + f"&route=/sample/{id12}/stability"], tmp_path / "profile",
         ok=lambda page: 'data-ready="1"' in page and "Stability: every point" in page,
     )
-    assert ("<strong>Fraction of all autosomal 1 kb bins with positive mean WPS</strong>"
+    assert ("<strong>WPS-eligible 120–180 bp aligned-fragment depth</strong>"
             " — stability not validated") in dom
     assert "no split-half stability verdict" in dom
     assert "No validated stability deviation scale; numeric values are in the table." in dom

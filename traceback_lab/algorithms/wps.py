@@ -164,10 +164,7 @@ class Wps(Base):
         ends = summary.column("end")
         tracks: dict[str, np.ndarray] = {}
         metadata: list[dict[str, Any]] = []
-        total_score = 0
         total_centres = 0
-        positive = 0
-        valid_bins = 0
         qualifying_fragments = 0
         qualifying_span_bp = 0
         exact_chunks: list[dict[str, Any]] = []
@@ -183,10 +180,8 @@ class Wps(Base):
             qualifying_fragments += int(qualifying.sum())
             qualifying_span_bp += int(span[qualifying].sum(dtype=np.int64))
             def emit(start: int, score: np.ndarray) -> None:
-                nonlocal total_score
                 if np.any((score < np.iinfo(np.int32).min) | (score > np.iinfo(np.int32).max)):
                     raise OverflowError("WPS per-base score exceeds int32")
-                total_score += int(score.sum(dtype=np.int64))
                 if not publish_exact:
                     return
                 relative = Path("wps_exact") / name / f"{start:010d}.npz"
@@ -199,9 +194,6 @@ class Wps(Base):
 
             mean, counts = chromosome_track(on_starts, on_ends, summary.lengths[int(cid)], emit=emit)
             tracks[name] = mean
-            valid = counts > 0
-            positive += int((mean[valid] > 0).sum())
-            valid_bins += int(valid.sum())
             total_centres += int(counts.sum())
             metadata.append({"contig": name, "length_bp": summary.lengths[int(cid)], "bins": len(mean)})
         buffer = io.BytesIO()
@@ -223,11 +215,7 @@ class Wps(Base):
                            "chunks": exact_chunks}
             artifacts["wps_exact_index.json"] = json.dumps(exact_index, separators=(",", ":")).encode()
         return AlgorithmOutput(
-            metrics=[metric("mean_wps", total_score / total_centres if total_centres and qualifying_fragments else None,
-                            unit="fragments", n=total_centres),
-                     metric("positive_bin_fraction", positive / valid_bins if valid_bins and qualifying_fragments else None,
-                            unit="fraction", n=valid_bins),
-                     metric("qualifying_fragment_depth_x", qualifying_depth_x,
+            metrics=[metric("qualifying_fragment_depth_x", qualifying_depth_x,
                             unit="x", n=qualifying_fragments)],
             artifacts=artifacts,
         )

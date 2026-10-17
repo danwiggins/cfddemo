@@ -74,8 +74,7 @@ def test_wps_control_values_are_measured_but_not_declared_usable() -> None:
         result = ResultEnvelope(
             algorithm_id="wps", algorithm_version="1", status="ok", provenance=provenance,
             depth=Depth(eligible_reads=1_000_000, approx_depth_x=20 * fraction),
-            metrics=[Metric(metric_id="mean_wps", value=12 * fraction),
-                     Metric(metric_id="positive_bin_fraction", value=value)],
+            metrics=[Metric(metric_id="qualifying_fragment_depth_x", value=value)],
         )
         return views.InputView(label, "c" * 64, transform, {"half": label[-1]} if transform == "split" else {},
                                {"wps": result}, fraction)
@@ -86,18 +85,17 @@ def test_wps_control_values_are_measured_but_not_declared_usable() -> None:
                               [half, view("split-A", 0.5, 0.2, "split"),
                                view("split-B", 0.5, 0.6, "split")])
     library = views.load_library()
-    cell = views.cell_state(half, full, "wps", "positive_bin_fraction", library)
+    cell = views.cell_state(half, full, "wps", "qualifying_fragment_depth_x", library)
     assert cell == {"state": "ok_unvalidated", "value": 0.4, "verdict": None}
-    assert views.cell_state(half, full, "wps", "mean_wps", library)["state"] == "ok_unvalidated"
     panel = next(p for p in views.stability_panels(sample, library)
-                 if p["metric_id"] == "positive_bin_fraction")
+                 if p["metric_id"] == "qualifying_fragment_depth_x")
     assert panel["verdict"] == "stability not validated"
     assert panel["points"][0]["value"] == 0.4
     assert panel["points"][0]["deviation"] is None
     assert panel["split"]["stable"] is None
     repeatability = views.repeatability(views.stability_panels(sample, library))
-    assert repeatability["metrics"] == 2
-    assert repeatability["no_verdict"] == 2
+    assert repeatability["metrics"] == 1
+    assert repeatability["no_verdict"] == 1
     assert repeatability["unstable"] == 0
     assert all(row["stable"] is None for row in repeatability["worst"])
 

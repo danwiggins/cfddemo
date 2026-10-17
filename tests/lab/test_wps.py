@@ -100,9 +100,7 @@ def test_wps_accepts_a_real_read_summary(tmp_path) -> None:
     assert {"wps_track.npz", "wps_summary.json"} == set(derived.artifacts)
     assert not (derived_out / "wps_exact").exists()
     assert json.loads(derived.artifacts["wps_summary.json"])["exact_index"] is None
-    assert {row["metric_id"] for row in derived.metrics} == {
-        "mean_wps", "positive_bin_fraction", "qualifying_fragment_depth_x",
-    }
+    assert {row["metric_id"] for row in derived.metrics} == {"qualifying_fragment_depth_x"}
 
 
 def test_wps_depth_gate_requires_known_ten_x(tmp_path, monkeypatch) -> None:
@@ -170,8 +168,8 @@ def test_wps_registry_and_algorithm_output(tmp_path, monkeypatch, valid_fragment
     assert panel["qualifying_fragment_depth_x"] == (
         (120 + 160 + 180) / 1200 if valid_fragments else 0
     )
-    assert (result.metrics[0]["value"] is not None) == valid_fragments
-    assert (result.metrics[1]["value"] is not None) == valid_fragments
+    assert {row["metric_id"] for row in result.metrics} == {"qualifying_fragment_depth_x"}
+    assert result.metrics[0]["value"] == panel["qualifying_fragment_depth_x"]
     index = json.loads(result.artifacts["wps_exact_index.json"])
     chunks = index["chunks"]
     assert chunks[0]["start"] == HALF
@@ -186,13 +184,10 @@ def test_wps_registry_and_algorithm_output(tmp_path, monkeypatch, valid_fragment
     source_starts = Summary.data["start"] if valid_fragments else np.asarray([], dtype=np.int64)
     source_ends = Summary.data["end"] if valid_fragments else np.asarray([], dtype=np.int64)
     assert exact == _naive(source_starts, source_ends, HALF, 1200 - HALF + 1)
-    assert result.metrics[0]["n"] == len(exact)
-    if valid_fragments:
-        assert result.metrics[0]["value"] == sum(exact) / len(exact)
-    else:
-        assert result.metrics[0]["value"] is None
+    assert result.metrics[0]["n"] == (3 if valid_fragments else 0)
     assert any(algorithm.id == "wps" for algorithm in load_registry())
-    assert load_library().entry("wps", "mean_wps") is not None
+    assert load_library().entry("wps", "qualifying_fragment_depth_x") is not None
+    assert load_library().entry("wps", "mean_wps") is None
 
 
 def test_wps_worker_exact_chunks_survive_store_publication(tmp_path, monkeypatch) -> None:
