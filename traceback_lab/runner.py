@@ -208,6 +208,7 @@ def run_plan(
             # Consumed assets enter the execution identity (D19), so a
             # re-registered asset never reuses an older result.
             asset_sha256s=planned_assets,
+            platform=target.platform if target.platform != "ont" else None,
             tool_pins=planned_tools,
             platform=target.platform,
         )
