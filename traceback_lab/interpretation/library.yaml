@@ -473,6 +473,7 @@ entries:
     flags: [LEGAL]
     headline: true
     citations: ["doi:10.1038/s41467-025-66503-3"]
+    citation_checked: {by: "S3 primary-paper review", date: "2026-10-17", note: "DOI resolves to the LIONHEART Nature Communications paper. It defines scores as sample-standardized Pearson correlations between paired-end Illumina cfDNA WGS coverage and open-chromatin reference features. This metric counts finite profiles in the operator's run; no fixed paper count, performance figure, or ONT validity is claimed here."}
 
   # ----------------------------------------------------------- copy-number
   - algorithm_id: copy-number
@@ -3478,6 +3479,8 @@ entries:
     label: "Eligible chrY non-PAR reads"
     value_kind: count
     tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "ONT; this Lab's D21 non-PAR chrY supporting count"
     reference: {kind: none}
     performance: null
     performance_missing_reason: "Raw supporting count, not a clinical cutoff"
@@ -3492,6 +3495,8 @@ entries:
     label: "Eligible chrY non-PAR reads per million"
     value_kind: positive
     tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "ONT; this Lab's D21 non-PAR chrY supporting rate"
     reference: {kind: none}
     performance: null
     performance_missing_reason: "A matched female background is required for interpretation"
@@ -3609,6 +3614,8 @@ entries:
     label: "cg02228185 5mC+5hmC fraction"
     value_kind: proportion
     tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "ONT cfDNA; this Lab's per-site 5mC+5hmC call fraction"
     reference: {kind: none}
     performance: null
     performance_missing_reason: "No matched cfDNA ONT reference"
@@ -3621,6 +3628,8 @@ entries:
     label: "cg25809905 5mC+5hmC fraction"
     value_kind: proportion
     tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "ONT cfDNA; this Lab's per-site 5mC+5hmC call fraction"
     reference: {kind: none}
     performance: null
     performance_missing_reason: "No matched cfDNA ONT reference"
@@ -3633,6 +3642,8 @@ entries:
     label: "Weidner PDE4C upstream CpG 5mC+5hmC fraction"
     value_kind: proportion
     tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "ONT cfDNA; this Lab's per-site 5mC+5hmC call fraction"
     reference: {kind: none}
     performance: null
     performance_missing_reason: "No matched cfDNA ONT reference"
