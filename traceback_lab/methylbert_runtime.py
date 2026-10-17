@@ -33,11 +33,14 @@ MAX_CODE_FILE_BYTES = 8 * 1024 * 1024
 MAX_CODE_TOTAL_BYTES = 64 * 1024 * 1024
 AGGREGATE_SCHEMA = "traceback.methylbert-aggregate.v1"
 CHILD_ENV_KEYS = frozenset({
-    "PATH", "SYSTEMROOT", "LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES",
+    "PATH", "SYSTEMROOT", "LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER",
     "HOME", "TMPDIR", "TMP", "TEMP", "HF_HOME", "HF_HUB_OFFLINE",
     "HF_DATASETS_OFFLINE", "TRANSFORMERS_OFFLINE", "TOKENIZERS_PARALLELISM", "NO_PROXY",
 })
-NUMERICAL_PACKAGES = ("torch", "transformers", "numpy", "pandas", "scipy", "scikit-learn", "pysam")
+NUMERICAL_PACKAGES = (
+    "torch", "transformers", "tokenizers", "safetensors", "huggingface-hub",
+    "numpy", "pandas", "scipy", "scikit-learn", "pysam",
+)
 
 
 def numerical_runtime_identity(*, probe_gpu: bool) -> dict[str, Any]:
@@ -60,12 +63,17 @@ def numerical_runtime_identity(*, probe_gpu: bool) -> dict[str, Any]:
                     "device_count": count}
             if available:
                 cuda.update({
+                    "current_device": torch.cuda.current_device(),
                     "devices": [
                         {"name": torch.cuda.get_device_name(index),
                          "capability": list(torch.cuda.get_device_capability(index))}
                         for index in range(count)
                     ],
                     "cudnn": torch.backends.cudnn.version(),
+                    "matmul_allow_tf32": torch.backends.cuda.matmul.allow_tf32,
+                    "cudnn_allow_tf32": torch.backends.cudnn.allow_tf32,
+                    "cudnn_benchmark": torch.backends.cudnn.benchmark,
+                    "float32_matmul_precision": torch.get_float32_matmul_precision(),
                 })
         except (ImportError, OSError, RuntimeError):
             cuda = {"available": False, "torch_cuda": None}

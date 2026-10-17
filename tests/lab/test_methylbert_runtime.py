@@ -38,10 +38,15 @@ def test_numerical_runtime_identity_is_lightweight_until_a_model_needs_cuda(monk
         version=SimpleNamespace(cuda="12.4"),
         cuda=SimpleNamespace(
             is_available=lambda: True, device_count=lambda: len(visible),
+            current_device=lambda: 0,
             get_device_name=lambda index: visible[index],
             get_device_capability=lambda index: (8, 6 + index),
         ),
-        backends=SimpleNamespace(cudnn=SimpleNamespace(version=lambda: 90100)),
+        backends=SimpleNamespace(
+            cuda=SimpleNamespace(matmul=SimpleNamespace(allow_tf32=False)),
+            cudnn=SimpleNamespace(version=lambda: 90100, allow_tf32=True, benchmark=False),
+        ),
+        get_float32_matmul_precision=lambda: "highest",
     )
     monkeypatch.setitem(sys.modules, "torch", torch)
     without_model = runtime.numerical_runtime_identity(probe_gpu=False)
@@ -50,7 +55,10 @@ def test_numerical_runtime_identity_is_lightweight_until_a_model_needs_cuda(monk
     with_model = runtime.numerical_runtime_identity(probe_gpu=True)
     assert with_model["cuda"] == {
         "available": True, "torch_cuda": "12.4", "device_count": 1,
+        "current_device": 0,
         "devices": [{"name": "fixture GPU 0", "capability": [8, 6]}], "cudnn": 90100,
+        "matmul_allow_tf32": False, "cudnn_allow_tf32": True,
+        "cudnn_benchmark": False, "float32_matmul_precision": "highest",
     }
     visible.append("fixture GPU 1")
     two_devices = runtime.numerical_runtime_identity(probe_gpu=True)

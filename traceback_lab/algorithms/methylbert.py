@@ -84,7 +84,9 @@ def _write_eligible_bam(source: Path, destination: Path, ctx: InputContext) -> i
 def _offline_env(scratch: Path) -> dict[str, str]:
     """No inherited Python search path, proxy, or model-hub network setting."""
 
-    env = {name: os.environ[name] for name in ("PATH", "SYSTEMROOT", "LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES")
+    env = {name: os.environ[name] for name in (
+        "PATH", "SYSTEMROOT", "LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER",
+    )
            if name in os.environ}
     env.update({
         "HOME": str(scratch), "TMPDIR": str(scratch), "TMP": str(scratch), "TEMP": str(scratch),
