@@ -14,13 +14,15 @@ from traceback_runner import cli as signed_cli
 from traceback_runner.references import register_reference
 
 
-def _paired_bam(path: Path, platform: str, count: int = 120) -> None:
+def _paired_bam(path: Path, count: int = 120) -> None:
     header = {"HD": {"VN": "1.6", "SO": "coordinate"},
               "SQ": [{"SN": "chr1", "LN": 50000}],
-              "RG": [{"ID": "library-1", "PL": platform}]}
+              "RG": [{"ID": "library-1", "PL": "ILLUMINA"}]}
     with pysam.AlignmentFile(str(path), "wb", header=header) as bam:
         for index in range(count):
             start = 100 + index * 250
+            insert = 140 if index < 40 else 180
+            mate_start = start + insert - 100
             for first in (True, False):
                 read = pysam.AlignedSegment()
                 read.query_name = f"template-{index:04d}"
@@ -28,17 +30,37 @@ def _paired_bam(path: Path, platform: str, count: int = 120) -> None:
                 read.query_qualities = pysam.qualitystring_to_array("I" * 100)
                 read.flag = 99 if first else 147
                 read.reference_id = 0
-                read.reference_start = start if first else start + 80
+                read.reference_start = start if first else mate_start
                 read.mapping_quality = 60
                 read.cigarstring = "100M"
                 read.next_reference_id = 0
-                read.next_reference_start = start + 80 if first else start
-                read.template_length = 180 if first else -180
+                read.next_reference_start = mate_start if first else start
+                read.template_length = insert if first else -insert
                 read.set_tag("RG", "library-1")
                 bam.write(read)
     sorted_path = path.with_name(path.stem + ".sorted.bam")
     pysam.sort("-o", str(sorted_path), str(path))
     sorted_path.replace(path)
+
+
+def _ont_bam(path: Path, count: int = 120) -> None:
+    header = {"HD": {"VN": "1.6", "SO": "coordinate"},
+              "SQ": [{"SN": "chr1", "LN": 50000}],
+              "RG": [{"ID": "library-1", "PL": "ONT"}]}
+    with pysam.AlignmentFile(str(path), "wb", header=header) as bam:
+        for index in range(count):
+            span = 140 if index < 40 else 180
+            read = pysam.AlignedSegment()
+            read.query_name = f"ont-molecule-{index:04d}"
+            read.query_sequence = "A" * span
+            read.query_qualities = pysam.qualitystring_to_array("I" * span)
+            read.flag = 0
+            read.reference_id = 0
+            read.reference_start = 100 + index * 250
+            read.mapping_quality = 60
+            read.cigarstring = f"{span}M"
+            read.set_tag("RG", "library-1")
+            bam.write(read)
 
 
 def _run(path: Path, root: Path, capsys: pytest.CaptureFixture[str]) -> dict:
@@ -62,8 +84,8 @@ def test_realistic_paired_bams_keep_platform_results_and_cohorts_separate(
     register_reference(root, reference, "hg38")
     illumina_bam = tmp_path / "illumina.bam"
     ont_bam = tmp_path / "ont.bam"
-    _paired_bam(illumina_bam, "ILLUMINA")
-    _paired_bam(ont_bam, "ONT")
+    _paired_bam(illumina_bam)
+    _ont_bam(ont_bam)
 
     illumina = _run(illumina_bam, root, capsys)
     ont = _run(ont_bam, root, capsys)
@@ -73,8 +95,10 @@ def test_realistic_paired_bams_keep_platform_results_and_cohorts_separate(
     ont_steps = {step["algorithm_id"]: step for step in ont["steps"]}
     for name in ("read-summary", "depth", "bam-qc", "short-read-fragment-size"):
         assert illumina_steps[name]["status"] == "ok"
+    assert illumina_steps["fragment-size"]["status"] == "skipped"
     assert illumina_steps["fragment-size"]["skip_reason"] == "platform"
     assert ont_steps["fragment-size"]["status"] == "ok"
+    assert ont_steps["short-read-fragment-size"]["status"] == "skipped"
     assert ont_steps["short-read-fragment-size"]["skip_reason"] == "platform"
 
     store = LabStore(root)
@@ -85,7 +109,7 @@ def test_realistic_paired_bams_keep_platform_results_and_cohorts_separate(
     assert selected is not None
     metrics = {metric.metric_id: metric.value for metric in selected.metrics}
     assert metrics["mode_bp"] == 180
-    assert metrics["short_fraction_lt150"] == 0
+    assert metrics["short_fraction_lt150"] == pytest.approx(40 / 120)
     illumina_depth = next(item for item in member_from_store(store, illumina["sample"]["source_id"]).results
                           if item.algorithm_id == "depth")
     ont_depth = next(item for item in member_from_store(store, ont["sample"]["source_id"]).results
