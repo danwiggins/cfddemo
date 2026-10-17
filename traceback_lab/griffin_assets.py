@@ -64,17 +64,21 @@ def _file(path: Path) -> Path:
 def _checkout(root: Path) -> Path:
     source = _safe_path(root)
     try:
+        toplevel = subprocess.run(
+            ["git", "-C", str(source), "rev-parse", "--show-toplevel"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
         head = subprocess.run(
             ["git", "-C", str(source), "rev-parse", "HEAD"],
             check=True, capture_output=True, text=True,
         ).stdout.strip()
         dirty = subprocess.run(
-            ["git", "-C", str(source), "status", "--porcelain"],
+            ["git", "-C", str(source), "status", "--porcelain", "--ignored", "--untracked-files=all"],
             check=True, capture_output=True, text=True,
         ).stdout.strip()
     except (OSError, subprocess.CalledProcessError) as exc:
         raise GriffinAssetError("Griffin checkout cannot be verified") from exc
-    if head != GRIFFIN_COMMIT or dirty:
+    if Path(toplevel).resolve() != source or head != GRIFFIN_COMMIT or dirty:
         raise GriffinAssetError("Griffin checkout must be clean at the pinned commit")
     return source
 
