@@ -267,6 +267,7 @@ def test_live_status_changes_keep_focus_and_open_disclosure(tmp_path) -> None:
                 time.sleep(0.2)
             else:
                 pytest.fail("Trust / QC did not render")
+            assert evaluate("""getComputedStyle(document.querySelector('[data-run-algorithm="bam-qc"] [data-run-note]')).display === 'none'""")
             evaluate("""(() => {
               window.pinnedRunButton = document.querySelector('button[aria-label="Run log line for bam-qc"]');
               window.pinnedRunButton.focus();
@@ -278,6 +279,7 @@ def test_live_status_changes_keep_focus_and_open_disclosure(tmp_path) -> None:
                 time.sleep(0.2)
             else:
                 pytest.fail("Trust / QC run note did not update")
+            assert evaluate("""getComputedStyle(document.querySelector('[data-run-algorithm="bam-qc"] [data-run-note]')).display !== 'none'""")
             assert evaluate("document.activeElement === window.pinnedRunButton")
             phase["state"] = "interrupted"
             for _ in range(30):
@@ -289,6 +291,12 @@ def test_live_status_changes_keep_focus_and_open_disclosure(tmp_path) -> None:
             assert evaluate("document.activeElement === window.pinnedRunButton")
 
             phase["state"] = "idle"
+            for _ in range(30):
+                if evaluate("""getComputedStyle(document.querySelector('[data-run-algorithm="bam-qc"] [data-run-note]')).display === 'none'"""):
+                    break
+                time.sleep(0.2)
+            else:
+                pytest.fail("Trust / QC run note stayed visible after the run ended")
             evaluate(f"location.hash = '#/sample/{ID12}/signals'")
             for _ in range(30):
                 if evaluate("document.querySelector('#main h1')?.textContent === 'Signals'"):
