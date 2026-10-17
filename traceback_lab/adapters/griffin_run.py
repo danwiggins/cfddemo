@@ -339,11 +339,14 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
     reference_index = reference.with_suffix(reference.suffix + ".fai")
     if not reference_index.is_file():
         raise ValueError("the registered reference FASTA needs an index for Griffin")
+    counted_bam_sha256 = _digest(bam)
     if _require_paired_input(bam) == 0:
         raise ValueError("Griffin's pinned 100–200 bp profile window has no qualifying fragments")
     reference_index = _safe_path(reference_index)
     _require_reference_header(bam, reference)
     measured_pairs = count_d21_pairs(bam)
+    if _digest(bam) != counted_bam_sha256:
+        raise RuntimeError("BAM changed while Griffin input eligibility was measured")
     if measured_pairs != config.eligible_autosomal_pairs:
         raise ValueError("caller-supplied eligible autosomal pair count differs from the BAM")
     for filename in _REF_FILES:
@@ -371,7 +374,7 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
     if not _SAFE_TOKEN.fullmatch(str(attempt.absolute())):
         raise ValueError("Griffin attempt needs a shell-safe POSIX path")
     fingerprints = {
-        "bam_sha256": _digest(bam),
+        "bam_sha256": counted_bam_sha256,
         "bam_indexes_sha256": {path.name: _digest(path) for path in bam_indexes},
         "reference_sha256": config.reference_sha256,
         "reference_index_sha256": _digest(reference_index),

@@ -293,6 +293,20 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
             site_lists={"CTCF": sites}, attempt_dir=tmp_path / "wrong-pair-count-attempt",
         ))
     assert not (tmp_path / "wrong-pair-count-attempt").exists()
+    def mutate_bam_during_count(_: Path) -> int:
+        bam.write_bytes(b"changed while counting")
+        return 5_000_000
+
+    monkeypatch.setattr(griffin_run, "count_d21_pairs", mutate_bam_during_count)
+    with pytest.raises(RuntimeError, match="changed while Griffin input eligibility was measured"):
+        run_upstream(GriffinRun(
+            input_id=input_id, bam=bam, reference_fasta=reference,
+            reference_id="hg38", reference_sha256=hashlib.sha256(reference.read_bytes()).hexdigest(),
+            eligible_autosomal_pairs=5_000_000, upstream_root=upstream, ref_assets=assets,
+            site_lists={"CTCF": sites}, attempt_dir=tmp_path / "changed-during-count-attempt",
+        ))
+    assert not (tmp_path / "changed-during-count-attempt").exists()
+    bam.write_bytes(b"bam")
     monkeypatch.setattr(griffin_run, "count_d21_pairs", lambda _: 5_000_000)
     snakemake_version = "6.0"
     with pytest.raises(ValueError, match="pinned Snakemake 5.19.2"):
