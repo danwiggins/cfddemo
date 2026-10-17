@@ -2600,7 +2600,7 @@ entries:
     performance_missing_reason: null
     meaning_high: "More 5hmC calls."
     meaning_low: "Fewer 5hmC calls; global 5hmC loss has been reported in cancer cfDNA with a different chemistry."
-    confounders: ["basecaller 5hmC model accuracy", "5hmC is rare: most calls are noise at low depth"]
+    confounders: ["basecaller 5hmC model accuracy", "shallow-depth sampling variance"]
     next_steps:
       analytical: ["Exploratory only; never a headline"]
       clinical_setting: null
