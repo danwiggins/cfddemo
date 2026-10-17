@@ -486,8 +486,9 @@ def test_empty_copy_and_complete_example_commands(tmp_path) -> None:
 
 @needs_chrome
 @pytest.mark.parametrize("route,copy_text", [
-    ("home", f"result unreadable (run {ID12})"),
-    ("findings", f"bam-qc: result unreadable (run {ID12})"),
+    ("home", f"result unreadable (sample {ID12})"),
+    ("findings", f"bam-qc: result unreadable (sample {ID12})"),
+    ("trust-qc", "result unreadable"),
 ])
 def test_unreadable_result_copy_on_each_required_surface(route, copy_text, tmp_path) -> None:
     sample = _sample()
@@ -495,8 +496,41 @@ def test_unreadable_result_copy_on_each_required_surface(route, copy_text, tmp_p
     sample["algorithms"] = [a for a in sample["algorithms"] if a["algorithm_id"] != "bam-qc"]
     path = None if route == "home" else f"/sample/{ID12}/{route}"
     with _server(tmp_path, sample) as server:
+        if route == "trust-qc":
+            server.app.api.status = lambda: {
+                "generation": 1, "active": {
+                    "run_id": "r-20261015-0101-abcd", "command": "run", "step": "bam-qc",
+                    "source_id": sample["source_id"], "input_id": sample["full_input_id"],
+                    "started_utc": "2026-10-16T00:00:00Z",
+                }, "interrupted": None, "run_log_unavailable": None,
+                "library": sample["library_health"],
+            }
         dom = _dom(server, tmp_path / "browser", route=path)
     assert copy_text in dom
+    if route == "trust-qc":
+        assert "no result was published for this step" not in dom
+
+
+@needs_chrome
+def test_stale_run_log_link_refuses_to_mix_new_attempt_with_loaded_results(tmp_path) -> None:
+    sample = _sample()
+    with _server(tmp_path, sample) as server:
+        profile = tmp_path / "browser-profile"
+        dom = _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/trust-qc"],
+            profile, ok=lambda d: 'data-ready="1"' in d and "Run log line →" in d,
+            action="""(() => {
+              const state = window.TracebackLab.state;
+              state.generationAtLoad = 1;
+              state.lastStatus ||= {generation: 1};
+              state.lastStatus.generation = 2;
+              const link = [...document.querySelectorAll('main a')]
+                .find((a) => a.textContent.includes('Run log line →'));
+              link.click();
+            })()""",
+        )
+    assert "Results changed on disk; reload before viewing this run log line." in dom
 
 
 @needs_chrome
