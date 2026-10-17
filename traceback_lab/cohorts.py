@@ -11,9 +11,10 @@ import json
 import os
 import re
 import stat
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Iterator
 
 from pydantic import ValidationError
 
@@ -490,11 +491,32 @@ def list_cohorts(store: LabStore) -> tuple[CohortListing, ...]:
     return tuple(rows)
 
 
+@contextmanager
+def _cohort_run_log(store: LabStore, run_id: str, cohort_id: str, kind: str) -> Iterator[Any]:
+    """Give a cohort build one complete run lifecycle, including failures."""
+
+    log = store.run_log(run_id)
+    log.append("run_start", command="cohort build", cohort_id=cohort_id, kind=kind)
+    try:
+        yield log
+    except KeyboardInterrupt:
+        log.append("run_end", status="interrupted", exit_code=6)
+        raise
+    except LabProblem as problem:
+        log.append("run_end", status="blocked", exit_code=problem.exit_code, code=problem.code)
+        raise
+    except Exception as exc:
+        log.append("run_end", status="internal_error", exit_code=7, error=type(exc).__name__)
+        raise
+    else:
+        log.append("run_end", status="ok", exit_code=0)
+
+
 def build_cohort(store: LabStore, cohort_id: str, *, kind: str = "internal_cohort") -> CohortGeneration:
     """Publish a full snapshot atomically, preserving every older generation."""
 
     run_id = new_run_id()
-    with store.writer("cohort build", run_id) as lock:
+    with store.writer("cohort build", run_id) as lock, _cohort_run_log(store, run_id, cohort_id, kind) as log:
         directory = _cohort_dir(store, cohort_id)
         if _read_cohort_json(directory / "current.json", cohort_id) is not None:
             read_current(store, cohort_id)
@@ -521,7 +543,6 @@ def build_cohort(store: LabStore, cohort_id: str, *, kind: str = "internal_cohor
                     pon_n=built.pon_n, pon_asset_sha256=built.full_asset_sha256,
                     pon_build=built.provenance(),
                 )
-                log = store.run_log(run_id)
                 updated = {
                     source_id: recompute_member(
                         store, pending, source_id, lock=lock, log=log, run_id=run_id,

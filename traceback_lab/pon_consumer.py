@@ -193,6 +193,10 @@ def recompute_member(
         reference_id=manifest["reference_id"], reference_sha256=manifest["reference_sha256"],
         extras={"pon_selection": selection_payload(selection)},
     )
+    if log is not None:
+        from .ingest import id12_for
+
+        log.append("sample", sample=id12_for(store, source_id), source_id=source_id, input_id=input_id)
     results = run_plan(
         store, lock, log, target, items, by_id, run_id=run_id,
         timeout_s=timeout_s, scrubber=Scrubber(root=store.root),

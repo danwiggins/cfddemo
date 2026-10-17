@@ -18,7 +18,8 @@ from traceback_lab.identity import cohort_compat_key
 from traceback_lab.pon_consumer import bind_copy_number
 from traceback_lab.registry import InputContext, execution_identity, load_registry, plan
 from traceback_lab.runner import RunTarget
-from traceback_lab.store import LabStore
+from traceback_lab.store import LabStore, new_run_id, summarize_run
+from traceback_lab.web.api import LabApi
 from traceback_lab.problems import LabProblem
 from tests.lab.test_cohort_store import _sample
 
@@ -312,6 +313,8 @@ def test_member_recompute_runs_pinned_loo_chain_and_requires_success(
     observed: dict[str, object] = {}
 
     def fake_run_plan(store, lock, log, target, items, entries, **kwargs):
+        assert log.events()[-1]["event"] == "sample"
+        assert log.events()[-1]["input_id"] == input_id
         observed["ids"] = [item.algorithm.id for item in items]
         observed["digest"] = next(item.algorithm.parameters["pon_sha256"] for item in items
                                   if item.algorithm.id == "copy-number")
@@ -320,9 +323,14 @@ def test_member_recompute_runs_pinned_loo_chain_and_requires_success(
 
     monkeypatch.setattr(runner, "run_plan", fake_run_plan)
     generation = SimpleNamespace(cohort_id="healthy-v1")
+    log = store.run_log(new_run_id())
     assert pon_consumer.recompute_member(
-        store, generation, source_id, lock=None, log=None, run_id="synthetic", timeout_s=1,
+        store, generation, source_id, lock=None, log=log, run_id=log.run_id, timeout_s=1,
     ) is expected
+    sample_events = [event for event in log.events() if event["event"] == "sample"]
+    assert len(sample_events) == 1
+    assert sample_events[0]["source_id"] == source_id
+    assert sample_events[0]["input_id"] == input_id
     assert observed["ids"] == ["read-summary", "copy-number", "instability"]
     assert observed["digest"] == selection.pon_sha256
     assert observed["target"].extras["pon_selection"]["cohort_version"] == "healthy-v1:2"
@@ -357,6 +365,7 @@ def test_builder_recomputes_each_loo_before_selecting_generation(tmp_path: Path,
         assert read_current(store, "healthy-v1") is None
         member = next(item for item in pending.members if item.source_id == source_id)
         assert member.pon_asset_sha256 == build.loo_asset_sha256s[source_id]
+        kwargs["log"].append("sample", sample=source_id[:12], source_id=source_id, input_id=member.input_id)
         calls.append(source_id)
         return member
 
@@ -365,6 +374,12 @@ def test_builder_recomputes_each_loo_before_selecting_generation(tmp_path: Path,
     assert calls == list(sources)
     assert snapshot.pon_n == 10 and snapshot.pon_asset_sha256 == "a" * 64
     assert read_current(store, "healthy-v1") == snapshot
+    log = store.run_log(store.run_ids()[0])
+    assert [event["event"] for event in log.events()].count("sample") == 10
+    assert [event["event"] for event in log.events()][0] == "run_start"
+    assert log.events()[-1]["event"] == "run_end"
+    assert summarize_run(log.events(), store)["status"] == "ok"
+    assert LabApi(store).status()["interrupted"] is None
 
 
 def test_failed_member_recompute_keeps_previous_generation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -384,9 +399,27 @@ def test_failed_member_recompute_keeps_previous_generation(tmp_path: Path, monke
         gc_sha256="f" * 64, map_sha256="1" * 64, centromere_sha256="2" * 64,
     )
     monkeypatch.setattr(pon, "build_panels", lambda *_: build)
-    monkeypatch.setattr(pon_consumer, "recompute_member", lambda *_, **__: (_ for _ in ()).throw(
-        LabProblem("TBX-LAB-020", cause="synthetic member failure", fix="retry")
-    ))
+    before_runs = set(store.run_ids())
+    attempted: list[str] = []
+
+    def fake_recompute(store, pending, source_id, **kwargs):
+        member = next(item for item in pending.members if item.source_id == source_id)
+        log = kwargs["log"]
+        log.append("sample", sample=source_id[:12], source_id=source_id, input_id=member.input_id)
+        attempted.append(source_id)
+        if len(attempted) == 2:
+            raise LabProblem("TBX-LAB-020", cause="synthetic member failure", fix="retry")
+        return member
+
+    monkeypatch.setattr(pon_consumer, "recompute_member", fake_recompute)
     with pytest.raises(LabProblem, match="TBX-LAB-020"):
         build_cohort(store, "healthy-v1")
     assert read_current(store, "healthy-v1") == previous
+    assert attempted == list(sources[:2])
+    run_ids = set(store.run_ids()) - before_runs
+    assert len(run_ids) == 1
+    log = store.run_log(run_ids.pop())
+    assert [event["event"] for event in log.events()] == ["run_start", "sample", "sample", "run_end"]
+    assert summarize_run(log.events(), store)["status"] == "blocked"
+    assert log.events()[-1]["code"] == "TBX-LAB-020"
+    assert LabApi(store).status()["interrupted"] is None
