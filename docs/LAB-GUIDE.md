@@ -241,6 +241,11 @@ The Lab's cell-origin v2 execution identity pins normalized source digests of
 its MM/ML decoder and reused UXM, NNLS, bootstrap, model, and prefilter code,
 along with the NumPy, pysam, and htslib versions. A changed implementation
 therefore needs a new result rather than reusing a prior cached estimate.
+After a ready cell-origin worker examines the marker regions, too few passing
+alignments, confident CpG calls, classified fragments, or observed markers
+publish a `skipped/low_support` result with no composition metrics or artifact.
+Parser errors, resource caps, non-convergence, and validation failures still
+publish failed attempts for investigation.
 
 **Short-read support.** For a prealigned paired-end Illumina BAM against the
 registered hg38 reference, run the normal Lab command:

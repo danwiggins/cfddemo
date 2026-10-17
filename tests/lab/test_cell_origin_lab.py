@@ -19,11 +19,12 @@ from traceback_lab import cohorts
 from traceback_lab.algorithms import cell_origin as co
 from traceback_lab.algorithms.read_summary import READ_SUMMARY
 from traceback_lab.envelope import Metric, ResultEnvelope, provenance
-from traceback_lab.registry import InputContext, PlanItem, Ready, ToolPin, execution_identity
+from traceback_lab.registry import InputContext, PlanItem, Ready, Skip, ToolPin, execution_identity
 from traceback_lab.runner import RunTarget, StepResult, run_plan
 from traceback_lab.scrub import Scrubber
 from traceback_lab.store import LabStore, new_run_id
 import traceback_lab.runner as lab_runner
+import traceback_lab.worker as lab_worker
 from traceback_runner.fixtures import create_cell_origin_inputs
 from traceback_runner.references import register_loyfer_directory, register_reference
 
@@ -253,6 +254,68 @@ def test_runner_plan_persists_cell_origin_parser_pin_for_cohort_read(tmp_path, m
     assert selected["cell-origin"].metrics["classified_fragments"] == 100
 
 
+@pytest.mark.parametrize("tamper_output", [False, True])
+def test_low_marker_support_publishes_a_skip_without_a_composition(
+    tmp_path, monkeypatch, tamper_output,
+) -> None:
+    store = LabStore(tmp_path)
+    source_id, expected_hash = _publish_cohort_cell_origin(
+        store, index=19, algorithm=co.CELL_ORIGIN, publish_adapter=False,
+    )
+    input_id, reference_sha256 = f"{119:064x}", "a" * 64
+    read_hash = execution_identity(READ_SUMMARY, reference_sha256=reference_sha256)
+    read_attempt = store.selected_attempt(input_id, READ_SUMMARY.id, read_hash)
+    assert read_attempt is not None
+    target = RunTarget(
+        input_id=input_id, source_id=source_id, input_dir=store.inputs_dir / input_id,
+        reference_id="hg38", reference_sha256=reference_sha256,
+    )
+    monkeypatch.setattr(co.CELL_ORIGIN, "preflight", lambda _ctx: Ready())
+    monkeypatch.setattr(co.CELL_ORIGIN, "run", lambda _ctx, _out: Skip(
+        "low_support", "cell-origin classified fragment and marker floors are not met",
+    ))
+    monkeypatch.setattr(lab_worker, "load_entry", lambda _entry: co.CELL_ORIGIN)
+    monkeypatch.setattr(lab_worker.signal, "signal", lambda *_args: None)
+
+    def fake_pipeline(stages, **_kwargs):
+        assert lab_worker.main([stages[0].argv[-1]]) == 0
+        if tamper_output:
+            scratch = Path(json.loads(Path(stages[0].argv[-1]).read_bytes())["out_dir"])
+            output = json.loads((scratch / "output.json").read_bytes())
+            output["metrics"] = [{"metric_id": "fraction_wrong", "value": 0.5}]
+            (scratch / "output.json").write_text(json.dumps(output))
+        return SimpleNamespace(
+            ok=True, duration_s=0.01, peak_rss_bytes=0,
+            sampled_tree_peak_rss_bytes=0, peak_disk_bytes=0,
+        )
+
+    monkeypatch.setattr(lab_runner, "run_pipeline", fake_pipeline)
+    run_id = new_run_id()
+    results = run_plan(
+        store, None, store.run_log(run_id), target,
+        [PlanItem(co.CELL_ORIGIN, False)], {"cell-origin": "cell_origin:CELL_ORIGIN"},
+        run_id=run_id, scrubber=Scrubber(root=store.root),
+        upstream_results={READ_SUMMARY.id: StepResult(
+            READ_SUMMARY.id, "ok", True, read_hash, input_id=input_id,
+            attempt_id=read_attempt.name,
+        )},
+    )
+    assert len(results) == 1
+    result = results[0]
+    if tamper_output:
+        assert result.status == "failed"
+        assert result.first_line is not None and "skipped worker output" in result.first_line
+        assert not list((store.results_dir / input_id / "cell-origin").rglob("composition.json"))
+        return
+    assert result.status == "skipped" and result.skip_reason == "low_support"
+    assert result.parameters_sha256 == expected_hash
+    assert result.attempt_id is not None
+    envelope = store.read_result(input_id, "cell-origin", expected_hash)
+    assert envelope.status == "skipped" and envelope.skip_reason == "low_support"
+    assert not envelope.metrics and not envelope.panels
+    assert not list((store.results_dir / input_id / "cell-origin").rglob("composition.json"))
+
+
 def test_run_recovers_the_planted_mixture_with_intervals(world) -> None:
     register_loyfer_directory(world["root"], world["inputs"].loyfer_dir)
     out = world["tmp"] / "attempt" / "artifacts"
@@ -311,8 +374,10 @@ def test_low_marker_support_refuses_an_estimate(world, monkeypatch, floor, value
     )
     out = world["tmp"] / "low-support" / "artifacts"
     out.mkdir(parents=True)
-    with pytest.raises(ValueError, match="classified fragment and marker floors are not met"):
-        co.CELL_ORIGIN.run(world["ctx"], out)
+    decision = co.CELL_ORIGIN.run(world["ctx"], out)
+    assert isinstance(decision, Skip)
+    assert decision.reason_code == "low_support"
+    assert "classified fragment and marker floors are not met" in decision.message
     assert not list(out.iterdir())
     assert not list(out.parent.glob("co-*"))
 
