@@ -75,5 +75,18 @@ def test_route_flags_are_visible(route, expected, route_page_root, tmp_path) -> 
     id12 = _id12(route_page_root)
     path = None if route == "home" else f"/sample/{id12}/{route}"
     with RunningLabServer(LabStore(route_page_root)) as server:
-        dom = _dom(server, tmp_path / route, route=path)
+        if route == "signals":
+            # The FDA marker belongs to the Copy number panel, not the initial
+            # Fragmentomics subtab. Open that panel through the actual control.
+            kind, source = server.app.assets["/assets/lab.js"]
+            server.app.assets["/assets/lab.js"] = (kind, source + b"""
+              (() => {
+                const timer = setInterval(() => {
+                  const tab = [...document.querySelectorAll('.subtab')]
+                    .find((item) => item.textContent === 'Copy number');
+                  if (tab) { tab.click(); clearInterval(timer); }
+                }, 25);
+              })();
+            """)
+        dom = _dom(server, tmp_path / route, route=path, want=lambda d: expected in d)
     assert expected in dom
