@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,8 +24,39 @@ from traceback_lab.scrub import Scrubber
 from traceback_lab.store import LabStore, new_run_id, summarize_run
 from traceback_lab.web.api import LabApi
 from traceback_lab.problems import LabProblem
-from traceback_lab.views import selected_results
+from traceback_lab.views import load_sample, selected_results
 from tests.lab.test_cohort_store import _sample
+
+
+def test_sample_view_marks_old_copy_number_and_instability_as_superseded(tmp_path: Path) -> None:
+    store = LabStore(tmp_path)
+    source_id = _sample(store, 1)
+    input_id = f"{101:064x}"
+    derived_id = f"{301:064x}"
+    source_path = store.sources_dir / f"{source_id}.json"
+    record = json.loads(source_path.read_text())
+    record["derived"] = [{
+        "parent_input_id": input_id, "input_id": derived_id,
+        "label": "split-A", "transform": "split", "parameters": {},
+    }]
+    source_path.write_text(json.dumps(record))
+    for selected_input in (input_id, derived_id):
+        for algorithm_id in ("copy-number", "instability"):
+            store.publish_result(ResultEnvelope(
+                algorithm_id=algorithm_id, algorithm_version="1", status="ok",
+                provenance=provenance(
+                    tool="fixture", parameters_sha256=("8" if algorithm_id == "copy-number" else "9") * 64,
+                    source_id=source_id, input_id=selected_input, reference_id="hg38",
+                ),
+            ), input_id=selected_input)
+    view = load_sample(store, source_id)
+    assert view is not None
+    assert len(view.derived) == 1
+    for visible_input, selected_input in ((view.full, input_id), (view.derived[0], derived_id)):
+        for algorithm_id in ("copy-number", "instability"):
+            shown = visible_input.results[algorithm_id]
+            assert shown.status == "skipped" and shown.skip_reason == "superseded_method"
+            assert selected_results(store, selected_input)[algorithm_id].status == "ok"
 
 
 def test_pon_contract_requires_policy_and_digest_together() -> None:

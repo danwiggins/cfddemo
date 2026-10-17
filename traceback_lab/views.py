@@ -140,30 +140,64 @@ def load_sample(store: LabStore, source_id: str) -> SampleView | None:
     platform_unverified = platform == "unknown"
     legacy_not_ont = (isinstance(manifest, Mapping) and manifest.get("kind") == "prealigned"
                       and "platform" not in manifest and platform == "illumina")
+    algorithms = load_registry()
     supported: set[str] | None = None
     if platform_unverified:
         supported = set()
     elif legacy_not_ont:
-        supported = {algorithm.id for algorithm in load_registry() if "illumina" in algorithm.requires.platforms}
+        supported = {algorithm.id for algorithm in algorithms if "illumina" in algorithm.requires.platforms}
     skip_message = (
         "Stored input platform cannot be verified against its BAM; restore the registered input before viewing results"
         if platform_unverified else
         "Legacy result lacks verified ONT provenance; rerun or repair this sample"
     )
+    current_cn_version = next(
+        (algorithm.version for algorithm in algorithms if algorithm.id == "copy-number"), None,
+    )
 
     def visible_results(input_id: str, identities: Mapping[str, str] | None = None) -> dict[str, ResultEnvelope]:
         selected = selected_results(store, input_id, identities)
-        if supported is None:
-            return selected
-        return {
-            algorithm_id: envelope if algorithm_id in supported else ResultEnvelope(
+        old_cn = selected.get("copy-number")
+        superseded_cn = (old_cn is not None and current_cn_version == "2"
+                         and old_cn.algorithm_version == "1")
+        superseded_ids = {"copy-number"} if superseded_cn else set()
+        instability = selected.get("instability")
+        if instability is not None and current_cn_version is not None and not superseded_cn:
+            consumed = store.selected_upstream_selections(
+                input_id, "instability", instability.provenance.parameters_sha256,
+            )
+            for item in consumed or ():
+                if item["algorithm_id"] == "copy-number":
+                    upstream = store.read_result(item["input_id"], "copy-number", item["parameters_sha256"])
+                    if upstream is not None and upstream.algorithm_version == "1":
+                        superseded_ids.add("instability")
+                    break
+        while True:
+            added = {
+                algorithm.id for algorithm in algorithms
+                if algorithm.id in selected and any(upstream in superseded_ids for upstream in algorithm.upstream)
+            } - superseded_ids
+            if not added:
+                break
+            superseded_ids.update(added)
+
+        def visible(algorithm_id: str, envelope: ResultEnvelope) -> ResultEnvelope:
+            if supported is not None and algorithm_id not in supported:
+                reason, message = "platform", skip_message
+            elif algorithm_id in superseded_ids:
+                reason = "superseded_method"
+                message = "Selected copy-number method predates the signed counted-read floor; rerun this input"
+            else:
+                return envelope
+            return ResultEnvelope(
                 algorithm_id=envelope.algorithm_id,
                 algorithm_version=envelope.algorithm_version,
-                status="skipped",
-                skip_reason="platform",
-                skip_message=skip_message,
+                status="skipped", skip_reason=reason, skip_message=message,
                 provenance=envelope.provenance,
             )
+
+        return {
+            algorithm_id: visible(algorithm_id, envelope)
             for algorithm_id, envelope in selected.items()
         }
 

@@ -493,7 +493,9 @@ reads on the target input. Copy-number also enforces the signed 1M counted-read
 floor after filtering, with or without a panel.
 The corrected copy-number method version does not reuse older copy-number or
 dependent instability attempts. Rerun affected inputs and rebuild existing
-cohorts to restore current-version comparisons.
+cohorts to restore current-version comparisons. The sample view marks selected
+older copy-number and dependent instability results as `superseded_method`
+until rerun; their immutable attempts remain available for inspection.
 
 `arm-summary` summarizes PoN-corrected copy-number bins on autosomal p/q arms.
 It derives boundaries from the locally registered ichorCNA GRCh38 centromere
