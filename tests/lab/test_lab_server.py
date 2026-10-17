@@ -833,6 +833,15 @@ def test_status_reports_malformed_latest_run_pointer_without_echoing_it(tmp_path
     assert status["run_log_unavailable"] == {"run_id": None, "reason": "latest_run_pointer_unavailable"}
 
 
+def test_active_nonanalysis_writer_does_not_echo_malformed_pointer(tmp_path) -> None:
+    store = LabStore(tmp_path)
+    with store.writer("cohort add", "r-20261015-0101-abcd"):
+        store.last_run_file.write_text('{"run_id":"untrusted"}')
+        status = api_module.LabApi(store).status()
+    assert status["active"]["command"] == "cohort add"
+    assert status["run_log_unavailable"] == {"run_id": None, "reason": "latest_run_pointer_unavailable"}
+
+
 def test_recent_run_candidates_are_bounded_and_do_not_use_unbounded_run_ids(tmp_path, monkeypatch) -> None:
     store = LabStore(tmp_path)
     store.runs_dir.mkdir(parents=True)
