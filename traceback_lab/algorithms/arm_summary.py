@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from ..adapters import ichor
-from ..derived import centromeres_from_table
 from ..read_summary import ReadSummary
 from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip, ToolPin
 from ._base import Base, metric
@@ -27,6 +26,14 @@ from .copy_number import toolchain_or_none
 
 ARMS = tuple(f"chr{chrom}{side}" for chrom in range(1, 23) for side in ("p", "q"))
 POLICY = "finite-unmasked-whole-bin-median-v1"
+
+
+def centromeres_from_table(path: Path) -> dict[str, tuple[int, int]]:
+    """Load the existing centromere parser only when an arm worker runs."""
+
+    from ..derived import centromeres_from_table as parse
+
+    return parse(path)
 
 
 def arm_intervals(
