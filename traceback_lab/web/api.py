@@ -540,6 +540,7 @@ class LabApi:
                         "tool": envelope.provenance.tool,
                         "tool_version": envelope.provenance.tool_version,
                         "parameters_sha256": envelope.provenance.parameters_sha256,
+                        "attempt_id": sample.full.attempt_ids.get(algorithm_id),
                         "input_id": envelope.provenance.input_id,
                         "source_id": envelope.provenance.source_id,
                         "reference_id": envelope.provenance.reference_id,
@@ -599,7 +600,8 @@ class LabApi:
         }
 
     def run_log_line(self, id12: str, algorithm_id: str,
-                     expected_input_id: str | None = None, expected_identity: str | None = None) -> dict[str, Any]:
+                     expected_input_id: str | None = None, expected_identity: str | None = None,
+                     expected_attempt_id: str | None = None) -> dict[str, Any]:
         """Return a bounded, allowlisted step-end line for the selected full result."""
 
         source_id, _ = self._resolve(id12)
@@ -617,6 +619,8 @@ class LabApi:
             return {"found": False}
         selected = self.store.selected_attempt(sample.full.input_id, algorithm_id, identity)
         if selected is None:
+            return {"found": False}
+        if expected_attempt_id is not None and expected_attempt_id != selected.name:
             return {"found": False}
         for run_id in _recent_run_ids(self.store):
             events, reason = _run_events(self.store, run_id)

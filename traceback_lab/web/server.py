@@ -64,7 +64,7 @@ _ROUTES = (
     ("cohorts", re.compile(r"^/api/cohorts$")),
     ("compare", re.compile(rf"^/api/cohorts/({COHORT})/samples/({ID12})/compare$")),
     ("run_log_line", re.compile(rf"^/api/samples/({ID12})/run-log/({ALG})$")),
-    ("pinned_run_log_line", re.compile(rf"^/api/samples/({ID12})/run-log/({ALG})/([0-9a-f]{{64}})/([0-9a-f]{{64}})$")),
+    ("pinned_run_log_line", re.compile(rf"^/api/samples/({ID12})/run-log/({ALG})/([0-9a-f]{{64}})/([0-9a-f]{{64}})/(a-\d{{8}}T\d{{12}}-[0-9a-f]{{8}})$")),
     ("compare_samples", re.compile(rf"^/api/samples/({ID12})/compare/({ID12})$")),
     ("sample", re.compile(rf"^/api/samples/({ID12})$")),
     ("artifact", re.compile(rf"^/api/samples/({ID12})/artifact/({DERIVED})/({ALG})/({PANEL})$")),
