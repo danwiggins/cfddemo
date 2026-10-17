@@ -179,7 +179,8 @@ class Microbial(Base):
         "denominator": "all primary QC-passing non-duplicate reads",
         "clipping": "first registered Bracken read-length bases",
         "bracken_level": "S", "bracken_threshold": 1,
-        "microbial_roots": _ROOTS, "max_taxa": MAX_TAXA,
+        "microbial_roots": {str(taxid): category for taxid, category in _ROOTS.items()},
+        "max_taxa": MAX_TAXA,
     })
 
     @property  # type: ignore[override]
