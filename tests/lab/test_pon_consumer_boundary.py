@@ -380,9 +380,16 @@ def test_builder_recomputes_each_loo_before_selecting_generation(tmp_path: Path,
     assert log.events()[-1]["event"] == "run_end"
     assert summarize_run(log.events(), store)["status"] == "ok"
     assert LabApi(store).status()["interrupted"] is None
+    assert LabApi(store).status()["run_log_unavailable"] is None
 
 
-def test_failed_member_recompute_keeps_previous_generation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("error,status", [
+    (LabProblem("TBX-LAB-020", cause="synthetic member failure", fix="retry"), "blocked"),
+    (KeyboardInterrupt(), "interrupted"),
+])
+def test_failed_member_recompute_keeps_previous_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: BaseException, status: str,
+) -> None:
     store = LabStore(tmp_path)
     sources = tuple(_sample(store, index) for index in range(1, 11))
     for source_id in sources[:9]:
@@ -407,12 +414,15 @@ def test_failed_member_recompute_keeps_previous_generation(tmp_path: Path, monke
         log = kwargs["log"]
         log.append("sample", sample=source_id[:12], source_id=source_id, input_id=member.input_id)
         attempted.append(source_id)
+        if len(attempted) == 1:
+            active = LabApi(store).status()["active"]
+            assert active["source_id"] == source_id and active["input_id"] == member.input_id
         if len(attempted) == 2:
-            raise LabProblem("TBX-LAB-020", cause="synthetic member failure", fix="retry")
+            raise error
         return member
 
     monkeypatch.setattr(pon_consumer, "recompute_member", fake_recompute)
-    with pytest.raises(LabProblem, match="TBX-LAB-020"):
+    with pytest.raises(type(error)):
         build_cohort(store, "healthy-v1")
     assert read_current(store, "healthy-v1") == previous
     assert attempted == list(sources[:2])
@@ -420,6 +430,10 @@ def test_failed_member_recompute_keeps_previous_generation(tmp_path: Path, monke
     assert len(run_ids) == 1
     log = store.run_log(run_ids.pop())
     assert [event["event"] for event in log.events()] == ["run_start", "sample", "sample", "run_end"]
-    assert summarize_run(log.events(), store)["status"] == "blocked"
-    assert log.events()[-1]["code"] == "TBX-LAB-020"
-    assert LabApi(store).status()["interrupted"] is None
+    assert summarize_run(log.events(), store)["status"] == status
+    assert log.events()[-1]["status"] == status
+    if status == "blocked":
+        assert log.events()[-1]["code"] == "TBX-LAB-020"
+        assert LabApi(store).status()["interrupted"] is None
+    else:
+        assert LabApi(store).status()["interrupted"]["run_id"] == log.run_id

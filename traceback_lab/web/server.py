@@ -63,6 +63,7 @@ _ROUTES = (
     ("samples", re.compile(r"^/api/samples$")),
     ("cohorts", re.compile(r"^/api/cohorts$")),
     ("compare", re.compile(rf"^/api/cohorts/({COHORT})/samples/({ID12})/compare$")),
+    ("run_log_line", re.compile(rf"^/api/samples/({ID12})/run-log/({ALG})$")),
     ("sample", re.compile(rf"^/api/samples/({ID12})$")),
     ("artifact", re.compile(rf"^/api/samples/({ID12})/artifact/({DERIVED})/({ALG})/({PANEL})$")),
 )
@@ -209,6 +210,9 @@ class _Handler(BaseHTTPRequestHandler):
                     self._json(200 if payload.get("found") else 404, payload)
                 elif name == "sample":
                     payload = self.app.api.sample(match.group(1))
+                    self._json(200 if payload.get("found") else 404, payload)
+                elif name == "run_log_line":
+                    payload = self.app.api.run_log_line(*match.groups())
                     self._json(200 if payload.get("found") else 404, payload)
                 else:
                     found = self.app.api.artifact(*match.groups())
