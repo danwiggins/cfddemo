@@ -685,9 +685,7 @@ def build_cohort(store: LabStore, cohort_id: str, *, kind: str = "internal_cohor
         versions = _generation_versions(directory, cohort_id)
         if (versions or (directory / "current.json").exists()) and not (directory / "members.json").is_file():
             raise _storage_problem(cohort_id, "members.json")
-        members = capture_density_vectors(
-            store, tuple(member_from_store(store, source_id) for source_id in read_roster(store, cohort_id))
-        )
+        members = tuple(member_from_store(store, source_id) for source_id in read_roster(store, cohort_id))
         version = max(versions, default=0) + 1
         snapshot = CohortGeneration(cohort_id=cohort_id, version=version, kind=kind, members=members)
         selected_input_ids: tuple[str, ...] = ()
@@ -743,6 +741,11 @@ def build_cohort(store: LabStore, cohort_id: str, *, kind: str = "internal_cohor
             (staging / "generation.json").write_bytes(canonical_json_bytes(snapshot.model_dump(mode="json", by_alias=True)))
 
         try:
+            # PoN recomputation returns fresh members. Capture the exact final
+            # selected histograms only after those replacements are known.
+            snapshot = snapshot.model_copy(update={
+                "members": capture_density_vectors(store, snapshot.members),
+            })
             store.publish_directory(generations, str(version), write)
             write_atomic(directory / "current.json", canonical_json_bytes({"version": version}))
         except BaseException:

@@ -68,6 +68,23 @@ def test_sample_pair_reports_exact_b_minus_a_and_distinct_sources(tmp_path, monk
     assert api.compare_samples(SOURCE_A[:12], SOURCE_A[:12])["state"] == "same_sample"
 
 
+@pytest.mark.parametrize("source,input_id", [(SOURCE_A, INPUT_A), (SOURCE_B, INPUT_B)])
+def test_sample_pair_does_not_reflect_unregistered_result_name(tmp_path, monkeypatch, source, input_id) -> None:
+    api, samples, _ = world(tmp_path, monkeypatch)
+    samples[source].full.results["private-donorname"] = ResultEnvelope(
+        algorithm_id="private-donorname", algorithm_version="1", status="ok",
+        provenance=provenance(tool="fixture", parameters_sha256=PARAM_A,
+                              source_id=source, input_id=input_id, reference_id="synthetic"),
+        metrics=[Metric(metric_id="mode_bp", value=1.0)],
+    )
+    payload = api.compare_samples(SOURCE_A[:12], SOURCE_B[:12])
+    assert payload["state"] == "ready"
+    assert [(row["algorithm_id"], row["delta_b_minus_a"]) for row in payload["metrics"]] == [
+        ("fragment-size", 10.0),
+    ]
+    assert "private-donorname" not in json.dumps(payload)
+
+
 def test_store_selected_results_keep_hidden_and_null_metrics(tmp_path, monkeypatch) -> None:
     from tests.lab.test_cohort_store import _sample as stored_sample
 

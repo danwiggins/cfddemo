@@ -862,7 +862,7 @@ def test_failed_member_recompute_keeps_previous_generation(
         assert LabApi(store).status()["interrupted"]["run_id"] == log.run_id
 
 
-@pytest.mark.parametrize("failure_site", ["generation", "current_pointer"])
+@pytest.mark.parametrize("failure_site", ["capture", "generation", "current_pointer"])
 def test_failed_generation_publish_restores_member_selections(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_site: str,
 ) -> None:
@@ -930,11 +930,16 @@ def test_failed_generation_publish_restores_member_selections(
             raise OSError("synthetic current pointer failure")
         return original_write_atomic(path, content)
 
-    if failure_site == "generation":
+    if failure_site == "capture":
+        def fail_capture(*_args):
+            raise OSError("synthetic final density capture failure")
+
+        monkeypatch.setattr(cohorts, "capture_density_vectors", fail_capture)
+    elif failure_site == "generation":
         monkeypatch.setattr(store, "publish_directory", fail_generation_publish)
     else:
         monkeypatch.setattr(cohorts, "write_atomic", fail_current_write)
-    with pytest.raises(OSError, match="synthetic generation publish failure|synthetic current pointer failure"):
+    with pytest.raises(OSError, match="synthetic final density capture failure|synthetic generation publish failure|synthetic current pointer failure"):
         build_cohort(store, "healthy-v1")
     assert attempted == list(sources)
     assert read_current(store, "healthy-v1") == previous

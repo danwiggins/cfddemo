@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from traceback_lab.cohort_contracts import CohortGeneration, CohortMember, CohortResult, SizeDensityVector
-from traceback_lab import cohort_density
+from traceback_lab import cohort_density, pon, pon_consumer
 from traceback_lab.cohort_density import capture_density_vectors, project_density_band
 from traceback_lab import cohorts
 from traceback_lab.cohorts import add_sample, build_cohort, read_current
@@ -195,6 +195,53 @@ def test_build_pins_vector_before_selected_attempt_changes(tmp_path, monkeypatch
     assert built.members[0].results[0].size_density.count == _counts(3, 1)
     publish(_counts(1, 3))
     assert read_current(store, "healthy").members[0].results[0].size_density.count == _counts(3, 1)
+
+
+def test_pon_recomputation_captures_density_from_final_members(tmp_path, monkeypatch) -> None:
+    from tests.lab.test_cohort_store import _sample
+
+    store = LabStore(tmp_path)
+    algorithm = SimpleNamespace(id="fragment-size", version="1", parameters={}, tools=[], upstream=())
+    monkeypatch.setattr(cohorts, "load_registry", lambda: (algorithm,))
+    sources = tuple(_sample(store, index) for index in range(1, 11))
+    first = sources[0]
+    input_id = f"{101:064x}"
+    params = parameters_sha256(
+        algorithm_id="fragment-size", algorithm_version="1", parameters={},
+        tools=[], reference_sha256=f"{900:064x}",
+    )
+    store.publish_result(ResultEnvelope(
+        algorithm_id="fragment-size", algorithm_version="1", status="ok",
+        provenance=provenance(tool="fixture", parameters_sha256=params,
+                              source_id=first, input_id=input_id, reference_id="synthetic"),
+        metrics=[Metric(metric_id="mode_bp", value=100)],
+        panels=[{"panel_id": "size-density", "kind": "density", "data_ref": "artifacts/size_hist.json"}],
+    ), input_id=input_id, artifacts={"size_hist.json": json.dumps({
+        "span_bp": list(range(1, 1001)), "count": _counts(3, 1),
+    }).encode()})
+    for source_id in sources:
+        add_sample(store, "healthy", source_id)
+    built = pon.PonBuild(
+        source_ids=sources, full_asset_sha256="a" * 64,
+        loo_asset_sha256s={source_id: f"{index:064x}" for index, source_id in enumerate(sources, 101)},
+        reference_sha256=f"{900:064x}", aligner_identity="minimap2 2.28; samtools 1.20",
+        grid_sha256="b" * 64, counting_parameters_sha256="c" * 64,
+        toolchain_lock_sha256="d" * 64, builder_source_sha256="e" * 64,
+        builder_sha256="3" * 64, validator_sha256="4" * 64,
+        gc_sha256="f" * 64, map_sha256="1" * 64, centromere_sha256="2" * 64,
+    )
+    monkeypatch.setattr(pon, "build_panels", lambda *_: built)
+
+    def fresh_member(_store, pending, source_id, **_kwargs):
+        pinned = next(member for member in pending.members if member.source_id == source_id)
+        return pinned.model_copy(update={"results": cohorts.member_from_store(store, source_id).results})
+
+    monkeypatch.setattr(pon_consumer, "recompute_member", fresh_member)
+    snapshot = build_cohort(store, "healthy")
+    first_result = snapshot.members[0].results[0]
+    assert first_result.size_density is not None
+    assert first_result.size_density.count == _counts(3, 1)
+    assert read_current(store, "healthy") == snapshot
 
 
 def test_valid_zero_density_member_publishes_without_vector_but_malformed_still_refuses(tmp_path, monkeypatch) -> None:
