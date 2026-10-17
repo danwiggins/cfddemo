@@ -11,7 +11,7 @@ upstream `*.GC_corrected.coverage.tsv` format. It keeps the original bin-start
 coordinates, GC-corrected coverage, central coverage, amplitude, site-list
 name/count, smoothing and CNA-normalization state. It rejects uncorrected,
 non-finite, malformed, or wrong-sample files. The parser was checked against
-the official `Healthy_demo.GC_corrected.coverage.tsv` (one CTCF list, 132
+the vendored upstream `Healthy_demo.GC_corrected.coverage.tsv` fixture (one CTCF list, 132
 15-bp bins) from upstream commit
 `b624c7a2ea7b8758b6eebd424066c815bfeece61`.
 
@@ -33,15 +33,20 @@ reference assets (including mappability BigWig, exclusion BEDs and all
 It requires the 5M D21 gate, a clean upstream checkout at the pinned commit,
 and a fresh per-input attempt directory. The adapter's `eligible_autosomal_pairs`
 input is a count of eligible autosomal **pairs**. The adapter independently
-recounts first mates of proper, primary, nonduplicate autosomal pairs at
-MAPQ ≥ 20 and refuses a mismatch before creating an attempt. The attempt
-records the verified count, sample ID, gate, and hashes for
+recounts first mates of proper, primary, mapped, same-contig, nonduplicate,
+non-QC-failed autosomal pairs at MAPQ ≥ 20. This is the paired subset of the
+Lab's D21 eligible-record rule; the proper-pair bit depends on the aligner.
+The adapter refuses a mismatch before creating an attempt. The attempt
+records the verified count, exact counting predicate, sample ID, gate, and hashes for
 BAM, BAM index, reference, reference index, site lists and reference assets.
 It copies the pinned scripts and two Snakefiles into the attempt without
 cached outputs or Python bytecode, records their digests and the upstream
 default-config digests, disables bytecode writes during execution, and hashes
-all five generated workflow YAML files. It requires Snakemake 5.19.2 and records
-the adapter's Python, pysam and PyYAML versions and core count. The generated config keeps the pinned
+all five generated workflow YAML files. It requires Snakemake 5.19.2, records
+the resolved Snakemake, Python, samtools, and bedtools executable digests and
+the numerical Python package versions, and checks the runtime again after
+execution. The workflow PATH uses the Lab Python environment so the upstream
+scripts' `#!/usr/bin/env python` resolves to that recorded interpreter. The generated config sets the pinned
 upstream default `mappability_correction: false`, so the accepted output is
 GC-corrected only. The attempt only marks its manifest complete after Griffin returns
 a valid corrected TSV with exactly the requested site-list names. Partial outputs remain
@@ -53,7 +58,9 @@ The current Lab does **not** register or display Griffin as an available
 algorithm. The adapter is an invocation boundary. A toy paired-end run through
 both pinned upstream Snakemake workflows completed on a 30 kb synthetic
 reference; this checks orchestration, not the biological signal or production
-resource needs. No real-sample end-to-end run has been completed. Native ONT
+resource needs. The commands, fixture generators, and output digest are in
+[`docs/proofs/griffin/README.md`](proofs/griffin/README.md). No real-sample
+end-to-end run has been completed. Native ONT
 input is incompatible with the exact upstream code. There is no
 registered TF-site set yet. Before publication, the Lab must bind the
 per-input attempt manifest, verified corrected TSV, asset digests and

@@ -22,7 +22,7 @@ def _write(path: Path, *, correction: str = "GC_corrected", sample: str = "S1") 
     return path
 
 
-def test_reads_genuine_corrected_profile_contract(tmp_path: Path) -> None:
+def test_reads_minimal_corrected_profile_contract(tmp_path: Path) -> None:
     profile = read_corrected_profiles(
         _write(tmp_path / "S1.GC_corrected.coverage.tsv"), expected_sample="S1"
     )[0]
@@ -32,6 +32,15 @@ def test_reads_genuine_corrected_profile_contract(tmp_path: Path) -> None:
     assert profile.coverage == (0.8, 0.5, 0.9)
     assert profile.central_coverage == 0.5
     assert profile.smoothing is True
+
+
+def test_reads_pinned_upstream_healthy_demo_fixture() -> None:
+    path = Path(__file__).parent / "fixtures" / "griffin" / "Healthy_demo.GC_corrected.coverage.tsv"
+    profile, = read_corrected_profiles(path, expected_sample="Healthy_demo")
+    assert profile.site_name == "CTCF_demo"
+    assert profile.site_count == 1000
+    assert len(profile.offsets_bp) == 132
+    assert profile.offsets_bp[0] == -990 and profile.offsets_bp[-1] == 975
 
 
 @pytest.mark.parametrize(
@@ -126,6 +135,10 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
     reference.with_suffix(".fa.fai").write_bytes(b"index")
     sites = tmp_path / "CTCF.txt"
     sites.write_bytes(b"Chrom\tposition\nchr1\t100\n")
+    tool_dir = tmp_path / "tools"
+    tool_dir.mkdir()
+    for name in ("snakemake", "samtools", "bedtools"):
+        (tool_dir / name).write_bytes(name.encode("ascii"))
     input_id = "abcdef012345"
     sample = f"lab_{input_id}"
     calls: list[Path] = []
@@ -162,6 +175,7 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
         return subprocess.CompletedProcess(argv, 0)
 
     monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr(griffin_run, "_tool_path", lambda command, **_: tool_dir / command)
     monkeypatch.setattr(griffin_run, "_require_paired_input", lambda _: None)
     monkeypatch.setattr(griffin_run, "_require_reference_header", lambda *_: None)
     monkeypatch.setattr(griffin_run, "_require_chrom_sizes", lambda *_: None)
@@ -183,7 +197,10 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
     assert manifest["minimum_eligible_autosomal_pairs"] == 5_000_000
     assert manifest["eligibility_source"] == "bam_verified"
     assert manifest["snakemake_version"] == "5.19.2"
-    assert manifest["runtime"]["pysam"]
+    assert manifest["runtime"]["packages"]["pysam"]
+    for name in ("snakemake", "samtools", "bedtools"):
+        assert manifest["runtime"]["executables"][name]["sha256"] == hashlib.sha256(name.encode()).hexdigest()
+    assert manifest["runtime"]["packages"]["numpy"]
     assert manifest["fingerprints"]["bam_sha256"] == hashlib.sha256(b"bam").hexdigest()
     assert manifest["fingerprints"]["bam_indexes_sha256"]["aligned.bam.bai"] == hashlib.sha256(b"index").hexdigest()
     assert manifest["fingerprints"]["reference_index_sha256"] == hashlib.sha256(b"index").hexdigest()
