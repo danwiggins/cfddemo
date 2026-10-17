@@ -125,10 +125,17 @@ def test_sex_assertion_is_local_metadata_and_does_not_rekey_results(
     code, first = _json(capsys, *args)
     assert code == 0
     original = first["data"]["sample"]
+    store = LabStore(root)
+    generation = store.generation()
+    result_bytes = {path.relative_to(store.results_dir): path.read_bytes()
+                    for path in store.results_dir.rglob("result.json")}
 
     code, asserted = _json(capsys, "run", "latest", "--sex", "M", "--root", str(root))
     assert code == 0 and asserted["data"]["sample"] == original
     assert all(step["cached"] for step in asserted["data"]["steps"])
+    assert store.generation() == generation + 1
+    assert {path.relative_to(store.results_dir): path.read_bytes()
+            for path in store.results_dir.rglob("result.json")} == result_bytes
     from traceback_lab.ingest import source_record
     from traceback_lab.views import load_sample, sex_check_view
 
@@ -148,8 +155,10 @@ def test_sex_assertion_is_local_metadata_and_does_not_rekey_results(
     assert source_record(LabStore(root), original["source_id"]) == record
     code, same = _json(capsys, "run", "latest", "--sex", "M", "--root", str(root))
     assert code == 0 and same["data"]["sample"] == original
+    assert store.generation() == generation + 1
     code, reingested = _json(capsys, *args)
     assert code == 0 and reingested["data"]["sample"] == original
+    assert store.generation() == generation + 1
     assert source_record(LabStore(root), original["source_id"])["operator_metadata"] == record["operator_metadata"]
 
     code, conflict = _json(capsys, *args, "--sex", "F")

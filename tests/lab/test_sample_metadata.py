@@ -106,9 +106,12 @@ def test_first_ingest_records_assertion_without_changing_source_or_input_id(tmp_
         source_id=source_id, input_id=input_id,
         manifest={"kind": "prealigned", "tools": None, "reference_id": "synth"},
     )
+    generation = store.generation()
     record = write_source(store, chunks, aligned, declared_sex="F")
     assert record["source_id"] == source_id
     assert record["inputs"][0]["input_id"] == input_id
     assert record["operator_metadata"]["sex"] == "F"
+    assert store.generation() == generation + 1
     rerun = write_source(store, chunks, aligned)
     assert rerun["operator_metadata"] == record["operator_metadata"]
+    assert store.generation() == generation + 1

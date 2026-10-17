@@ -90,7 +90,9 @@ traceback lab runs [RUN_ID] [--step S]     the run log, or one run's steps
 
 `--sex M|F` records an operator assertion in versioned local sample metadata.
 It does not change the measured `sex-check` ratio, source or input identity, or
-cached results. Trust/QC compares a definite male/female call with the assertion
+cached results. Recording a new assertion advances the local page's change counter,
+including on a fully cached run; repeating the same assertion does not. Trust/QC
+compares a definite male/female call with the assertion
 at read time as a pre-analytic check. An absent assertion or indeterminate call
 has no mismatch verdict. The page marks the check as privacy-sensitive and does
 not present it as a diagnostic sex or gender determination. A later conflicting
