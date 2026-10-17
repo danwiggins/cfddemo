@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -399,7 +400,12 @@ def test_proc_enumeration_failure_uses_ps(monkeypatch: pytest.MonkeyPatch) -> No
         return original(path)
 
     monkeypatch.setattr(Path, "iterdir", scan)
-    assert (_process_tree_rss_bytes(os.getpgrp()) or 0) > 0
+    child = subprocess.Popen([PY, "-c", "import time; time.sleep(30)"], start_new_session=True)
+    try:
+        assert (_process_tree_rss_bytes(child.pid) or 0) > 0
+    finally:
+        child.terminate()
+        child.wait(timeout=5)
 
 
 def test_empty_proc_sample_does_not_spawn_ps(monkeypatch: pytest.MonkeyPatch) -> None:
