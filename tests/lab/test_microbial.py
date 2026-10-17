@@ -239,7 +239,13 @@ def test_sample_page_uses_bounded_receipt_and_reports_changed_database(tmp_path,
                       input_id=input_id, reference_id="ref")
     summary = ResultEnvelope(algorithm_id="read-summary", algorithm_version="1", status="ok", provenance=prov)
     measured = ResultEnvelope(algorithm_id="microbial", algorithm_version="3", status="ok", provenance=prov,
-                              metrics=[Metric(metric_id="microbial_rpm_primary", value=0.0)])
+                                  metrics=[Metric(metric_id="primary_reads", value=1),
+                                           Metric(metric_id="candidate_unmapped_reads", value=0),
+                                           Metric(metric_id="too_short_unmapped_reads", value=0),
+                                           Metric(metric_id="missing_sequence_unmapped_reads", value=0),
+                                           Metric(metric_id="omitted_taxa", value=0),
+                                           Metric(metric_id="microbial_estimated_reads", value=0.0),
+                                           Metric(metric_id="microbial_rpm_primary", value=0.0)])
     sample = SampleView(source, source[:12], False,
                         InputView("full", input_id, None, {}, {"read-summary": summary, "microbial": measured}))
     artifacts = tmp_path / "artifacts"
@@ -297,7 +303,13 @@ def _profile_with_nonzero_exclusions(tmp_path: Path, monkeypatch) -> dict:
                              provenance=summary_prov)
     measured = ResultEnvelope(algorithm_id="microbial", algorithm_version="3", status="ok",
                               provenance=measured_prov,
-                              metrics=[Metric(metric_id="microbial_rpm_primary", value=500_000.0)])
+                              metrics=[Metric(metric_id="primary_reads", value=10),
+                                       Metric(metric_id="candidate_unmapped_reads", value=5),
+                                       Metric(metric_id="too_short_unmapped_reads", value=3),
+                                       Metric(metric_id="missing_sequence_unmapped_reads", value=2),
+                                       Metric(metric_id="omitted_taxa", value=0),
+                                       Metric(metric_id="microbial_estimated_reads", value=0),
+                                       Metric(metric_id="microbial_rpm_primary", value=0)])
     sample = SampleView(source, source[:12], False,
                         InputView("full", input_id, None, {}, {"read-summary": summary, "microbial": measured}))
     artifacts = tmp_path / "artifacts"
@@ -770,7 +782,13 @@ def test_cohort_975_zero_fills_complete_absent_taxa_and_refuses_missing_referenc
     summary = ResultEnvelope(algorithm_id="read-summary", algorithm_version="1", status="ok", provenance=prov)
     measured = ResultEnvelope(
         algorithm_id="microbial", algorithm_version="1", status="ok", provenance=prov,
-        metrics=[Metric(metric_id="microbial_rpm_primary", value=4.0),
+        metrics=[Metric(metric_id="primary_reads", value=100),
+                 Metric(metric_id="candidate_unmapped_reads", value=5),
+                 Metric(metric_id="too_short_unmapped_reads", value=0),
+                 Metric(metric_id="missing_sequence_unmapped_reads", value=0),
+                 Metric(metric_id="omitted_taxa", value=0),
+                 Metric(metric_id="microbial_estimated_reads", value=0.0004),
+                 Metric(metric_id="microbial_rpm_primary", value=4.0),
                  Metric(metric_id="taxon_123_rpm", value=4.0)],
     )
     sample = SampleView(source, source[:12], False,
@@ -784,7 +802,7 @@ def test_cohort_975_zero_fills_complete_absent_taxa_and_refuses_missing_referenc
         "candidate_unmapped_reads": 5, "too_short_unmapped_reads": 0,
         "missing_sequence_unmapped_reads": 0, "omitted_taxa": 0,
         "taxa": [{"taxid": 123, "name": "Candidate species", "category": "bacteria",
-                  "estimated_reads": 1.0, "rpm_primary": 4.0}],
+                  "estimated_reads": 0.0004, "rpm_primary": 4.0}],
     }))
     monkeypatch.setattr(view, "_tool", lambda name: (name, "e" * 64))
     monkeypatch.setattr(view, "inspect_database", lambda _store, **_kwargs: SimpleNamespace(
@@ -878,6 +896,14 @@ def test_cohort_975_zero_fills_complete_absent_taxa_and_refuses_missing_referenc
     unavailable = profile_for_sample(store, sample, None, None, "not_built")
     assert unavailable["state"] == "cohort_unavailable" and unavailable["cohort_p975"] is None
     bad_profile = json.loads((artifacts / "microbial_profile.json").read_text())
+    bad_profile["taxa"][0]["rpm_primary"] = 9.0
+    (artifacts / "microbial_profile.json").write_text(json.dumps(bad_profile))
+    assert profile_for_sample(store, sample, generation, target, "ready")["state"] == "stored_profile_unavailable"
+    bad_profile["taxa"][0]["rpm_primary"] = 4.0
+    bad_profile["candidate_unmapped_reads"] = 6
+    (artifacts / "microbial_profile.json").write_text(json.dumps(bad_profile))
+    assert profile_for_sample(store, sample, generation, target, "ready")["state"] == "stored_profile_unavailable"
+    bad_profile["candidate_unmapped_reads"] = 5
     bad_profile["denominator"] = -1
     (artifacts / "microbial_profile.json").write_text(json.dumps(bad_profile))
     assert profile_for_sample(store, sample, generation, target, "ready")["state"] == "stored_profile_unavailable"
@@ -885,9 +911,9 @@ def test_cohort_975_zero_fills_complete_absent_taxa_and_refuses_missing_referenc
     bad_profile["candidate_unmapped_reads"] = 0
     (artifacts / "microbial_profile.json").write_text(json.dumps(bad_profile))
     absent = profile_for_sample(store, sample, generation, target, "ready")
-    assert absent["state"] == "measurement_unavailable" and absent["taxa"] == []
+    assert absent["state"] == "stored_profile_unavailable" and absent["taxa"] == []
     bad_profile["denominator"] = 100
     bad_profile["too_short_unmapped_reads"] = 1
     (artifacts / "microbial_profile.json").write_text(json.dumps(bad_profile))
     unassayable = profile_for_sample(store, sample, generation, target, "ready")
-    assert unassayable["state"] == "measurement_unavailable" and unassayable["taxa"] == []
+    assert unassayable["state"] == "stored_profile_unavailable" and unassayable["taxa"] == []
