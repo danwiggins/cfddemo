@@ -16,7 +16,7 @@ from traceback_lab.cli import build_parser
 from traceback_lab import end_catalog_assets
 from traceback_lab.end_catalog_assets import EndCatalogueError, inspect_end_catalogues, register_end_catalogues
 from traceback_lab.interpretation.engine import load_library
-from traceback_lab.read_summary import COLUMNS, SCHEMA
+from traceback_lab.read_summary import COLUMNS, SCHEMA, ReadSummary, derived_mask
 from traceback_lab.registry import InputContext, PlanItem, Ready, registry_entries
 from traceback_lab.runner import RunTarget, run_plan
 from traceback_lab.scrub import Scrubber
@@ -199,8 +199,15 @@ def test_downsample_and_split_use_selected_depth_and_rows(tmp_path: Path) -> Non
     meta["rows"] = rows
     (columns / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
 
+    summary = ReadSummary.open(columns)
+    split_a = derived_mask(summary, {"transform": "split", "half": "A"})
+    split_b = derived_mask(summary, {"transform": "split", "half": "B"})
+    assert split_a is not None and split_b is not None
+    assert not np.any(split_a & split_b) and np.all(split_a | split_b)
+
     for derived in ({"transform": "downsample", "fraction": 0.5},
-                    {"transform": "split", "half": "A"}):
+                    {"transform": "split", "half": "A"},
+                    {"transform": "split", "half": "B"}):
         ctx = _context(root, parent, derived=derived, depth=99.0)
         assert isinstance(ALIGNED_END_STRUCTURE.preflight(ctx), Ready)
         artifact = json.loads(ALIGNED_END_STRUCTURE.run(ctx, tmp_path / "out").artifacts["aligned_end_structure.json"])
@@ -236,6 +243,15 @@ def test_downsample_and_split_use_selected_depth_and_rows(tmp_path: Path) -> Non
     assert ALIGNED_END_STRUCTURE.preflight(_context(
         root, parent, derived={"transform": "split", "half": "A", "unexpected": True}, depth=99.0,
     )).reason_code == "derived_input"
+
+    # A corrupt selected summary must fail loudly instead of looking like an
+    # unavailable upstream step.
+    meta["schema"] = "corrupt"
+    (columns / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    with pytest.raises(ValueError, match="not a traceback read summary"):
+        ALIGNED_END_STRUCTURE.preflight(_context(
+            root, parent, derived={"transform": "split", "half": "B"}, depth=99.0,
+        ))
 
 
 @pytest.mark.parametrize("bad", [
@@ -478,7 +494,7 @@ def test_ten_x_synthetic_ont_bam_runs_read_summary_and_end_worker(
             record.query_sequence = "A" * 121
             record.flag = 0
             record.reference_id = 0
-            record.reference_start = 440 if index == 0 else 0
+            record.reference_start = 440 if derived is not None or index == 0 else 0
             record.mapping_quality = 60
             record.cigarstring = "121M"
             stream.write(record)
@@ -518,10 +534,9 @@ def test_ten_x_synthetic_ont_bam_runs_read_summary_and_end_worker(
             assert 160 <= selected <= 210
         else:
             assert 100 <= selected <= 150
-        hits = artifact["preferred_u_hits"]
-        assert hits == artifact["preferred_d_hits"] and hits in (0, 1)
-        assert metrics["preferred_end_support_fraction"] == hits / selected
-        assert metrics["ocf_like_end_asymmetry"] == (-2 if hits else None)
+        assert artifact["preferred_u_hits"] == artifact["preferred_d_hits"] == selected
+        assert metrics["preferred_end_support_fraction"] == 1.0
+        assert metrics["ocf_like_end_asymmetry"] == -2 * selected
         assert artifact["observed_depth_x"] >= 10.0
         assert artifact["depth_basis"] == "selected_read_summary"
         assert artifact["derived_selection"] == derived

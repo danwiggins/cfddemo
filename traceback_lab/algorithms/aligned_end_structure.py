@@ -108,7 +108,7 @@ class AlignedEndStructure(Base):
             try:
                 summary, mask = load_summary(ctx)
                 depth = depth_stamp(summary, mask)["approx_depth_x"]
-            except (OSError, RuntimeError, ValueError):
+            except (OSError, RuntimeError):
                 return Skip("upstream", "aligned-end structure could not read the derived read summary")
         if depth is None or not np.isfinite(depth) or depth < MIN_DEPTH_X:
             return Skip("depth", "aligned-end structure needs at least 10x observed eligible depth")
