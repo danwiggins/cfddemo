@@ -80,8 +80,7 @@ class Entry:
 
     @property
     def citation_verified(self) -> bool:
-        checked = self.raw.get("citation_checked")
-        return isinstance(checked, Mapping) and all(checked.get(key) for key in ("by", "date"))
+        return _citation_check_is_complete(self.raw.get("citation_checked"))
 
     @property
     def stability(self) -> dict[str, Any] | None:
@@ -118,6 +117,13 @@ def _require(condition: bool, where: str, message: str) -> None:
         raise LibraryError(f"{where}: {message}")
 
 
+def _citation_check_is_complete(checked: Any) -> bool:
+    return isinstance(checked, Mapping) and all(
+        isinstance(checked.get(key), str) and checked[key].strip()
+        for key in ("by", "date", "note")
+    )
+
+
 def _validate_entry(raw: Mapping[str, Any], licenses: Mapping[str, Any]) -> Entry:
     where = f"{raw.get('algorithm_id')}/{raw.get('metric_id')}"
     for key in ("algorithm_id", "metric_id", "label", "tier", "reference", "headline", "value_kind"):
@@ -149,7 +155,7 @@ def _validate_entry(raw: Mapping[str, Any], licenses: Mapping[str, Any]) -> Entr
              where, "citations must be nonempty strings")
     checked = raw.get("citation_checked")
     if checked is not None:
-        _require(isinstance(checked, Mapping) and checked.get("by") and checked.get("date"), where, "citation_checked needs by and date")
+        _require(_citation_check_is_complete(checked), where, "citation_checked needs nonblank by, date and note")
     stability = raw.get("stability")
     if raw["value_kind"] in ("vector", "categorical"):
         stability = None

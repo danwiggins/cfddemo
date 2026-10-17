@@ -1359,6 +1359,8 @@ def _metric_payload(row: Any, entry: Any, band: str | None) -> dict[str, Any]:
                 "citation_checked",
             )
         }
+        if not entry.citation_verified:
+            payload["entry"]["citation_checked"] = None
     return payload
 
 
