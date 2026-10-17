@@ -49,6 +49,7 @@ def _write_input(tmp_path: Path) -> tuple[Path, Path]:
         add("hydroxymethyl", 100, "ACGTACGTAA", mm="C+h?,0;", ml=[250], mn=10)
         add("two-groups", 100, "ACGTACGTAA", mm="C+h?,0;C+m?,1;", ml=[250, 250], mn=10)
         add("competing", 100, "ACGTACGTAA", mm="C+h?,0;C+m?,0;", ml=[240, 10], mn=10)
+        add("query-mismatch", 100, "ACATACGTAA", mm="C+m?,0;", ml=[250], mn=10)
         add("low-confidence", 100, "ACGTACGTAA", mm="C+m?,0;", ml=[100], mn=10)
         add("missing-ml", 100, "ACGTACGTAA", mm="C+m?,0;", mn=10)
         add("bad-mn", 100, "ACGTACGTAA", mm="C+m?,0;", ml=[250], mn=11)
@@ -68,6 +69,7 @@ def test_skip_modes_reverse_mapping_and_unknown_calls(tmp_path: Path) -> None:
     assert got == [
         (101, "+", "methylated"),  # 5hmC contributes to the UXM M state
         (101, "+", "methylated"),
+        (101, "+", "methylated"),  # query CA still aligns over reference CG
         (101, "+", "methylated"),
         (101, "+", "unmethylated"),  # dot-mode implicit canonical, never from ?
         (105, "+", "methylated"),
@@ -76,13 +78,13 @@ def test_skip_modes_reverse_mapping_and_unknown_calls(tmp_path: Path) -> None:
         (202, "+", "methylated"),
         (206, "-", "methylated"),
     ]
-    assert result.records_scanned == 14
-    assert result.records_with_mm == 13
+    assert result.records_scanned == 15
+    assert result.records_with_mm == 14
     assert result.invalid_mm == 2  # absent ML and mismatched MN never become canonical
     assert result.low_confidence == 1
     assert result.dropped_unaligned == 2
     assert result.non_reference_cpg == 1
-    assert len({call.fragment_digest for call in result.calls}) == 7
+    assert len({call.fragment_digest for call in result.calls}) == 8
 
 
 def test_extraction_cap_refuses_before_unbounded_growth(tmp_path: Path) -> None:

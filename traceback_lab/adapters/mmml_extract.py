@@ -17,10 +17,9 @@ import pysam
 from evidence_inspector.cell_origin_models import CpgCallState, ModkitCpgCall, Strand
 from evidence_inspector.cell_origin_prefilter import RegionIndex
 
-from ..meth_calls import _InvalidRecord, _record_sites
-from ..modbase import mm_tag
+from ..modbase import InvalidMM, mm_skip_modes, mm_tag, mn_ok
 
-EXTRACTOR_VERSION = "lab-mmml-cpg-v1"
+EXTRACTOR_VERSION = "lab-mmml-cpg-v2"
 
 
 @dataclass(frozen=True)
@@ -33,6 +32,60 @@ class Extraction:
     non_reference_cpg: int
     outside_regions: int
     low_confidence: int
+
+
+def _reference_sites(record: pysam.AlignedSegment) -> tuple[list[tuple[int, int, int, int]], int]:
+    """Map cytosine MM/ML channels to reference-forward CG candidates.
+
+    The neighboring *query* base need only align adjacently; it may mismatch
+    the reference G. Modkit's ``--cpg`` selects the reference motif, not a
+    motif in the read sequence.
+    """
+
+    if not mn_ok(record):
+        raise InvalidMM("MN differs from stored sequence length")
+    try:
+        parsed = record.modified_bases
+    except (ValueError, KeyError, IndexError) as exc:
+        raise InvalidMM("MM/ML do not parse") from exc
+    if parsed is None:
+        raise InvalidMM("MM/ML do not parse")
+    sequence = record.query_sequence or ""
+    sites: dict[tuple[int, int], dict[str, int]] = {}
+    for (base, strand, code), entries in parsed.items():
+        if base != "C" or code not in {"m", "h"}:
+            continue
+        if any(quality < 0 for _, quality in entries):
+            raise InvalidMM("MM call without ML")
+        for position, quality in entries:
+            sites.setdefault((position, strand), {})[code] = int(quality)
+    target_base = "G" if record.is_reverse else "C"
+    positions = [index for index, base in enumerate(sequence) if base == target_base]
+    for code, mode in mm_skip_modes(mm_tag(record) or "").items():
+        if code[0] != "C" or code[-1] not in {"m", "h"} or mode != ".":
+            continue
+        strand = int(record.is_reverse) ^ int(code[1] == "-")
+        for position in positions:
+            sites.setdefault((position, strand), {}).setdefault(code[-1], 0)
+    cigar = record.cigartuples or []
+    if len(cigar) == 1 and cigar[0][0] in {0, 7, 8} and not record.is_unmapped:
+        start, span = record.reference_start, cigar[0][1]
+
+        def reference_of(position: int) -> int | None:
+            return start + position if 0 <= position < span else None
+
+    else:
+        reference_of = dict(record.get_aligned_pairs(matches_only=True)).get
+    mapped: list[tuple[int, int, int, int]] = []
+    dropped = 0
+    for (query_position, strand), channels in sorted(sites.items()):
+        mod_position = reference_of(query_position)
+        adjacent = reference_of(query_position - 1 if strand else query_position + 1)
+        if mod_position is None or adjacent != mod_position + (-1 if strand else 1):
+            dropped += 1
+            continue
+        mapped.append((mod_position - strand, strand, channels.get("m", 0), channels.get("h", 0)))
+    return mapped, dropped
 
 
 def extract_cpg_calls(
@@ -65,8 +118,8 @@ def extract_cpg_calls(
                 invalid += 1
                 continue
             try:
-                sites, dropped = _record_sites(record)
-            except _InvalidRecord:
+                sites, dropped = _reference_sites(record)
+            except InvalidMM:
                 invalid += 1
                 continue
             unaligned += dropped
@@ -74,18 +127,18 @@ def extract_cpg_calls(
                 salt + b"\0" + record.query_name.encode("utf-8")
             ).hexdigest()
             chromosome = record.reference_name
-            for position0, reverse, p_m, p_h, _channels in sites:
+            for position0, reverse, p_m, p_h in sites:
                 if include_regions is not None and not include_regions.overlaps(
                     chromosome, position0, position0 + 1
                 ):
                     outside += 1
                     continue
-                candidates += 1
-                if candidates > maximum_calls:
-                    raise ValueError("cell-origin MM/ML calls exceed the locked cap")
                 if fasta.fetch(chromosome, position0, position0 + 2).upper() != "CG":
                     non_reference += 1
                     continue
+                candidates += 1
+                if candidates > maximum_calls:
+                    raise ValueError("cell-origin MM/ML calls exceed the locked cap")
                 p_c = max(0, 255 - p_m - p_h)
                 confidence = max(p_c, p_m, p_h) / 255.0
                 if confidence < filter_threshold:
