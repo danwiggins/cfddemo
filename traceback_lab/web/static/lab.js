@@ -343,9 +343,10 @@
     if (sex && sex.reason === "malformed_metadata") {
       sexMessage = "Stored operator sex assertion metadata is malformed; no comparison verdict. Measured results remain available.";
     } else if (!sex || sex.state === "no_verdict") {
-      sexMessage = sex && sex.reason === "no_definite_call"
-        ? "No definite measured chrX/chrY call is available; no comparison verdict."
-        : "No operator sex assertion was supplied; no comparison was made.";
+      if (!sex || sex.reason === "no_assertion") sexMessage = "No operator sex assertion was supplied; no comparison was made.";
+      else if (sex.reason === "no_measurement") sexMessage = "No measured chrX/chrY call is available; no comparison verdict.";
+      else if (sex.reason === "indeterminate_call") sexMessage = "Measured chrX/chrY call is indeterminate; no comparison verdict.";
+      else sexMessage = "Measured chrX/chrY call is unrecognized; no comparison verdict.";
     } else if (sex.state === "mismatch") {
       sexMessage = `Pre-analytic mismatch: operator-declared ${sex.declared} differs from the measured chrX/chrY call (${sex.observed}). Review sample metadata and processing.`;
     } else if (sex.state === "concordant") {

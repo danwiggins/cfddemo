@@ -151,6 +151,16 @@ def test_sex_assertion_is_local_metadata_and_does_not_rekey_results(
     generation = store.generation()
     result_bytes = {path.relative_to(store.results_dir): path.read_bytes()
                     for path in store.results_dir.rglob("result.json")}
+    from traceback_lab.ingest import source_record
+
+    for target in ("latest", str(lab_world["chunks"])):
+        extra = () if target == "latest" else ("--mmi", str(shared_mmi))
+        code, dry = _json(capsys, "run", target, "--root", str(root), *extra, "--sex", "M", "--dry-run")
+        assert code == 0 and dry["data"]["dry_run"]
+        assert store.generation() == generation
+        assert "operator_metadata" not in source_record(store, original["source_id"])
+        assert {path.relative_to(store.results_dir): path.read_bytes()
+                for path in store.results_dir.rglob("result.json")} == result_bytes
 
     code, asserted = _json(capsys, "run", "latest", "--sex", "M", "--root", str(root))
     assert code == 0 and asserted["data"]["sample"] == original
@@ -158,7 +168,6 @@ def test_sex_assertion_is_local_metadata_and_does_not_rekey_results(
     assert store.generation() == generation + 1
     assert {path.relative_to(store.results_dir): path.read_bytes()
             for path in store.results_dir.rglob("result.json")} == result_bytes
-    from traceback_lab.ingest import source_record
     from traceback_lab.views import load_sample, sex_check_view
 
     record = source_record(LabStore(root), original["source_id"])
