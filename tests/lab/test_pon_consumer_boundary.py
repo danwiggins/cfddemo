@@ -25,6 +25,7 @@ from traceback_lab.store import LabStore, new_run_id, summarize_run
 from traceback_lab.web.api import LabApi
 from traceback_lab.problems import LabProblem
 from traceback_lab.views import load_sample, selected_results
+from traceback_runner.references import ReferenceProblem
 from tests.lab.test_cohort_store import _sample
 
 
@@ -95,6 +96,24 @@ def test_sample_view_follows_instability_consumed_v1_after_copy_number_v2(
     assert view.full.results["instability"].skip_reason == "superseded_method"
     assert store.read_result(input_id, "copy-number", old_identity).status == "ok"
     assert store.read_result(input_id, "instability", instability_identity).status == "ok"
+
+
+def test_sample_view_hides_instability_without_selected_copy_number(tmp_path: Path) -> None:
+    store = LabStore(tmp_path)
+    source_id = _sample(store, 1)
+    input_id = f"{101:064x}"
+    identity = "a" * 64
+    store.publish_result(ResultEnvelope(
+        algorithm_id="instability", algorithm_version="1", status="ok",
+        provenance=provenance(
+            tool="fixture", parameters_sha256=identity,
+            source_id=source_id, input_id=input_id, reference_id="hg38",
+        ),
+    ), input_id=input_id)
+    view = load_sample(store, source_id)
+    assert view is not None
+    assert view.full.results["instability"].skip_reason == "superseded_method"
+    assert store.read_result(input_id, "instability", identity).status == "ok"
 
 
 def test_pon_contract_requires_policy_and_digest_together() -> None:
@@ -438,6 +457,26 @@ def test_implicit_unavailable_panel_marks_only_copy_number_for_skip(
         pon_consumer.bind_target(
             LabStore(tmp_path), items, target, manifest, cohort_id="healthy-v1",
         )
+
+
+def test_missing_registered_panel_asset_becomes_lab_unavailable_problem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(cn_module, "toolchain_or_none", lambda: SimpleNamespace(
+        identity=SimpleNamespace(lock_sha256="1" * 64),
+    ))
+    missing = ReferenceProblem(
+        "TBX-ASSET-004", "Asset is not registered", cause="registration absent",
+        fix="Register the asset",
+    )
+    monkeypatch.setattr(ichor, "resolve_assets", lambda *_: (_ for _ in ()).throw(missing))
+    with pytest.raises(LabProblem) as caught:
+        pon_consumer.selection_for_generation(
+            LabStore(tmp_path), SimpleNamespace(cohort_id="healthy-v1", kind="internal_cohort"),
+            source_id="2" * 64, reference_sha256="3" * 64, aligner_identity="synthetic",
+        )
+    assert caught.value.code == "TBX-LAB-020"
+    assert caught.value.data["field"] == "method assets"
 
 
 @pytest.mark.parametrize("reason", ["missing_toolchain", "missing_asset"])
