@@ -55,6 +55,7 @@ ALGORITHMS: tuple[str, ...] = (
     "viral_reads:VIRAL_READS",
     "cell_origin:CELL_ORIGIN",
     "end_motifs:END_MOTIFS",
+    "finaletoolkit_xcheck:FINALETOOLKIT_XCHECK",
     "breakpoint_motifs:BREAKPOINT_MOTIFS",
     "delfi_ratio:DELFI_RATIO",
     "tss_profile:TSS_PROFILE",

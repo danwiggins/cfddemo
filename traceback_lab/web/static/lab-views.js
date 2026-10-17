@@ -659,7 +659,7 @@
   function context(sample, algorithmId, seen) {
     const c = (sample.catalog || []).find((x) => x.algorithm_id === algorithmId);
     const out = [];
-    if (c) out.push(h("p", { class: "help" }, tierBadge(c.tier), ` As run here (ONT). Original evidence: ${c.origin_tier || "—"}. Footnote: ${c.footnote || "none published"}`,
+    if (c) out.push(h("p", { class: "help" }, tierBadge(c.tier), ` As run here. Original evidence: ${c.origin_tier || "—"}. Footnote: ${c.footnote || "none published"}`,
       spacedUnverifiedBadge(c.has_library_entry ? c : null)));
     for (const id of (c ? c.license_ids : [])) {
       if (seen.has(id)) { out.push(licenseRef(sample, id)); continue; }
@@ -691,7 +691,7 @@
     };
     families.forEach(([, label], i) => tabs.append(h("button", { type: "button", class: "control subtab", "aria-pressed": "false", onclick: () => show(i) }, label)));
     out.push(tabs, body);
-    const initial = ["fragment-size", "end-motifs", "delfi-ratio", "tss-profile", "long-tail", "mtdna", "breakpoint-motifs", "lionheart"].some((id) => algo(sample, id))
+    const initial = ["fragment-size", "end-motifs", "delfi-ratio", "finaletoolkit-xcheck", "tss-profile", "long-tail", "mtdna", "breakpoint-motifs", "lionheart"].some((id) => algo(sample, id))
       ? 0 : algo(sample, "copy-number") ? 1 : 2;
     show(initial);
     return out;
@@ -761,7 +761,7 @@
   function fragmentSignals(sample) {
     const a = algo(sample, "fragment-size");
     const section = h("section", { class: "panel" }, h("h2", {}, "Size density"));
-    if (!a || a.status !== "ok") return [section, absent(a, "fragment-size"), ...tssProfileSignals(sample), ...breakpointMotifSignals(sample), ...lionheartSignals(sample)];
+    if (!a || a.status !== "ok") return [section, absent(a, "fragment-size"), ...finaletoolkitSignals(sample), ...tssProfileSignals(sample), ...breakpointMotifSignals(sample), ...lionheartSignals(sample)];
     const slot = h("div", {}, h("p", {}, "Loading…"));
     const short = a.metrics.find((m) => m.metric_id === "short_fraction_lt150");
     section.append(h("p", { class: "help" }, `No size-density cohort band yet; 167 bp marked. Short-fragment reference: ${cohortReadiness(sample, short ? [short] : [])}.`), ...context(sample, "fragment-size", new Set()), slot);
@@ -779,7 +779,38 @@
         ? h("table", { class: "data-table" }, h("tbody", {}, ...other.metrics.filter((m) => m.value === null || typeof m.value !== "object").map((m) => h("tr", {}, h("th", { scope: "row" }, m.label), h("td", {}, fmt(m.value, m.unit))))))
         : absent(other, id), id === "end-motifs" || id === "delfi-ratio" ? flagPill("LEGAL") : ""));
     }
-    return [section, ...more, ...tssProfileSignals(sample), ...breakpointMotifSignals(sample), ...lionheartSignals(sample)];
+    return [section, ...more, ...finaletoolkitSignals(sample), ...tssProfileSignals(sample), ...breakpointMotifSignals(sample), ...lionheartSignals(sample)];
+  }
+
+  function finaletoolkitSignals(sample) {
+    const a = algo(sample, "finaletoolkit-xcheck");
+    if (!a) return [];
+    const section = h("section", { class: "panel" }, h("h2", {}, "FinaleToolkit paired-end cross-check"), flagPill("LEGAL"));
+    if (a.status !== "ok") return [section, absent(a, "finaletoolkit-xcheck")];
+    section.append(h("p", { class: "help" }, "Engineering parity on a verified paired-end Illumina BAM. Neither the single-end ONT results nor the published GC-corrected DELFI classifier are compared here."),
+      ...context(sample, "finaletoolkit-xcheck", new Set()));
+    const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading paired-end cross-check…"));
+    section.append(slot);
+    artifact(sample, "finaletoolkit-xcheck", "finaletoolkit-xcheck").then((data) => {
+      const correlation = (value) => value === null || (typeof value === "number" && Number.isFinite(value) && value >= -1 && value <= 1);
+      if (data.schema !== "traceback.lab.finaletoolkit-xcheck.v1" || data.version !== "1.1.0" ||
+          !/^[0-9a-f]{64}$/.test(data.runtime_pin_sha256 || "") ||
+          !correlation(data.motif?.r) || !correlation(data.delfi?.r) ||
+          !Number.isInteger(data.delfi?.comparable_bins) || data.delfi.comparable_bins < 0 ||
+          !Number.isInteger(data.pairs) || data.pairs < 0 ||
+          !["concordant", "discordant", "insufficient_variation"].includes(data.verdict)) {
+        throw new Error("cross-check artifact is malformed");
+      }
+      slot.replaceWith(
+        h("p", {}, `Result: ${data.verdict.replace(/_/g, " ")}; ${data.pairs.toLocaleString("en-US")} paired molecules; runtime pin ${data.runtime_pin_sha256.slice(0, 12)}.`),
+        dataTable("Paired-end method concordance", ["Comparison", "Pearson r", "Engineering threshold", "Support"], [
+          ["4-mer end frequencies", fmt(data.motif.r), "≥0.95", "256 motifs"],
+          ["Uncorrected 100-kb short/long ratios", fmt(data.delfi.r), "≥0.90", `${data.delfi.comparable_bins} bins with long fragments`],
+        ]),
+        h("p", { class: "help" }, `Exact short/long count agreement: ${data.delfi.upstream_counts_equal ? "yes" : "no"}. ${data.note}`),
+      );
+    }).catch((error) => slot.replaceWith(h("p", { class: "problem" }, `Paired-end cross-check unavailable (${error.message}).`)));
+    return [section];
   }
 
   function tssProfileSignals(sample) {
