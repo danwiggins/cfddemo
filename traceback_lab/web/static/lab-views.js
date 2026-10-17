@@ -1116,8 +1116,10 @@
 
   // -- Agreement: paired signals only, no combined score (D29) ----------------------------------------
   function agreement(sample) {
+    const report = sample.concordance || { pairs: [] };
     const out = [h("p", { class: "breadcrumb" }, `Lab › ${sample.id12} › Agreement`), h("h1", { class: "view-title" }, "Agreement"),
-      h("p", { class: "status-line" }, "These signals share inputs and are not independent confirmation; agreement is not validation.")];
+      h("p", { class: "status-line" }, report.caption || "These signals share inputs and are not independent confirmation; agreement is not validation."),
+      h("p", { class: "help" }, report.wgd_caveat || "Copy-number tumour fraction can shift with whole-genome doubling.")];
     const tf = value(sample, "copy-number", "tumor_fraction");
     const mode = value(sample, "fragment-size", "mode_bp");
     const mt = value(sample, "mtdna", "chrm_fraction");
@@ -1143,6 +1145,40 @@
           ],
         }, dataTable(`${title}; ${cohortText}`, ["Sample", xLabel, yLabel],
           [[`${cohort?.target_display_id || sample.id12} (this sample)`, xValue, yValue], ...points.map((p) => [p.display_id || p.source_id, p.x, p.y])])));
+      }
+      out.push(section);
+    }
+    const methPair = (report.pairs || []).find((pair) => pair.id === "cn-meth");
+    if (methPair) {
+      const section = h("section", { class: "panel" }, h("h2", {}, methPair.label), flagPill("FDA"), flagPill("CLIA"));
+      const reasons = {
+        no_pon: "A verified panel of normals is needed before copy-number tumour fraction can be compared.",
+        missing_cn: "Copy-number tumour fraction is unavailable.",
+        unidentifiable_cn: "Copy-number tumour fraction was not identifiable.",
+        missing_meth_tf: "Methylation tumour fraction is unavailable; inspect the registered marker reference and method result.",
+        unidentifiable_meth_tf: "The observed markers did not identify a methylation tumour fraction.",
+      };
+      if (methPair.support && methPair.support.markers_covered !== null) {
+        const support = methPair.support;
+        const residual = support.fit_rms === null
+          ? "Fit residual unavailable."
+          : `Unnormalized weight-fit residual RMS ${fmt(support.fit_rms)}.`;
+        const exactFitCaveat = support.markers_covered === 2
+          ? " With two covered markers, an interior fit is exactly determined; zero residual does not establish fit quality." : "";
+        section.append(h("p", { class: "help" },
+          `Methylation numerical fit: ${String(support.markers_covered)} covered markers, ${String(support.cpg_calls_used)} CpG calls; condition number ${support.reference_condition_number === null ? "unavailable" : fmt(support.reference_condition_number)}. ${residual}${exactFitCaveat} These counts do not establish biological calibration.`));
+        if (support.markers_covered === 0)
+          section.append(h("p", { class: "problem" }, "No registered CpG marker has a usable C+m call on this input. Check zero-based CpG-C positions, the genome reference, and modification-call coverage."));
+      }
+      if (methPair.state !== "ok") {
+        const unavailable = methPair.unavailable_reasons?.length ? methPair.unavailable_reasons : [methPair.state];
+        section.append(h("p", { class: "empty" }, unavailable.map(reason => reasons[reason] || "This pair is unavailable.").join(" "),
+          ""));
+      } else {
+        section.append(chart(`${methPair.label}: this sample at ${fmt(methPair.x)} and ${fmt(methPair.y)}.`, {
+          grid: { left: 60, right: 20, top: 20, bottom: 40 }, xAxis: { type: "value", name: methPair.x_label, scale: true }, yAxis: { type: "value", name: methPair.y_label, min: 0 },
+          series: [{ type: "scatter", symbolSize: 12, data: [[methPair.x, methPair.y]], itemStyle: { color: "#8a4b08" } }],
+        }, dataTable(methPair.label, ["Sample", methPair.x_label, methPair.y_label], [[sample.id12, methPair.x, methPair.y]])));
       }
       out.push(section);
     }

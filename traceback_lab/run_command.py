@@ -16,9 +16,15 @@ from typing import Any
 from traceback_runner.cli import _local_envelope, _result, _with_human
 
 from . import registry
+from .identity import SHA256_PATTERN, aligned_input_id, prealigned_input_id
 from .ingest import (
+    EXAMPLE_REFERENCE_ID,
+    GIB,
     AlignedInput,
     ChunkSet,
+    align,
+    aligner_argv_identity,
+    cached_sha256,
     collect_paths,
     disk_budget,
     ensure_mmi,
@@ -29,27 +35,26 @@ from .ingest import (
     inspect_chunks,
     is_sample_reference,
     mmi_path,
-    align,
+    record_source_sex,
     require_budget,
     resolve_reference,
     resolve_sample,
-    record_source_sex,
     source_record,
     write_source,
-    aligner_argv_identity,
-    cached_sha256,
-    GIB,
-    EXAMPLE_REFERENCE_ID,
 )
-from .identity import SHA256_PATTERN, aligned_input_id, prealigned_input_id
 from .platforms import for_input, from_rg_lines
 from .problems import (
-    EXIT_OK, EXIT_PARTIAL, EXIT_USAGE, LabProblem, problem_lines, problem_payload,
+    EXIT_OK,
+    EXIT_PARTIAL,
+    EXIT_USAGE,
+    LabProblem,
+    problem_lines,
+    problem_payload,
 )
 from .registry import execution_identity
 from .runner import DEFAULT_TIMEOUT_S, RunTarget, StepResult, run_plan
-from .scrub import Scrubber
 from .sample_metadata import with_sex_assertion
+from .scrub import Scrubber
 from .store import LabStore, new_run_id
 from .tools import find_minimap2, find_samtools, require_aligner_tools
 
@@ -800,7 +805,7 @@ def _pid() -> int:
 
 
 def _duration(seconds: float) -> str:
-    seconds = int(round(seconds))
+    seconds = round(seconds)
     if seconds < 60:
         return f"{seconds}s"
     minutes, seconds = divmod(seconds, 60)
@@ -838,6 +843,13 @@ def _skip_remedy(algorithm_id: str, reason: str, root: Path) -> dict[str, Any] |
             "traceback", "lab", "asset", "add", "pmd", "--file",
             "YOUR_LOCAL_PMD_coordinates_hg38.bed.gz", "--source-label",
             "Zhou-2018-operator-supplied", "--terms", "unknown", "--root", str(root),
+        ]
+    elif reason == "missing_asset" and algorithm_id == "meth-tf":
+        asset = "compatible tumour/healthy methylation marker reference"
+        argv = [
+            "traceback", "lab", "asset", "add", "meth-tf-reference", "--file",
+            "YOUR_LOCAL_MARKER_REFERENCE.json", "--source-label", "operator-marker-panel",
+            "--terms", "unknown", "--root", str(root),
         ]
     else:
         return None
