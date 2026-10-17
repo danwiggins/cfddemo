@@ -710,7 +710,7 @@ entries:
     next_steps: {analytical: ["Use arm-zscores only with a compatible published cohort and at least ten controls after source exclusion"], clinical_setting: null}
     license_ids: [gpl-copyleft]
     flags: []
-    headline: false
+    headline: true
     citations: []
     citation_checked: {by: "lab build agent", date: "2026-10-16", note: "No citation displayed; a descriptive Lab bin-coverage count, not a biological threshold."}
 
