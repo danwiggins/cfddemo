@@ -605,6 +605,29 @@ def test_reregistration_write_failure_preserves_manifest_and_hides_path(tmp_path
     assert manifest.read_bytes() == original
 
 
+def test_first_registration_write_failure_is_blocked_and_hides_path(tmp_path, monkeypatch, capsys) -> None:
+    from traceback_runner import cli
+
+    directory = tmp_path / "private-kraken-db"
+    directory.mkdir()
+    for name in ("hash.k2d", "opts.k2d", "taxo.k2d", "database75mers.kmer_distrib"):
+        (directory / name).write_bytes(f"synthetic {name}".encode())
+    root = tmp_path / "root"
+
+    def fail_publish(*_args, **_kwargs):
+        raise OSError(f"private path: {directory}")
+
+    monkeypatch.setattr(LabStore, "publish_directory", fail_publish)
+    assert cli.main(["lab", "microbial", "db", "add", "--directory", str(directory),
+                     "--read-length", "75", "--source-label", "synthetic database",
+                     "--root", str(root), "--json"]) != 0
+    response = json.loads(capsys.readouterr().out)
+    assert response["status"] == "blocked"
+    assert "database registration could not be written" in json.dumps(response)
+    assert str(directory) not in json.dumps(response)
+    assert not (root / "lab" / "assets" / "microbial-db").exists()
+
+
 def test_database_registration_and_inspection_cli(tmp_path, capsys) -> None:
     from traceback_runner import cli
 

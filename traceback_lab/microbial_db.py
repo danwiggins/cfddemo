@@ -215,5 +215,8 @@ def register_database(store: LabStore, directory: Path, read_length: int, source
             "source_label": source_label, "files": files, "file_stats": file_stats, "sha256": bundle,
         }))
 
-    store.publish_directory(destination.parent, destination.name, build)
+    try:
+        store.publish_directory(destination.parent, destination.name, build)
+    except OSError:
+        raise MicrobialDbError("database registration could not be written") from None
     return inspect_database(store, verify_bytes=False)
