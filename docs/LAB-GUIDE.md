@@ -307,6 +307,7 @@ cohort members after excluding the target source. The lens computes no combined
 score, warns that the signals are not independent, and notes the
 whole-genome-doubling caveat for copy-number tumour fraction. When both sides
 of a pair are unavailable, it shows both reasons.
+
 **Viral reference.** `viral-reads` leaves the registered hg38 human reference
 unchanged. It takes human-unmapped primary reads from the aligned BAM, including
 duplicate-flagged and QC-fail primaries but excluding secondary and

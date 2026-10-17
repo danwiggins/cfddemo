@@ -952,7 +952,7 @@
       if (pair.state !== "ok") {
         const unavailable = pair.unavailable_reasons?.length ? pair.unavailable_reasons : [pair.state];
         section.append(h("p", { class: "empty" }, unavailable.map(reason => reasons[reason] || "This pair is unavailable.").join(" "),
-          unavailable.some(reason => reason === "no_size_baseline" || reason === "no_mtdna_baseline") && pair.reference_n !== null
+          unavailable.some(reason => reason === "no_size_baseline" || reason === "no_mtdna_baseline") && pair.reference_n > 0
             ? ` Compatible cohort members after source exclusion: ${pair.reference_n}.` : ""));
       } else {
         if (pair.baseline_median !== null) {
