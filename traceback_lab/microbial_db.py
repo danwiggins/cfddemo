@@ -186,10 +186,13 @@ def register_database(store: LabStore, directory: Path, read_length: int, source
             raise MicrobialDbError("the same database bytes are already registered at a different directory")
         from .store import write_atomic
 
-        write_atomic(destination / "manifest.json", canonical_json_bytes({
-            "schema": SCHEMA, "directory": str(directory), "read_length": read_length,
-            "source_label": source_label, "files": files, "file_stats": file_stats, "sha256": bundle,
-        }))
+        try:
+            write_atomic(destination / "manifest.json", canonical_json_bytes({
+                "schema": SCHEMA, "directory": str(directory), "read_length": read_length,
+                "source_label": source_label, "files": files, "file_stats": file_stats, "sha256": bundle,
+            }))
+        except OSError as exc:
+            raise MicrobialDbError("database registration could not be updated") from exc
         return inspect_database(store)
 
     def build(staging: Path) -> None:

@@ -169,6 +169,23 @@ def test_legacy_registration_upgrades_by_full_verification(tmp_path) -> None:
     assert inspect_database(store, verify_bytes=False).sha256 == old["sha256"]
 
 
+def test_reregistration_write_failure_preserves_manifest_and_hides_path(tmp_path, monkeypatch) -> None:
+    from traceback_lab import store as store_module
+
+    store, directory = _database(tmp_path)
+    manifest = store.lab / "assets" / "microbial-db" / "manifest.json"
+    original = manifest.read_bytes()
+    with store.writer("microbial db add", "r-20261016-0003-aabb", step="database"):
+        with monkeypatch.context() as patch:
+            def fail_write(*_args, **_kwargs):
+                raise OSError(f"private path: {manifest}")
+            patch.setattr(store_module, "write_atomic", fail_write)
+            with pytest.raises(MicrobialDbError, match="could not be updated") as caught:
+                register_database(store, directory, 75, "synthetic database")
+    assert str(manifest) not in str(caught.value)
+    assert manifest.read_bytes() == original
+
+
 def test_database_registration_and_inspection_cli(tmp_path, capsys) -> None:
     from traceback_runner import cli
 

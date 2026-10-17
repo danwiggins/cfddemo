@@ -336,6 +336,9 @@
         microbial.microbial_rpm_primary !== undefined
           ? h("p", {}, `Candidate microbial estimate: ${fmt(microbial.microbial_rpm_primary)} per million primary QC-passing reads; ${fmt(microbial.candidate_unmapped_reads)} unmapped reads submitted. Cohort 97.5th percentile: ${microbial.cohort_p975 === null ? "unavailable" : fmt(microbial.cohort_p975)}${microbial.cohort_p975 === null ? "" : ` (n=${microbial.cohort_n}, ${microbial.cohort_version})`}.`)
           : "",
+        microbial.microbial_rpm_primary !== undefined
+          ? h("p", { class: "help" }, `${fmt(microbial.too_short_unmapped_reads)} unmapped reads were shorter than the registered Bracken length; ${fmt(microbial.missing_sequence_unmapped_reads)} lacked sequence. Neither group was classified. The per-million rate still divides by all primary QC-passing non-duplicate reads.`)
+          : "",
         microbial.omitted_taxa ? h("p", { class: "help" }, `${microbial.omitted_taxa} lower-abundance taxa omitted from the bounded display; absent taxa are not assumed zero in cohort comparisons.`) : "",
         microbial.taxa.length
           ? h("div", { class: "table-wrap" }, h("table", {},
