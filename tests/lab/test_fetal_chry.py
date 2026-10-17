@@ -244,7 +244,8 @@ def test_real_summary_counts_nonpar_y_and_calibrates_only_within_bounds(
     assert fetal.FETAL_FRACTION_CHRY.preflight(ctx).reason_code == "depth"
     algorithm = replace(fetal.FETAL_FRACTION_CHRY, requires=Requirements(min_eligible_reads=0))
     assert not isinstance(algorithm.preflight(ctx), Skip)
-    assert algorithm.preflight(replace(ctx, approx_depth_x=0.0005)).reason_code == "missing_asset"
+    assert algorithm.preflight(replace(ctx, approx_depth_x=0.0005)).reason_code == "depth"
+    assert algorithm.preflight(replace(ctx, approx_depth_x=None)).reason_code == "depth"
     measured = {item["metric_id"]: item["value"] for item in algorithm.run(ctx, tmp_path).metrics}
     assert measured == {"fetal_fraction": pytest.approx(0.5),
                         "fetal_chry_nonpar_reads": 2,
