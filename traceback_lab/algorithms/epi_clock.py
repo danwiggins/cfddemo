@@ -78,6 +78,8 @@ class EpiClock(MethBase):
         model = inspect_map(LabStore(ctx.root))
         if model.sha256 not in ctx.extras.get("planned_asset_sha256s", ()):
             raise RuntimeError("Weidner map changed after execution identity was planned")
+        if not isinstance(self.preflight(ctx), Ready):
+            raise RuntimeError("Weidner reference or input changed after preflight")
         calls, mask = load_calls(ctx)
         summary, _ = load_summary(ctx)
         lengths = dict(zip(summary.contigs, summary.lengths))

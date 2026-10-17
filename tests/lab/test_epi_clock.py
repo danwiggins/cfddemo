@@ -86,6 +86,7 @@ def test_clock_requires_all_three_sites_and_uses_published_coefficients(monkeypa
     rows["p_canonical"] = 255 - rows["p_m"]
     calls = SimpleNamespace(chunks=lambda mask: iter([rows]))
     monkeypatch.setattr(epi_clock, "load_calls", lambda ctx: (calls, None))
+    monkeypatch.setattr(epi_clock.EPI_CLOCK, "preflight", lambda ctx: Ready())
     ctx = InputContext(tmp_path, "s", "i", "r", "a" * 64, tmp_path,
                        extras={"planned_asset_sha256s": [model.sha256]})
     output = epi_clock.EPI_CLOCK.run(ctx, tmp_path)
@@ -137,7 +138,7 @@ def test_clock_skips_when_probe_chromosome_is_absent_from_bam(monkeypatch, tmp_p
                        extras={"planned_asset_sha256s": [model.sha256]})
     assert epi_clock.EPI_CLOCK.preflight(ctx).reason_code == "reference"
     monkeypatch.setattr(epi_clock, "load_calls", lambda ctx: (SimpleNamespace(chunks=lambda mask: iter(())), None))
-    with pytest.raises(RuntimeError, match="BAM reference layout"):
+    with pytest.raises(RuntimeError, match="reference or input changed"):
         epi_clock.EPI_CLOCK.run(ctx, tmp_path)
 
 
@@ -189,6 +190,9 @@ def test_clock_preflight_and_worker_with_real_call_store(tmp_path: Path) -> None
     assert metrics["epigenetic_age_years"]["n"] == 5
     derived = replace(ctx, derived={"transform": "split", "half": "A"})
     assert epi_clock.EPI_CLOCK.run(derived, scratch).metrics[0]["value"] is None
+    without_reference = replace(ctx, extras={**extras, "reference_fasta": str(tmp_path / "missing.fa")})
+    with pytest.raises(RuntimeError, match="reference or input changed"):
+        epi_clock.EPI_CLOCK.run(without_reference, scratch)
     (LabStore(tmp_path).lab / "assets" / "epi-clock-map" / "coordinates.json").write_bytes(b"{}")
     assert isinstance(epi_clock.EPI_CLOCK.preflight(ctx), Skip)
     with pytest.raises(ClockModelError):
