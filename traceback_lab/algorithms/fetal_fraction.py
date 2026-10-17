@@ -333,6 +333,8 @@ class FetalFraction(Base):
         from ..store import LabStore
 
         contract = inspect_contract(LabStore(ctx.root), ctx.input_id)
+        if contract.source_id != ctx.source_id or contract.reference_sha256 != ctx.reference_sha256:
+            raise RuntimeError("prenatal assertion or reference changed after preflight")
         runtime = _rscript()
         if runtime is None:
             raise RuntimeError("NIPTeR toolchain changed after preflight")

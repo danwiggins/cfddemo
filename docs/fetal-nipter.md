@@ -63,6 +63,11 @@ reference range or clinical cutoff. Input-scoped prenatal control identities
 are not pooled into a generic healthy-cohort reference. A separate, validated fetal-fraction
 model is still required before that metric can be reported.
 
+The control RDS must come from a trusted operator: a matching SHA-256 proves
+which bytes were supplied, not that deserializing them is safe. The R 4.4.0
+minimum addresses the [known RDS deserialization vulnerability](https://blog.r-project.org/2024/05/10/statement-on-cve-2024-27322/),
+but does not make arbitrary RDS files trustworthy.
+
 Sources: [NIPTeR package and license](https://github.com/molgenis/NIPTeR),
 [official NIPTeR workflow](https://cran.r-universe.dev/NIPTeR/doc/NIPTeR.html),
 [NIPTeR paper](https://doi.org/10.1186/s12859-018-2557-8).

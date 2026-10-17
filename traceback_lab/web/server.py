@@ -63,6 +63,7 @@ _ROUTES = (
     ("samples", re.compile(r"^/api/samples$")),
     ("cohorts", re.compile(r"^/api/cohorts$")),
     ("compare", re.compile(rf"^/api/cohorts/({COHORT})/samples/({ID12})/compare$")),
+    ("compare_samples", re.compile(rf"^/api/samples/({ID12})/compare/({ID12})$")),
     ("sample", re.compile(rf"^/api/samples/({ID12})$")),
     ("artifact", re.compile(rf"^/api/samples/({ID12})/artifact/({DERIVED})/({ALG})/({PANEL})$")),
 )
@@ -206,6 +207,9 @@ class _Handler(BaseHTTPRequestHandler):
                     self._json(200, self.app.api.cohorts())
                 elif name == "compare":
                     payload = self.app.api.compare(match.group(2), match.group(1))
+                    self._json(200 if payload.get("found") else 404, payload)
+                elif name == "compare_samples":
+                    payload = self.app.api.compare_samples(match.group(1), match.group(2))
                     self._json(200 if payload.get("found") else 404, payload)
                 elif name == "sample":
                     payload = self.app.api.sample(match.group(1))
