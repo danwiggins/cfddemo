@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import re
 import time
+from html.parser import HTMLParser
 from pathlib import Path
 
 import pytest
@@ -32,6 +33,39 @@ SAMPLE_ROUTES = (
     "findings", "trust-qc", "stability", "signals", "compare",
     "body-map", "agreement", "evidence", "methods",
 )
+
+
+class _LicenseNodes(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.callouts: list[str] = []
+        self.refs: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        props = dict(attrs)
+        classes = set((props.get("class") or "").split())
+        if "license-callout" in classes:
+            identity = props.get("id") or ""
+            assert identity.startswith("license-"), identity
+            self.callouts.append(identity.removeprefix("license-"))
+        if "license-pill" in classes:
+            target = props.get("aria-describedby") or ""
+            assert target.startswith("license-"), target
+            self.refs.append(target.removeprefix("license-"))
+
+
+def _license_nodes(dom: str) -> _LicenseNodes:
+    parsed = _LicenseNodes()
+    parsed.feed(dom)
+    return parsed
+
+
+def test_license_parser_accepts_digit_ids_and_any_attribute_order() -> None:
+    parsed = _license_nodes(
+        '<div id="license-gpl-3" data-x="1" class="panel license-callout"></div>'
+        '<button aria-describedby="license-gpl-3" class="license-pill control"></button>'
+    )
+    assert parsed.callouts == ["gpl-3"] and parsed.refs == ["gpl-3"]
 
 
 def _sample() -> dict:
@@ -144,8 +178,8 @@ def test_every_registry_license_has_one_callout_on_disclosure_route(route, tmp_p
     with _server(tmp_path, sample) as server:
         dom = _dom(server, tmp_path / "browser", route=path,
                    want=lambda d: "Synthetic disclosure fixture." in d if route == "home" else "data-ready" in d)
-    callouts = re.findall(r'class="license-callout" id="license-([a-z-]+)"', dom)
-    refs = re.findall(r'class="license-pill" aria-describedby="license-([a-z-]+)"', dom)
+    parsed = _license_nodes(dom)
+    callouts, refs = parsed.callouts, parsed.refs
     assert set(callouts) == LICENSE_IDS, (route, set(callouts), LICENSE_IDS)
     assert len(callouts) == len(LICENSE_IDS), route
     assert set(refs) <= LICENSE_IDS, route
@@ -333,6 +367,8 @@ def test_synthetic_status_copy_in_live_region(state, copy_text, tmp_path) -> Non
                     baseline["generation"] = 2
             elif state == "results-changed":
                 baseline["generation"] = 1 if calls == 1 else 2
+                if calls > 1:
+                    sample["algorithms"][0]["duration_s"] = 99.9
             elif state == "disconnected" and calls > 1:
                 raise OSError("synthetic poll failure")
             return baseline
@@ -345,6 +381,9 @@ def test_synthetic_status_copy_in_live_region(state, copy_text, tmp_path) -> Non
         assert "bam-qc</th><td>running" in dom
     if state in ("run-finished", "results-changed"):
         assert ">Reload</button>" in dom
+    if state == "results-changed":
+        assert "0.0 s" in dom
+        assert "99.9 s" not in dom
     if state == "disconnected":
         assert 'data-disconnected="1"' in dom
         assert re.search(r'<body[^>]*class="[^"]*\bdimmed\b', dom)

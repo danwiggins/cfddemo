@@ -375,8 +375,8 @@ def _read_debug_port(path: Path) -> str | None:
     return lines[0]
 
 
-def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90) -> str:
-    """Wait for one Chrome page's caller-defined DOM state through DevTools."""
+def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90, interact=None) -> str:
+    """Wait for one Chrome page, then optionally exercise it through DevTools."""
 
     deadline = time.monotonic() + timeout
     events: deque[str] = deque(maxlen=8)
@@ -456,6 +456,9 @@ def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90) -> str:
                 }
 
             _wait_for_dom(read_state, timeout=max(0, deadline - time.monotonic()))
+            if interact is not None:
+                interact(command, evaluate)
+                dom = evaluate("document.documentElement?.outerHTML ?? ''")
         except Exception as exc:
             failure = exc
             if connection is not None:

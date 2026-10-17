@@ -32,6 +32,13 @@ body.lab { background: #f3f1ec; }
 .license-callout h3 { font-size: 1.25rem; font-weight: 800; color: var(--ink); }
 .license-callout p { font-size: 1.25rem; font-weight: 700; margin: .25rem 0 0; }
 .license-pill { display: inline-block; padding: .1rem .5rem; border: 2px solid var(--license); border-radius: 1rem; font-size: .875rem; font-weight: 700; color: var(--ink); text-decoration: none; }
+.lab :where(a[href]) { display: inline-flex; align-items: center; min-width: 2.75rem; min-height: 2.75rem; max-width: 100%; }
+.lab :where(summary) { min-height: 2.75rem; padding-block: .7rem; cursor: pointer; }
+.lab .skip-link { min-height: 2.75rem; }
+@media (min-width: 768px) {
+  .lab-banner { position: relative; padding-right: 7rem; }
+  .lab-banner a { position: absolute; top: 50%; right: .75rem; transform: translateY(-50%); }
+}
 .depth-bar { position: relative; height: 1rem; min-width: 8rem; background: var(--flag-bg); border-radius: .2rem; }
 .depth-bar .fill { position: absolute; left: 0; top: 0; bottom: 0; background: var(--chart-a); border-radius: .2rem; }
 .depth-bar .tick { position: absolute; top: -.2rem; bottom: -.2rem; width: 3px; background: var(--ink); }
