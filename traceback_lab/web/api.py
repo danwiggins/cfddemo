@@ -22,6 +22,8 @@ from ..cohort_contracts import CohortGeneration, CohortMember, MetricProjection,
 from ..cohorts import list_cohorts, member_from_store, read_current
 from ..identity import resolve_prefix, shortest_unique_prefixes
 from ..ingest import source_ids, source_record
+from ..identity_pair import pairs_for_sample
+from ..algorithms.identity import somalier_tool
 from ..interpretation.engine import (
     COHORT_MIN,
     LIBRARY_FILE,
@@ -442,6 +444,8 @@ class LabApi:
         curve = views.depth_curve(sample, library)
         synthetic = views.synthetic(sample)
         defended_block, headline_block = _defended(algorithms, curve, panels, synthetic, library, order, depth_x)
+        identity_tool_unavailable = ("identity" in sample.full.results and somalier_tool() is None)
+        identity_pairs = [] if identity_tool_unavailable else pairs_for_sample(self.store, source_id)
         return {
             "found": True,
             "id12": self._id12s()[source_id],
@@ -461,6 +465,11 @@ class LabApi:
             "cohort_problem": cohort_problem,
             "agreement_pairs": _agreement_pairs(sample, generation, target, source_id, cohort_state),
             "algorithms": algorithms,
+            "identity_pairs": identity_pairs,
+            "identity_pairs_reason": (
+                "Somalier is unavailable; reinstall the pinned tool and rerun identity before comparing."
+                if identity_tool_unavailable else None
+            ),
             "curve": curve,
             "stability": panels,
             "repeatability": views.repeatability(panels),
