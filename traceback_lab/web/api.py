@@ -177,7 +177,10 @@ def _run_events(store: LabStore, run_id: str) -> tuple[list[tuple[int, dict[str,
     raw = _read_run_log(store.runs_dir / f"{run_id}.jsonl")
     if raw is None:
         return [], "unreadable_or_over_1mib"
-    lines = raw.splitlines()
+    lines = raw.split(b"\n")
+    complete_tail = raw.endswith(b"\n")
+    if complete_tail:
+        lines.pop()
     if len(lines) > 4096:
         return [], "over_4096_lines"
     events = []
@@ -185,6 +188,8 @@ def _run_events(store: LabStore, run_id: str) -> tuple[list[tuple[int, dict[str,
         try:
             event = json.loads(line)
         except (ValueError, UnicodeDecodeError):
+            if number == len(lines) and not complete_tail:
+                break  # an interrupted append can leave only the final line torn
             return [], "malformed_or_empty"
         if not isinstance(event, dict):
             return [], "malformed_or_empty"
