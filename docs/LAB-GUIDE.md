@@ -1,10 +1,11 @@
 # Traceback Lab guide
 
-Traceback Lab runs every cfDNA algorithm a kit BAM can support from one
-command, and a local page explains each result. It is a separate, **unsigned**
-subsystem: results carry a provenance stamp (tool, version, parameters hash,
-input hash, timestamp) and nothing else. The signed `traceback run` path is
-unchanged.
+Traceback Lab attempts its registered cfDNA algorithms from one run command;
+each method either reports a result or a specific skip or failure when the
+input, platform, depth, tools, or assets do not qualify. A local page explains
+the available results. Lab is a separate, **unsigned** subsystem: its results
+carry execution provenance and immutable attempts, not a development
+signature. The signed `traceback run` path has its own methods and records.
 
 **Research use only. Not CLIA-validated. Not a diagnosis.**
 
@@ -40,7 +41,9 @@ Measured time to the page on a clean Mac by a teammate: not yet measured
 2. Register hg38: `traceback reference register --fasta hg38.fa --id hg38 --root R`.
 3. For copy-number: `traceback toolchain install ichor`, then
    `traceback method-asset register --from-toolchain copy-number --root R`.
-4. `traceback lab doctor --root R` should then show no blocked checks.
+4. `traceback lab doctor --root R` shows setup checks and recovery commands;
+   inspect readiness for the methods you intend to run. Other methods have
+   additional optional tools, assets, or input-scoped calibrations below.
 
 ## Duration and disk for a real run
 
@@ -87,7 +90,22 @@ traceback lab runs [RUN_ID] [--step S]     the run log, or one run's steps
 traceback lab identity sites add --file SITES.vcf.gz --sha256 SHA256 --source-label LABEL [--root R]
 traceback lab identity sites inspect [--root R]
 traceback lab identity compare SAMPLE_A SAMPLE_B [--force] [--json] [--root R]
+traceback lab cohort add|remove ID12 --cohort ID [--root R]
+traceback lab cohort build --cohort ID [--root R]
+traceback lab arm-zscores ID12 --cohort ID [--root R]
+traceback lab asset add|inspect KIND [--root R]
+traceback lab asset register-clock-map|inspect-clock-map [options] [--root R]
+traceback lab asset griffin-register|griffin-inspect [options] [--root R]
+traceback lab asset end-catalogues-register|end-catalogues-inspect [options] [--root R]
+traceback lab microbial db add|inspect [options] [--root R]
+traceback lab fetal register|inspect [options] [--root R]
+traceback lab fetal chry-register|chry-inspect [options] [--root R]
+traceback lab donor register|inspect [options] [--root R]
 ```
+
+The registration lines are a map, not complete copy-paste syntax. Their
+input files and required flags are specified in the method sections and
+linked guides below; `traceback lab COMMAND --help` shows exact options.
 
 ## Running on a kit
 
@@ -227,7 +245,27 @@ new measurement.
 
 ## Algorithms
 
-`traceback lab algorithms` lists what is registered. The slice ships:
+`traceback lab algorithms` is the live catalog of registered IDs, versions,
+tiers, license notes, and minimum depths. This table explains their outputs.
+Run a subset with `--only ID[,ID...]`; a listed method can still skip for a
+particular input. For a scientist-friendly explanation of what each measurement
+may reveal, including epigenetic age, read the
+[Lab algorithm explainer](LAB-ALGORITHM-EXPLAINER.md).
+
+- **Both supported platforms:** read summary, depth, BAM QC, and selected
+  common counters run where their input requirements permit. The ONT
+  `fragment-size` aligned-span measurement and Illumina
+  `short-read-fragment-size` TLEN measurement have different denominators.
+- **ONT and modified-base methods:** methylation, cell-origin, end patterns,
+  WPS, and exploratory tumour or microbial measures often need extra depth,
+  pinned references, software, or an operator-provided model. Missing inputs
+  are reported as unavailable, not zero.
+- **Illumina-specific checks:** Griffin and the FinaleToolkit cross-check
+  require a declared paired-end Illumina input. Neither validates equivalence
+  to an ONT result.
+- **Input-scoped calibrations:** prenatal and transplant fraction methods
+  require separate operator assertions and matched controls. Their software
+  gates do not establish clinical accuracy.
 
 | id | What it reports |
 |---|---|
@@ -239,18 +277,24 @@ new measurement.
 | `short-read-fragment-size` | separate exploratory paired-end Illumina histogram and size summaries from absolute BAM TLEN; requires a prealigned BAM with every `@RG PL:ILLUMINA` |
 | `copy-number` | tumour fraction, ploidy, genome log2 track and segments through the installed ichorCNA toolchain; a built protocol-matched cohort supplies a verified technical panel, but no clinical calibration or interpretation; the unbuilt default runs without a panel and remains not interpretable; needs 2M eligible reads, `traceback toolchain install ichor` and `traceback method-asset register --from-toolchain copy-number --root R` |
 | `instability` | bin-weighted median absolute deviation of the selected copy-number result's segment log2 values (`tmad`), with used-bin and null-estimate coverage counts; needs 2M eligible reads and a successful copy-number result for the same input; exploratory and cohort-relative, with no ONT cutoff |
+| `arm-summary` | medians of finite, unmasked PoN-corrected copy-number bins wholly inside each autosomal p/q arm; requires a selected verified PoN, the registered GRCh38 centromere asset, and 2M eligible reads. The separate `lab arm-zscores` command compares these summaries with compatible cohort controls; neither output supplies a clinical threshold |
 | `modbase-qc` | mod codes in the MM tags, MM-tagged share, mean ML at aligned CpG calls (read from `meth-calls`), share of those calls below 0.7 confidence, tagged reads with unusable MM/ML; skipped (`missing_tags`) when no read carries MM |
 | `long-tail` | shares of molecules > 300 bp, 1–4 kb (delayed processing) and > 7.5 kb (lysis); a supplementary-split read counts at its read length |
 | `sex-check` | chrY/chrX read density per Mb of non-N, non-PAR reference and a male / female / indeterminate call; needs 500,000 eligible reads |
+| `identity` | opt-in Somalier fingerprint from a full aligned hg38 input with at least 10M eligible reads and operator-pinned sites; `lab identity compare` relates two current selected fingerprints. Exploratory and privacy-sensitive, with no validated ONT kinship threshold |
 | `dd-cfdna-chry` | exploratory male-donor/female-recipient transplant fraction from chrY non-PAR reads and an input-scoped, operator-verified female-background/full-male calibration; depth minimum comes from that calibration ([registration and limits](dd-cfdna-chry.md)) |
+| `fetal-fraction` | exploratory NIPTeR 1.0.2 chromosome 13/18/21 z-scores against an operator-attested, input-scoped matched control RDS; its fetal-fraction field is always null because NIPTeR does not estimate it. No trisomy call or ONT clinical cutoff ([registration and limits](fetal-nipter.md)) |
+| `fetal-fraction-chry` | exploratory chrY-based fraction for an asserted male fetus and female maternal background, with separate input-scoped protocol-matched calibration; returns null outside its calibrated interval and makes no aneuploidy call ([registration and limits](fetal-chry.md)) |
 | `mtdna` | chrM reads (MAPQ ≥ 20) as a share of all primary reads, and the chrM fragment mode |
 | `microbial` | exploratory Kraken2/Bracken species profile from primary, QC-passing, non-duplicate human-unmapped ONT reads; needs operator-pinned tools and database; no infection diagnosis |
 | `viral-reads` | EBV, HPV and HBV reads per million human-unmapped primary reads from a separate minimap2 ≥ 2.28 alignment; needs an operator-registered viral FASTA and is exploratory for ONT cfDNA |
 | `cell-origin` | share of cfDNA from each of 40 Loyfer U250 cell types with bootstrap intervals; the Lab decodes MM/ML CpG calls in-house and uses the registered Loyfer atlas with UXM and NNLS. It needs 2.5M eligible reads and `traceback method-asset register --from-dir LOYFER_DIR --root R`; minor cell types are not interpretable below 5x. Missing or uncertain calls stay unknown; confident 5hmC and 5mC both enter the UXM methylated (M) state. Every run writes a private prefiltered BAM in worker scratch; downsample and split runs first select their reads into a second transient BAM. Both are deleted after normal run completion, and neither is published. The signed cell-origin method retains its separate modkit path |
 | `meth-tf` | slow-profile exploratory tumour share of a two-component, nonnegative methylation-marker fit; needs 2.5M eligible reads, C+m calls, and an operator-registered reference with matching genome and modified-base model; no clinical calibration or threshold |
+| `methylbert` | speculative ONT tumour/normal deconvolution from an operator-trusted, fine-tuned MethylBERT bundle and pinned installed code; needs modified-base input, at least 2.5M eligible reads, and CUDA. No model ships with the Lab, and a generic pretrained encoder is insufficient ([bundle contract](METHYLBERT-BUNDLE.md)) |
 | `end-motifs` | reference 4-mers at both ends of each molecule (5′ forward end and the reverse complement of the other end), motif diversity score and CCCA share; needs 500,000 eligible reads and the registered FASTA |
 | `griffin` | pinned Griffin GC-corrected TF-site nucleosome profile on a registered hg38 site list; needs an Illumina-declared paired-end BAM, at least 5 million eligible autosomal pairs, the registered reference assets, Snakemake 5.19.2 importable by the Lab Python interpreter, and bedtools, samtools, pyBigWig and pybedtools. Native ONT skips; derived Illumina downsample and split selections run when the selected reads meet the 5-million-pair gate and the other requirements. Site profiles are descriptive, not a tissue-origin or clinical call |
 | `delfi-ratio` | short (100–150 bp) / long (151–220 bp) ratio per 5 Mb bin on chr1–22, median-centred, and its SD; no GC correction, cohort-relative only; needs 1,000,000 eligible reads |
+| `tss-profile` | strand-oriented molecule-overlap coverage in 50 bp bins around pinned GENCODE v46 autosomal protein-coding transcription start sites, with a central-to-flank ratio; needs 5M autosomal eligible reads and the registered annotation. It does not infer gene expression |
 | `wps` | long-fragment windowed protection score from D21-eligible 120–180 bp ONT aligned spans: spanning 120 bp windows minus molecules with either aligned-span endpoint inside them. Requires hg38 with `chr1`–`chr22` autosome names and known approximate depth ≥ 10x for each input, including derived controls. No minimum qualifying-fragment depth has been validated; its measured depth and fragment count are reported as support, not a biological WPS score. The full input also needs free lab-volume space for its exact track (four bytes per autosomal base, 10% overhead, plus 2 GiB margin); insufficient space yields a `disk` skip. The full result publishes exact per-base scores in compressed 1 Mb chunks indexed by `wps_exact_index.json`. Derived downsample and split controls that meet the 10x gate publish a separate mean-per-1 kb-bin preview in `wps_track.npz`, but do not retain another exact per-base track. The preview smooths away per-base detail and cannot recover the exact track. A genome-wide or 1 kb average of raw WPS is dominated by qualifying-fragment coverage and is not reported as an interpreted scalar. No nucleosome calls, validated stability tolerance, or clinical cutoff. |
 | `finaletoolkit-xcheck` | FinaleToolkit **1.1.0** cross-check on a verified prealigned, indexed, paired-end Illumina hg38 BAM with at least 1M eligible reads. Set `TRACEBACK_FINALETOOLKIT_BIN` to that release's executable (or place it on `PATH`); an `env`-style launcher or Windows wrapper can also use `TRACEBACK_FINALETOOLKIT_PYTHON` to run the pinned package module under that interpreter, so the attested runtime performs the measurement. The full input only is checked; ONT and derived inputs receive labelled skips. The upstream 4-mer 5′-end frequencies and uncorrected, unmerged 100-kb DELFI short/long counts (MAPQ ≥20) are compared with an independent paired-end counter on the same BAM and registered FASTA. The artifact gives Pearson correlations, matched-bin count, exact count agreement and the fixed 0.95/0.90 engineering thresholds; concordance also requires exact DELFI short/long count agreement. It retains the upstream and reference TSVs. A sparse or constant track has no correlation verdict. Its 1.1.0 end-motif region worker accepts but does not apply the declared minimum-length option, so the comparator follows the actual output and records that behavior. These settings intentionally differ from the published GC-corrected, arm-merged DELFI classifier and from the Lab's single-end ONT `end-motifs` and `delfi-ratio`; no clinical or cross-platform equivalence is implied. FinaleToolkit 1.1.0 produced no usable single-end ONT fragments in the D13 spike. |
 | `meth-calls` | intermediate: decodes MM/ML once into site-level CpG call chunks (read row, forward-strand C position, strand, 5mC/5hmC/canonical ML); derived inputs reuse it through their row mask |
@@ -936,10 +980,10 @@ The volume filled up during a step (exit 3, retryable). The staging directory wa
 
 ### TBX-LAB-012
 
-Another Lab writer is running (exit 3, retryable). Only one writer (`lab run`,
-`lab simulate`, `lab cohort add`, `lab cohort remove`, `lab cohort build`) may hold `ROOT/lab/.lock`
-at a time. The cause names the holder's command, run id, pid, step and start
-time. Wait for it (`traceback lab runs`), or stop that process.
+Another Lab writer is running (exit 3, retryable). Run, simulation, cohort
+changes, identity operations, and asset or calibration registration share the
+single `ROOT/lab/.lock`. The cause names the holder's command, run id, pid,
+step and start time. Wait for it to finish, or stop that process.
 
 ### TBX-LAB-013
 
@@ -1046,5 +1090,7 @@ cannot be detected, the Lab omits this advisory rather than blocking the run.
 
 ## Changes
 
+- 2026-10-17: documented the expanded registered catalog, platform-specific
+  methods, input-scoped calibrations, and current Lab writer commands.
 - 2026-10-15: first slice: `lab run`, `lab runs`, `lab algorithms`,
   `lab simulate cna|split`, `lab serve`, `lab doctor`, `lab run --example`.

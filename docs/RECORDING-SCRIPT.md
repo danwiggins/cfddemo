@@ -2,6 +2,9 @@
 
 Use the live site at <https://cfddemo-production.up.railway.app>. Record at
 1080p with the browser zoom at 90–100%.
+This script describes the fixed public evidence demo. It does not demonstrate
+the separate [signed local runner](OPERATOR-GUIDE.md) or
+[unsigned Lab](LAB-GUIDE.md) analyzing a new BAM.
 
 ## 0:00–0:12 — The premise
 
