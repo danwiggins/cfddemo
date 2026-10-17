@@ -21,11 +21,13 @@ the vendored upstream `Healthy_demo.GC_corrected.coverage.tsv` fixture (one CTCF
 checkout, rather than approximating the measurement. It runs Griffin's GC
 correction and nucleosome-profiling Snakemake workflows on one Lab aligned
 BAM **when the BAM is paired-end WGS**. Griffin's scripts require paired
-reads with positive template length in both GC counting and coverage. Native
-ONT single-end BAMs have no such records; the adapter checks all primary
-records and unanimous `@RG PL:ILLUMINA`, then rejects inputs declaring other
-platforms or lacking predominantly paired primary records
-before creating an attempt. It compares the BAM's `@SQ` names and lengths
+reads with positive template length in both GC counting and coverage. The
+adapter requires at least one BAM read group and every group to declare
+`PL:ILLUMINA`; it scans all primary BAM records for pairing and the 100–200 bp
+profile-window gate before creating an attempt. It does not infer library type
+from an early coordinate-sorted slice. Read-group platform labels are
+declarations, not independent instrument attestation. Native ONT single-end
+BAMs lack the required paired records. It compares the BAM's `@SQ` names and lengths
 and the workflow chromosome sizes with the registered FASTA index. Every
 autosome in that index must appear in the workflow sizes, so the coverage
 space cannot omit autosomes included in the depth count. This checks
