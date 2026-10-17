@@ -625,6 +625,8 @@ def test_headless_page_renders_a_chart_with_zero_csp_violations(server, tmp_path
         ({"state": "no_verdict", "reason": "malformed_metadata", "declared": None, "observed": "female",
           "problem": {"code": "TBX-LAB-023", "fix": "Restore the local sample record from a known-good backup before rerunning"}},
          "Stored operator sex assertion metadata is malformed; no comparison verdict."),
+        ({"state": "unexpected", "reason": None, "declared": "M", "observed": "male"},
+         "Comparison state is unavailable; no comparison verdict."),
     ],
 )
 def test_trust_qc_shows_preanalytic_verdict_and_privacy_flag(server, tmp_path, monkeypatch, comparison, expected) -> None:
