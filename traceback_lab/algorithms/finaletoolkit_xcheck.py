@@ -147,7 +147,11 @@ def _pearson(left: list[float], right: list[float]) -> float | None:
     a -= a.mean()
     b -= b.mean()
     denominator = float(np.linalg.norm(a) * np.linalg.norm(b))
-    return float(np.dot(a, b) / denominator) if denominator else None
+    if not denominator:
+        return None
+    # Dot and norm use different rounding paths; exact agreement can yield
+    # 1.0000000000000002, which the artifact reader correctly rejects.
+    return max(-1.0, min(1.0, float(np.dot(a, b) / denominator)))
 
 
 def _reference_counts(bam_path: Path, fasta: Path, contigs: list[tuple[str, int]]) -> tuple[dict[str, int], dict[tuple[str, int], tuple[int, int]], int]:
@@ -287,6 +291,14 @@ class FinaleToolkitXcheck(Base):
         return Ready()
 
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
+        try:
+            return self._run(ctx, out)
+        except OSError:
+            # Workers scrub stderr, but direct callers must not receive local
+            # sample paths in an exception either.
+            raise RuntimeError("FinaleToolkit input or output became unreadable") from None
+
+    def _run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
         tool = _tool()
         if tool is None or ctx.extras.get("planned_tool_pins") != [pin.identity() for pin in self.tools]:
             raise RuntimeError("FinaleToolkit tool changed since execution planning")

@@ -13,7 +13,7 @@ import pysam
 import pytest
 
 from traceback_lab.algorithms.finaletoolkit_xcheck import (
-    FINALETOOLKIT_XCHECK, _command_base, _delfi, _motifs, _tool,
+    FINALETOOLKIT_XCHECK, _command_base, _delfi, _motifs, _pearson, _tool,
 )
 from traceback_lab.registry import InputContext, Skip, load_registry
 
@@ -160,6 +160,23 @@ def test_preflight_does_not_publish_an_input_path(tmp_path: Path, monkeypatch: p
     assert str(ctx.input_dir) not in result.message
 
 
+def test_exact_correlation_stays_within_the_artifact_range() -> None:
+    values = [0.8130181598113199, 0.8482792727877749, 0.2276530594558811]
+    assert _pearson(values, values) == 1.0
+
+
+def test_run_error_does_not_publish_an_input_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import traceback_lab.algorithms.finaletoolkit_xcheck as module
+
+    ctx = _fixture(tmp_path / "DonorName_2026")
+    (ctx.input_dir / "manifest.json").unlink()
+    monkeypatch.setattr(module, "_tool", lambda: ("pinned-fixture", "e" * 64))
+    ctx.extras["planned_tool_pins"] = [pin.identity() for pin in FINALETOOLKIT_XCHECK.tools]
+    with pytest.raises(RuntimeError, match="input or output became unreadable") as error:
+        FINALETOOLKIT_XCHECK.run(ctx, tmp_path / "out")
+    assert "DonorName_2026" not in str(error.value)
+
+
 def test_python_override_runs_the_attested_package() -> None:
     launcher = Path("/operator/bin/finaletoolkit")
     interpreter = Path("/operator/venv/bin/python")
@@ -192,6 +209,26 @@ def test_pinned_tool_outputs_exercise_run_without_external_install(
     assert panel["delfi"]["r"] == pytest.approx(1.0)
     assert panel["delfi"]["upstream_counts_equal"]
     assert panel["verdict"] == "concordant"
+
+    # Exact-count agreement is an additional gate even when ratios still
+    # correlate perfectly. Keep this distinct from the correlation thresholds.
+    def replay_count_mismatch(command: list[str], **kwargs: object) -> SimpleNamespace:
+        completed = replay(command, **kwargs)
+        if "delfi" in command:
+            path = Path(command[command.index("-o") + 1])
+            original = path.read_text()
+            assert original.count("\t10\t4\t0.49954") == 1
+            path.write_text(original.replace("\t10\t4\t0.49954", "\t20\t8\t0.49954"))
+        return completed
+
+    monkeypatch.setattr(module.subprocess, "run", replay_count_mismatch)
+    mismatch = tmp_path / "mismatch"
+    mismatch.mkdir()
+    changed = json.loads(FINALETOOLKIT_XCHECK.run(ctx, mismatch / "out").artifacts["finaletoolkit_xcheck.json"])
+    assert changed["motif"]["r"] == pytest.approx(1.0)
+    assert changed["delfi"]["r"] == pytest.approx(1.0)
+    assert changed["delfi"]["upstream_counts_equal"] is False
+    assert changed["verdict"] == "discordant"
 
 
 @pytest.mark.skipif(not os.environ.get("TRACEBACK_FINALETOOLKIT_BIN"),
