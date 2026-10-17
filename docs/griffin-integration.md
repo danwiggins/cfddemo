@@ -1,8 +1,9 @@
 # Griffin TF-site profile integration
 
 The approved L2 `griffin` row means a Griffin nucleosome-protection profile
-over transcription-factor binding sites, with a minimum of 5,000,000 D21
-eligible autosomal molecules. It is a research signal, not a TF expression
+over transcription-factor binding sites. The paired-end implementation requires
+5,000,000 D21 eligible autosomal pairs, a stricter subset of the broader
+eligible-molecule cohort count. It is a research signal, not a TF expression
 call or a cancer classifier. A site-density histogram or an uncorrected
 coverage plot is not a Griffin result.
 
