@@ -11,6 +11,12 @@ licenses:
       The resource pack is operator-supplied and is never bundled here.
       ONT single-end extraction is experimental and is not a validated cancer test.
     url: "https://zenodo.org/records/15747531"
+  somalier-mit:
+    headline: "MIT: Somalier"
+    body: >-
+      Somalier is MIT-licensed. Its fingerprint and relatedness output can
+      reveal family relationships; use it only for explicitly selected pairs.
+    url: "https://github.com/brentp/somalier/blob/master/LICENSE"
   modkit-ont-public:
     headline: "RESEARCH-ONLY: modkit"
     body: >-
