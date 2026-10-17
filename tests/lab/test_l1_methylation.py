@@ -319,6 +319,9 @@ def test_global_5mc_streaming_has_bounded_peak_rss(tmp_path: Path) -> None:
     baseline, eager, streamed = peak("open"), peak("eager"), peak("stream")
     assert eager["result"] == [n]
     assert streamed["result"] == [2 / 3, n * 3 // 4]
+    # A 64 MiB fixed increment leaves room for platform allocator variation,
+    # but remains below the cost of eagerly retaining all three normal chunks.
+    assert streamed["rss"] - baseline["rss"] < 64 * 1024 * 1024, (baseline, streamed)
     assert streamed["rss"] - baseline["rss"] < eager["rss"] - baseline["rss"] - 8 * 1024 * 1024, (
         baseline, eager, streamed
     )
