@@ -166,14 +166,23 @@ class MethTF(MethBase):
 
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
         from ..store import LabStore
+        from .cell_origin import header_model
 
+        if ctx.example:
+            raise ValueError("meth-TF cannot score a synthetic example")
         reference = inspect_reference(LabStore(ctx.root))
         if ctx.extras.get("planned_asset_sha256s") != [reference.sha256]:
             raise ValueError("the meth-TF reference changed after execution planning")
         if reference.reference.reference_sha256 != ctx.reference_sha256:
             raise ValueError("the meth-TF marker reference does not match this genome reference")
-        calls, mask = load_calls(ctx)
+        if header_model(ctx.input_dir / "aligned.bam") != reference.reference.modbase_model:
+            raise ValueError("the BAM's modified-base model changed since meth-TF preflight")
         summary = ReadSummary.open(Path(ctx.extras["upstream"]["read-summary"]) / "columns")
+        lengths = dict(zip(summary.contigs, summary.lengths))
+        if any(marker.chrom not in lengths or marker.pos0 >= lengths[marker.chrom]
+               for marker in reference.reference.markers):
+            raise ValueError("meth-TF markers lie outside this reference's autosomal contigs")
+        calls, mask = load_calls(ctx)
         methylated, counts = tally_markers(calls, mask, summary, reference)
         markers = reference.reference.markers
         fraction, residual = solve_two_component(
@@ -187,6 +196,8 @@ class MethTF(MethBase):
         )
         used = int(counts.sum())
         covered = int(np.count_nonzero(counts))
+        if covered <= 2:
+            residual = None  # two fitted weights leave no overdetermined residual
         receipt = {
             "schema": "traceback.lab.meth-tf-fit.v1", "asset_sha256": reference.sha256,
             "reference_sha256": reference.reference.reference_sha256,

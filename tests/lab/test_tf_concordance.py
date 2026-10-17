@@ -44,6 +44,8 @@ def _sample(target: CohortMember, *, pon_policy: str = "lab_full_v1"):
             }),
             "meth-tf": _envelope("meth-tf", {
                 "identifiable": True, "tumor_fraction": 0.25,
+                "markers_covered": 2, "cpg_calls_used": 16,
+                "reference_condition_number": 2.0, "fit_rms": None,
             }),
             "fragment-size": _envelope("fragment-size", {"mode_bp": 120}),
             "mtdna": _envelope("mtdna", {"chrm_fraction": 0.02}),
@@ -62,6 +64,10 @@ def test_paired_signals_use_ten_source_excluded_compatible_controls() -> None:
     assert pairs["cn-meth"]["state"] == "ok"
     assert pairs["cn-meth"]["unavailable_reasons"] == []
     assert (pairs["cn-meth"]["x"], pairs["cn-meth"]["y"]) == (0.25, 0.2)
+    assert pairs["cn-meth"]["support"] == {
+        "markers_covered": 2, "cpg_calls_used": 16,
+        "reference_condition_number": 2.0, "fit_rms": None,
+    }
     assert pairs["cn-size"]["state"] == "ok"
     assert pairs["cn-size"]["reference_n"] == 10
     assert pairs["cn-size"]["baseline_median"] == 105.5

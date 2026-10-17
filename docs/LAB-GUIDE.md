@@ -263,6 +263,10 @@ count-weighted reference columns have numerical rank and a nonzero fit. The
 reported `reference_condition_number` describes how sensitive the numerical
 fit is to small changes; a large value warns of nearly collinear references,
 without implying a validated reliability cutoff.
+The `markers_covered` and `cpg_calls_used` diagnostics show the support for
+the numerical fit, not biological confidence. With exactly two covered
+markers, two weights can fit both observations without residual degrees of
+freedom, so `fit_rms` is unavailable rather than reported as a reassuring zero.
 
 The Agreement lens pairs PoN-qualified copy-number tumour fraction with the
 methylation estimate, a cohort-relative fragment-size mode shift, and a

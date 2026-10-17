@@ -2519,6 +2519,7 @@ entries:
     label: "Marker methylation fit residual RMS"
     value_kind: positive
     headline: false
+    missing_value_caption: "Fewer than three covered markers leave no residual degrees of freedom, or the fit is unidentifiable; inspect marker coverage and call counts."
     meaning_high: "Observed marker fractions differ more from the fitted two-reference mixture."
     meaning_low: "Observed marker fractions lie closer to the fitted two-reference mixture."
   - <<: *meth_tf_metric

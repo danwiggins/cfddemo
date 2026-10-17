@@ -10,6 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
+import pysam
 import pytest
 
 from traceback_lab.algorithms import cell_origin
@@ -175,7 +176,7 @@ def test_registered_worker_produces_exploratory_fraction_and_pinned_attempt(tmp_
     assert values["tumor_fraction"] == pytest.approx(0.25, abs=1e-12)
     assert values["identifiable"] is True
     assert values["markers_covered"] == 2 and values["cpg_calls_used"] == 16
-    assert values["fit_rms"] == pytest.approx(0, abs=1e-12)
+    assert values["fit_rms"] is None  # exactly two observed markers have no residual degrees of freedom
     assert values["reference_condition_number"] == pytest.approx(2)
     receipt = json.loads(output.artifacts["meth_tf_fit.json"])
     assert receipt["asset_sha256"] == registered.sha256
@@ -199,6 +200,25 @@ def test_registered_worker_produces_exploratory_fraction_and_pinned_attempt(tmp_
     assert completed.returncode == 0, completed.stderr
     measured = json.loads((out / "output.json").read_text())
     assert {item["metric_id"]: item["value"] for item in measured["metrics"]}["tumor_fraction"] == pytest.approx(0.25)
+
+    changed_input = tmp_path / "changed-model"
+    changed_input.mkdir()
+    with pysam.AlignmentFile(str(ctx.input_dir / "aligned.bam"), "rb") as bam:
+        header = bam.header.to_dict()
+    for read_group in header["RG"]:
+        read_group["DS"] = read_group["DS"].replace("synthetic-model", "changed-model")
+    with pysam.AlignmentFile(str(changed_input / "aligned.bam"), "wb", header=header):
+        pass
+    changed_request = tmp_path / "changed-model-request.json"
+    changed_request.write_text(json.dumps({
+        "entry": "meth_tf:METH_TF", "context": context_to_json(replace(ctx, input_dir=changed_input)),
+        "out_dir": str(tmp_path / "changed-model-output"),
+    }))
+    changed = subprocess.run(
+        [sys.executable, "-m", "traceback_lab.worker", str(changed_request)],
+        capture_output=True, text=True, check=False, timeout=30,
+    )
+    assert changed.returncode != 0 and "modified-base model changed" in changed.stderr
 
 
 def test_real_modification_bam_flows_through_call_store_worker_and_derived_mask(tmp_path: Path) -> None:
@@ -251,6 +271,7 @@ def test_real_modification_bam_flows_through_call_store_worker_and_derived_mask(
     fit = json.loads((out / "artifacts" / "meth_tf_fit.json").read_text())
     assert fit["markers_registered"] == 3 and fit["markers_covered"] == 2
     assert fit["cpg_calls_used"] == 16 and fit["call_definition"] == CALL_DEFINITION
+    assert fit["fit_rms"] is None
 
     derived_ctx = replace(ctx, derived={"transform": "split", "half": "A"})
     derived_calls, derived_mask = load_calls(derived_ctx)

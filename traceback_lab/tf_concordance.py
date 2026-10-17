@@ -97,11 +97,18 @@ def report_tf_concordance(
     mt_reasons = (["missing_mtdna"] if mt is None else []) + (
         ["no_mtdna_baseline"] if mt_baseline is None else []
     )
+    meth_pair = pair("cn-meth", "Methylation TF vs copy-number TF",
+                     "methylation tumour fraction", meth, meth_reasons)
+    meth_pair["support"] = {
+        "markers_covered": _metric(sample, "meth-tf", "markers_covered"),
+        "cpg_calls_used": _metric(sample, "meth-tf", "cpg_calls_used"),
+        "reference_condition_number": _number(_metric(sample, "meth-tf", "reference_condition_number")),
+        "fit_rms": _number(_metric(sample, "meth-tf", "fit_rms")),
+    }
     return {
         "caption": CAPTION, "wgd_caveat": WGD_CAVEAT,
         "pairs": [
-            pair("cn-meth", "Methylation TF vs copy-number TF",
-                 "methylation tumour fraction", meth, meth_reasons),
+            meth_pair,
             pair("cn-size", "Size shift vs copy-number TF",
                  "fragment-size mode shift from cohort median (bp)",
                  size - size_baseline if size is not None and size_baseline is not None else None,
