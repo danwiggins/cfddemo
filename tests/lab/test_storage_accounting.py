@@ -56,6 +56,19 @@ def test_other_sample_prevents_single_sample_ac4_claim(tmp_path):
     assert report["literal_ac4_at_most_1_2"] is None
 
 
+@pytest.mark.parametrize("kind", ["empty_directory", "zero_byte_file"])
+def test_other_input_presence_prevents_single_sample_claim(tmp_path, kind):
+    source, _ = _fixture(tmp_path)
+    if kind == "empty_directory":
+        (tmp_path / "lab" / "inputs" / ("d" * 64)).mkdir()
+    else:
+        _write(tmp_path, "inputs/unrelated.tmp", 0)
+    report = account(tmp_path, source)
+    assert report["other_input_bytes"] == 0
+    assert report["literal_ac4_single_sample_applicable"] is False
+    assert report["literal_ac4_at_most_1_2"] is None
+
+
 def test_ratio_over_limit_is_reported_false(tmp_path):
     source, full = _fixture(tmp_path)
     _write(tmp_path, f"inputs/{full}/extra", 30)

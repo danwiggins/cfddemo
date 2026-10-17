@@ -55,12 +55,13 @@ def _file_size(path: Path) -> int:
     return info.st_size
 
 
-def _inventory(lab: Path, max_entries: int) -> tuple[dict[str, int], int]:
+def _inventory(lab: Path, max_entries: int) -> tuple[dict[str, int], int, set[str]]:
     """Count each file once; reject links and capped/incomplete walks."""
     sizes: dict[str, int] = defaultdict(int)
     pending = [lab]
     seen = 0
     staging_entries = 0
+    input_entries: set[str] = set()
     while pending:
         directory = pending.pop()
         try:
@@ -73,6 +74,8 @@ def _inventory(lab: Path, max_entries: int) -> tuple[dict[str, int], int]:
                         info = entry.stat(follow_symlinks=False)
                     except OSError as exc:
                         raise InventoryError("inventory entry became unreadable") from exc
+                    if directory == lab / "inputs":
+                        input_entries.add(entry.name)
                     if entry.name.startswith(".staging-"):
                         staging_entries += 1
                     if stat.S_ISDIR(info.st_mode):
@@ -84,7 +87,7 @@ def _inventory(lab: Path, max_entries: int) -> tuple[dict[str, int], int]:
                         raise InventoryError("inventory contains a link or special file")
         except OSError as exc:
             raise InventoryError("inventory directory is unreadable") from exc
-    return dict(sizes), staging_entries
+    return dict(sizes), staging_entries, input_entries
 
 
 def account(root: Path, source_id: str, input_id: str | None = None, *,
@@ -123,7 +126,8 @@ def account(root: Path, source_id: str, input_id: str | None = None, *,
     denominator = bam_bytes + bai_bytes
     if denominator == 0:
         raise InventoryError("aligned BAM and index have zero combined bytes")
-    sizes, staging_entries = _inventory(lab, max_entries)
+    sizes, staging_entries, input_entries = _inventory(lab, max_entries)
+    other_input_present = bool(input_entries - sample_ids - {"index.json"})
     sample_inputs = 0
     other_inputs = 0
     shared_input_cache = 0
@@ -170,9 +174,9 @@ def account(root: Path, source_id: str, input_id: str | None = None, *,
         "ac4_denominator_basis": "selected full aligned.bam plus aligned.bam.bai",
         "literal_lab_inputs_bytes": literal_inputs,
         "literal_lab_inputs_ratio": literal_inputs / denominator,
-        "literal_ac4_single_sample_applicable": other_inputs == 0,
+        "literal_ac4_single_sample_applicable": not other_input_present,
         "literal_ac4_at_most_1_2": (literal_inputs * 5 <= denominator * 6)
-        if other_inputs == 0 else None,
+        if not other_input_present else None,
         "sample_input_bytes": sample_inputs,
         "shared_input_hash_cache_bytes": shared_input_cache,
         "other_input_bytes": other_inputs,
