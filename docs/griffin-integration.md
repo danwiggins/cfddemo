@@ -12,10 +12,13 @@ upstream `*.GC_corrected.coverage.tsv` format. It keeps the original bin-start
 coordinates, GC-corrected coverage, central coverage, amplitude, site-list
 name/count, smoothing and CNA-normalization state. It rejects uncorrected,
 non-finite, malformed, or wrong-sample files. The parser was checked against
-the vendored upstream `Healthy_demo.GC_corrected.coverage.tsv` fixture (one CTCF list, 132
-15-bp bins) from upstream commit
-`b624c7a2ea7b8758b6eebd424066c815bfeece61`; its exact-byte SHA-256 is
-`4e7b430bc98d67d704e506ee41d2650b76bad3cc0a55be919f7884d0137ecc88`.
+the reproducible `Synthetic_demo.GC_corrected.coverage.tsv` fixture (one
+artificial site list, 132 15-bp bins). Its column layout follows Griffin's
+public output format at upstream commit
+`b624c7a2ea7b8758b6eebd424066c815bfeece61`; all data values and labels
+are generated locally by `python -m tests.lab.generate_griffin_fixture`.
+Its exact-byte SHA-256 is
+`6dde4e889ce0feff498de054d5b629c24b0092e63fbd035ac99be86250fafdf0`.
 
 `traceback_lab.adapters.griffin_run.run_upstream` drives that pinned upstream
 checkout, rather than approximating the measurement. It runs Griffin's GC

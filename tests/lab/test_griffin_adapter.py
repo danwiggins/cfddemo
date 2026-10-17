@@ -12,6 +12,7 @@ import pytest
 
 from traceback_lab.adapters.griffin import GriffinFormatError, read_corrected_profiles
 from traceback_lab.adapters.griffin_run import GRIFFIN_COMMIT, GriffinRun, run_upstream
+from .generate_griffin_fixture import synthetic_bytes
 
 
 @pytest.mark.parametrize("unsafe", ["space name", "dollar$", "semi;colon", "back`tick", "star*", "tilde~", "new\nline"])
@@ -75,25 +76,30 @@ def test_site_list_cannot_extend_beyond_profiled_autosomes(tmp_path: Path) -> No
         _require_site_contigs(sites, ("chr1",))
 
 
-def test_reads_pinned_upstream_healthy_demo_fixture() -> None:
-    path = Path(__file__).parent / "fixtures" / "griffin" / "Healthy_demo.GC_corrected.coverage.tsv"
+def test_reads_reproducible_synthetic_griffin_format_fixture() -> None:
+    path = Path(__file__).parent / "fixtures" / "griffin" / "Synthetic_demo.GC_corrected.coverage.tsv"
+    assert path.read_bytes() == synthetic_bytes()
     assert hashlib.sha256(path.read_bytes()).hexdigest() == (
-        "4e7b430bc98d67d704e506ee41d2650b76bad3cc0a55be919f7884d0137ecc88"
+        "6dde4e889ce0feff498de054d5b629c24b0092e63fbd035ac99be86250fafdf0"
     )
-    profile, = read_corrected_profiles(path, expected_sample="Healthy_demo")
-    assert profile.site_name == "CTCF_demo"
+    profile, = read_corrected_profiles(path, expected_sample="Synthetic_demo")
+    assert profile.site_name == "CTCF_synthetic"
     assert profile.site_count == 1000
     assert len(profile.offsets_bp) == 132
     assert profile.offsets_bp[0] == -990 and profile.offsets_bp[-1] == 975
+    assert profile.offsets_bp == tuple(range(-990, 976, 15))
+    assert profile.coverage[0] == 0.8
+    assert profile.central_coverage == 0.912
+    assert profile.smoothing is True and profile.cna_normalization is False
 
 
 def test_rejects_renamed_upstream_coordinate_column(tmp_path: Path) -> None:
-    source = Path(__file__).parent / "fixtures" / "griffin" / "Healthy_demo.GC_corrected.coverage.tsv"
+    source = Path(__file__).parent / "fixtures" / "griffin" / "Synthetic_demo.GC_corrected.coverage.tsv"
     path = tmp_path / source.name
     raw = source.read_text(encoding="utf-8")
     path.write_text(raw.replace("\t975\tmean_reads_per_bp", "\tlost_975\tmean_reads_per_bp", 1), encoding="utf-8")
     with pytest.raises(GriffinFormatError, match="unknown Griffin output column"):
-        read_corrected_profiles(path, expected_sample="Healthy_demo")
+        read_corrected_profiles(path, expected_sample="Synthetic_demo")
 
 
 @pytest.mark.parametrize(

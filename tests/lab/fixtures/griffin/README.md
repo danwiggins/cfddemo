@@ -1,7 +1,16 @@
-# Pinned Griffin parser fixture
+# Synthetic Griffin-format parser fixture
 
-`Healthy_demo.GC_corrected.coverage.tsv` is copied unchanged from
-`demo/griffin_nucleosome_profiling_demo_files/expected_results/` at Griffin
-commit `b624c7a2ea7b8758b6eebd424066c815bfeece61` (SHA-256
-`4e7b430bc98d67d704e506ee41d2650b76bad3cc0a55be919f7884d0137ecc88`).
-The upstream BSD-3-Clause-Clear license is included as `LICENSE`.
+`Synthetic_demo.GC_corrected.coverage.tsv` contains no observed sample values.
+Run `python -m tests.lab.generate_griffin_fixture` from the repository root to
+regenerate it exactly. Its SHA-256 is
+`6dde4e889ce0feff498de054d5b629c24b0092e63fbd035ac99be86250fafdf0`.
+
+The 132 bin-start coordinate columns (−990 through +975 bp in 15 bp steps)
+and trailing metadata column names model Griffin's public corrected-profile
+TSV format at pinned upstream commit
+`b624c7a2ea7b8758b6eebd424066c815bfeece61`. Every numeric data value,
+site label, and sample label is generated locally. Parser tests verify the
+fixture's exact bytes, full coordinate grid, metadata, and rejection of a
+renamed coordinate column. The separate synthetic workflow proof under
+`docs/proofs/griffin/` exercises the pinned upstream code without committed
+real-sample output.
