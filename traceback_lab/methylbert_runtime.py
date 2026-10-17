@@ -27,6 +27,7 @@ MIN_ELIGIBLE_READS = 2_500_000
 MAX_WALL_SECONDS = 2 * 60 * 60
 MAX_LOG_BYTES = 64 * 1024
 MAX_AGGREGATE_BYTES = 16 * 1024
+MAX_CLASSIFIED_READS = 10_000_000_000
 MAX_CODE_FILE_BYTES = 8 * 1024 * 1024
 MAX_CODE_TOTAL_BYTES = 64 * 1024 * 1024
 AGGREGATE_SCHEMA = "traceback.methylbert-aggregate.v1"
@@ -108,15 +109,19 @@ def installed_identity() -> InstalledCodeIdentity:
 
 def require_ready(
     bundle: Bundle, *, reference_sha256: str, eligible_reads: int | None,
-    platform: str, gpu_available: bool, installed: InstalledCodeIdentity | None = None,
+    platform: str, gpu_available: bool, expected_code_sha256: str,
 ) -> InstalledCodeIdentity:
     """Gate the exact registered model, reference, ONT depth and CUDA runtime."""
 
-    code = installed_identity() if installed is None else installed
+    code = installed_identity()
     if bundle.upstream_commit != PINNED_UPSTREAM_COMMIT or code.commit != PINNED_UPSTREAM_COMMIT:
         raise RuntimeRefusal("MethylBERT source or model was not built at the pinned commit")
     if len(code.sha256) != 64 or any(char not in "0123456789abcdef" for char in code.sha256):
         raise RuntimeRefusal("MethylBERT installed code has no valid byte digest")
+    if (not isinstance(expected_code_sha256, str) or len(expected_code_sha256) != 64
+            or any(char not in "0123456789abcdef" for char in expected_code_sha256)
+            or code.sha256 != expected_code_sha256):
+        raise RuntimeRefusal("MethylBERT installed code differs from the trusted byte digest")
     if bundle.reference_sha256 != reference_sha256:
         raise RuntimeRefusal("MethylBERT model reference differs from the input reference")
     if platform != "ont":
@@ -143,7 +148,9 @@ def read_aggregate(path: Path, *, model_id: str) -> Aggregate:
             if len(data) > MAX_AGGREGATE_BYTES:
                 raise RuntimeRefusal("MethylBERT aggregate is oversized")
         raw = json.loads(data)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+    except RuntimeRefusal:
+        raise
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
         raise RuntimeRefusal("MethylBERT aggregate is unreadable or invalid JSON") from exc
     if not isinstance(raw, dict) or set(raw) != {
         "schema", "model_id", "tumour_fraction", "normal_fraction", "classified_reads",
@@ -154,7 +161,7 @@ def read_aggregate(path: Path, *, model_id: str) -> Aggregate:
            for value in fractions) or not math.isclose(sum(fractions), 1.0, rel_tol=0, abs_tol=1e-6):
         raise RuntimeRefusal("MethylBERT aggregate fractions are invalid")
     count = raw["classified_reads"]
-    if type(count) is not int or count < 1:
+    if type(count) is not int or not 1 <= count <= MAX_CLASSIFIED_READS:
         raise RuntimeRefusal("MethylBERT aggregate has no classified reads")
     return Aggregate(model_id, float(fractions[0]), float(fractions[1]), count)
 
@@ -169,8 +176,12 @@ def run_worker(
         raise RuntimeRefusal("MethylBERT worker executable must be absolute")
     if not scratch.is_absolute() or not aggregate_path.is_absolute():
         raise RuntimeRefusal("MethylBERT scratch and aggregate paths must be absolute")
-    if (not aggregate_path.parent.resolve(strict=True).is_relative_to(scratch.resolve(strict=True))
-            or aggregate_path.exists() or aggregate_path.is_symlink()):
+    try:
+        scratch_root = scratch.resolve(strict=True)
+        parent = aggregate_path.parent.resolve(strict=True)
+    except OSError as exc:
+        raise RuntimeRefusal("MethylBERT scratch or aggregate parent is missing") from exc
+    if not parent.is_relative_to(scratch_root) or aggregate_path.exists() or aggregate_path.is_symlink():
         raise RuntimeRefusal("MethylBERT aggregate must be a new file inside private scratch")
     result = run_contained(
         argv, env=env, cwd=scratch, timeout_seconds=MAX_WALL_SECONDS,
@@ -178,4 +189,9 @@ def run_worker(
     )
     if not result.succeeded:
         raise RuntimeRefusal("MethylBERT worker failed, timed out, or was aborted")
+    try:
+        if not aggregate_path.parent.resolve(strict=True).is_relative_to(scratch_root):
+            raise RuntimeRefusal("MethylBERT aggregate escaped private scratch")
+    except OSError as exc:
+        raise RuntimeRefusal("MethylBERT aggregate parent disappeared") from exc
     return read_aggregate(aggregate_path, model_id=model_id)

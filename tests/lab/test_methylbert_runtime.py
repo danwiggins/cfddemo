@@ -24,7 +24,7 @@ def _ready(**changes):
     values = {
         "reference_sha256": "a" * 64, "eligible_reads": 2_500_000,
         "platform": "ont", "gpu_available": True,
-        "installed": runtime.InstalledCodeIdentity(runtime.PINNED_UPSTREAM_COMMIT, "a" * 64),
+        "expected_code_sha256": "a" * 64,
     }
     values.update(changes)
     return runtime.require_ready(_bundle(), **values)
@@ -55,17 +55,29 @@ def test_install_identity_requires_pinned_git_source_and_hashes_actual_code(tmp_
     original = runtime.installed_identity()
     assert original.commit == runtime.PINNED_UPSTREAM_COMMIT
     assert len(original.sha256) == 64
+    assert runtime.require_ready(
+        _bundle(), reference_sha256="a" * 64, eligible_reads=2_500_000,
+        platform="ont", gpu_available=True, expected_code_sha256=original.sha256,
+    ) == original
     code.write_text("changed source\n")
     assert runtime.installed_identity().sha256 != original.sha256
+    with pytest.raises(runtime.RuntimeRefusal, match="trusted byte digest"):
+        runtime.require_ready(
+            _bundle(), reference_sha256="a" * 64, eligible_reads=2_500_000,
+            platform="ont", gpu_available=True, expected_code_sha256=original.sha256,
+        )
     monkeypatch.setattr(runtime.metadata, "distribution", lambda _name: Distribution({**valid, "url": "https://example.org/model.git"}))
     with pytest.raises(runtime.RuntimeRefusal, match="pinned upstream repository"):
         runtime.installed_identity()
 
 
-def test_readiness_requires_pinned_model_reference_depth_ont_and_gpu():
+def test_readiness_requires_pinned_model_reference_depth_ont_and_gpu(monkeypatch):
+    monkeypatch.setattr(runtime, "installed_identity", lambda: runtime.InstalledCodeIdentity(
+        runtime.PINNED_UPSTREAM_COMMIT, "a" * 64,
+    ))
     assert _ready().sha256 == "a" * 64
     for change, message in (
-        ({"installed": runtime.InstalledCodeIdentity("b" * 40, "a" * 64)}, "pinned commit"),
+        ({"expected_code_sha256": "b" * 64}, "trusted byte digest"),
         ({"reference_sha256": "b" * 64}, "reference differs"),
         ({"eligible_reads": 2_499_999}, "2,500,000"),
         ({"eligible_reads": True}, "2,500,000"),
@@ -74,6 +86,11 @@ def test_readiness_requires_pinned_model_reference_depth_ont_and_gpu():
     ):
         with pytest.raises(runtime.RuntimeRefusal, match=message):
             _ready(**change)
+    monkeypatch.setattr(runtime, "installed_identity", lambda: runtime.InstalledCodeIdentity(
+        "b" * 40, "a" * 64,
+    ))
+    with pytest.raises(runtime.RuntimeRefusal, match="pinned commit"):
+        _ready()
 
 
 def _aggregate(path, **changes):
@@ -96,12 +113,19 @@ def test_only_small_finite_aggregate_without_per_read_fields_is_publishable(tmp_
         ({"tumour_fraction": float("nan")}, "fractions"),
         ({"tumour_fraction": 10**1000}, "fractions"),
         ({"classified_reads": 0}, "no classified reads"),
+        ({"classified_reads": runtime.MAX_CLASSIFIED_READS + 1}, "no classified reads"),
     ):
         _aggregate(path, **change)
         with pytest.raises(runtime.RuntimeRefusal, match=message):
             runtime.read_aggregate(path, model_id="tumour-normal")
     path.write_bytes(b"x" * (runtime.MAX_AGGREGATE_BYTES + 1))
     with pytest.raises(runtime.RuntimeRefusal, match="oversized"):
+        runtime.read_aggregate(path, model_id="tumour-normal")
+    path.write_text('{"classified_reads":' + "9" * 5000 + "}")
+    with pytest.raises(runtime.RuntimeRefusal, match="invalid JSON"):
+        runtime.read_aggregate(path, model_id="tumour-normal")
+    path.write_text("[" * 3000 + "0" + "]" * 3000)
+    with pytest.raises(runtime.RuntimeRefusal, match="invalid JSON"):
         runtime.read_aggregate(path, model_id="tumour-normal")
 
 
@@ -128,4 +152,9 @@ def test_worker_launch_uses_contained_deadline_and_private_aggregate(tmp_path, m
         runtime.run_worker(
             [sys.executable, "worker.py"], scratch=scratch, env={}, aggregate_path=aggregate,
             model_id="tumour-normal",
+        )
+    with pytest.raises(runtime.RuntimeRefusal, match="parent is missing"):
+        runtime.run_worker(
+            [sys.executable, "worker.py"], scratch=scratch, env={},
+            aggregate_path=scratch / "missing" / "aggregate.json", model_id="tumour-normal",
         )
