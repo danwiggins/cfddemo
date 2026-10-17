@@ -110,11 +110,18 @@ class LibraryHolder:
             if mtimes != self._mtimes:
                 self._mtimes = mtimes
                 try:
-                    self.library = parse_library(LIBRARY_FILE.read_text(), LICENSES_FILE.read_text())
+                    self.library = parse_library(
+                        LIBRARY_FILE.read_text(encoding="utf-8"),
+                        LICENSES_FILE.read_text(encoding="utf-8"),
+                    )
                     self.loaded_at = time.strftime("%H:%M", time.localtime())
                     self.error = None
                 except LibraryError as exc:
                     self.error = str(exc)[:300]  # names the entry or YAML line, never a path
+                    if self.library is None:
+                        raise
+                except UnicodeDecodeError:
+                    self.error = "the library file is not valid UTF-8"
                     if self.library is None:
                         raise
                 except OSError:
