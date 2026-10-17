@@ -9,7 +9,7 @@ evidence does not qualify this ONT cfDNA transfer.
 The operator supplies an input-scoped JSON contract and an existing NIPTeR
 `NIPTControlGroup` RDS, prepared from euploid pregnancy samples on a matched
 sequencing, alignment, reference, binning, and library protocol. The Lab keeps
-the RDS outside its root and pins its exact bytes; the operator is responsible
+the registered source RDS outside its root and pins its exact bytes; the operator is responsible
 for the cohort's provenance, rights, consent, and match. The operator must also
 keep names, gestational dates, and other patient identifiers out of the contract,
 including its free-text protocol label. The Lab does not attempt to detect them
@@ -53,11 +53,13 @@ path. Registration for an input is immutable.
 The adapter requires at least two million eligible reads, the full aligned
 input, matching source/input/reference IDs, a coordinate-sorted canonical
 hg38 BAM, the verified control RDS, and R 4.4.0 or newer with NIPTeR 1.0.2.
-The Rscript binary, the installed `NIPTeR`, `sets`, `Rsamtools`, and `S4Vectors`
+The resolved Rscript executable file (which may be a launcher), the installed `NIPTeR`, `sets`, `Rsamtools`, and `S4Vectors`
 package files, R adapter code, contract, and RDS digests enter the execution
-identity. Other R dependencies are not byte-pinned. At execution the Lab
-copies the exact verified RDS bytes into a private scratch file that R reads;
-the copy is removed after the adapter returns. A missing or changed
+identity. The underlying R runtime and other R dependencies are not byte-pinned;
+the adapter enforces the minimum R version at execution. At execution the Lab
+copies the exact verified RDS bytes into a private worker scratch directory,
+separate from publishable artifacts; the parent runner removes the whole
+worker scratch tree after execution or timeout. A missing or changed
 prerequisite leaves the method unavailable. The z-scores have no ONT-matched
 reference range or clinical cutoff. Input-scoped prenatal control identities
 are not pooled into a generic healthy-cohort reference. A separate, validated fetal-fraction
