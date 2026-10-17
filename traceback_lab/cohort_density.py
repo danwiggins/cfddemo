@@ -114,7 +114,9 @@ def project_density_band(
     target_result = next((result for result in target.results if result.algorithm_id == "fragment-size"), None)
     if target_result is None or target_result.parameters_sha256 != selected_parameters_sha256:
         return row
-    vectors: list[tuple[float, ...]] = []
+    low: list[float] = []
+    high: list[float] = []
+    eligible_n = 0
     excluded: Counter[str] = Counter()
     for member in generation.members:
         if member.source_id == source_id:
@@ -129,18 +131,25 @@ def project_density_band(
             excluded["missing_pinned_vector"] += 1
         else:
             vector = result.size_density
-            vectors.append(tuple(count / vector.denominator for count in vector.count[49:700]))
-    row["eligible_n"] = len(vectors)
+            denominator = vector.denominator
+            values = [count / denominator for count in vector.count[49:700]]
+            if eligible_n == 0:
+                low, high = values.copy(), values
+            else:
+                for index, value in enumerate(values):
+                    low[index] = min(low[index], value)
+                    high[index] = max(high[index], value)
+            eligible_n += 1
+    row["eligible_n"] = eligible_n
     row["excluded"] = dict(sorted(excluded.items()))
-    if not vectors:
+    if not eligible_n:
         row["state"] = "old_generation_no_vectors" if excluded["missing_pinned_vector"] else "no_eligible_vectors"
-    elif len(vectors) < 10:
+    elif eligible_n < 10:
         row["state"] = "cohort_too_small"
     else:
         row.update({
             "state": "ready", "span_bp": list(range(50, 701)),
-            "low": [min(values) for values in zip(*vectors, strict=True)],
-            "high": [max(values) for values in zip(*vectors, strict=True)],
+            "low": low, "high": high,
         })
     return row
 

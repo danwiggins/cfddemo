@@ -45,11 +45,20 @@ def _member(n: int, *, counts: tuple[int, ...] | None = None, compat: str = COMP
     )
 
 
-def test_generation_band_is_normalized_min_max_and_excludes_target() -> None:
+def test_generation_band_is_normalized_min_max_and_excludes_target(monkeypatch) -> None:
     target = _member(1, counts=_counts(100))
     members = (target, *(_member(n, counts=_counts(n, 10 - n % 5)) for n in range(2, 12)),
                _member(12, counts=_counts(1), compat="d" * 64))
     generation = CohortGeneration(cohort_id="healthy-v1", version=3, members=members)
+    denominator = SizeDensityVector.denominator.fget
+    calls = 0
+
+    def counted_denominator(vector):
+        nonlocal calls
+        calls += 1
+        return denominator(vector)
+
+    monkeypatch.setattr(SizeDensityVector, "denominator", property(counted_denominator))
 
     band = project_density_band(generation, target, target.source_id, PARAMETERS, "ready")
     assert band["state"] == "ready" and band["eligible_n"] == 10
@@ -57,6 +66,8 @@ def test_generation_band_is_normalized_min_max_and_excludes_target() -> None:
     expected = [n / (n + 10 - n % 5) for n in range(2, 12)]
     assert band["low"][50] == pytest.approx(min(expected))   # 100 bp
     assert band["high"][50] == pytest.approx(max(expected))
+    assert band["low"][0] == band["high"][0] == 0
+    assert calls == 10  # one denominator scan per eligible vector, none for self/incompatible
     assert band["excluded"] == {"incompatible": 1, "self": 1}
     assert project_density_band(generation, target, target.source_id, "e" * 64, "ready")["state"] == "target_unavailable"
 
