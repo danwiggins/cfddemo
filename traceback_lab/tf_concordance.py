@@ -33,7 +33,7 @@ def _baseline(
     sample: SampleView, generation: CohortGeneration | None, target: CohortMember | None,
     algorithm_id: str, metric_id: str,
 ) -> tuple[float | None, int]:
-    """Median of source-excluded, protocol-compatible controls only."""
+    """Median of source-excluded, protocol-compatible cohort members."""
     if generation is None or target is None or target.input_id != sample.full.input_id:
         return None, 0
     envelope = sample.full.results.get(algorithm_id)
@@ -98,7 +98,7 @@ def report_tf_concordance(
         ["no_mtdna_baseline"] if mt_baseline is None else []
     )
     meth_pair = pair("cn-meth", "Methylation TF vs copy-number TF",
-                     "methylation tumour fraction", meth, meth_reasons)
+                     "tumour share of fitted methylation reference weights", meth, meth_reasons)
     meth_pair["support"] = {
         "markers_covered": _metric(sample, "meth-tf", "markers_covered"),
         "cpg_calls_used": _metric(sample, "meth-tf", "cpg_calls_used"),

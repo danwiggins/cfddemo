@@ -934,9 +934,9 @@
       missing_meth_tf: "Methylation tumour fraction is unavailable; inspect the registered marker reference and method result.",
       unidentifiable_meth_tf: "The observed markers did not identify a methylation tumour fraction.",
       missing_size: "Fragment-size mode is unavailable.",
-      no_size_baseline: "A compatible cohort with at least ten controls after source exclusion is needed for a size shift.",
+      no_size_baseline: "A compatible cohort with at least ten members after source exclusion is needed for a size shift.",
       missing_mtdna: "Mitochondrial fraction is unavailable.",
-      no_mtdna_baseline: "A compatible cohort with at least ten controls after source exclusion is needed for an mtDNA trend.",
+      no_mtdna_baseline: "A compatible cohort with at least ten members after source exclusion is needed for an mtDNA trend.",
     };
     for (const pair of (report.pairs || [])) {
       const section = h("section", { class: "panel" }, h("h2", {}, pair.label), flagPill(pair.id === "cn-meth" ? "CLIA" : "FDA"));

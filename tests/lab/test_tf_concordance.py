@@ -53,7 +53,7 @@ def _sample(target: CohortMember, *, pon_policy: str = "lab_loo_v1"):
     ))
 
 
-def test_paired_signals_use_ten_source_excluded_compatible_controls() -> None:
+def test_paired_signals_use_ten_source_excluded_compatible_members() -> None:
     members = tuple(_member(index) for index in range(1, 12))
     generation = CohortGeneration(cohort_id="synthetic", version=1, members=members)
     report = report_tf_concordance(_sample(members[0]), generation, members[0])
@@ -63,6 +63,7 @@ def test_paired_signals_use_ten_source_excluded_compatible_controls() -> None:
     pairs = {pair["id"]: pair for pair in report["pairs"]}
     assert pairs["cn-meth"]["state"] == "ok"
     assert pairs["cn-meth"]["unavailable_reasons"] == []
+    assert pairs["cn-meth"]["x_label"] == "tumour share of fitted methylation reference weights"
     assert (pairs["cn-meth"]["x"], pairs["cn-meth"]["y"]) == (0.25, 0.2)
     assert pairs["cn-meth"]["support"] == {
         "markers_covered": 2, "cpg_calls_used": 16,

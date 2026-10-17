@@ -279,8 +279,9 @@ not automatically meet that definition. For example,
 `{"chrom":"chr1","pos0":101,"healthy":0.25,"tumour":0.75}` illustrates the
 format only; these numbers are synthetic and are not a usable reference.
 Registration is immutable within one Lab root: a different panel needs a
-separate root. Missing, changed, mismatched, or insufficient marker data never
-become a zero tumour estimate. The result has no detection limit, calibrated
+separate root. Skipped, refused, or numerically unidentifiable results are
+unavailable rather than zero; a sparse but identifiable fit can estimate zero.
+The result has no detection limit, calibrated
 interval, or clinical cutoff. If an existing registration is damaged, `lab
 asset add` will not overwrite it: restore that registration's exact files from
 a known-good backup, or use a new ROOT. If planning could not pin a readable
@@ -292,15 +293,16 @@ fit is to small changes; a large value warns of nearly collinear references,
 without implying a validated reliability cutoff.
 The `markers_covered` and `cpg_calls_used` diagnostics show the support for
 the numerical fit, not biological confidence. With exactly two covered
-markers, an unconstrained two-weight fit can have zero numerical residual by
-construction; a boundary-clamped fit can have a nonzero residual. `fit_rms`
-reports that descriptive mismatch in either case, without a goodness-of-fit
-threshold or biological confidence claim.
+markers, a full-rank two-weight fit is exactly determined: an interior feasible
+fit has zero residual up to numerical error, so a near-zero `fit_rms` is not
+evidence of goodness of fit. A boundary-clamped fit may retain mismatch, but
+the residual alone does not identify whether the solution lies on a boundary.
+`fit_rms` has no goodness-of-fit threshold or biological confidence claim.
 
 The Agreement lens pairs PoN-qualified copy-number tumour fraction with the
 methylation estimate, a cohort-relative fragment-size mode shift, and a
-cohort-relative mtDNA fraction trend. The latter two need ten compatible
-controls after excluding the sample itself. The lens computes no combined
+cohort-relative mtDNA fraction trend. The latter two need at least ten compatible
+cohort members after excluding the target source. The lens computes no combined
 score, warns that the signals are not independent, and notes the
 whole-genome-doubling caveat for copy-number tumour fraction. When both sides
 of a pair are unavailable, it shows both reasons.
