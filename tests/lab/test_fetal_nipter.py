@@ -92,12 +92,42 @@ def test_outer_lab_timeout_kills_r_descendant(tmp_path: Path) -> None:
     assert marker.stat().st_size == stopped_at
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Lab process-group cleanup uses POSIX groups")
+def test_inner_r_timeout_reaps_descendant_after_worker_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from .fake_algorithms import INNER_R_TIMEOUT
+
+    marker = tmp_path / "inner-r-ticks.txt"
+    monkeypatch.setenv("LAB_TEST_INNER_R_TICKS", str(marker))
+    store = LabStore(tmp_path / "root")
+    store.ensure()
+    run_id = new_run_id()
+    target = RunTarget(INPUT, SOURCE, tmp_path, "hg38", REFERENCE)
+    results = run_plan(
+        store, None, store.run_log(run_id), target,
+        [PlanItem(INNER_R_TIMEOUT, False)],
+        {INNER_R_TIMEOUT.id: "tests.lab.fake_algorithms:INNER_R_TIMEOUT"},
+        run_id=run_id, timeout_s=20, scrubber=Scrubber(root=store.root),
+    )
+    assert len(results) == 1 and results[0].status == "failed"
+    saved = store.read_result(INPUT, INNER_R_TIMEOUT.id, results[0].parameters_sha256)
+    assert saved is not None and saved.failure is not None
+    assert not saved.failure.timed_out, "the inner timeout must finish before the outer deadline"
+    assert marker.is_file(), "the R descendant must run before the inner timeout"
+    stopped_at = marker.stat().st_size
+    time.sleep(0.5)
+    assert marker.stat().st_size == stopped_at
+    assert not (store.lab / "tmp" / run_id).exists()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="planning probe process groups use POSIX cleanup")
 def test_planning_and_preflight_package_probes_kill_launcher_descendants(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path, digest, _ = _contract(tmp_path)
     store = LabStore(tmp_path / "root")
+    _stored_input(store)
     register_contract(store, path, digest)
     marker, pids = tmp_path / "ticks", tmp_path / "pids"
     child = tmp_path / "ticker.py"
@@ -155,11 +185,25 @@ def _contract(tmp_path: Path, *, control_n: int = 20, sex: str = "unknown") -> t
     return path, hashlib.sha256(path.read_bytes()).hexdigest(), control
 
 
+def _stored_input(store: LabStore, *, source_id: str = SOURCE,
+                  reference_sha256: str = REFERENCE) -> None:
+    store.ensure()
+    directory = store.inputs_dir / INPUT
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "manifest.json").write_text(json.dumps({
+        "input_id": INPUT, "source_id": source_id,
+        "reference_sha256": reference_sha256,
+    }))
+
+
 def test_contract_is_immutable_and_rehashes_external_control(tmp_path: Path) -> None:
     path, digest, control = _contract(tmp_path)
     store = LabStore(tmp_path / "root")
     with pytest.raises(FetalContractError, match="expected contract SHA"):
         register_contract(store, path, "x")
+    with pytest.raises(FetalContractError, match="stored input manifest"):
+        register_contract(store, path, digest)
+    _stored_input(store)
     registered = register_contract(store, path, digest)
     assert registered == inspect_contract(store, INPUT)
     assert register_contract(store, path, digest) == registered
@@ -171,6 +215,7 @@ def test_contract_is_immutable_and_rehashes_external_control(tmp_path: Path) -> 
 def test_fetal_cli_register_and_inspect_keep_external_path_private(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     path, digest, control = _contract(tmp_path)
     root = tmp_path / "root"
+    _stored_input(LabStore(root))
     assert lab_main(["fetal", "register", "--file", str(path), "--sha256", digest,
                      "--root", str(root), "--json"]) == 0
     registered = json.loads(capsys.readouterr().out)
@@ -180,6 +225,22 @@ def test_fetal_cli_register_and_inspect_keep_external_path_private(tmp_path: Pat
     inspected = json.loads(capsys.readouterr().out)
     assert inspected["data"]["control_n"] == 20
     assert str(control) not in json.dumps(inspected)
+
+
+@pytest.mark.parametrize("manifest_change", [
+    {"source_id": "d" * 64}, {"reference_sha256": "e" * 64},
+])
+def test_prenatal_registration_refuses_wrong_stored_input_binding(
+    tmp_path: Path, manifest_change: dict,
+) -> None:
+    store = LabStore(tmp_path / "root")
+    _stored_input(store, **manifest_change)
+    path, digest, _ = _contract(tmp_path)
+    with pytest.raises(FetalContractError, match="does not match stored input provenance"):
+        register_contract(store, path, digest)
+    assert not (store.lab / "assets" / "fetal-fraction" / INPUT).exists()
+    _stored_input(store)
+    assert register_contract(store, path, digest).manifest_sha256 == digest
 
 
 @pytest.mark.parametrize("edit", [
@@ -202,6 +263,7 @@ def test_contract_rejects_missing_attestation_or_unsupported_model(tmp_path: Pat
 def test_nipter_preflight_and_synthetic_adapter_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path, digest, control = _contract(tmp_path)
     store = LabStore(tmp_path / "root")
+    _stored_input(store)
     contract = register_contract(store, path, digest)
     runtime = tmp_path / "Rscript"
     runtime.write_bytes(b"synthetic executable stand-in")

@@ -6,7 +6,8 @@ NIPTeR does not include a fetal-fraction estimator. No aneuploidy call,
 screen-positive cutoff, or clinical reassurance is produced. Short-read NIPT
 evidence does not qualify this ONT cfDNA transfer.
 
-The operator supplies an input-scoped JSON contract and an existing NIPTeR
+After ingesting the input, the operator supplies an input-scoped JSON contract
+and an existing NIPTeR
 `NIPTControlGroup` RDS, prepared from euploid pregnancy samples on a matched
 sequencing, alignment, reference, binning, and library protocol. The Lab keeps
 the registered source RDS outside its root and pins its exact bytes; the operator is responsible
@@ -48,7 +49,8 @@ admission checks, not clinical validation thresholds. The operator registers
 the exact manifest with `traceback lab fetal register --file CONTRACT.json
 --sha256 HEX_SHA256 --root ROOT`; `traceback lab fetal inspect INPUT_ID
 --root ROOT` rehashes the contract and RDS without displaying the external
-path. Registration for an input is immutable.
+path. Registration checks the stored input ID, source ID, and reference SHA-256
+before reserving the immutable slot. Registration for an input is immutable.
 
 The adapter requires at least two million eligible reads, an aligned parent
 input, matching source/input/reference IDs, a coordinate-sorted canonical
@@ -73,6 +75,16 @@ prerequisite leaves the method unavailable. The z-scores have no ONT-matched
 reference range or clinical cutoff. Input-scoped prenatal control identities
 are not pooled into a generic healthy-cohort reference. A separate, validated fetal-fraction
 model is still required before that metric can be reported.
+
+The adapter's `bin_bam_sample` arguments, `calculate_z_score` arguments and
+`sample_Zscore` result field match the published
+[NIPTeR 1.0.2 binning reference](https://search.r-project.org/CRAN/refmans/NIPTeR/html/bin_bam_sample.html)
+and [Z-score reference](https://search.r-project.org/CRAN/refmans/NIPTeR/html/calculate_z_score.html).
+The package's [control-group description](https://rdrr.io/cran/NIPTeR/f/vignettes/NIPTeR.Rmd)
+also documents `samples` and `correction_status_autosomal_chromosomes`.
+The repository tests use a synthetic R process; they do not execute NIPTeR
+1.0.2 against a real matched control RDS. That runtime qualification remains
+necessary before relying on the reported z-scores.
 
 The control RDS must come from a trusted operator: a matching SHA-256 proves
 which bytes were supplied, not that deserializing them is safe. The R 4.4.0
