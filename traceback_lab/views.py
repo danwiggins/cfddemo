@@ -331,8 +331,11 @@ def stability_panels(sample: SampleView, library: Library | None = None) -> list
             if spec is None or not isinstance(metric.value, (int, float)) or isinstance(metric.value, bool):
                 continue
             points = []
+            unstable_below = False
             for view in [*downs, sample.full]:
                 state = cell_state(view, sample.full, algorithm_id, metric.metric_id, library)
+                if view.fraction < 1.0 and state.get("verdict") is False:
+                    unstable_below = True
                 envelope = view.results.get(algorithm_id)
                 current = _value(envelope, metric.metric_id) if envelope is not None else None
                 y, unit = deviation(spec, current.value if current else None, metric.value, view.fraction)
@@ -386,7 +389,7 @@ def stability_panels(sample: SampleView, library: Library | None = None) -> list
                 verdict_text = f"usable to {usable_to:g}"
             elif not downs:
                 verdict_text = "not measured below full depth"
-            elif any(point["state"] == "ok_unstable" for point in points if point["fraction"] < 1.0):
+            elif unstable_below:
                 verdict_text = "unstable below full depth"
             elif any(point["state"] == "ok_usable" for point in points if point["fraction"] < 1.0):
                 verdict_text = "usable only at isolated lower depths"
