@@ -23,6 +23,7 @@ inspect INPUT_ID --root ROOT` verifies the registration. The schema is:
   "calibration_status": "operator_verified",
   "calibration_source": "operator's matched-mixture study and version",
   "protocol_label": "matched sequencing, alignment, and counting protocol",
+  "counting_protocol": "D21-canonical-chrY-nonPAR-starts-per-million-all-eligible.v1",
   "female_control_n": 10,
   "male_calibration_n": 10,
   "min_depth_x": 4.0,
@@ -45,6 +46,11 @@ fraction is `(observed - female_background) / (full_male_response -
 female_background)`. It returns null below the background or above the full
 male response rather than extrapolating or clipping. The adapter also requires
 canonical hg38 chr1–22, X, Y layout and the calibrated minimum depth.
+The fixed counting-protocol value means D21 primary, mapped, QC-passing,
+non-duplicate reads with MAPQ at least 20 on canonical chromosomes; chrY
+read starts in either pseudoautosomal interval are excluded only from the
+numerator. The operator's background, full-male response, and depth study must
+use this exact count definition and the same reference and laboratory protocol.
 
 ChrY signal can arise from sources other than a donor, and sample identity,
 transplant context, sex-chromosome variation, and assay mismatch can invalidate

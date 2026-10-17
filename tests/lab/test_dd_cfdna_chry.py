@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,8 +16,10 @@ import pytest
 from traceback_lab.algorithms import dd_cfdna_chry as donor
 from traceback_lab.cli import main as lab_main
 from traceback_lab.dd_contract import DonorContractError, inspect_contract, register_contract
-from traceback_lab.registry import InputContext, Ready, Skip
+from traceback_lab.registry import InputContext, Ready, Skip, context_to_json
 from traceback_lab.store import LabStore
+
+from .bam_fixtures import Read, context_for
 
 
 SOURCE = "a" * 64
@@ -29,7 +33,9 @@ def _file(tmp_path: Path, *, status: str = "operator_verified", **changes) -> tu
             "male_donor_attested": True, "female_recipient_attested": True,
             "transplant_attested": True, "pregnancy_excluded_attested": True,
             "calibration_status": status, "calibration_source": "anonymous matched mixtures",
-            "protocol_label": "synthetic ONT protocol", "female_control_n": 10,
+            "protocol_label": "synthetic ONT protocol",
+            "counting_protocol": "D21-canonical-chrY-nonPAR-starts-per-million-all-eligible.v1",
+            "female_control_n": 10,
             "male_calibration_n": 10, "min_depth_x": 4.0,
             "female_background_y_per_million": 1000.0,
             "male_full_donor_y_per_million": 3000.0}
@@ -59,12 +65,27 @@ def test_registration_is_input_scoped_immutable_and_cli_inspectable(tmp_path: Pa
         inspect_contract(store, INPUT)
 
 
+def test_registration_publish_failure_is_structured_and_path_free(tmp_path: Path, monkeypatch, capsys) -> None:
+    path, digest = _file(tmp_path)
+    root = tmp_path / "root"
+    def fail_publish(*_args, **_kwargs):
+        raise OSError(f"private path: {path}")
+    monkeypatch.setattr(LabStore, "publish_directory", fail_publish)
+    assert lab_main(["donor", "register", "--file", str(path), "--sha256", digest,
+                     "--root", str(root), "--json"]) != 0
+    response = json.loads(capsys.readouterr().out)
+    assert response["status"] == "blocked"
+    assert str(path) not in json.dumps(response)
+    assert not (root / "lab" / "assets" / "dd-cfdna-chry" / INPUT).exists()
+
+
 @pytest.mark.parametrize("change", [
     {"male_donor_attested": False}, {"female_recipient_attested": False},
     {"pregnancy_excluded_attested": False}, {"min_depth_x": 0},
     {"min_depth_x": 10 ** 1000},
     {"female_background_y_per_million": 4000}, {"male_full_donor_y_per_million": 1000},
     {"female_control_n": 0}, {"calibration_status": "presumed"},
+    {"counting_protocol": "unknown"},
 ])
 def test_contract_refuses_unverified_assertions_and_invalid_calibration(tmp_path: Path, change: dict) -> None:
     path, digest = _file(tmp_path, **change)
@@ -113,3 +134,40 @@ def test_synthetic_calibration_skips_and_verified_mechanics_use_nonpar_y(tmp_pat
     assert donor.DD_CFDNA_CHRY.preflight(replace(verified_ctx, extras={})).reason_code == "missing_asset"
     lengths[23] -= 1
     assert donor.DD_CFDNA_CHRY.preflight(verified_ctx).reason_code == "reference"
+
+
+def test_real_bam_summary_and_worker_obey_d21_and_par_boundaries(tmp_path: Path) -> None:
+    """Anonymous fixture verifies plumbing; its asserted calibration is not biology."""
+
+    contigs = [(f"chr{i}", 248_956_422 if i == 1 else 1_000_000) for i in range(1, 23)]
+    contigs += [("chrX", 1_000_000), ("chrY", 57_227_415)]
+    reads = [Read(f"autosome-{i}", "chr1", 1000 + i * 1000, "A" * 75) for i in range(7)]
+    reads += [
+        Read("after-par1", "chrY", 2_781_479, "A" * 75),
+        Read("before-par2", "chrY", 56_887_901, "A" * 75),
+        Read("inside-par1", "chrY", 10_000, "A" * 75),
+        Read("low-mapq", "chrY", 3_000_000, "A" * 75, mapq=19),
+        Read("duplicate", "chrY", 3_001_000, "A" * 75, flag=0x400),
+        Read("supplementary", "chrY", 3_002_000, "A" * 75, flag=0x800),
+    ]
+    ctx = context_for(tmp_path, contigs, reads)
+    store = LabStore(tmp_path)
+    path, digest = _file(tmp_path, min_depth_x=0.001,
+                         female_background_y_per_million=100_000,
+                         male_full_donor_y_per_million=300_000)
+    contract = register_contract(store, path, digest)
+    ctx = replace(ctx, source_id=SOURCE, input_id=INPUT, reference_id="hg38",
+                  reference_sha256=REFERENCE, eligible_reads=10, approx_depth_x=0.01,
+                  extras={**ctx.extras, "planned_asset_sha256s": [contract.manifest_sha256]})
+    assert isinstance(donor.DD_CFDNA_CHRY.preflight(ctx), Ready)
+    out = tmp_path / "worker"
+    out.mkdir()
+    request = out / "request.json"
+    request.write_text(json.dumps({"entry": "dd_cfdna_chry:DD_CFDNA_CHRY",
+                                   "context": context_to_json(ctx), "out_dir": str(out)}))
+    subprocess.run([sys.executable, "-m", "traceback_lab.worker", str(request)], check=True)
+    metrics = {item["metric_id"]: item for item in json.loads((out / "output.json").read_text())["metrics"]}
+    assert metrics["chry_nonpar_reads"]["value"] == 2
+    assert metrics["chry_reads_per_million"]["value"] == 200_000
+    assert metrics["dd_cfdna_fraction"]["value"] == pytest.approx(0.5)
+    assert metrics["dd_cfdna_fraction"]["n"] == 10

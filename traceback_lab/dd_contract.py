@@ -20,11 +20,12 @@ if TYPE_CHECKING:
     from .store import LabStore
 
 SCHEMA = "traceback.lab.dd-cfdna-contract.v1"
+COUNTING_PROTOCOL = "D21-canonical-chrY-nonPAR-starts-per-million-all-eligible.v1"
 _SHA = re.compile(r"[0-9a-f]{64}\Z")
 _FIELDS = {"schema", "source_id", "input_id", "reference_sha256",
            "male_donor_attested", "female_recipient_attested",
            "transplant_attested", "pregnancy_excluded_attested",
-           "calibration_status", "calibration_source", "protocol_label",
+           "calibration_status", "calibration_source", "protocol_label", "counting_protocol",
            "female_control_n", "male_calibration_n", "min_depth_x",
            "female_background_y_per_million", "male_full_donor_y_per_million"}
 
@@ -41,6 +42,7 @@ class DonorContract:
     calibration_status: str
     calibration_source: str
     protocol_label: str
+    counting_protocol: str
     female_control_n: int
     male_calibration_n: int
     min_depth_x: float
@@ -98,6 +100,8 @@ def _parse(raw: bytes) -> DonorContract:
         raise DonorContractError("calibration status must be synthetic or operator_verified")
     if not _label(data["calibration_source"]) or not _label(data["protocol_label"]):
         raise DonorContractError("calibration source and protocol labels are required")
+    if data["counting_protocol"] != COUNTING_PROTOCOL:
+        raise DonorContractError("calibration counting protocol is incompatible")
     if any(not isinstance(data[key], int) or isinstance(data[key], bool) or data[key] < 1
            for key in ("female_control_n", "male_calibration_n")):
         raise DonorContractError("calibration cohort counts must be positive")
@@ -111,7 +115,7 @@ def _parse(raw: bytes) -> DonorContract:
         raise DonorContractError("female background and male response must be finite ordered rates")
     return DonorContract(data["source_id"], data["input_id"], data["reference_sha256"],
                          data["calibration_status"], data["calibration_source"],
-                         data["protocol_label"], data["female_control_n"],
+                         data["protocol_label"], COUNTING_PROTOCOL, data["female_control_n"],
                          data["male_calibration_n"], depth, background, male,
                          hashlib.sha256(raw).hexdigest())
 
@@ -163,5 +167,8 @@ def register_contract(store: LabStore, source: Path, expected_sha256: str) -> Do
         (staging / "receipt.json").write_bytes(canonical_json_bytes(
             {"schema": SCHEMA, "sha256": contract.manifest_sha256}))
 
-    store.publish_directory(directory.parent, directory.name, build)
+    try:
+        store.publish_directory(directory.parent, directory.name, build)
+    except OSError as exc:
+        raise DonorContractError("donor calibration could not be published") from exc
     return inspect_contract(store, contract.input_id)

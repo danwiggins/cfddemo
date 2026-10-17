@@ -38,6 +38,7 @@ def _public(contract: DonorContract) -> dict[str, Any]:
             "calibration_status": contract.calibration_status,
             "calibration_source": contract.calibration_source,
             "protocol_label": contract.protocol_label,
+            "counting_protocol": contract.counting_protocol,
             "female_control_n": contract.female_control_n,
             "male_calibration_n": contract.male_calibration_n,
             "min_depth_x": contract.min_depth_x,

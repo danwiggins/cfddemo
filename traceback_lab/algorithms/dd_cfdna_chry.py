@@ -9,7 +9,7 @@ from typing import Any
 
 import numpy as np
 
-from ..dd_contract import DonorContract, DonorContractError, inspect_contract
+from ..dd_contract import COUNTING_PROTOCOL, DonorContract, DonorContractError, inspect_contract
 from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip
 from ._base import Base, load_summary, metric
 from .sex_check import HG38_CHRY_LENGTH, HG38_CHRY_PARS
@@ -37,7 +37,7 @@ class DonorDerivedChrY(Base):
     requires: Requirements = field(default_factory=Requirements)
     parameters: dict[str, Any] = field(default_factory=lambda: {
         "model": "matched_female_background_to_full_male_linear_response",
-        "count": "eligible_chrY_nonPAR_read_starts", "calibration": "input_scoped_sha256",
+        "count": COUNTING_PROTOCOL, "calibration": "input_scoped_sha256",
     })
 
     def asset_sha256s_for_input(self, root: Path, input_id: str) -> list[str]:
