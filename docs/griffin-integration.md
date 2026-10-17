@@ -64,6 +64,10 @@ Python packages, compatibility shim, and relevant environment. Before computatio
 the worker rechecks that digest and the registered asset digest against the
 planned values; a changed runtime or registration cannot reuse or publish under
 the earlier key.
+The published `griffin_provenance.json` is a path-free receipt with selected
+run facts, output hashes, and a SHA-256 of the full attempt manifest. The full
+manifest stays in the operator's attempt directory because it records local
+executable paths and environment variables.
 
 The Lab now registers the exact upstream checkout, Griffin reference inputs,
 and operator-supplied TF-site lists with:
