@@ -37,8 +37,8 @@ adapter remains necessary for the Lab's primary input. The caller supplies
 the registered hg38 FASTA and its SHA-256, Griffin's
 reference assets (including mappability BigWig, exclusion BEDs and all
 15–500 bp genome GC-frequency tables), and high-mappability TF-site lists.
-Every supplied TF-site row must lie on an autosome in the workflow chromosome
-sizes; the attempt records input row counts, while Griffin may retain fewer
+Every supplied TF-site row must place an autosome from the workflow chromosome
+sizes in its named `Chrom` column. The attempt records input row counts, while Griffin may retain fewer
 sites after its own filtering. A complete status never implies zero site
 attrition or adequate fragment support at each site.
 It requires the 5M D21 gate, a clean upstream checkout at the pinned commit,
