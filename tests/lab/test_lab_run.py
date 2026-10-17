@@ -277,6 +277,18 @@ def test_failed_algorithm_exits_8_with_scrubbed_stderr_and_rerun_recomputes_only
     persisted = json.dumps(envelope.model_dump())
     assert "DonorName" not in persisted and "/Users/someone" not in persisted
     assert "<path>" in persisted
+    step_events = [event for event in store.run_log(data["run_id"]).events()
+                   if event.get("event") == "step_end" and event.get("step") in steps]
+    assert {"failed", "skipped"} <= {event["status"] for event in step_events}
+    for event in step_events:
+        selected = store.selected_attempt(input_id, event["step"], event["parameters_sha256"])
+        assert selected is not None and event["attempt_id"] == selected.name
+        assert event["input_id"] == input_id
+    first_success = next(event for run_id in store.run_ids()
+                         for event in store.run_log(run_id).events()
+                         if event.get("event") == "step_end" and event.get("step") == "read-summary")
+    selected_success = store.selected_attempt(input_id, "read-summary", first_success["parameters_sha256"])
+    assert selected_success is not None and first_success["attempt_id"] == selected_success.name
 
 
 def test_algorithm_timeout_kills_its_grandchild(lab_world, capsys, monkeypatch, shared_mmi) -> None:
