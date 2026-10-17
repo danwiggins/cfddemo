@@ -355,8 +355,9 @@ script or style, no outside requests.
   shows its own status when a result is skipped, failed, or lacks a numeric
   metric; a split-half verdict appears only when both values are available
   and the stability comparison is interpretable. Raw A/B values and their
-  relative difference remain visible without a verdict; the REPEATABILITY
-  summary counts only metrics with a validated split-half verdict.
+  relative difference remain visible without a verdict. REPEATABILITY's
+  median and worst-three list include every numeric split comparison; only
+  metrics with a validated verdict enter its stability count.
 
 ## Building a Lab cohort
 

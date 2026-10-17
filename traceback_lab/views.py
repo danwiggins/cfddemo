@@ -390,7 +390,7 @@ def repeatability(panels: list[dict[str, Any]]) -> dict[str, Any] | None:
     rows = [
         (panel["split"]["relative_abs_diff"], panel["label"], panel["split"]["stable"])
         for panel in panels
-        if panel.get("split") is not None and panel["split"]["stable"] is not None
+        if panel.get("split") is not None
     ]
     if not rows:
         return None
@@ -401,6 +401,8 @@ def repeatability(panels: list[dict[str, Any]]) -> dict[str, Any] | None:
     return {
         "median_relative_abs_diff": median,
         "metrics": len(rows),
+        "verdict_metrics": sum(1 for row in rows if row[2] is not None),
+        "no_verdict_metrics": sum(1 for row in rows if row[2] is None),
         "unstable": sum(1 for row in rows if row[2] is False),
         "worst": [{"label": label, "relative_abs_diff": diff, "stable": ok} for diff, label, ok in worst],
     }
