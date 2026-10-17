@@ -319,7 +319,6 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
     else:
         paths = collect_paths(args.inputs)
         chunkset = inspect_chunks(paths, store, skip_bad_chunks=args.skip_bad_chunks, write_cache=False)
-        alignment_required = not chunkset.aligned
         input_platform = _declared_platform(chunkset)
         data["sample"] = {"source_id": chunkset.source_id,
                           "platform": input_platform if chunkset.aligned else "ont"}
@@ -367,6 +366,7 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
                     elif _aligner_change(store, chunkset.source_id, {"samtools": samtools.version, "minimap2": minimap2.version}):
                         reason = "aligner identity changed (TBX-LAB-019): realigns"
             data["alignment"] = reason
+            alignment_required = reason != "reused"
             data["estimate_min"] = [round(low, 1), round(high, 1)]
             lines.append(
                 f"ALIGN     {reason}" + ("" if reason == "reused" else f" · estimate {low:.0f}-{high:.0f} min")

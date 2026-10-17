@@ -22,11 +22,16 @@ def _snapshot(root: Path) -> dict[str, bytes | None]:
     }
 
 
-def _dry_run(capsys: pytest.CaptureFixture[str], store: LabStore, source_id: str) -> tuple[int, dict]:
-    code = signed_cli.main([
+def _dry_run(
+    capsys: pytest.CaptureFixture[str], store: LabStore, source_id: str, *, only: str | None = None,
+) -> tuple[int, dict]:
+    argv = [
         "lab", "run", source_id[:12], "--cohort", "healthy", "--root", str(store.root),
         "--dry-run", "--json",
-    ])
+    ]
+    if only is not None:
+        argv.extend(("--only", only))
+    code = signed_cli.main(argv)
     return code, json.loads(capsys.readouterr().out)
 
 
@@ -58,8 +63,9 @@ def _publish_built_panel(store: LabStore) -> None:
 
 
 @pytest.mark.parametrize("state", ["missing", "unbuilt", "built"])
+@pytest.mark.parametrize("only", [None, "bam-qc"])
 def test_explicit_cohort_preview_checks_built_status_without_writes_or_lock(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], state: str,
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], state: str, only: str | None,
 ) -> None:
     store = LabStore(tmp_path)
     source_id = _sample(store, 20)
@@ -72,12 +78,14 @@ def test_explicit_cohort_preview_checks_built_status_without_writes_or_lock(
     with store.writer("cohort build", new_run_id()):
         before = _snapshot(tmp_path)
         generation = store.generation()
-        code, payload = _dry_run(capsys, store, source_id)
+        code, payload = _dry_run(capsys, store, source_id, only=only)
         assert _snapshot(tmp_path) == before
         assert store.generation() == generation
 
     if state == "built":
         assert code == 0
+        if only == "bam-qc":
+            assert all(row["algorithm_id"] != "copy-number" for row in payload["data"]["plan"])
         assert payload["data"]["cohort"] == {
             "id": "healthy", "version": "healthy:1", "panel": "built",
             "compatibility": "during run",
@@ -101,6 +109,36 @@ def test_new_chunk_preview_defers_compatibility_until_alignment(
     payload = json.loads(capsys.readouterr().out)
     assert code == 0
     assert payload["data"]["cohort"]["compatibility"] == "after alignment"
+    assert _snapshot(store.root) == before
+
+
+def test_reused_alignment_preview_checks_cohort_during_run(
+    lab_world: dict, capsys: pytest.CaptureFixture[str],
+) -> None:
+    store = LabStore(lab_world["root"])
+    chunks = str(lab_world["chunks"])
+    assert signed_cli.main([
+        "lab", "run", chunks, "--root", str(store.root), "--only", "bam-qc",
+        "--no-downsample", "--no-controls",
+    ]) == 0
+    capsys.readouterr()
+    _publish_built_panel(store)
+    before = _snapshot(store.root)
+    code = signed_cli.main([
+        "lab", "run", chunks, "--cohort", "healthy", "--root", str(store.root),
+        "--only", "bam-qc", "--dry-run", "--json",
+    ])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["data"]["alignment"] == "reused"
+    assert payload["data"]["cohort"]["compatibility"] == "during run"
+    assert signed_cli.main([
+        "lab", "run", chunks, "--cohort", "healthy", "--root", str(store.root),
+        "--only", "bam-qc", "--dry-run",
+    ]) == 0
+    human = capsys.readouterr().out
+    assert "ALIGN     reused" in human
+    assert "COHORT    healthy:1 (built; compatibility checked during run)" in human
     assert _snapshot(store.root) == before
 
 
