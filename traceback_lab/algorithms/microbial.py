@@ -190,7 +190,10 @@ def _write_candidates(bam: Path, fasta: Path, read_length: int) -> tuple[int, in
                 out.write(row)
                 staged_bytes += len(row)
     except BaseException:
-        fasta.unlink(missing_ok=True)
+        try:
+            fasta.unlink(missing_ok=True)
+        except OSError:
+            pass  # Preserve the original error; the worker scratch is still removed.
         raise
     finally:
         rows.close()
