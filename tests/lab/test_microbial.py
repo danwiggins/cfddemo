@@ -179,7 +179,7 @@ def test_streamed_outer_timeout_kills_nonreading_classifier_and_cleans_scratch(
         contigs = list(zip(fasta.references, fasta.lengths))
     bam = write_bam(tmp_path / "aligned.bam", contigs, [
         Read(f"candidate-{index}", "chr1", 0, "A" * 75, flag=4) for index in range(2500)
-    ])
+    ], platform="ONT")
     common = [str(bam), "--root", str(store.root), "--no-downsample", "--no-controls", "--json"]
     assert signed_cli.main(["lab", "run", *common, "--only", "read-summary"]) == 0
 
@@ -458,7 +458,7 @@ def microbial_dom_root(tmp_path_factory, synthetic_world):
     with pysam.FastaFile(str(synthetic_world["fasta"])) as fasta:
         contigs = list(zip(fasta.references, fasta.lengths))
     bam = write_bam(base / "aligned.bam", contigs,
-                    [Read("anonymous-synthetic", "chr1", 100, "A" * 75)])
+                    [Read("anonymous-synthetic", "chr1", 100, "A" * 75)], platform="ONT")
     assert signed_cli.main(["lab", "run", str(bam), "--root", str(root),
                             "--only", "read-summary", "--no-downsample", "--no-controls", "--json"]) == 0
     return root
