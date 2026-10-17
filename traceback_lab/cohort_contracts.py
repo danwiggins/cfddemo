@@ -65,6 +65,39 @@ class CohortMember(BaseModel):
         return self
 
 
+class CohortPon(BaseModel):
+    """Pinned build identity for a full panel and its member-specific panels."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    source_ids: tuple[str, ...] = Field(min_length=10)
+    loo_asset_sha256s: tuple[tuple[str, str], ...] = Field(min_length=10)
+    reference_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
+    aligner_identity: str = Field(min_length=1, max_length=160)
+    grid_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
+    counting_parameters_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
+    toolchain_lock_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
+    builder_source_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
+    builder_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
+    validator_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
+    gc_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
+    map_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
+    centromere_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
+
+    @model_validator(mode="after")
+    def _distinct_sources(self) -> CohortPon:
+        if any(not SHA256_PATTERN.fullmatch(item) for item in self.source_ids):
+            raise ValueError("PoN source identities must be SHA-256 digests")
+        if tuple(sorted(set(self.source_ids))) != self.source_ids:
+            raise ValueError("PoN source identities must be distinct and sorted")
+        if tuple(source for source, _ in self.loo_asset_sha256s) != self.source_ids:
+            raise ValueError("PoN leave-one-out identities must match sorted sources")
+        digests = tuple(digest for _, digest in self.loo_asset_sha256s)
+        if any(not SHA256_PATTERN.fullmatch(digest) for digest in digests) or len(set(digests)) != len(digests):
+            raise ValueError("PoN leave-one-out assets must have distinct SHA-256 digests")
+        return self
+
+
 class CohortGeneration(BaseModel):
     """An immutable snapshot selected through ``current.json`` by the store."""
 
@@ -76,6 +109,8 @@ class CohortGeneration(BaseModel):
     kind: Literal["internal_cohort", "provisional_external"] = "internal_cohort"
     members: tuple[CohortMember, ...]
     pon_n: StrictInt = Field(default=0, ge=0)
+    pon_asset_sha256: str | None = Field(default=None, pattern=SHA256_PATTERN.pattern)
+    pon_build: CohortPon | None = None
 
     @model_validator(mode="after")
     def _independent_members(self) -> CohortGeneration:
@@ -84,6 +119,22 @@ class CohortGeneration(BaseModel):
             raise ValueError("duplicate source_id would inflate cohort membership")
         if self.pon_n > len(self.members):
             raise ValueError("pon_n cannot exceed independent member count")
+        if self.pon_build is None:
+            if self.pon_n or self.pon_asset_sha256 is not None or any(member.pon_asset_sha256 for member in self.members):
+                raise ValueError("PoN identities require build provenance")
+        else:
+            by_source = {member.source_id: member for member in self.members}
+            if self.pon_asset_sha256 is None or self.pon_n != len(self.pon_build.source_ids):
+                raise ValueError("full PoN identity and count must match build provenance")
+            loo_by_source = dict(self.pon_build.loo_asset_sha256s)
+            if self.pon_asset_sha256 in loo_by_source.values():
+                raise ValueError("full PoN asset cannot be a leave-one-out asset")
+            if any(source_id not in by_source or by_source[source_id].pon_asset_sha256 != loo_by_source[source_id]
+                   for source_id in self.pon_build.source_ids):
+                raise ValueError("every PoN source needs its own verified leave-one-out panel")
+            if any(member.pon_asset_sha256 is not None and member.source_id not in self.pon_build.source_ids
+                   for member in self.members):
+                raise ValueError("only PoN sources may have leave-one-out panels")
         return self
 
     @property
@@ -187,6 +238,6 @@ def project_metric(
 
 
 __all__ = [
-    "COHORT_SCHEMA", "CohortGeneration", "CohortMember", "CohortResult",
+    "COHORT_SCHEMA", "CohortGeneration", "CohortMember", "CohortPon", "CohortResult",
     "MetricProjection", "project_metric",
 ]
