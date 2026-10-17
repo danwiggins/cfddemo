@@ -348,7 +348,8 @@ class LabApi:
                 entry = row.entry
                 if entry is None and algorithm_id not in library.hidden_algorithms:
                     no_entry += 1
-                elif entry is not None and not entry.citation_verified and entry.get("citations"):
+                elif (entry is not None and algorithm_id not in library.hidden_algorithms
+                      and not entry.citation_verified):
                     unverified.add((row.algorithm_id, row.metric_id))
                 for license_id in (entry.get("license_ids") or []) if entry else []:
                     if license_id not in used_licenses:
@@ -833,6 +834,7 @@ def _catalog(library: Library, order: list[str], algorithms: list[dict[str, Any]
             {
                 "algorithm_id": algorithm_id,
                 "label": entry["label"] if entry else algorithm_id,
+                "has_library_entry": entry is not None,
                 "tier": entry.tier if entry else None,
                 "origin_tier": entry.get("origin_tier") if entry else None,
                 "origin_platform": entry.get("origin_platform") if entry else None,
