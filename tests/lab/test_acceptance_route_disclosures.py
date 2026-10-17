@@ -53,6 +53,7 @@ def test_stored_modkit_result_keeps_its_license_without_labeling_new_decoder() -
     assert "modkit-ont-public" in old
     assert "modkit-ont-public" not in new
     assert "modkit-ont-public" not in skipped
+    assert "modkit-ont-public" in _result_license_ids(entry, "cell-origin", "", "ok")
     assert "modkit-ont-public" in LIBRARY.licenses
     for version, expected in (("1", old), ("2", new)):
         catalog = _catalog(

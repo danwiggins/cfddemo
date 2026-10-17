@@ -802,7 +802,7 @@ def _result_license_ids(
     """Keep modkit disclosure on stored v1 results; v2 runs use the Lab decoder."""
 
     licenses = list(entry.get("license_ids") or []) if entry else []
-    if (algorithm_id == "cell-origin" and algorithm_version == "1" and status == "ok"
+    if (algorithm_id == "cell-origin" and algorithm_version != "2" and status == "ok"
             and "modkit-ont-public" not in licenses):
         licenses.append("modkit-ont-public")
     return licenses

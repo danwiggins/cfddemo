@@ -38,9 +38,8 @@ class Extraction:
 def _reference_sites(record: pysam.AlignedSegment) -> tuple[list[tuple[int, int, dict[str, int]]], int]:
     """Map cytosine MM/ML channels to reference-forward CG candidates.
 
-    The neighboring *query* base need only align adjacently; it may mismatch
-    the reference G. Modkit's ``--cpg`` selects the reference motif, not a
-    motif in the read sequence.
+    Modkit's ``--cpg`` selects the reference motif. The neighboring query base
+    need not align (for example at a read end or across a deletion).
     """
 
     if not mn_ok(record):
@@ -54,19 +53,20 @@ def _reference_sites(record: pysam.AlignedSegment) -> tuple[list[tuple[int, int,
     sequence = record.query_sequence or ""
     sites: dict[tuple[int, int], dict[str, int]] = {}
     for (base, strand, code), entries in parsed.items():
-        if base != "C":
+        if base not in {"C", "G"}:
             continue
         if any(quality < 0 for _, quality in entries):
             raise InvalidMM("MM call without ML")
         for position, quality in entries:
             sites.setdefault((position, strand), {})[str(code)] = int(quality)
-    target_base = "G" if record.is_reverse else "C"
-    positions = [index for index, base in enumerate(sequence) if base == target_base]
     for code, mode in mm_skip_modes(mm_tag(record) or "").items():
-        if code[0] != "C" or mode != ".":
+        if code[0] not in {"C", "G"} or mode != ".":
             continue
         strand = int(record.is_reverse) ^ int(code[1] == "-")
-        for position in positions:
+        target_base = code[0] if not record.is_reverse else ("G" if code[0] == "C" else "C")
+        for position, base in enumerate(sequence):
+            if base != target_base:
+                continue
             sites.setdefault((position, strand), {}).setdefault(code[2:], 0)
     if any(sum(channels.values()) > 255 for channels in sites.values()):
         raise InvalidMM("MM/ML channel probabilities exceed one")
@@ -83,8 +83,7 @@ def _reference_sites(record: pysam.AlignedSegment) -> tuple[list[tuple[int, int,
     dropped = 0
     for (query_position, strand), channels in sorted(sites.items()):
         mod_position = reference_of(query_position)
-        adjacent = reference_of(query_position - 1 if strand else query_position + 1)
-        if mod_position is None or adjacent != mod_position + (-1 if strand else 1):
+        if mod_position is None:
             dropped += 1
             continue
         mapped.append((mod_position - strand, strand, channels))

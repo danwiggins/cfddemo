@@ -111,6 +111,84 @@ def test_c_minus_dot_sites_follow_pysam_query_coordinates_on_both_orientations()
         assert [(position, strand, channels["m"]) for position, strand, channels in sites] == expected
 
 
+def test_reference_cpg_survives_terminal_and_deleted_query_partner(tmp_path: Path) -> None:
+    fasta = tmp_path / "reference.fa"
+    fasta.write_text(">chr1\n" + "A" * 100 + "ACGA" + "A" * 100 + "\n")
+    pysam.faidx(str(fasta))
+    bam = tmp_path / "aligned.bam"
+    header = {"SQ": [{"SN": "chr1", "LN": 204}]}
+    with pysam.AlignmentFile(str(bam), "wb", header=header) as writer:
+        for name, sequence, cigar in (("terminal", "AC", "2M"), ("deletion", "ACA", "2M1D1M")):
+            read = pysam.AlignedSegment(writer.header)
+            read.query_name = name
+            read.query_sequence = sequence
+            read.reference_id = 0
+            read.reference_start = 100
+            read.mapping_quality = 60
+            read.cigarstring = cigar
+            read.set_tag("MM", "C+m?,0;")
+            read.set_tag("ML", array.array("B", [250]))
+            writer.write(read)
+    result = extract_cpg_calls(bam, fasta, maximum_calls=2, filter_threshold=0.9)
+    assert len(result.calls) == 2
+    assert all(call.position0 == 101 and call.state.value == "methylated" for call in result.calls)
+    assert result.dropped_unaligned == 0
+
+    binary = os.environ.get("LAB_MODKIT_PARITY_BINARY")
+    if binary:
+        output = tmp_path / "modkit.tsv"
+        subprocess.run(
+            [binary, "extract", "calls", "--reference", str(fasta), "--cpg",
+             "--filter-threshold", "0.9", "--suppress-progress", str(bam), str(output)],
+            check=True, capture_output=True, text=True, timeout=60,
+        )
+        with output.open(newline="") as stream:
+            rows = list(csv.DictReader(stream, delimiter="\t"))
+        assert {(row["read_id"], int(row["ref_position"]), row["call_code"])
+                for row in rows if row["fail"] == "false"} == {
+                    ("terminal", 101, "m"), ("deletion", 101, "m"),
+                }
+
+
+def test_g_minus_cpg_and_flagless_implicit_calls_match_modkit(tmp_path: Path) -> None:
+    fasta = tmp_path / "reference.fa"
+    fasta.write_text(">chr1\n" + "A" * 100 + "ACGTACGTAA" + "A" * 100 + "\n")
+    pysam.faidx(str(fasta))
+    bam = tmp_path / "aligned.bam"
+    header = {"SQ": [{"SN": "chr1", "LN": 210}]}
+    with pysam.AlignmentFile(str(bam), "wb", header=header) as writer:
+        for name, mm in (("g-minus", "G-m?,0;"), ("flagless", "C+m,1;")):
+            read = pysam.AlignedSegment(writer.header)
+            read.query_name = name
+            read.query_sequence = "ACGTACGTAA"
+            read.reference_id = 0
+            read.reference_start = 100
+            read.mapping_quality = 60
+            read.cigarstring = "10M"
+            read.set_tag("MM", mm)
+            read.set_tag("ML", array.array("B", [250]))
+            writer.write(read)
+    result = extract_cpg_calls(bam, fasta, maximum_calls=3, filter_threshold=0.9)
+    assert sorted((call.position0, call.strand.value, call.state.value) for call in result.calls) == [
+        (101, "+", "unmethylated"), (101, "-", "methylated"), (105, "+", "methylated"),
+    ]
+
+    binary = os.environ.get("LAB_MODKIT_PARITY_BINARY")
+    if binary:
+        output = tmp_path / "modkit.tsv"
+        subprocess.run(
+            [binary, "extract", "calls", "--reference", str(fasta), "--cpg",
+             "--filter-threshold", "0.9", "--suppress-progress", str(bam), str(output)],
+            check=True, capture_output=True, text=True, timeout=60,
+        )
+        with output.open(newline="") as stream:
+            rows = list(csv.DictReader(stream, delimiter="\t"))
+        assert {(row["read_id"], int(row["ref_position"]), row["call_code"])
+                for row in rows if row["fail"] == "false"} == {
+                    ("g-minus", 102, "m"), ("flagless", 101, "-"), ("flagless", 105, "m"),
+                }
+
+
 def test_extraction_cap_refuses_before_unbounded_growth(tmp_path: Path) -> None:
     bam, fasta = _write_input(tmp_path)
     with pytest.raises(ValueError, match="locked cap"):
