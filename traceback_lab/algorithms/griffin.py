@@ -36,7 +36,8 @@ _SAFE_BAM_VALIDATION_MESSAGES = frozenset({
 })
 
 
-def _public_provenance(manifest: dict[str, Any], raw_sha256: str) -> bytes:
+def _public_provenance(manifest: dict[str, Any], raw_sha256: str,
+                       runtime_sha256: str) -> bytes:
     """Publish a path-free receipt; the full runtime record stays in the attempt."""
     fields = (
         "status", "input_id", "upstream_commit", "reference_id", "platform",
@@ -46,6 +47,7 @@ def _public_provenance(manifest: dict[str, Any], raw_sha256: str) -> bytes:
     )
     public = {key: manifest[key] for key in fields if key in manifest}
     public["full_provenance_sha256"] = raw_sha256
+    public["runtime_identity_sha256"] = runtime_sha256
     return json.dumps(public, sort_keys=True, separators=(",", ":")).encode()
 
 
@@ -148,7 +150,8 @@ class Griffin(Base):
         if planned_assets is not None and planned_assets != [assets.sha256]:
             raise RuntimeError("Griffin registration changed after execution identity was set")
         planned_tools = ctx.extras.get("planned_tool_identities")
-        if planned_tools is not None and planned_tools != [tool.identity() for tool in self.identity_tools()]:
+        actual_tools = [tool.identity() for tool in self.identity_tools()]
+        if planned_tools is not None and planned_tools != actual_tools:
             raise RuntimeError("Griffin runtime changed after execution identity was set")
         scratch = (tempfile.TemporaryDirectory(prefix="griffin-derived-", dir=out.parent)
                    if ctx.derived is not None else nullcontext(None))
@@ -210,6 +213,7 @@ class Griffin(Base):
                 "griffin_corrected_coverage.tsv": corrected_bytes,
                 "griffin_provenance.json": _public_provenance(
                     provenance, hashlib.sha256(provenance_bytes).hexdigest(),
+                    actual_tools[-1]["version"],
                 ),
             },
         )
