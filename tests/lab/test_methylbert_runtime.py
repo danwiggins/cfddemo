@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import sys
+from types import SimpleNamespace
 
 import pytest
 
 import traceback_lab.methylbert_runtime as runtime
 from traceback_lab.methylbert_bundle import Bundle
+from traceback_lab.methylbert_child import _save_support_refusal
 from traceback_runner.contained_process import ContainedResult
 
 
@@ -28,6 +30,104 @@ def _ready(**changes):
     }
     values.update(changes)
     return runtime.require_ready(_bundle(), **values)
+
+
+def test_numerical_runtime_identity_is_lightweight_until_a_model_needs_cuda(monkeypatch):
+    monkeypatch.setattr(runtime.metadata, "version", lambda name: f"pinned-{name}")
+    visible = ["fixture GPU 0"]
+    torch = SimpleNamespace(
+        version=SimpleNamespace(cuda="12.4"),
+        cuda=SimpleNamespace(
+            is_available=lambda: True, device_count=lambda: len(visible),
+            current_device=lambda: 0,
+            get_device_name=lambda index: visible[index],
+            get_device_capability=lambda index: (8, 6 + index),
+        ),
+        backends=SimpleNamespace(
+            cuda=SimpleNamespace(matmul=SimpleNamespace(allow_tf32=False)),
+            cudnn=SimpleNamespace(version=lambda: 90100, allow_tf32=True, benchmark=False),
+        ),
+        get_float32_matmul_precision=lambda: "highest",
+    )
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    without_model = runtime.numerical_runtime_identity(probe_gpu=False, isolated_gpu=True)
+    assert without_model["cuda"] is None
+    assert set(without_model["packages"]) == set(runtime.NUMERICAL_PACKAGES)
+    with_model = runtime.numerical_runtime_identity(probe_gpu=True, isolated_gpu=False)
+    assert with_model["cuda"] == {
+        "available": True, "torch_cuda": "12.4", "device_count": 1,
+        "current_device": 0,
+        "devices": [{"name": "fixture GPU 0", "capability": [8, 6]}], "cudnn": 90100,
+        "matmul_allow_tf32": False, "cudnn_allow_tf32": True,
+        "cudnn_benchmark": False, "float32_matmul_precision": "highest",
+    }
+    visible.append("fixture GPU 1")
+    two_devices = runtime.numerical_runtime_identity(probe_gpu=True, isolated_gpu=False)
+    assert two_devices["cuda"]["device_count"] == 2
+    assert two_devices["cuda"]["devices"][1] == {"name": "fixture GPU 1", "capability": [8, 7]}
+    assert two_devices != with_model
+
+
+def test_child_runtime_guard_refuses_a_changed_numerical_package(monkeypatch):
+    expected = {"python": "3.11", "packages": {"torch": "2.1"}, "cuda": {"device": "fixture"}}
+    monkeypatch.setattr(runtime, "numerical_runtime_identity", lambda **_kwargs: expected)
+    assert runtime.require_numerical_runtime(expected) == expected
+    monkeypatch.setattr(runtime, "numerical_runtime_identity", lambda **_kwargs: {
+        **expected, "packages": {"torch": "2.2"},
+    })
+    with pytest.raises(runtime.RuntimeRefusal, match="numerical runtime differs"):
+        runtime.require_numerical_runtime(expected)
+
+
+def test_parent_gpu_identity_uses_a_bounded_process_without_importing_cuda(monkeypatch):
+    monkeypatch.setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+    monkeypatch.setattr(runtime, "probe_cuda", lambda: pytest.fail("parent initialized CUDA"))
+    seen = {}
+    cuda = {"available": True, "torch_cuda": "12.4", "device_count": 1}
+    identity = {"python": "3.11", "packages": {"torch": "2.1"}, "cuda": cuda}
+
+    def contained(argv, **kwargs):
+        seen.update({"argv": argv, **kwargs})
+        output = json.dumps(identity).encode()
+        return ContainedResult(tuple(argv), "exited", 0, 0.1, output, b"", len(output), 0, False, False)
+
+    monkeypatch.setattr(runtime, "run_contained", contained)
+    actual = runtime.numerical_runtime_identity(probe_gpu=True, isolated_gpu=True)
+    assert actual == identity
+    assert seen["argv"][1] == "-I"
+    assert seen["argv"][2].endswith("methylbert_gpu_probe.py")
+    assert seen["env"]["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID"
+    assert "NVIDIA_VISIBLE_DEVICES" not in seen["env"]
+    assert seen["timeout_seconds"] == 30
+    assert seen["log_limit_bytes"] == 8 * 1024
+
+    def failed_probe(argv, **_kwargs):
+        return ContainedResult(tuple(argv), "exited", 1, 0.1, b"", b"failure", 0, 7, False, False)
+
+    monkeypatch.setattr(runtime, "run_contained", failed_probe)
+    with pytest.raises(runtime.RuntimeRefusal, match="isolated numerical runtime probe failed"):
+        runtime.numerical_runtime_identity(probe_gpu=True, isolated_gpu=True)
+
+
+def test_child_restores_selected_precision_after_model_import(monkeypatch):
+    precision = []
+    matmul = SimpleNamespace(allow_tf32=True)
+    cudnn = SimpleNamespace(allow_tf32=False, benchmark=True)
+    torch = SimpleNamespace(
+        set_float32_matmul_precision=precision.append,
+        backends=SimpleNamespace(cuda=SimpleNamespace(matmul=matmul), cudnn=cudnn),
+    )
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    expected = {"cuda": {
+        "float32_matmul_precision": "highest", "matmul_allow_tf32": False,
+        "cudnn_allow_tf32": True, "cudnn_benchmark": False,
+    }}
+    runtime.apply_precision_flags(expected)
+    assert precision == ["highest"]
+    assert matmul.allow_tf32 is False
+    assert cudnn.allow_tf32 is True and cudnn.benchmark is False
+    with pytest.raises(runtime.RuntimeRefusal, match="invalid"):
+        runtime.apply_precision_flags({"cuda": {**expected["cuda"], "cudnn_benchmark": "false"}})
 
 
 def test_install_identity_requires_pinned_git_source_and_hashes_record_listed_code(tmp_path, monkeypatch):
@@ -143,6 +243,7 @@ def test_worker_launch_uses_contained_deadline_and_private_aggregate(tmp_path, m
     scratch.mkdir()
     aggregate = scratch / "aggregate.json"
     seen = {}
+    offline = {"HF_HUB_OFFLINE": "1", "HF_DATASETS_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
 
     def contained(argv, **kwargs):
         seen.update({"argv": argv, **kwargs})
@@ -151,7 +252,7 @@ def test_worker_launch_uses_contained_deadline_and_private_aggregate(tmp_path, m
 
     monkeypatch.setattr(runtime, "run_contained", contained)
     result = runtime.run_worker(
-        [sys.executable, "worker.py"], scratch=scratch, env={}, aggregate_path=aggregate,
+        [sys.executable, "worker.py"], scratch=scratch, env=offline, aggregate_path=aggregate,
         model_id="tumour-normal", eligible_reads=runtime.MIN_ELIGIBLE_READS,
     )
     assert result.tumour_fraction == 0.2
@@ -159,12 +260,12 @@ def test_worker_launch_uses_contained_deadline_and_private_aggregate(tmp_path, m
     assert seen["log_limit_bytes"] == runtime.MAX_LOG_BYTES
     with pytest.raises(runtime.RuntimeRefusal, match="new file"):
         runtime.run_worker(
-            [sys.executable, "worker.py"], scratch=scratch, env={}, aggregate_path=aggregate,
+            [sys.executable, "worker.py"], scratch=scratch, env=offline, aggregate_path=aggregate,
             model_id="tumour-normal", eligible_reads=runtime.MIN_ELIGIBLE_READS,
         )
     with pytest.raises(runtime.RuntimeRefusal, match="parent is missing"):
         runtime.run_worker(
-            [sys.executable, "worker.py"], scratch=scratch, env={},
+            [sys.executable, "worker.py"], scratch=scratch, env=offline,
             aggregate_path=scratch / "missing" / "aggregate.json", model_id="tumour-normal",
             eligible_reads=runtime.MIN_ELIGIBLE_READS,
         )
@@ -174,6 +275,36 @@ def test_worker_launch_uses_contained_deadline_and_private_aggregate(tmp_path, m
     ))
     with pytest.raises(runtime.RuntimeRefusal, match="failed"):
         runtime.run_worker(
-            [sys.executable, "worker.py"], scratch=scratch, env={}, aggregate_path=aggregate,
+            [sys.executable, "worker.py"], scratch=scratch, env=offline, aggregate_path=aggregate,
             model_id="tumour-normal", eligible_reads=runtime.MIN_ELIGIBLE_READS,
+        )
+    with pytest.raises(runtime.RuntimeRefusal, match="unapproved variable"):
+        runtime.run_worker(
+            [sys.executable, "worker.py"], scratch=scratch, env={**offline, "PYTHONPATH": "/tmp/inject"},
+            aggregate_path=aggregate, model_id="tumour-normal",
+            eligible_reads=runtime.MIN_ELIGIBLE_READS,
+        )
+
+
+def test_child_under_floor_reports_only_counts_and_never_publishes_an_aggregate(tmp_path, monkeypatch):
+    scratch = tmp_path / "private"
+    scratch.mkdir()
+    aggregate = scratch / "aggregate.json"
+    _save_support_refusal(scratch, classified=99, minimum=100)
+    monkeypatch.setattr(runtime, "run_contained", lambda argv, **_kwargs: ContainedResult(
+        tuple(argv), "exited", 1, 1.0, b"", b"", 0, 0, False, False,
+    ))
+    offline = {"HF_HUB_OFFLINE": "1", "HF_DATASETS_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
+    with pytest.raises(runtime.RuntimeRefusal, match="support 99 is below qualified floor 100"):
+        runtime.run_worker(
+            [sys.executable, "worker.py"], scratch=scratch, env=offline, aggregate_path=aggregate,
+            model_id="tumour-normal", eligible_reads=runtime.MIN_ELIGIBLE_READS,
+            min_classified_reads=100,
+        )
+    assert not aggregate.exists()
+    with pytest.raises(runtime.RuntimeRefusal, match="worker failed"):
+        runtime.run_worker(
+            [sys.executable, "worker.py"], scratch=scratch, env=offline, aggregate_path=aggregate,
+            model_id="tumour-normal", eligible_reads=runtime.MIN_ELIGIBLE_READS,
+            min_classified_reads=101,
         )

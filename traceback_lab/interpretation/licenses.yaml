@@ -3,6 +3,13 @@
 # callout (>= 20px bold) once per route, pills elsewhere.
 version: 0.1.0
 licenses:
+  methylbert-mit:
+    headline: "MIT: MethylBERT code; model terms are operator supplied"
+    body: >-
+      The MethylBERT source is MIT-licensed. A fine-tuned tumour/normal
+      checkpoint is not distributed with the Lab; its data and model terms
+      must be checked separately by the operator before registration.
+    url: "https://github.com/CompEpigen/methylbert/blob/main/LICENSE"
   lionheart-resources-research:
     headline: "RESEARCH-ONLY RESOURCES: LIONHEART cell-type scores"
     body: >-
