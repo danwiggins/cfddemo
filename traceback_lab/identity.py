@@ -91,16 +91,21 @@ def aligned_input_id(
     )
 
 
-def prealigned_input_id(*, source_id: str, reference_sha256: str) -> str:
+def prealigned_input_id(*, source_id: str, reference_sha256: str, platform: str = "unknown") -> str:
     """The identity of an input that arrived already aligned."""
 
-    return canonical_sha256(
-        {
-            "source_id": _sha(source_id, "source_id"),
-            "reference_sha256": _sha(reference_sha256, "reference_sha256"),
-            "aligner": PRE_ALIGNED,
-        }
-    )
+    if platform not in {"ont", "illumina", "unknown"}:
+        raise ValueError("prealigned platform must be ont, illumina or unknown")
+    identity = {
+        "source_id": _sha(source_id, "source_id"),
+        "reference_sha256": _sha(reference_sha256, "reference_sha256"),
+        "aligner": PRE_ALIGNED,
+    }
+    # Legacy prealigned inputs omitted the platform and were ONT. Keep their
+    # input IDs stable; only Illumina adds a new disambiguating key.
+    if platform == "illumina":
+        identity["platform"] = platform
+    return canonical_sha256(identity)
 
 
 def validate_fraction(value: float) -> float:
@@ -155,6 +160,14 @@ def _tools(tools: Iterable[Mapping[str, str]]) -> list[dict[str, str]]:
     return sorted(pinned, key=lambda tool: (tool["name"], tool["version"]))
 
 
+def _identity_platform(platform: str | None) -> str | None:
+    """Legacy ONT result/cohort identities omitted the platform key."""
+
+    if platform not in {None, "ont", "illumina", "unknown"}:
+        raise ValueError("unknown Lab platform")
+    return None if platform == "ont" else platform
+
+
 def parameters_sha256(
     *,
     algorithm_id: str,
@@ -164,6 +177,7 @@ def parameters_sha256(
     reference_sha256: str,
     asset_sha256s: Iterable[str] = (),
     upstream: Iterable[Mapping[str, str]] = (),
+    platform: str | None = None,
 ) -> str:
     """The execution identity of one result (D19).
 
@@ -173,28 +187,30 @@ def parameters_sha256(
 
     if not ALGORITHM_ID_PATTERN.fullmatch(algorithm_id):
         raise ValueError("algorithm id must match ^[a-z0-9-]{1,40}$")
-    return canonical_sha256(
-        {
-            "algorithm_id": algorithm_id,
-            "algorithm_version": str(algorithm_version),
-            "parameters": dict(parameters),
-            "tools": _tools(tools),
-            "reference_sha256": _sha(reference_sha256, "reference_sha256"),
-            "asset_sha256s": sorted(_sha(item, "asset sha256") for item in asset_sha256s),
-            "upstream": sorted(
-                (
-                    {
-                        "algorithm_id": str(item["algorithm_id"]),
-                        "parameters_sha256": _sha(
-                            str(item["parameters_sha256"]), "upstream parameters_sha256"
-                        ),
-                    }
-                    for item in upstream
-                ),
-                key=lambda item: (item["algorithm_id"], item["parameters_sha256"]),
+    platform = _identity_platform(platform)
+    identity = {
+        "algorithm_id": algorithm_id,
+        "algorithm_version": str(algorithm_version),
+        "parameters": dict(parameters),
+        "tools": _tools(tools),
+        "reference_sha256": _sha(reference_sha256, "reference_sha256"),
+        "asset_sha256s": sorted(_sha(item, "asset sha256") for item in asset_sha256s),
+        "upstream": sorted(
+            (
+                {
+                    "algorithm_id": str(item["algorithm_id"]),
+                    "parameters_sha256": _sha(
+                        str(item["parameters_sha256"]), "upstream parameters_sha256"
+                    ),
+                }
+                for item in upstream
             ),
-        }
-    )
+            key=lambda item: (item["algorithm_id"], item["parameters_sha256"]),
+            ),
+    }
+    if platform is not None:
+        identity["platform"] = platform
+    return canonical_sha256(identity)
 
 
 def cohort_compat_key(
@@ -207,23 +223,26 @@ def cohort_compat_key(
     aligner_identity: Mapping[str, Any],
     pon_policy: str = "none",
     per_sample_asset_keys: Iterable[str] = (),
+    platform: str | None = None,
 ) -> str:
     """May two results be compared?  Per-sample assets (a leave-one-out PoN)
     are removed from ``parameters`` first, so LOO members stay comparable."""
 
     drop = set(per_sample_asset_keys)
     shared = {key: value for key, value in parameters.items() if key not in drop}
-    return canonical_sha256(
-        {
-            "algorithm_id": algorithm_id,
-            "algorithm_version": str(algorithm_version),
-            "parameters": shared,
-            "tools": _tools(tools),
-            "reference_sha256": _sha(reference_sha256, "reference_sha256"),
-            "aligner": dict(aligner_identity),
-            "pon_policy": pon_policy,
-        }
-    )
+    platform = _identity_platform(platform)
+    identity = {
+        "algorithm_id": algorithm_id,
+        "algorithm_version": str(algorithm_version),
+        "parameters": shared,
+        "tools": _tools(tools),
+        "reference_sha256": _sha(reference_sha256, "reference_sha256"),
+        "aligner": dict(aligner_identity),
+        "pon_policy": pon_policy,
+    }
+    if platform is not None:
+        identity["platform"] = platform
+    return canonical_sha256(identity)
 
 
 def shortest_unique_prefixes(ids: Iterable[str], minimum: int = ID12_MIN) -> dict[str, str]:

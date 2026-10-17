@@ -30,10 +30,12 @@ Status = Literal["ok", "skipped", "failed"]
 # Skip reasons the runner and algorithms may record (D7, D14, D22, D36).
 SKIP_REASONS: tuple[str, ...] = (
     "depth",
+    "disk",
     "missing_toolchain",
     "missing_asset",
     "invalid_asset",
     "missing_channel",
+    "input_unavailable",
     "missing_tags",
     "example_reference",
     "platform",

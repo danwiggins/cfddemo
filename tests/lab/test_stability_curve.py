@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
 from traceback_lab import views
+from traceback_lab.envelope import Depth, Metric, Provenance, ResultEnvelope
 from traceback_lab.stability import Side, band_at, deviation, stable
 from traceback_lab.store import LabStore
 from traceback_runner import cli as signed_cli
@@ -51,6 +54,72 @@ def test_d32_table(spec, a, b, expected) -> None:
 def test_absolute_needs_a_tolerance() -> None:
     with pytest.raises(ValueError):
         stable({"kind": "absolute"}, Side(1.0), Side(1.0))
+
+
+def test_unvalidated_depth_dependent_fraction_has_no_stability_verdict() -> None:
+    spec = {"kind": "unvalidated"}
+    assert stable(spec, Side(0.2, n=1_000_000), Side(0.8, n=1_000_000)) is None
+    assert deviation(spec, 0.2, 0.8, 0.5) == (None, "none")
+    assert band_at(spec, Side(0.2), Side(0.8)) is None
+
+
+def test_wps_control_values_are_measured_but_not_declared_usable() -> None:
+    provenance = Provenance(
+        tool="wps", tool_version="1", parameters_sha256="a" * 64,
+        source_id="b" * 64, input_id="c" * 64, reference_id="hg38",
+        timestamp_utc="2026-10-17T00:00:00Z",
+    )
+
+    def view(label: str, fraction: float, value: float, transform: str | None = None) -> views.InputView:
+        result = ResultEnvelope(
+            algorithm_id="wps", algorithm_version="1", status="ok", provenance=provenance,
+            depth=Depth(eligible_reads=1_000_000, approx_depth_x=20 * fraction),
+            metrics=[Metric(metric_id="qualifying_fragment_depth_x", value=value)],
+        )
+        return views.InputView(label, "c" * 64, transform, {"half": label[-1]} if transform == "split" else {},
+                               {"wps": result}, fraction)
+
+    full = view("full", 1.0, 0.7)
+    half = view("0.5", 0.5, 0.4, "downsample")
+    sample = views.SampleView("b" * 64, "b" * 12, False, full,
+                              [half, view("split-A", 0.5, 0.2, "split"),
+                               view("split-B", 0.5, 0.6, "split")])
+    library = views.load_library()
+    cell = views.cell_state(half, full, "wps", "qualifying_fragment_depth_x", library)
+    assert cell == {"state": "ok_unvalidated", "value": 0.4, "verdict": None}
+    panel = next(p for p in views.stability_panels(sample, library)
+                 if p["metric_id"] == "qualifying_fragment_depth_x")
+    assert panel["verdict"] == "stability not validated"
+    assert panel["points"][0]["value"] == 0.4
+    assert panel["points"][0]["deviation"] is None
+    assert panel["split"]["stable"] is None
+    repeatability = views.repeatability(views.stability_panels(sample, library))
+    assert repeatability["metrics"] == 1
+    assert repeatability["no_verdict"] == 1
+    assert repeatability["unstable"] == 0
+    assert all(row["stable"] is None for row in repeatability["worst"])
+
+
+def test_all_skipped_wps_controls_are_not_called_unstable() -> None:
+    provenance = Provenance(
+        tool="wps", tool_version="1", parameters_sha256="a" * 64,
+        source_id="b" * 64, input_id="c" * 64, reference_id="hg38",
+        timestamp_utc="2026-10-17T00:00:00Z",
+    )
+    full_result = ResultEnvelope(
+        algorithm_id="wps", algorithm_version="1", status="ok", provenance=provenance,
+        depth=Depth(eligible_reads=1_000_000, approx_depth_x=12),
+        metrics=[Metric(metric_id="qualifying_fragment_depth_x", value=0.7)],
+    )
+    skipped_result = full_result.model_copy(update={"status": "skipped", "skip_reason": "depth", "metrics": []})
+    full = views.InputView("full", "c" * 64, None, {}, {"wps": full_result}, 1.0)
+    half = views.InputView("0.5", "d" * 64, "downsample", {}, {"wps": skipped_result}, 0.5)
+    sample = views.SampleView("b" * 64, "b" * 12, False, full, [half])
+
+    panel = next(p for p in views.stability_panels(sample)
+                 if p["algorithm_id"] == "wps" and p["metric_id"] == "qualifying_fragment_depth_x")
+    assert panel["points"][0]["state"] == "skipped"
+    assert panel["verdict"] == "not measured below full depth"
 
 
 def test_deviation_and_band_units() -> None:
@@ -100,8 +169,55 @@ def test_default_run_builds_the_curve_and_controls(default_run) -> None:
     assert panels[0]["headline"]
     with_split = [panel for panel in panels if panel["split"] is not None]
     assert {panel["algorithm_id"] for panel in with_split} >= {"bam-qc", "depth", "fragment-size"}
+    assert all(panel["split_status"][half]["state"] == "ok" for panel in with_split for half in ("A", "B"))
     block = views.repeatability(panels)
     assert block["metrics"] == len([p for p in panels if p["split"]])
+
+    with patch.object(views, "stable", return_value=None), patch.object(views, "deviation", return_value=(None, "none")):
+        no_verdict = next(p for p in views.stability_panels(sample)
+                          if p["algorithm_id"] == "fragment-size" and p["metric_id"] == "mode_bp")
+    assert no_verdict["split"]["stable"] is None
+    assert no_verdict["split"]["deviation_a"] is None
+    assert no_verdict["split"]["relative_abs_diff"] >= 0
+    assert all(no_verdict["split_status"][half]["state"] == "ok" for half in ("A", "B"))
+    assert all(no_verdict["split_status"][half]["value"] is not None for half in ("A", "B"))
+
+    halves = {view.parameters["half"]: view for view in sample.by_transform("split")}
+    selected = "fragment-size"
+    original_a = halves["A"].results.pop(selected)
+    original_b = halves["B"].results[selected]
+    try:
+        def fragment_panel():
+            return next(p for p in views.stability_panels(sample)
+                        if p["algorithm_id"] == selected and p["metric_id"] == "mode_bp")
+
+        missing = fragment_panel()
+        assert missing["split"] is None
+        assert missing["split_status"]["A"]["state"] == "unavailable"
+        halves["A"].results[selected] = original_a
+
+        halves["B"].results[selected] = original_b.model_copy(
+            update={"status": "skipped", "skip_reason": "depth", "metrics": []})
+        skipped = fragment_panel()
+        assert skipped["split"] is None
+        assert skipped["split_status"]["A"]["state"] == "ok"
+        assert skipped["split_status"]["B"]["state"] == "skipped"
+        assert skipped["split_status"]["B"]["reason"] == "depth"
+
+        halves["B"].results[selected] = original_b.model_copy(
+            update={"status": "failed", "metrics": []})
+        assert fragment_panel()["split_status"]["B"]["state"] == "failed"
+
+        null_metrics = [m.model_copy(update={"value": None}) if m.metric_id == "mode_bp" else m
+                        for m in original_b.metrics]
+        halves["B"].results[selected] = original_b.model_copy(update={"metrics": null_metrics})
+        null = fragment_panel()
+        assert null["split"] is None
+        assert null["split_status"]["A"]["state"] == "ok"
+        assert null["split_status"]["B"]["state"] == "not_interpretable"
+    finally:
+        halves["A"].results[selected] = original_a
+        halves["B"].results[selected] = original_b
 
 
 def test_rerun_is_cached_and_no_downsample_leaves_only_full(default_run, lab_world, capsys, shared_mmi) -> None:
@@ -169,3 +285,37 @@ def test_null_split_values_never_break_panels() -> None:
     from traceback_lab.views import _numeric
 
     assert not _numeric(None) and not _numeric(True) and _numeric(3)
+
+
+def test_split_half_missingness_keeps_each_status_visible() -> None:
+    spec = {"kind": "relative", "tolerance": 0.1}
+    def metric(value):
+        return SimpleNamespace(metric_id="mode_bp", value=value)
+    view = views.InputView("split-A", "a" * 64, "split", {"half": "A"}, {}, 0.5)
+    status = views._split_half_status
+
+    assert status(None, "fragment-size", "mode_bp", 100, spec)["state"] == "not_recorded"
+    assert status(None, "fragment-size", "mode_bp", 100, spec, other_half_recorded=True)["state"] == "unavailable"
+    assert status(view, "fragment-size", "mode_bp", 100, spec)["state"] == "unavailable"
+    view.unreadable = {"fragment-size"}
+    assert status(view, "fragment-size", "mode_bp", 100, spec)["reason"] == "result unreadable"
+    view.unreadable = set()
+    view.ambiguous = {"fragment-size"}
+    assert status(view, "fragment-size", "mode_bp", 100, spec)["reason"] == "result selection ambiguous"
+    view.ambiguous = set()
+
+    view.results["fragment-size"] = SimpleNamespace(status="skipped", skip_reason="depth")
+    assert status(view, "fragment-size", "mode_bp", 100, spec) == {
+        "state": "skipped", "reason": "depth", "value": None, "deviation": None,
+    }
+    view.results["fragment-size"] = SimpleNamespace(status="failed")
+    assert status(view, "fragment-size", "mode_bp", 100, spec)["state"] == "failed"
+
+    view.results["fragment-size"] = SimpleNamespace(status="ok", metrics=[metric(None)])
+    assert status(view, "fragment-size", "mode_bp", 100, spec)["state"] == "not_interpretable"
+    view.results["fragment-size"] = SimpleNamespace(status="ok", metrics=[metric(float("nan"))])
+    assert status(view, "fragment-size", "mode_bp", 100, spec)["state"] == "not_interpretable"
+    view.results["fragment-size"] = SimpleNamespace(status="ok", metrics=[metric(105)])
+    assert status(view, "fragment-size", "mode_bp", 100, spec) == {
+        "state": "ok", "reason": None, "value": 105, "deviation": 5.0,
+    }

@@ -4,11 +4,12 @@ import json
 from types import SimpleNamespace
 
 import pytest
+import pysam
 
 from traceback_lab import cohorts
 from traceback_lab.cohorts import add_sample, build_cohort, project_current_metric, project_sample_metric, read_current, read_roster
 from traceback_lab.envelope import Metric, ResultEnvelope, provenance
-from traceback_lab.identity import parameters_sha256
+from traceback_lab.identity import cohort_compat_key, parameters_sha256
 from traceback_lab.ingest import resolve_sample
 from traceback_lab.problems import LabProblem
 from traceback_lab.store import LabStore
@@ -50,6 +51,10 @@ def _sample(
         "mmi_sha256": _sha(901) if aligned else None,
         "aligner_argv": ["minimap2", "-ax", "map-ont"] if aligned else None,
     }))
+    header = {"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 1000}],
+              "RG": [{"ID": "one", "PL": "ONT"}]}
+    with pysam.AlignmentFile(str(input_dir / "aligned.bam"), "wb", header=header):
+        pass
     result = ResultEnvelope(
         algorithm_id="fragment-size", algorithm_version="1", status="ok",
         provenance=provenance(tool="fixture", parameters_sha256=parameters,
@@ -74,6 +79,12 @@ def test_add_is_idempotent_and_build_publishes_immutable_generations(store: LabS
     assert one.percentile_n == 2
     assert one.members[0].results[0].cohort_compat_key == one.members[1].results[0].cohort_compat_key
     compat = one.members[0].results[0].cohort_compat_key
+    assert compat == cohort_compat_key(
+        algorithm_id="fragment-size", algorithm_version="1", parameters={}, tools=[],
+        reference_sha256=_sha(900),
+        aligner_identity={"kind": "aligned", "tools": {"samtools": "1.20", "minimap2": "2.28"},
+                          "mmi_sha256": _sha(901), "aligner_argv": ["minimap2", "-ax", "map-ont"]},
+    )
     projected = project_current_metric(store, "healthy", algorithm_id="fragment-size", metric_id="mode_bp",
                                        cohort_compat_key=compat, target_source_id=first)
     assert projected is not None
@@ -264,6 +275,37 @@ def test_unknown_prealigned_provenance_never_pools_distinct_inputs(store: LabSto
     _, payload = _build(SimpleNamespace(cohort="healthy", kind="internal_cohort"), store)
     assert "each input is isolated" in payload["data"]["comparability_note"]
     assert any("provenance is unknown" in line for line in payload["_human"]["lines"])
+
+
+@pytest.mark.parametrize("damage", ["missing", "unreadable", "mismatched", "unknown"])
+@pytest.mark.parametrize("aligned", [False, True])
+def test_bam_platform_damage_preserves_current_generation(
+    store: LabStore, damage: str, aligned: bool,
+) -> None:
+    source_id = _sample(store, 1, aligned=aligned)
+    add_sample(store, "healthy", source_id)
+    old = build_cohort(store, "healthy")
+    before = store.generation()
+    bam_path = store.inputs_dir / _sha(101) / "aligned.bam"
+    if damage == "missing":
+        bam_path.unlink()
+    elif damage == "unreadable":
+        bam_path.write_bytes(b"not a BAM")
+    else:
+        header = {"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 1000}]}
+        if damage == "mismatched":
+            header["RG"] = [{"ID": "one", "PL": "ILLUMINA"}]
+            manifest_path = bam_path.parent / "manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest["platform"] = "ont"
+            manifest_path.write_text(json.dumps(manifest))
+        with pysam.AlignmentFile(str(bam_path), "wb", header=header):
+            pass
+    with pytest.raises(LabProblem, match="TBX-LAB-024"):
+        build_cohort(store, "healthy")
+    assert read_current(store, "healthy") == old
+    assert store.generation() == before
+    assert not (store.lab / "cohorts" / "healthy" / "generations" / "2").exists()
 
 
 @pytest.mark.parametrize("field,bad", [("reference_sha256", None), ("tools", [])])
