@@ -8,8 +8,8 @@ result's own attempt directory and no component is a symlink.
 
 from __future__ import annotations
 
-import json
 import heapq
+import json
 import math
 import os
 import re

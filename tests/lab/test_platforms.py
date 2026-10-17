@@ -190,3 +190,28 @@ def test_valid_dry_run_reports_platform_in_sample(tmp_path: Path, capsys: pytest
     payload = json.loads(capsys.readouterr().out)
     assert code == 0, payload
     assert payload["data"]["sample"]["platform"] == "illumina"
+
+
+def test_simulate_cna_refuses_illumina_before_work(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from traceback_lab import simulate_command
+
+    root, bam_path = _prealigned_world(tmp_path, ("ILLUMINA",))
+    code = signed_cli.main([
+        "lab", "run", str(bam_path), "--root", str(root), "--reference", "hg38",
+        "--only", "short-read-fragment-size", "--no-downsample", "--no-controls", "--json",
+    ])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0, payload
+
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("simulation work started before platform refusal")
+
+    monkeypatch.setattr(simulate_command, "run_plan", unexpected)
+    monkeypatch.setattr(simulate_command, "cna_specs", unexpected)
+    code = signed_cli.main(["lab", "simulate", "cna", "latest", "--root", str(root), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 3
+    assert payload["data"]["code"] == "TBX-LAB-024"
+    assert payload["data"]["platform"] == "illumina"

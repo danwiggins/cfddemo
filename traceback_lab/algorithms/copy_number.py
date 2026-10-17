@@ -82,20 +82,22 @@ class CopyNumber(Base):
         return super().preflight(ctx)
 
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
+        parameters = ichor.default_parameters()
+        if "min_counted_reads" in ctx.extras:
+            requested = ctx.extras["min_counted_reads"]
+            if type(requested) is not int or requested != parameters.signed.min_counted_reads:
+                raise ichor.CopyNumberError("counted-read floor override is not part of this execution identity")
         selected = ctx.extras.get("pon_selection")
         if selected is not None:
             from ..pon import require_grid
             from ..pon_consumer import selection_from_payload
 
             selection = selection_from_payload(selected, ctx.root, ctx.reference_sha256)
-            parameters = replace(
-                ichor.default_parameters(), pon_policy="lab_loo_v1", pon_sha256=selection.pon_sha256
-            )
+            parameters = replace(parameters, pon_policy="lab_loo_v1", pon_sha256=selection.pon_sha256)
             return self.run_configured(
                 ctx, out, parameters=parameters, pon=selection.path,
                 validate_grid=lambda actual: require_grid(selection, actual),
             )
-        parameters = ichor.default_parameters(min_counted_reads=int(ctx.extras.get("min_counted_reads", 1)))
         return self.run_configured(ctx, out, parameters=parameters)
 
     def run_configured(
