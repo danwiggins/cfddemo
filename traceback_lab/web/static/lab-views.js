@@ -554,13 +554,22 @@
           marks.push(svg("text", { x: x(0.5) + dx, y: y(d) + 4, "text-anchor": "middle", class: "split" }, clipped ? (d > 0 ? "⇡" : "⇣") : "○"));
         }
       }
+      const halfStatus = (half) => {
+        const part = panel.split_status && panel.split_status[half];
+        if (!part) return "status unavailable";
+        if (part.state === "ok") return `ok (${fmt(part.value)})`;
+        return `${part.state.replace(/_/g, " ")}${part.reason ? ` (${part.reason.replace(/_/g, " ")})` : ""}`;
+      };
+      const splitSummary = `split A ${halfStatus("A")}; split B ${halfStatus("B")}`;
       for (const f of fracs) marks.push(svg("text", { x: x(f), y: hgt - 18, "text-anchor": "middle", class: "axis" }, `${f * 100}%`));
-      const label = `${panel.label}: ${panel.verdict}. Deviation from full depth in ${unit === "unit" ? "the metric's unit" : "%"}${panel.split ? `; split halves ${panel.split.stable ? "stable" : "unstable"}` : ""}.`;
+      const label = `${panel.label}: ${panel.verdict}. Deviation from full depth in ${unit === "unit" ? "the metric's unit" : "%"}; ${splitSummary}${panel.split ? `; split halves ${panel.split.stable ? "stable" : "unstable"}` : "; no numerical split verdict"}.`;
       grid.append(h("figure", { class: "multiple" }, h("figcaption", {}, h("strong", {}, panel.label), ` — ${panel.verdict}`),
         svg("svg", { viewBox: `0 0 ${w} ${hgt}`, role: "img", "aria-label": label, class: "multiple-svg" }, svg("title", {}, label), ...marks),
-        h("p", { class: "help" }, unit === "unit" ? "y: difference from full depth (metric's unit)" : "y: relative deviation from full depth, % (clipped ±50%)")));
+        h("p", { class: "help" }, unit === "unit" ? "y: difference from full depth (metric's unit)" : "y: relative deviation from full depth, % (clipped ±50%)"),
+        panel.split ? "" : h("p", { class: "help" }, `Split halves: ${splitSummary}. No numerical verdict.`)));
       for (const p of panel.points) tableRows.push([panel.label, `${p.fraction * 100}%`, p.value, p.deviation, p.state || "—"]);
       if (panel.split) tableRows.push([panel.label, "split A / B", `${fmt(panel.split.a)} / ${fmt(panel.split.b)}`, `${(panel.split.relative_abs_diff * 100).toFixed(1)}% |A−B|`, panel.split.stable ? "stable" : "unstable"]);
+      else tableRows.push([panel.label, "split A / B", `${fmt(panel.split_status?.A?.value)} / ${fmt(panel.split_status?.B?.value)}`, "—", splitSummary]);
     }
     out.push(grid, dataTable("Stability: every point", ["Metric", "Fraction", "Value", "Deviation", "State"], tableRows));
     const shown = new Set(sample.stability.map((p) => p.algorithm_id));

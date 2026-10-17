@@ -303,7 +303,9 @@ script or style, no outside requests.
 - **Trust/QC**: depth against each algorithm's minimum, the run table with
   scrubbed stderr for failures, provisional QC bands, library health.
 - **Stability**: one small multiple per metric: deviation from full depth at
-  each fraction, the stability band, and split halves A/B at 50%.
+  each fraction, the stability band, and split halves A/B at 50%. Each half
+  shows its own status when a result is skipped, failed, or lacks a numeric
+  metric; a split-half verdict appears only when both values are available.
 
 ## Building a Lab cohort
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -100,6 +101,7 @@ def test_default_run_builds_the_curve_and_controls(default_run) -> None:
     assert panels[0]["headline"]
     with_split = [panel for panel in panels if panel["split"] is not None]
     assert {panel["algorithm_id"] for panel in with_split} >= {"bam-qc", "depth", "fragment-size"}
+    assert all(panel["split_status"][half]["state"] == "ok" for panel in with_split for half in ("A", "B"))
     block = views.repeatability(panels)
     assert block["metrics"] == len([p for p in panels if p["split"]])
 
@@ -169,3 +171,31 @@ def test_null_split_values_never_break_panels() -> None:
     from traceback_lab.views import _numeric
 
     assert not _numeric(None) and not _numeric(True) and _numeric(3)
+
+
+def test_split_half_missingness_keeps_each_status_visible() -> None:
+    spec = {"kind": "relative", "tolerance": 0.1}
+    def metric(value):
+        return SimpleNamespace(metric_id="mode_bp", value=value)
+    view = views.InputView("split-A", "a" * 64, "split", {"half": "A"}, {}, 0.5)
+    status = views._split_half_status
+
+    assert status(None, "fragment-size", "mode_bp", 100, spec)["state"] == "not_requested"
+    assert status(None, "fragment-size", "mode_bp", 100, spec, requested=True)["state"] == "unavailable"
+    assert status(view, "fragment-size", "mode_bp", 100, spec)["state"] == "unavailable"
+
+    view.results["fragment-size"] = SimpleNamespace(status="skipped", skip_reason="depth")
+    assert status(view, "fragment-size", "mode_bp", 100, spec) == {
+        "state": "skipped", "reason": "depth", "value": None, "deviation": None,
+    }
+    view.results["fragment-size"] = SimpleNamespace(status="failed")
+    assert status(view, "fragment-size", "mode_bp", 100, spec)["state"] == "failed"
+
+    view.results["fragment-size"] = SimpleNamespace(status="ok", metrics=[metric(None)])
+    assert status(view, "fragment-size", "mode_bp", 100, spec)["state"] == "not_interpretable"
+    view.results["fragment-size"] = SimpleNamespace(status="ok", metrics=[metric(float("nan"))])
+    assert status(view, "fragment-size", "mode_bp", 100, spec)["state"] == "not_interpretable"
+    view.results["fragment-size"] = SimpleNamespace(status="ok", metrics=[metric(105)])
+    assert status(view, "fragment-size", "mode_bp", 100, spec) == {
+        "state": "ok", "reason": None, "value": 105, "deviation": 5.0,
+    }
