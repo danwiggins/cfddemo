@@ -188,7 +188,7 @@ def test_navigation_order_with_compare(page_root, tmp_path) -> None:
         dom = _dom(server, tmp_path, route=f"/sample/{_id12(page_root)}/stability")
     nav = re.search(r'<nav aria-label="Lenses"[^>]*>(.*?)</nav>', dom, re.DOTALL).group(1)
     labels = re.findall(r">([A-Za-z/ ]+?)(?: \(\d+[^)]*\))?</a>", nav)
-    assert labels == ["Findings", "Trust/QC", "Stability", "Signals", "Compare", "Body map", "Agreement", "Evidence", "Methods"]
+    assert labels == ["Findings", "Trust/QC", "Stability", "Signals", "Body map", "Agreement", "Compare", "Evidence", "Methods"]
     assert 'aria-current="page">Stability' in nav
     options = re.findall(r"<option[^>]*>([^<]*)</option>", dom)
     assert len(options) == 1 and "@" not in options[0]  # derived inputs are never samples

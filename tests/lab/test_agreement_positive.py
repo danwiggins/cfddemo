@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
+import hashlib
 from types import SimpleNamespace
 
 import numpy as np
@@ -14,11 +14,15 @@ from tests.lab.test_landing import _dom, needs_chrome
 from traceback_lab.algorithms import copy_number, meth_tf
 from traceback_lab.cohort_contracts import CohortGeneration, CohortMember, CohortResult
 from traceback_lab.envelope import Depth, Metric, Panel, ResultEnvelope, provenance
+from traceback_lab.pon import PonSelection
+from traceback_lab.pon_consumer import selection_payload
 from traceback_lab.registry import InputContext
 from traceback_lab.store import LabStore
 from traceback_lab.views import load_sample, selected_results
 from traceback_lab.web import api as web_api
 from traceback_lab.web.server import RunningLabServer
+
+
 def _published_agreement(tmp_path, monkeypatch):
     root = tmp_path / "root"
     store = LabStore(root)
@@ -65,13 +69,33 @@ def _published_agreement(tmp_path, monkeypatch):
                 "planned_asset_sha256s": ["c" * 64]},
     )
 
-    parameters = replace(copy_number.ichor.default_parameters(), pon_policy="lab_loo_v1", pon_sha256="d" * 64)
-    monkeypatch.setattr(copy_number.ichor, "default_parameters", lambda **kwargs: parameters)
+    panel_bytes = b"synthetic-selected-pon-v1"
+    digest = hashlib.sha256(panel_bytes).hexdigest()
+    panel = root / "lab" / "assets" / "pon" / f"{digest}.rds"
+    panel.parent.mkdir(parents=True)
+    panel.write_bytes(panel_bytes)
+    selection = PonSelection(
+        cohort_id="healthy-v1", cohort_version="v1", pon_policy="lab_loo_v1",
+        pon_sha256=digest, path=panel, pon_n=10,
+        reference_sha256=ctx.reference_sha256, aligner_identity="fixture aligner",
+        grid_sha256="b" * 64, counting_parameters_sha256="c" * 64,
+        toolchain_lock_sha256="a" * 64, gc_sha256="d" * 64,
+        map_sha256="e" * 64, centromere_sha256="f" * 64,
+        panel_source_ids=tuple(f"{index:064x}" for index in range(1, 11)),
+        target_excluded=True,
+    )
+    ctx.extras["pon_selection"] = selection_payload(selection)
     monkeypatch.setattr(copy_number, "_toolchain", lambda: SimpleNamespace(identity=SimpleNamespace(lock_sha256="a" * 64)))
     monkeypatch.setattr(copy_number.ichor, "resolve_assets", lambda root, toolchain: object())
-    monkeypatch.setattr(copy_number.ichor, "measure", lambda *args, **kwargs: SimpleNamespace(
-        tumor_fraction=0.25, ploidy=2.0, identifiable=True, bins=[], segments=[],
-    ))
+
+    def measured(*args, **kwargs):
+        assert kwargs["pon"] == panel
+        copy_number.ichor.stage_verified_pon(panel, tmp_path / "staged-pon.rds", digest)
+        kwargs["validate_grid"]("b" * 64)
+        assert kwargs["parameters"].pon_sha256 == digest
+        return SimpleNamespace(tumor_fraction=0.25, ploidy=2.0, identifiable=True, bins=[], segments=[])
+
+    monkeypatch.setattr(copy_number.ichor, "measure", measured)
     cn = copy_number.COPY_NUMBER.run(ctx, tmp_path / "cn-out")
     assert next(metric["value"] for metric in cn.metrics if metric["metric_id"] == "pon_policy") == "lab_loo_v1"
 
@@ -96,7 +120,9 @@ def _published_agreement(tmp_path, monkeypatch):
 
     def publish(algorithm_id, metrics, *, panels=(), artifacts=None):
         envelope = ResultEnvelope(
-            algorithm_id=algorithm_id, algorithm_version="1", status="ok",
+            algorithm_id=algorithm_id,
+            algorithm_version=copy_number.COPY_NUMBER.version if algorithm_id == "copy-number" else "1",
+            status="ok",
             provenance=provenance(tool="agreement-fixture", parameters_sha256={
                 "copy-number": "1" * 64, "meth-tf": "2" * 64,
                 "fragment-size": "3" * 64, "mtdna": "4" * 64,
@@ -136,7 +162,7 @@ def _published_agreement(tmp_path, monkeypatch):
     monkeypatch.setattr(web_api, "read_current", lambda store, cohort_id: generation)
     # The fixture target copies parameter hashes from selected publications;
     # compatibility keys and cohort peers are supplied at the snapshot boundary.
-    monkeypatch.setattr(web_api, "member_from_store", lambda store, source: target)
+    monkeypatch.setattr(web_api, "_cohort_target", lambda store, generation, source: (target, None))
     return store, id12
 
 

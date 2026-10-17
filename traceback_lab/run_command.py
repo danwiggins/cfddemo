@@ -41,6 +41,7 @@ from .ingest import (
     source_record,
     write_source,
 )
+from .platforms import for_input, from_rg_lines
 from .problems import (
     EXIT_OK,
     EXIT_PARTIAL,
@@ -74,6 +75,7 @@ def add_run_parser(commands: Any, common: Callable[[argparse.ArgumentParser], No
     run.add_argument("--reference", dest="reference_id", metavar="ID", help="registered reference id")
     run.add_argument("--profile", choices=("all", "fast"), default="all")
     run.add_argument("--only", metavar="A,B", help="only these algorithms (overrides --profile)")
+    run.add_argument("--cohort", metavar="ID", help="use this built protocol-matched cohort's panel of normals")
     run.add_argument("--downsample", default="0.5,0.25,0.1", metavar="F,F,F", help="depth-curve fractions (default 0.5,0.25,0.1)")
     run.add_argument("--no-downsample", action="store_true", help="skip the depth curve")
     run.add_argument("--controls", dest="controls", action="store_true", default=True, help="run the positive controls (default)")
@@ -164,6 +166,7 @@ def _flags(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "profile": args.profile,
         "only": args.only,
+        "cohort": args.cohort,
         "skip_bad_chunks": args.skip_bad_chunks,
         "force": args.force,
         "timeout_s": args.timeout_s,
@@ -188,16 +191,52 @@ def _target_from_input(
         extras["reference_fasta"] = str(resolve_reference(store.root, reference_id, example=True).fasta)
     except LabProblem:
         pass  # algorithms that need the FASTA fail or skip on their own
+    platform = _stored_platform(aligned)
     return RunTarget(
         input_id=aligned.input_id,
         source_id=aligned.source_id,
         input_dir=aligned.directory,
         reference_id=reference_id,
         reference_sha256=reference_sha256,
+        platform=platform,
         label="full",
         example=example,
         extras=extras,
     )
+
+
+def _stored_platform(aligned: AlignedInput) -> str:
+    try:
+        platform = for_input(aligned.manifest, aligned.directory / "aligned.bam")
+    except (OSError, ValueError) as exc:
+        raise LabProblem(
+            "TBX-LAB-024", cause=f"stored input {aligned.input_id[:12]} platform or BAM is invalid",
+            fix="Restore this stored input from a known-good backup, or re-ingest the original BAM under a fresh ROOT",
+            data={"input_id": aligned.input_id},
+        ) from exc
+    if platform == "unknown":
+        raise LabProblem(
+            "TBX-LAB-024", cause=f"stored input {aligned.input_id[:12]} has no verifiable platform declaration",
+            fix="Verify instrument provenance and re-ingest a BAM with PL:ONT or PL:ILLUMINA under a fresh ROOT",
+            data={"input_id": aligned.input_id},
+        )
+    return platform
+
+
+def _declared_platform(chunkset: ChunkSet) -> str:
+    declared = {from_rg_lines(chunk.rg_lines) for chunk in chunkset.chunks}
+    if len(declared) != 1 or "unknown" in declared:
+        raise LabProblem(
+            "TBX-LAB-024", cause="BAM read groups have no unanimous supported platform declaration",
+            fix="Use input whose read groups all declare PL:ONT or PL:ILLUMINA",
+        )
+    platform = next(iter(declared))
+    if not chunkset.aligned and platform != "ont":
+        raise LabProblem(
+            "TBX-LAB-024", cause="unaligned Illumina input cannot use the ONT alignment path",
+            fix="Align the short reads externally and supply a prealigned BAM",
+        )
+    return platform
 
 
 def _stored_input(store: LabStore, source_id: str) -> tuple[AlignedInput, dict[str, Any]]:
@@ -273,13 +312,17 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
         source_id = resolve_sample(store, args.inputs[0])
         with_sex_assertion(source_record(store, source_id) or {}, args.sex)
         aligned, _ = _stored_input(store, source_id)
-        data["sample"] = {"id12": id12_for(store, source_id), "input_id": aligned.input_id}
+        data["sample"] = {"id12": id12_for(store, source_id), "input_id": aligned.input_id,
+                          "platform": _stored_platform(aligned)}
         data["alignment"] = "reused (stored sample)"
         lines.append(f"SAMPLE    {id12_for(store, source_id)} (stored)")
         lines.append("ALIGN     reused (stored sample)")
     else:
         paths = collect_paths(args.inputs)
         chunkset = inspect_chunks(paths, store, skip_bad_chunks=args.skip_bad_chunks, write_cache=False)
+        input_platform = _declared_platform(chunkset)
+        data["sample"] = {"source_id": chunkset.source_id,
+                          "platform": input_platform if chunkset.aligned else "ont"}
         with_sex_assertion(source_record(store, chunkset.source_id) or {}, args.sex)
         reference = resolve_reference(store.root, args.reference_id)
         data["reference_id"] = reference.reference_id
@@ -389,6 +432,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                 if stored:
                     source_id = resolve_sample(store, args.inputs[0])
                     aligned, record = _stored_input(store, source_id)
+                    _stored_platform(aligned)
                     record = record_source_sex(store, source_id, args.sex)
                     example = bool(record.get("example"))
                     reference_id = aligned.manifest["reference_id"]
@@ -407,6 +451,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     chunkset = inspect_chunks(
                         paths, store, skip_bad_chunks=args.skip_bad_chunks, progress=progress
                     )
+                    input_platform = _declared_platform(chunkset)
                     with_sex_assertion(source_record(store, chunkset.source_id) or {}, args.sex)
                     reference = resolve_reference(store.root, args.reference_id, example=args.example)
                     reference_id, reference_sha256 = reference.reference_id, reference.sha256
@@ -428,7 +473,8 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     log.append("step_start", step="align")
                     if chunkset.aligned:
                         prealigned_id = prealigned_input_id(
-                            source_id=chunkset.source_id, reference_sha256=reference.sha256
+                            source_id=chunkset.source_id, reference_sha256=reference.sha256,
+                            platform=input_platform,
                         )
                         if input_manifest(store, prealigned_id) is None:
                             budget = disk_budget(store, chunkset, mmi_needed=False, fasta_bytes=0)
@@ -508,8 +554,12 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                         f"align                    {'reused' if aligned.reused else 'done'} · input {aligned.input_id[:12]}"
                     )
                 id12 = id12_for(store, aligned.source_id)
-                log.append("sample", sample=id12, source_id=aligned.source_id, input_id=aligned.input_id)
                 target = _target_from_input(aligned, reference_id, reference_sha256, example, store)
+                log.append("sample", sample=id12, source_id=aligned.source_id, input_id=aligned.input_id,
+                           platform=target.platform)
+                from .pon_consumer import bind_target
+
+                items = bind_target(store, items, target, aligned.manifest, cohort_id=args.cohort)
                 results = run_plan(
                     store,
                     lock,
@@ -532,7 +582,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                 code, payload = _summary(
                     store, run_id, aligned, id12, chunkset, results, warnings, time.monotonic() - started,
                     depth=target.depth.model_dump() if target.depth is not None else None,
-                    controls=controls["summary"],
+                    controls=controls["summary"], platform=target.platform,
                 )
                 log.append("run_end", status=payload["status"], exit_code=code)
                 return code, payload
@@ -596,11 +646,14 @@ def _derived_phase(
     if args.controls:
         specs.extend(split_specs())
         summary["split"] = True
-        built = cna_specs(store.root, target.input_dir / "aligned.bam", tfs)
-        if isinstance(built, str):
-            summary["cna_skipped"] = "example_reference" if target.example else built
+        if target.platform == "ont":
+            built = cna_specs(store.root, target.input_dir / "aligned.bam", tfs)
+            if isinstance(built, str):
+                summary["cna_skipped"] = "example_reference" if target.example else built
+            else:
+                specs.extend(built)
         else:
-            specs.extend(built)
+            summary["cna_skipped"] = "platform"
     if not specs:
         return {"results": [], "summary": summary}
     runs = run_derived(
@@ -689,6 +742,7 @@ def _summary(
     *,
     depth: dict[str, Any] | None = None,
     controls: dict[str, Any] | None = None,
+    platform: str = "ont",
 ) -> tuple[int, dict[str, Any]]:
     ok = sum(result.status == "ok" for result in results)
     skipped: dict[str, int] = {}
@@ -717,7 +771,8 @@ def _summary(
     data: dict[str, Any] = {
         "root": str(store.root),
         "run_id": run_id,
-        "sample": {"id12": id12, "source_id": aligned.source_id, "input_id": aligned.input_id},
+        "sample": {"id12": id12, "source_id": aligned.source_id, "input_id": aligned.input_id,
+                   "platform": platform},
         "depth": depth,
         "counts": {"ok": ok, "skipped": skipped, "failed": len(failed)},
         "failed": [{"algorithm_id": result.algorithm_id, "first_line": result.first_line} for result in failed],

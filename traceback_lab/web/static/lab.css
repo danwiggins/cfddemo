@@ -26,12 +26,21 @@ body.lab { background: #f3f1ec; }
 .tier-NEWER { background: #ffffff; color: var(--ink); border: 2px solid var(--ink); }
 .tier-SPECULATIVE { background: #ffffff; color: var(--ink); border: 2px dashed var(--ink); }
 .state-chip { display: inline-block; padding: .15rem .5rem; border-radius: 1rem; background: var(--flag-bg); color: var(--ink); font-weight: 600; }
+.run-note[hidden], [data-run-pending][hidden] { display: none; }
+.run-note { margin-left: .5rem; }
 .qc-band { display: inline-block; padding: .1rem .45rem; border: 1px solid var(--neutral); border-radius: .25rem; }
 .unverified { display: inline-block; padding: .15rem .45rem; background: #fff1c7; color: #573b00; font-weight: 700; font-size: .875rem; }
 .license-callout { margin: .75rem 0; padding: .75rem 1rem; border: 3px solid var(--license); background: #ffffff; }
 .license-callout h3 { font-size: 1.25rem; font-weight: 800; color: var(--ink); }
 .license-callout p { font-size: 1.25rem; font-weight: 700; margin: .25rem 0 0; }
 .license-pill { display: inline-block; padding: .1rem .5rem; border: 2px solid var(--license); border-radius: 1rem; font-size: .875rem; font-weight: 700; color: var(--ink); text-decoration: none; }
+.lab :where(a[href]) { display: inline-flex; align-items: center; min-width: 2.75rem; min-height: 2.75rem; max-width: 100%; }
+.lab :where(summary) { min-height: 2.75rem; padding-block: .7rem; cursor: pointer; }
+.lab .skip-link { min-height: 2.75rem; }
+@media (min-width: 768px) {
+  .lab-banner { position: relative; padding-right: 7rem; }
+  .lab-banner a { position: absolute; top: 50%; right: .75rem; transform: translateY(-50%); }
+}
 .depth-bar { position: relative; height: 1rem; min-width: 8rem; background: var(--flag-bg); border-radius: .2rem; }
 .depth-bar .fill { position: absolute; left: 0; top: 0; bottom: 0; background: var(--chart-a); border-radius: .2rem; }
 .depth-bar .tick { position: absolute; top: -.2rem; bottom: -.2rem; width: 3px; background: var(--ink); }
@@ -50,6 +59,11 @@ pre.stderr { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; 
 .lab-chrome .lab-status:not(:empty) { display: block; }
 #main { width: min(76rem, calc(100% - 2rem)); margin-inline: auto; display: block; padding-block: .25rem 3rem; }
 .clia-panel { margin: 0; padding: .5rem .75rem; background: #ffffff; border: 1px solid var(--rule); border-radius: .5rem; overflow: visible; }
+.loading-clia { min-height: 12rem; box-sizing: border-box; }
+.loading-headline { min-height: 2.5rem; }
+.loading-defended, .loading-curve { min-height: 13rem; }
+.loading-controls, .loading-lens { min-height: 10rem; }
+@media (min-width: 1024px) { .loading-clia { height: 320px; } }
 .clia-title { margin: 0 0 .3rem; font: 700 1.5rem/1.15 ui-serif, Georgia, serif; }
 .clia-short { column-count: 1; column-gap: 2rem; font-size: .9rem; line-height: 1.3; }
 .clia-short p { margin: 0 0 .15rem; break-inside: avoid; }
