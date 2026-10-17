@@ -521,6 +521,10 @@ serve as a history of every interrupted run.
   interpretation library's percentile and interval. A provisional external
   generation is labelled as such. Missing or failed metrics are never zero.
   The synthetic EXAMPLE cannot be scored against a real kit cohort.
+  The two-sample A/B view keeps independently pinned metrics when a selected
+  panel-of-normals copy-number method is present. It lists copy-number and its
+  dependents as unpaired until one compatible cohort generation can be pinned
+  for both samples; it never pools different panels as one reference.
 - **Trust/QC**: depth against each algorithm's minimum, the run table with
   scrubbed stderr for failures and a link to a matching numbered run-log line,
   provisional QC bands, library health. The link searches up to 64 recently updated
