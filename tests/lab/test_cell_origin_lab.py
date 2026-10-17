@@ -6,6 +6,7 @@ import json
 import os
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import pysam
 import pytest
@@ -16,8 +17,11 @@ from traceback_lab import cohorts
 from traceback_lab.algorithms import cell_origin as co
 from traceback_lab.algorithms.read_summary import READ_SUMMARY
 from traceback_lab.envelope import Metric, ResultEnvelope, provenance
-from traceback_lab.registry import InputContext, Ready, ToolPin, execution_identity
-from traceback_lab.store import LabStore
+from traceback_lab.registry import InputContext, PlanItem, Ready, ToolPin, execution_identity
+from traceback_lab.runner import RunTarget, StepResult, run_plan
+from traceback_lab.scrub import Scrubber
+from traceback_lab.store import LabStore, new_run_id
+import traceback_lab.runner as lab_runner
 from traceback_runner.fixtures import create_cell_origin_inputs
 from traceback_runner.references import register_loyfer_directory, register_reference
 
@@ -66,7 +70,9 @@ def test_execution_identity_pins_the_mmml_parser_versions() -> None:
         assert execution_identity(changed, reference_sha256="a" * 64) != original
 
 
-def _publish_cohort_cell_origin(store: LabStore, *, index: int, algorithm: co.CellOrigin) -> tuple[str, str]:
+def _publish_cohort_cell_origin(
+    store: LabStore, *, index: int, algorithm: co.CellOrigin, publish_adapter: bool = True,
+) -> tuple[str, str]:
     source_id, input_id, reference_sha256 = f"{index:064x}", f"{index + 100:064x}", "a" * 64
     store.sources_dir.mkdir(parents=True, exist_ok=True)
     (store.sources_dir / f"{source_id}.json").write_text(json.dumps({
@@ -122,15 +128,16 @@ def _publish_cohort_cell_origin(store: LabStore, *, index: int, algorithm: co.Ce
         "platform": "ont", "parameters": algorithm.parameters,
         "tools": tools, "asset_sha256s": assets, "upstream": upstream,
     }
-    store.publish_result(ResultEnvelope(
-        algorithm_id="cell-origin", algorithm_version=algorithm.version, status="ok",
-        provenance=provenance(tool="fixture", parameters_sha256=cell_hash,
-                              source_id=source_id, input_id=input_id, reference_id="hg38"),
-        metrics=[Metric(metric_id="classified_fragments", value=100)],
-    ), input_id=input_id, execution_plan=plan, upstream_selections=[{
-        "algorithm_id": READ_SUMMARY.id, "input_id": input_id,
-        "parameters_sha256": read_hash, "attempt_id": read_attempt.name,
-    }])
+    if publish_adapter:
+        store.publish_result(ResultEnvelope(
+            algorithm_id="cell-origin", algorithm_version=algorithm.version, status="ok",
+            provenance=provenance(tool="fixture", parameters_sha256=cell_hash,
+                                  source_id=source_id, input_id=input_id, reference_id="hg38"),
+            metrics=[Metric(metric_id="classified_fragments", value=100)],
+        ), input_id=input_id, execution_plan=plan, upstream_selections=[{
+            "algorithm_id": READ_SUMMARY.id, "input_id": input_id,
+            "parameters_sha256": read_hash, "attempt_id": read_attempt.name,
+        }])
     return source_id, cell_hash
 
 
@@ -165,6 +172,68 @@ def test_cohort_reads_recorded_parser_pin_after_reader_upgrade(tmp_path, monkeyp
     )
     assert projected is not None and projected.percentile_n == 1
     assert projected.exclusions == {"self": 1, "incompatible": 1}
+
+
+def test_runner_plan_persists_cell_origin_parser_pin_for_cohort_read(tmp_path, monkeypatch) -> None:
+    store = LabStore(tmp_path)
+    source_id, expected_hash = _publish_cohort_cell_origin(
+        store, index=9, algorithm=co.CELL_ORIGIN, publish_adapter=False,
+    )
+    input_id, reference_sha256 = f"{109:064x}", "a" * 64
+    read_hash = execution_identity(READ_SUMMARY, reference_sha256=reference_sha256)
+    read_attempt = store.selected_attempt(input_id, READ_SUMMARY.id, read_hash)
+    assert read_attempt is not None
+    target = RunTarget(
+        input_id=input_id, source_id=source_id, input_dir=store.inputs_dir / input_id,
+        reference_id="hg38", reference_sha256=reference_sha256,
+    )
+    monkeypatch.setattr(co.CELL_ORIGIN, "preflight", lambda _ctx: Ready())
+    ran = []
+
+    def fake_pipeline(stages, **_kwargs):
+        request = json.loads(Path(stages[0].argv[-1]).read_bytes())
+        scratch = Path(request["out_dir"])
+        (scratch / "artifacts").mkdir(exist_ok=True)
+        (scratch / "output.json").write_text(json.dumps({
+            "metrics": [{"metric_id": "classified_fragments", "value": 100}], "panels": [],
+        }))
+        ran.append(request)
+        return SimpleNamespace(ok=True, duration_s=0.01, peak_rss_bytes=0)
+
+    monkeypatch.setattr(lab_runner, "run_pipeline", fake_pipeline)
+    run_id = new_run_id()
+    results = run_plan(
+        store, None, store.run_log(run_id), target,
+        [PlanItem(co.CELL_ORIGIN, False)], {"cell-origin": "cell_origin:CELL_ORIGIN"},
+        run_id=run_id, scrubber=Scrubber(root=store.root),
+        upstream_results={READ_SUMMARY.id: StepResult(
+            READ_SUMMARY.id, "ok", True, read_hash, input_id=input_id,
+            attempt_id=read_attempt.name,
+        )},
+    )
+    assert len(ran) == 1 and len(results) == 1
+    assert results[0].status == "ok" and results[0].parameters_sha256 == expected_hash
+    attempt = store.selected_attempt(input_id, "cell-origin", expected_hash)
+    assert attempt is not None and attempt.name == results[0].attempt_id
+    plan = json.loads((attempt / "execution_plan.json").read_bytes())
+    assert plan["parameters"] == co.CELL_ORIGIN.parameters
+    assert plan["tools"] == [tool.identity() for tool in co.CELL_ORIGIN.tools]
+    assert plan["asset_sha256s"] == co.CELL_ORIGIN.asset_sha256s(store.root)
+    assert plan["upstream"] == [{"algorithm_id": READ_SUMMARY.id, "parameters_sha256": read_hash}]
+    assert store.upstream_selections_at(attempt) == ({
+        "algorithm_id": READ_SUMMARY.id, "input_id": input_id,
+        "parameters_sha256": read_hash, "attempt_id": read_attempt.name,
+    },)
+
+    reader_b = replace(co.CELL_ORIGIN, tools=tuple(
+        ToolPin(tool.name, "next-parser" if tool.name in {"pysam", "htslib"} else tool.version)
+        for tool in co.CELL_ORIGIN.tools
+    ))
+    monkeypatch.setattr(cohorts, "load_registry", lambda: (READ_SUMMARY, reader_b))
+    member = cohorts.member_from_store(store, source_id)
+    selected = {row.algorithm_id: row for row in member.results}
+    assert selected["cell-origin"].parameters_sha256 == expected_hash
+    assert selected["cell-origin"].metrics["classified_fragments"] == 100
 
 
 def test_run_recovers_the_planted_mixture_with_intervals(world) -> None:
