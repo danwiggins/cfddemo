@@ -18,10 +18,12 @@ from traceback_lab.asset_command import add_asset_parser
 from traceback_lab.assets import AssetError
 from traceback_lab.algorithms import viral_reads
 from traceback_lab.algorithms.viral_reads import VIRAL_READS, _count_hits, _derived_keep, _write_queries
-from traceback_lab.registry import InputContext, Ready, Skip
+from traceback_lab.registry import InputContext, PlanItem, Ready, Skip
 from traceback_lab.read_summary import DS_SALT, SPLIT_SALT, downsample_mask, h64, split_mask
 from traceback_lab.pipeline import Stage, run_pipeline
-from traceback_lab.store import LabStore
+from traceback_lab.runner import RunTarget, run_plan
+from traceback_lab.scrub import Scrubber
+from traceback_lab.store import LabStore, new_run_id
 from traceback_lab.tools import MIN_MINIMAP2, find_minimap2
 from traceback_lab.viral_assets import add_viral_reference, inspect_viral_reference
 
@@ -89,6 +91,28 @@ def test_registration_cli_identity_and_tamper(tmp_path: Path) -> None:
     status = VIRAL_READS.preflight(_context(store.root, tmp_path))
     assert isinstance(status, Skip)
     assert status.reason_code == "invalid_asset"
+
+
+def test_altered_viral_registration_skip_is_published_by_real_runner(tmp_path: Path) -> None:
+    store = LabStore(tmp_path / "root")
+    fasta, targets, _ = _sources(tmp_path)
+    _add(store, fasta, targets)
+    (store.lab / "assets" / "viral-fasta" / "targets.tsv").write_text("tampered")
+    target = RunTarget(
+        input_id="b" * 64, source_id="a" * 64, input_dir=tmp_path,
+        reference_id="hg38", reference_sha256="c" * 64,
+    )
+    run_id = new_run_id()
+    log = store.run_log(run_id)
+    result = run_plan(
+        store, None, log, target, [PlanItem(VIRAL_READS, False)],
+        {"viral-reads": "traceback_lab.algorithms.viral_reads:VIRAL_READS"},
+        run_id=run_id, scrubber=Scrubber(root=store.root),
+    )[0]
+    assert result.status == "skipped" and result.skip_reason == "invalid_asset"
+    stored = store.read_result(target.input_id, result.algorithm_id, result.parameters_sha256)
+    assert stored is not None and stored.status == "skipped" and stored.skip_reason == "invalid_asset"
+    assert any(event["event"] == "step_end" and event["skip_reason"] == "invalid_asset" for event in log.events())
 
 
 @pytest.mark.parametrize("fasta_bytes,targets_bytes", [
