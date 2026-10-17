@@ -24,7 +24,7 @@ import pytest
 import websocket
 
 from traceback_lab.store import LabStore
-from traceback_lab.envelope import Metric
+from traceback_lab.envelope import Depth, Metric
 from traceback_lab import views
 from traceback_lab.web import api as api_module
 from traceback_lab.web.server import CSP, RunningLabServer
@@ -138,11 +138,15 @@ def _sample_with_unvalidated_wps(server, monkeypatch):
     for view in [sample.full, *sample.derived]:
         source = next(envelope for envelope in view.results.values() if envelope.status == "ok")
         value = 0.7 if view is sample.full else 0.4
-        view.results["wps"] = source.model_copy(update={
+        wps = source.model_copy(update={
             "algorithm_id": "wps",
+            "depth": Depth(eligible_reads=1_000_000, approx_depth_x=200 * view.fraction),
             "metrics": [Metric(metric_id="mean_wps", value=12.0), Metric(metric_id="positive_bin_fraction", value=value)],
             "panels": [],
         })
+        # The read-side sample depth comes from the first result; put the
+        # injected WPS measurement first so this fixture exercises its gate.
+        view.results = {"wps": wps, **view.results}
     original = views.load_sample
     monkeypatch.setattr(api_module.views, "load_sample", lambda store, source_id: sample if source_id == sample.source_id else original(store, source_id))
     return sample.id12
