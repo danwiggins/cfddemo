@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import errno
 import shlex
+import shutil
 import signal
 import sys
 import time
@@ -40,11 +41,12 @@ from .ingest import (
     GIB,
     EXAMPLE_REFERENCE_ID,
 )
-from .identity import aligned_input_id, prealigned_input_id
+from .identity import SHA256_PATTERN, aligned_input_id, prealigned_input_id
 from .platforms import for_input, from_rg_lines
 from .problems import (
     EXIT_OK, EXIT_PARTIAL, EXIT_USAGE, LabProblem, problem_lines, problem_payload,
 )
+from .registry import execution_identity
 from .runner import DEFAULT_TIMEOUT_S, RunTarget, StepResult, run_plan
 from .scrub import Scrubber
 from .sample_metadata import with_sex_assertion
@@ -218,6 +220,24 @@ def _stored_platform(aligned: AlignedInput) -> str:
     return platform
 
 
+def _stored_reference_binding(aligned: AlignedInput) -> tuple[str, str]:
+    manifest = aligned.manifest
+    if (
+        not isinstance(manifest, dict)
+        or not isinstance(manifest.get("reference_id"), str)
+        or not manifest["reference_id"]
+        or not isinstance(manifest.get("reference_sha256"), str)
+        or not SHA256_PATTERN.fullmatch(manifest["reference_sha256"])
+    ):
+        raise LabProblem(
+            "TBX-LAB-017",
+            cause="the stored aligned input has no valid reference binding",
+            fix="Restore the stored input from a known-good backup, or re-ingest under a fresh ROOT",
+            data={"input_id": aligned.input_id},
+        )
+    return manifest["reference_id"], manifest["reference_sha256"]
+
+
 def _declared_platform(chunkset: ChunkSet) -> str:
     declared = {from_rg_lines(chunk.rg_lines) for chunk in chunkset.chunks}
     if len(declared) != 1 or "unknown" in declared:
@@ -307,21 +327,109 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
     data: dict[str, Any] = {"root": str(store.root), "dry_run": True, "plan": plan_rows}
     lines = [f"ROOT      {store.root}"]
     alignment_required = False
+
+    def mark_platform_skips(platform: str) -> None:
+        for row, item in zip(plan_rows, items):
+            if platform not in item.algorithm.requires.platforms:
+                row["decision"] = "skip expected (platform)"
+        if args.controls and platform != "ont":
+            data["controls"] = {"cna_skipped": "platform"}
+            lines.append("CONTROL   CNA spike not built (platform)")
+
     if len(args.inputs) == 1 and _is_stored(args.inputs[0]):
         source_id = resolve_sample(store, args.inputs[0])
-        with_sex_assertion(source_record(store, source_id) or {}, args.sex)
-        aligned, _ = _stored_input(store, source_id)
-        data["sample"] = {"id12": id12_for(store, source_id), "input_id": aligned.input_id,
-                          "platform": _stored_platform(aligned)}
+        aligned, record = _stored_input(store, source_id)
+        platform = _stored_platform(aligned)
+        reference_id, reference_sha256 = _stored_reference_binding(aligned)
+        with_sex_assertion(record, args.sex)
+        data["sample"] = {
+            "id12": id12_for(store, source_id), "input_id": aligned.input_id, "platform": platform,
+        }
+        data["reference_id"] = reference_id
         data["alignment"] = "reused (stored sample)"
+        excluded = record.get("excluded", [])
+        if not isinstance(excluded, list) or not all(
+            isinstance(index, int) and not isinstance(index, bool) and index >= 0
+            for index in excluded
+        ):
+            excluded = None
+        chunks = record.get("chunks")
+        if isinstance(chunks, list) and chunks and all(
+            isinstance(chunk, dict) and isinstance(chunk.get("size"), int)
+            and not isinstance(chunk["size"], bool) and chunk["size"] >= 0
+            for chunk in chunks
+        ):
+            data["chunks"] = {
+                "count": len(chunks), "bytes": sum(chunk["size"] for chunk in chunks),
+                "excluded": excluded,
+            }
+        else:
+            data["chunks"] = {"count": None, "bytes": None, "excluded": excluded}
+        data["budget"] = {
+            "required_bytes": 0,
+            "free_bytes": shutil.disk_usage(store.root).free,
+            "parts": {},
+            "scope": "ingest and alignment (reused)",
+            "analysis_scratch": "not predicted",
+        }
         lines.append(f"SAMPLE    {id12_for(store, source_id)} (stored)")
+        lines.append(f"REFERENCE {data['reference_id']}")
+        suffix = " · exclusions unknown" if excluded is None else (f" · excluded {excluded}" if excluded else "")
+        if data["chunks"]["count"] is not None:
+            lines.append(
+                f"INPUT     {data['chunks']['count']} stored chunk(s) · "
+                f"{data['chunks']['bytes'] / GIB:.2f} GB{suffix}"
+            )
+        else:
+            lines.append(f"INPUT     unknown (stored chunk record incomplete){suffix}")
         lines.append("ALIGN     reused (stored sample)")
+        lines.append(
+            f"DISK      ingest/align needs 0 GB, has {data['budget']['free_bytes'] / GIB:.1f} GB "
+            "(reused; not a sufficiency check)"
+        )
+        lines.append("ANALYSIS  scratch disk not predicted")
+        mark_platform_skips(platform)
+        summary = next((item.algorithm for item in items if item.algorithm.id == "read-summary"), None)
+        if summary is not None and not args.force:
+            identity = execution_identity(
+                summary, reference_sha256=reference_sha256,
+                platform=platform if platform != "ont" else None,
+            )
+            selected = store.read_result(aligned.input_id, summary.id, identity)
+            if selected is not None and selected.status == "ok":
+                plan_rows[next(index for index, item in enumerate(items) if item.algorithm.id == "read-summary")][
+                    "decision"
+                ] = "reused (selected result)"
+                values = {metric.metric_id: metric.value for metric in selected.metrics}
+                eligible = values.get("eligible_reads")
+                depth_x = values.get("approx_depth_x")
+                if (
+                    isinstance(eligible, int) and not isinstance(eligible, bool) and eligible >= 0
+                    and isinstance(depth_x, (int, float)) and not isinstance(depth_x, bool)
+                ):
+                    data["eligible_reads"] = eligible
+                    lines.append(f"DEPTH     {eligible:,} eligible reads (selected read-summary)")
+                    for row, item in zip(plan_rows, items):
+                        if row["decision"] != "decided after alignment":
+                            continue
+                        minimum = item.algorithm.requires.min_eligible_reads
+                        if minimum and eligible < minimum:
+                            row["decision"] = "skip expected below depth minimum (unless cached)"
+                            row["eligible_reads"] = eligible
+                            row["minimum_eligible_reads"] = minimum
+                        elif minimum:
+                            row["decision"] = "depth minimum met; other checks at run time"
+        for row in plan_rows:
+            if row["decision"] == "decided after alignment":
+                row["decision"] = "decided at run time"
     else:
         paths = collect_paths(args.inputs)
         chunkset = inspect_chunks(paths, store, skip_bad_chunks=args.skip_bad_chunks, write_cache=False)
         input_platform = _declared_platform(chunkset)
+        platform = input_platform if chunkset.aligned else "ont"
         data["sample"] = {"source_id": chunkset.source_id,
-                          "platform": input_platform if chunkset.aligned else "ont"}
+                          "platform": platform}
+        mark_platform_skips(platform)
         with_sex_assertion(source_record(store, chunkset.source_id) or {}, args.sex)
         reference = resolve_reference(store.root, args.reference_id)
         data["reference_id"] = reference.reference_id
@@ -446,10 +554,9 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     source_id = resolve_sample(store, args.inputs[0])
                     aligned, record = _stored_input(store, source_id)
                     _stored_platform(aligned)
+                    reference_id, reference_sha256 = _stored_reference_binding(aligned)
                     record = record_source_sex(store, source_id, args.sex)
                     example = bool(record.get("example"))
-                    reference_id = aligned.manifest["reference_id"]
-                    reference_sha256 = aligned.manifest["reference_sha256"]
                     scrubber = Scrubber(root=store.root)
                     progress(f"ingest                   stored sample {id12_for(store, source_id)}")
                 else:

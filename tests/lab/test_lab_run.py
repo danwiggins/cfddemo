@@ -6,6 +6,7 @@ installs versions at the D9 minimums.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -15,6 +16,7 @@ import sys
 import textwrap
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pysam
 import pytest
@@ -341,6 +343,237 @@ def test_dry_run_writes_nothing_and_ignores_the_lock(lab_world, capsys, monkeypa
     assert data["plan"][0]["algorithm_id"] == "read-summary"
     assert data["budget"]["required_bytes"] > 0
     assert len(before) <= len(snapshot)
+
+
+def test_stored_dry_run_uses_selected_depth_without_writing(
+    lab_world, capsys, monkeypatch, shared_mmi,
+) -> None:
+    monkeypatch.setattr(registry, "ALGORITHMS", (
+        "read_summary:READ_SUMMARY", "delfi_ratio:DELFI_RATIO",
+    ))
+    root = lab_world["root"]
+    code, first = _json(
+        capsys, "run", str(lab_world["chunks"]), "--root", str(root),
+        "--mmi", str(shared_mmi), "--only", "read-summary",
+    )
+    assert code == 0, first
+    store = LabStore(root)
+    source_file = store.sources_dir / f"{first['data']['sample']['source_id']}.json"
+    record = json.loads(source_file.read_text())
+    record["excluded"] = [4]
+    source_file.write_text(json.dumps(record))
+    input_id = first["data"]["sample"]["input_id"]
+    identity = next((store.results_dir / input_id / "read-summary").iterdir()).name
+    selected_summary = store.read_result(input_id, "read-summary", identity)
+    assert selected_summary is not None
+    expected_eligible = next(
+        metric.value for metric in selected_summary.metrics if metric.metric_id == "eligible_reads"
+    )
+
+    def snapshot() -> dict[str, str]:
+        return {
+            str(path.relative_to(root)): (
+                "dir" if path.is_dir() else hashlib.sha256(path.read_bytes()).hexdigest()
+            )
+            for path in root.rglob("*") if path.is_dir() or path.is_file()
+        }
+
+    def selected_result_for(value):
+        def selected_result(_store, selected_input_id, algorithm_id, parameters_sha256):
+            assert (selected_input_id, algorithm_id, parameters_sha256) == (
+                input_id, "read-summary", identity,
+            )
+            return value
+
+        return selected_result
+
+    with store.writer("other", "r-20261017-1200-aaab"):
+        before = snapshot()
+        monkeypatch.setattr(
+            run_module, "shutil",
+            SimpleNamespace(disk_usage=lambda _root: SimpleNamespace(free=3 * 1024**3)),
+        )
+        code, payload = _json(
+            capsys, "run", "latest", "--root", str(root),
+            "--only", "delfi-ratio", "--dry-run",
+        )
+        human_code, human, _ = _lab(
+            capsys, "run", "latest", "--root", str(root),
+            "--only", "delfi-ratio", "--dry-run",
+        )
+        forced_code, forced = _json(
+            capsys, "run", "latest", "--root", str(root),
+            "--only", "delfi-ratio", "--dry-run", "--force",
+        )
+        unavailable = []
+        for selected in (None, SimpleNamespace(status="failed", metrics=[])):
+            with monkeypatch.context() as patch:
+                patch.setattr(LabStore, "read_result", selected_result_for(selected))
+                missing_code, missing = _json(
+                    capsys, "run", "latest", "--root", str(root),
+                    "--only", "delfi-ratio", "--dry-run",
+                )
+                assert missing_code == 0
+                unavailable.append(missing["data"])
+        with monkeypatch.context() as patch:
+            selected = SimpleNamespace(
+                status="ok", metrics=[
+                    SimpleNamespace(metric_id="eligible_reads", value=2_000_000),
+                    SimpleNamespace(metric_id="approx_depth_x", value=1.0),
+                ],
+            )
+            patch.setattr(LabStore, "read_result", selected_result_for(selected))
+            met_code, met = _json(
+                capsys, "run", "latest", "--root", str(root),
+                "--only", "delfi-ratio", "--dry-run",
+            )
+        with monkeypatch.context() as patch:
+            patch.setattr(LabStore, "read_result", selected_result_for(SimpleNamespace(status="ok", metrics=[])))
+            no_depth_code, no_depth = _json(
+                capsys, "run", "latest", "--root", str(root),
+                "--only", "delfi-ratio", "--dry-run",
+            )
+        with monkeypatch.context() as patch:
+            patch.setattr(LabStore, "read_result", selected_result_for(SimpleNamespace(
+                status="ok", metrics=[SimpleNamespace(metric_id="eligible_reads", value=2_000_000)],
+            )))
+            partial_depth_code, partial_depth = _json(
+                capsys, "run", "latest", "--root", str(root),
+                "--only", "delfi-ratio", "--dry-run",
+            )
+        stored_manifest = json.loads((store.inputs_dir / input_id / "manifest.json").read_text())
+        for malformed in (
+            {**stored_manifest, "reference_sha256": None},
+            {**stored_manifest, "reference_sha256": "invalid"},
+            ["invalid"],
+        ):
+            with monkeypatch.context() as patch:
+                patch.setattr(run_module, "input_manifest", lambda _store, _input_id: malformed)
+                bad_code, bad = _json(capsys, "run", "latest", "--root", str(root), "--dry-run")
+                expected = "TBX-LAB-024" if isinstance(malformed, list) else "TBX-LAB-017"
+                assert bad_code == (3 if isinstance(malformed, list) else 4)
+                assert bad["data"]["code"] == expected
+                assert bad["data"]["input_id"] == input_id
+                if expected == "TBX-LAB-017":
+                    assert "fresh ROOT" in bad["data"]["fix"]
+        from traceback_lab.sample_metadata import SCHEMA as SEX_METADATA_SCHEMA
+
+        with monkeypatch.context() as patch:
+            patch.setattr(run_module, "input_manifest", lambda _store, _input_id: ["invalid"])
+            patch.setattr(run_module, "source_record", lambda _store, _source_id: {
+                **record,
+                "operator_metadata": {
+                    "schema": SEX_METADATA_SCHEMA, "sex": "M", "recorded_utc": "2026-10-17T00:00:00Z",
+                },
+            })
+            conflict_code, conflict = _json(
+                capsys, "run", "latest", "--root", str(root), "--sex", "F", "--dry-run",
+            )
+            assert conflict_code == 3 and conflict["data"]["code"] == "TBX-LAB-024"
+        with monkeypatch.context() as patch:
+            patch.setattr(run_module, "source_record", lambda _store, _source_id: {
+                **record, "chunks": [{"size": "invalid"}],
+            })
+            incomplete_code, incomplete = _json(
+                capsys, "run", "latest", "--root", str(root), "--dry-run",
+            )
+            incomplete_human_code, incomplete_human, _ = _lab(
+                capsys, "run", "latest", "--root", str(root), "--dry-run",
+            )
+        assert snapshot() == before
+    assert code == human_code == forced_code == met_code == no_depth_code == partial_depth_code == incomplete_code == incomplete_human_code == 0
+    data = payload["data"]
+    assert data["sample"]["id12"] == first["data"]["sample"]["id12"]
+    assert data["sample"]["input_id"] == first["data"]["sample"]["input_id"]
+    assert data["reference_id"] == "synth"
+    assert data["chunks"]["count"] == 3 and data["chunks"]["bytes"] > 0
+    assert data["chunks"]["excluded"] == [4]
+    assert data["alignment"] == "reused (stored sample)"
+    assert data["budget"]["required_bytes"] == 0
+    assert data["budget"]["free_bytes"] == 3 * 1024**3
+    assert data["budget"]["analysis_scratch"] == "not predicted"
+    assert data["eligible_reads"] == expected_eligible < 1_000_000
+    assert data["plan"] == [
+        {"algorithm_id": "read-summary", "upstream": True, "decision": "reused (selected result)"},
+        {
+            "algorithm_id": "delfi-ratio", "upstream": False,
+            "decision": "skip expected below depth minimum (unless cached)",
+            "eligible_reads": data["eligible_reads"], "minimum_eligible_reads": 1_000_000,
+        },
+    ]
+    assert "REFERENCE synth" in human
+    assert "3 stored chunk(s)" in human
+    assert "excluded [4]" in human
+    assert "skip expected below depth minimum (unless cached)" in human
+    assert "has 3.0 GB (reused; not a sufficiency check)" in human
+    assert "ANALYSIS  scratch disk not predicted" in human
+    assert "eligible_reads" not in forced["data"]
+    assert all(row["decision"] == "decided at run time" for row in forced["data"]["plan"])
+    for missing in unavailable:
+        assert "eligible_reads" not in missing
+        assert all(row["decision"] == "decided at run time" for row in missing["plan"])
+    assert met["data"]["plan"][1]["decision"] == "depth minimum met; other checks at run time"
+    assert "eligible_reads" not in no_depth["data"]
+    assert no_depth["data"]["plan"][0]["decision"] == "reused (selected result)"
+    assert no_depth["data"]["plan"][1]["decision"] == "decided at run time"
+    assert "eligible_reads" not in partial_depth["data"]
+    assert partial_depth["data"]["plan"][0]["decision"] == "reused (selected result)"
+    assert partial_depth["data"]["plan"][1]["decision"] == "decided at run time"
+    assert incomplete["data"]["chunks"] == {"count": None, "bytes": None, "excluded": [4]}
+    assert "INPUT     unknown (stored chunk record incomplete) · excluded [4]" in incomplete_human
+
+
+def test_stored_illumina_dry_run_uses_platform_bound_read_summary(
+    tmp_path: Path, capsys, monkeypatch,
+) -> None:
+    from tests.lab.test_platforms import _prealigned_world
+    from traceback_lab.algorithms.read_summary import READ_SUMMARY
+    from traceback_lab.registry import execution_identity
+
+    root, bam = _prealigned_world(tmp_path, ("ILLUMINA",))
+    monkeypatch.setattr(registry, "ALGORITHMS", (
+        "read_summary:READ_SUMMARY", "delfi_ratio:DELFI_RATIO",
+    ))
+    code, first = _json(capsys, "run", str(bam), "--root", str(root),
+                        "--reference", "hg38", "--only", "read-summary")
+    assert code == 0, first
+    store = LabStore(root)
+    input_id = first["data"]["sample"]["input_id"]
+    manifest = json.loads((store.inputs_dir / input_id / "manifest.json").read_bytes())
+    identity = execution_identity(
+        READ_SUMMARY, reference_sha256=manifest["reference_sha256"], platform="illumina",
+    )
+    selected = store.read_result(input_id, "read-summary", identity)
+    assert selected is not None and selected.status == "ok"
+    eligible = next(metric.value for metric in selected.metrics if metric.metric_id == "eligible_reads")
+
+    dry_code, dry = _json(capsys, "run", "latest", "--root", str(root),
+                          "--only", "delfi-ratio", "--dry-run")
+    assert dry_code == 0, dry
+    assert dry["data"]["sample"]["platform"] == "illumina"
+    assert dry["data"]["eligible_reads"] == eligible
+    assert dry["data"]["plan"] == [
+        {"algorithm_id": "read-summary", "upstream": True, "decision": "reused (selected result)"},
+        {"algorithm_id": "delfi-ratio", "upstream": False, "decision": "skip expected (platform)"},
+    ]
+    with monkeypatch.context() as patch:
+        original_read_result = LabStore.read_result
+
+        def high_depth_result(current_store, selected_id, algorithm_id, parameters_sha256):
+            if algorithm_id == "read-summary":
+                assert selected_id == input_id and parameters_sha256 == identity
+                return SimpleNamespace(status="ok", metrics=[
+                    SimpleNamespace(metric_id="eligible_reads", value=2_000_000),
+                    SimpleNamespace(metric_id="approx_depth_x", value=1.0),
+                ])
+            return original_read_result(current_store, selected_id, algorithm_id, parameters_sha256)
+
+        patch.setattr(LabStore, "read_result", high_depth_result)
+        met_code, met = _json(capsys, "run", "latest", "--root", str(root),
+                              "--only", "delfi-ratio", "--dry-run")
+    assert met_code == 0, met
+    assert met["data"]["eligible_reads"] == 2_000_000
+    assert met["data"]["plan"][1]["decision"] == "skip expected (platform)"
 
 
 def test_second_writer_is_refused(lab_world, capsys, monkeypatch) -> None:

@@ -179,7 +179,14 @@ Artifact sizes check completeness, not byte-level integrity.
 
 **Dry run.** `--dry-run` writes nothing and takes no lock. It prints the
 resolved ROOT and reference, chunk count and bytes, whether alignment is
-needed or reused, the disk budget against free space and the plan.
+needed or reused, the ingest/alignment disk budget against free space and the
+plan. For a stored sample, a selected read-summary can show eligible depth and
+minimum-depth gates; cached reuse and other adapter checks remain decisions for
+the run.
+The stored-sample zero budget covers reused ingest and alignment only; it is
+not a sufficiency check for analysis scratch. Nonempty excluded-chunk lists
+appear in both human and JSON output. With `--force`, a prior read-summary does not supply
+depth predictions for the new run.
 With an explicit `--cohort`, it also checks that a built internal panel exists.
 Protocol and asset compatibility are checked during the run, after alignment
 when alignment is needed; the preview labels that decision as deferred.
@@ -296,7 +303,8 @@ mode is experimental and its paired-end-trained cancer model is **not** run;
 these values are neither cell fractions nor a validated diagnostic.
 
 **Short-read TLEN slice.** For a prealigned paired-end Illumina BAM against
-the registered hg38 reference, run the separate measurement explicitly:
+the registered hg38 reference, run the normal Lab command to include its
+separate TLEN measurement:
 
 ```bash
 traceback lab run YOUR_LOCAL_aligned_illumina.bam \
