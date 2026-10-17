@@ -13,6 +13,7 @@ import os
 import stat
 import shutil
 import subprocess
+import tempfile
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -112,9 +113,48 @@ def _compatible_bam_layout(path: Path) -> bool:
     try:
         with pysam.AlignmentFile(str(path), "rb") as bam:
             return (tuple(bam.references[:24]) == _CONTIGS
+                    and bam.header.get("HD", {}).get("SO") == "coordinate"
                     and bam.lengths[0] == 248_956_422 and bam.lengths[23] == 57_227_415)
     except (OSError, ValueError, IndexError):
         return False
+
+
+def _stage_control(path: Path, expected_sha256: str, out: Path) -> Path:
+    """Copy a verified control snapshot for R, closing the check-to-open gap."""
+
+    staged: Path | None = None
+    completed = False
+    try:
+        source_fd = open_regular_no_follow(path)
+        try:
+            before = os.fstat(source_fd)
+            if not 1 <= before.st_size <= (2 << 30):
+                raise RuntimeError("registered NIPTeR control size changed")
+            output_fd, name = tempfile.mkstemp(prefix="nipter-control-", suffix=".rds", dir=out)
+            staged = Path(name)
+            digest = hashlib.sha256()
+            with os.fdopen(output_fd, "wb") as output:
+                while block := os.read(source_fd, 1 << 20):
+                    digest.update(block)
+                    output.write(block)
+            after = os.fstat(source_fd)
+            def identity(info: os.stat_result) -> tuple[int, int, int, int, int]:
+                return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+            if identity(before) != identity(after) or digest.hexdigest() != expected_sha256:
+                raise RuntimeError("registered NIPTeR control changed during snapshot")
+            completed = True
+            return staged
+        finally:
+            os.close(source_fd)
+    except OSError as exc:
+        raise RuntimeError("registered NIPTeR control could not be snapshotted") from exc
+    finally:
+        if staged is not None and not completed:
+            try:
+                staged.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _rscript() -> tuple[Path, str] | None:
@@ -236,7 +276,7 @@ class FetalFraction(Base):
     consumes: str = "full_bam"
     cost: str = "slow"
     requires: Requirements = field(default_factory=lambda: Requirements(min_eligible_reads=2_000_000))
-    tools: tuple[ToolPin, ...] = (ToolPin("NIPTeR", "1.0.2", "nipter-lgpl3"),)
+    tools: tuple[ToolPin, ...] = (ToolPin("NIPTeR", "1.0.2", "nipter-lgpl"),)
     parameters: dict[str, Any] = field(default_factory=lambda: {
         "trisomy_statistic": "NIPTeR standard z-score", "control": "attested matched NIPTControlGroup",
         "fetal_fraction_model": "unavailable", "r_script_sha256": SCRIPT_SHA256,
@@ -299,15 +339,19 @@ class FetalFraction(Base):
         out.mkdir(parents=True, exist_ok=True)
         script = out / "nipter-z.R"
         script.write_bytes(R_CODE.encode("utf-8"))
+        control_snapshot: Path | None = None
         try:
+            control_snapshot = _stage_control(contract.control_path, contract.control_sha256, out)
             completed = _run_bounded_r(
                 [str(runtime[0]), "--vanilla", str(script), str(ctx.input_dir / "aligned.bam"),
-                 str(contract.control_path), str(contract.control_n)],
+                 str(control_snapshot), str(contract.control_n)],
                 cwd=out, timeout_seconds=900, log_limit_bytes=4096,
             )
         except RuntimeError as exc:
-            raise RuntimeError("NIPTeR process could not start; inspect the registered toolchain") from exc
+            raise RuntimeError("NIPTeR control or process unavailable; inspect the registered toolchain") from exc
         finally:
+            if control_snapshot is not None:
+                control_snapshot.unlink(missing_ok=True)
             script.unlink(missing_ok=True)
         if completed.outcome != "exited" or completed.returncode != 0 or completed.stdout_truncated:
             raise RuntimeError("NIPTeR trisomy calculation failed; inspect the registered control and toolchain")
