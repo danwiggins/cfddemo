@@ -19,7 +19,9 @@ from traceback_lab.algorithms import microbial as algorithm
 from traceback_lab import cohorts
 from traceback_lab.cohort_contracts import CohortGeneration, CohortMember, CohortResult
 from traceback_lab.envelope import Metric, ResultEnvelope, provenance
-from traceback_lab.microbial_db import MicrobialDbError, inspect_database, register_database
+from traceback_lab.microbial_db import (
+    MicrobialDbError, MicrobialDbReceiptChanged, inspect_database, register_database,
+)
 from traceback_lab.microbial_view import profile_for_sample
 from traceback_lab.registry import InputContext, ToolPin
 from traceback_lab.registry import execution_identity
@@ -519,6 +521,29 @@ def test_legacy_registration_upgrades_by_full_verification(tmp_path) -> None:
     assert upgraded.sha256 == old["sha256"]
     assert json.loads(manifest.read_text())["schema"] == "traceback.lab.microbial-db.v2"
     assert inspect_database(store, verify_bytes=False).sha256 == old["sha256"]
+
+
+def test_metadata_drift_explains_recovery_and_reregisters_same_bytes(tmp_path, monkeypatch) -> None:
+    store, directory = _database(tmp_path)
+    pinned = inspect_database(store).sha256
+    file = directory / "hash.k2d"
+    info = file.stat()
+    os.utime(file, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000_000))
+    with pytest.raises(MicrobialDbReceiptChanged, match="changed since byte verification"):
+        inspect_database(store, verify_bytes=False)
+
+    monkeypatch.setattr(algorithm.shutil, "which", lambda name: name)
+    monkeypatch.setattr(algorithm, "_tool", lambda name: (name, "a" * 64))
+    ctx = InputContext(store.root, "a" * 64, "b" * 64, "ref", "c" * 64, tmp_path)
+    skipped = algorithm.MICROBIAL.preflight(ctx)
+    assert skipped.reason_code == "missing_asset"
+    assert "rerun lab microbial db add" in skipped.message
+    assert "restore the pinned bytes" in skipped.message
+
+    with store.writer("microbial db add", "r-20261016-0005-aabb", step="database"):
+        refreshed = register_database(store, directory, 75, "synthetic database")
+    assert refreshed.sha256 == pinned
+    assert inspect_database(store, verify_bytes=False).sha256 == pinned
 
 
 def test_reregistration_write_failure_preserves_manifest_and_hides_path(tmp_path, monkeypatch) -> None:

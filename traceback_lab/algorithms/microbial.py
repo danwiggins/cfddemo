@@ -25,7 +25,7 @@ import pysam
 from traceback_runner.serialization import canonical_json_bytes
 
 from ..assets import AssetError, _check_contained
-from ..microbial_db import MicrobialDbError, inspect_database
+from ..microbial_db import MicrobialDbError, MicrobialDbReceiptChanged, RECEIPT_RECOVERY, inspect_database
 from ..registry import AlgorithmOutput, InputContext, Ready, Skip, ToolPin
 from ._base import Base, metric
 
@@ -299,6 +299,8 @@ class Microbial(Base):
             return Skip("missing_toolchain", "Kraken2/Bracken launchers, upstream helpers, and Bracken's python interpreter are required")
         try:
             inspect_database(LabStore(ctx.root), verify_bytes=False)
+        except MicrobialDbReceiptChanged:
+            return Skip("missing_asset", RECEIPT_RECOVERY)
         except MicrobialDbError:
             return Skip("missing_asset", "register a pinned Kraken2/Bracken database")
         if not (ctx.input_dir / "aligned.bam").is_file():
