@@ -112,6 +112,7 @@ def _sample() -> dict:
             "provenance": {
                 "tool": "synthetic-fixture", "tool_version": "1", "parameters_sha256": "a" * 64,
                 "input_id": "b" * 64, "source_id": "c" * 64,
+                "attempt_id": "a-20261016T000000000000-abcd1234",
                 "reference_id": "synthetic", "timestamp_utc": "2026-10-16T00:00:00Z",
             },
         })
