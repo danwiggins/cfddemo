@@ -126,6 +126,9 @@ def test_reduced_motion_disables_rendered_lab_transition_and_animation(tmp_path)
         profile = tmp_path / "browser-profile"
 
         def inspect(command, evaluate) -> None:
+            command("Emulation.setEmulatedMedia", {"features": [
+                {"name": "prefers-reduced-motion", "value": "no-preference"},
+            ]})
             evaluate("""(() => {
               const chip = document.querySelector('#main .state-chip');
               chip.style.transition = 'opacity 1s linear';

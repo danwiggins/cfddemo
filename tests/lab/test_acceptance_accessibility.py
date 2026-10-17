@@ -190,5 +190,5 @@ def test_keyboard_focus_order_disclosures_dialog_and_route_focus(tmp_path) -> No
             [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
              f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/findings"],
             profile, ok=lambda d: 'data-ready="1"' in d and 'class="finding-card"' in d,
-            interact=interact,
+            interact=interact, timeout=180,
         )

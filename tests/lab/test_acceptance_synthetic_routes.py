@@ -13,7 +13,7 @@ import pytest
 
 from tests.lab.test_lab_server import _chrome, _dom_cdp
 from tests.lab.test_landing import _dom, needs_chrome
-from traceback_lab.interpretation.engine import load_library
+from traceback_lab.interpretation.engine import classify, load_library
 from traceback_lab.registry import load_registry
 from traceback_lab.store import LabStore
 from traceback_lab.web.api import _catalog
@@ -169,6 +169,35 @@ def test_disclosure_fixture_is_nonvacuous_and_registry_complete() -> None:
     assert LICENSE_IDS == {lic["license_id"] for lic in sample["licenses"]}
     assert LICENSE_IDS == {license_id for row in sample["catalog"] for license_id in row["license_ids"]}
     assert LICENSE_IDS == {license_id for row in sample["defended"]["rows"] for license_id in row["license_ids"]}
+
+
+def _low_depth_liver_sample() -> dict:
+    sample = _sample()
+    sample["depth"]["approx_depth_x"] = 0.2
+    liver = next(metric for algorithm in sample["algorithms"] if algorithm["algorithm_id"] == "cell-origin"
+                 for metric in algorithm["metrics"] if metric["metric_id"] == "fraction_liver_hep")
+    result = classify(0.031, LIBRARY.entry("cell-origin", "fraction_liver_hep"), depth_x=0.2)
+    liver.update(value=0.031, state=result.state, reason=result.reason, caption=result.caption,
+                 reference_kind=result.reference_kind, interval=result.interval)
+    return sample
+
+
+def test_actual_liver_metric_is_depth_gated_at_point_two_x_with_estimate_retained() -> None:
+    sample = _low_depth_liver_sample()
+    liver = next(metric for algorithm in sample["algorithms"] if algorithm["algorithm_id"] == "cell-origin"
+                 for metric in algorithm["metrics"] if metric["metric_id"] == "fraction_liver_hep")
+    assert (liver["state"], liver["reason"], liver["value"]) == ("not_interpretable", "depth", 0.031)
+    assert "Needs 5x; this input is 0.2x. The estimate stays visible." == liver["caption"]
+
+
+@needs_chrome
+def test_low_depth_liver_metric_keeps_numeric_estimate_in_findings(tmp_path) -> None:
+    with _server(tmp_path, _low_depth_liver_sample()) as server:
+        dom = _dom(server, tmp_path / "browser", route=f"/sample/{ID12}/findings",
+                   want=lambda d: 'data-ready="1"' in d and "Not interpretable" in d)
+    row = re.search(r"<tr><td>Liver-Hep share of cfDNA.*?</tr>", dom, re.DOTALL)
+    assert row is not None, "the liver metric must appear in the not-interpretable table"
+    assert "0.031" in row.group() and "depth" in row.group() and "5x" in row.group()
 
 
 @needs_chrome
