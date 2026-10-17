@@ -30,6 +30,11 @@ MAX_AGGREGATE_BYTES = 16 * 1024
 MAX_CODE_FILE_BYTES = 8 * 1024 * 1024
 MAX_CODE_TOTAL_BYTES = 64 * 1024 * 1024
 AGGREGATE_SCHEMA = "traceback.methylbert-aggregate.v1"
+CHILD_ENV_KEYS = frozenset({
+    "PATH", "SYSTEMROOT", "LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES",
+    "HOME", "TMPDIR", "TMP", "TEMP", "HF_HOME", "HF_HUB_OFFLINE",
+    "HF_DATASETS_OFFLINE", "TRANSFORMERS_OFFLINE", "TOKENIZERS_PARALLELISM", "NO_PROXY",
+})
 
 
 class RuntimeRefusal(ValueError):
@@ -190,6 +195,10 @@ def run_worker(
 
     if not argv or not os.path.isabs(argv[0]):
         raise RuntimeRefusal("MethylBERT worker executable must be absolute")
+    if set(env) - CHILD_ENV_KEYS:
+        raise RuntimeRefusal("MethylBERT child environment contains an unapproved variable")
+    if any(env.get(key) != "1" for key in ("HF_HUB_OFFLINE", "HF_DATASETS_OFFLINE", "TRANSFORMERS_OFFLINE")):
+        raise RuntimeRefusal("MethylBERT child model hubs must be offline")
     if type(eligible_reads) is not int or eligible_reads < MIN_ELIGIBLE_READS:
         raise RuntimeRefusal("MethylBERT needs at least 2,500,000 eligible ONT reads")
     if not scratch.is_absolute() or not aggregate_path.is_absolute():

@@ -195,8 +195,17 @@ def run_plan(
             for name in algorithm.upstream
             if name in done
         ]
+        identity_ctx = target.context(store.root)
+        identity_assets = getattr(algorithm, "identity_assets", None)
         assets_of = getattr(algorithm, "asset_sha256s", None)
-        planned_assets = list(assets_of(store.root) if callable(assets_of) else ())
+        if callable(identity_assets):
+            planned_assets = list(identity_assets(identity_ctx))
+        elif callable(assets_of):
+            planned_assets = list(assets_of(store.root))
+        else:
+            planned_assets = []
+        identity_parameters = getattr(algorithm, "identity_parameters", None)
+        planned_parameters = identity_parameters(identity_ctx) if callable(identity_parameters) else algorithm.parameters
         planned_tools = [tool.identity() for tool in algorithm.tools]
         identity = execution_identity(
             algorithm,
@@ -206,6 +215,7 @@ def run_plan(
             # re-registered asset never reuses an older result.
             asset_sha256s=planned_assets,
             tool_pins=planned_tools,
+            parameters=planned_parameters,
         )
         step = algorithm.id if target.label == "full" else f"{algorithm.id}@{target.label}"
         existing = store.read_result(target.input_id, algorithm.id, identity)

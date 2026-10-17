@@ -81,6 +81,8 @@ def add_run_parser(commands: Any, common: Callable[[argparse.ArgumentParser], No
     run.add_argument("--threads", type=_threads, metavar="N", help="alignment threads (default min(8, cores-2))")
     run.add_argument("--sort-mem", type=_sort_mem, default="1G", metavar="MEM", help="samtools sort memory per thread (e.g. 768M, 2G)")
     run.add_argument("--mmi", type=Path, metavar="PATH", help="reuse an existing minimap2 index")
+    run.add_argument("--methylbert-bundle-sha256", type=_sha256, metavar="SHA256", help="operator-trusted registered MethylBERT tumour/normal bundle")
+    run.add_argument("--methylbert-code-sha256", type=_sha256, metavar="SHA256", help="trusted digest of the pinned installed MethylBERT Python sources")
     run.add_argument("--dry-run", action="store_true", help="print the plan; write nothing, take no lock")
     run.add_argument("--verbose", action="store_true", help="stream tool stderr live (never stored)")
     common(run)
@@ -100,6 +102,14 @@ def _threads(value: str) -> int:
     if not 1 <= number <= 256:
         raise argparse.ArgumentTypeError("--threads is 1-256")
     return number
+
+
+def _sha256(value: str) -> str:
+    import re
+
+    if not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise argparse.ArgumentTypeError("MethylBERT SHA-256 must be 64 lowercase hexadecimal characters")
+    return value
 
 
 def _progress(as_json: bool) -> Callable[[str], None]:
@@ -168,6 +178,8 @@ def _flags(args: argparse.Namespace) -> dict[str, Any]:
         "reference_id": args.reference_id,
         "declared_sex": args.sex,
         "stored_sample": len(args.inputs) == 1 and _is_stored(args.inputs[0]),
+        "methylbert_bundle_sha256": getattr(args, "methylbert_bundle_sha256", None),
+        "methylbert_code_sha256": getattr(args, "methylbert_code_sha256", None),
     }
 
 
@@ -176,13 +188,16 @@ def _is_stored(text: str) -> bool:
 
 
 def _target_from_input(
-    aligned: AlignedInput, reference_id: str, reference_sha256: str, example: bool, store: LabStore
+    aligned: AlignedInput, reference_id: str, reference_sha256: str, example: bool, store: LabStore,
+    *, methylbert_bundle_sha256: str | None = None, methylbert_code_sha256: str | None = None,
 ) -> RunTarget:
     extras: dict[str, Any] = {}
     try:
         extras["reference_fasta"] = str(resolve_reference(store.root, reference_id, example=True).fasta)
     except LabProblem:
         pass  # algorithms that need the FASTA fail or skip on their own
+    extras["methylbert_bundle_sha256"] = methylbert_bundle_sha256
+    extras["methylbert_code_sha256"] = methylbert_code_sha256
     return RunTarget(
         input_id=aligned.input_id,
         source_id=aligned.source_id,
@@ -504,7 +519,11 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     )
                 id12 = id12_for(store, aligned.source_id)
                 log.append("sample", sample=id12, source_id=aligned.source_id, input_id=aligned.input_id)
-                target = _target_from_input(aligned, reference_id, reference_sha256, example, store)
+                target = _target_from_input(
+                    aligned, reference_id, reference_sha256, example, store,
+                    methylbert_bundle_sha256=getattr(args, "methylbert_bundle_sha256", None),
+                    methylbert_code_sha256=getattr(args, "methylbert_code_sha256", None),
+                )
                 results = run_plan(
                     store,
                     lock,

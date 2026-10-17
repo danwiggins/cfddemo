@@ -143,6 +143,7 @@ def test_worker_launch_uses_contained_deadline_and_private_aggregate(tmp_path, m
     scratch.mkdir()
     aggregate = scratch / "aggregate.json"
     seen = {}
+    offline = {"HF_HUB_OFFLINE": "1", "HF_DATASETS_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1"}
 
     def contained(argv, **kwargs):
         seen.update({"argv": argv, **kwargs})
@@ -151,7 +152,7 @@ def test_worker_launch_uses_contained_deadline_and_private_aggregate(tmp_path, m
 
     monkeypatch.setattr(runtime, "run_contained", contained)
     result = runtime.run_worker(
-        [sys.executable, "worker.py"], scratch=scratch, env={}, aggregate_path=aggregate,
+        [sys.executable, "worker.py"], scratch=scratch, env=offline, aggregate_path=aggregate,
         model_id="tumour-normal", eligible_reads=runtime.MIN_ELIGIBLE_READS,
     )
     assert result.tumour_fraction == 0.2
@@ -159,12 +160,12 @@ def test_worker_launch_uses_contained_deadline_and_private_aggregate(tmp_path, m
     assert seen["log_limit_bytes"] == runtime.MAX_LOG_BYTES
     with pytest.raises(runtime.RuntimeRefusal, match="new file"):
         runtime.run_worker(
-            [sys.executable, "worker.py"], scratch=scratch, env={}, aggregate_path=aggregate,
+            [sys.executable, "worker.py"], scratch=scratch, env=offline, aggregate_path=aggregate,
             model_id="tumour-normal", eligible_reads=runtime.MIN_ELIGIBLE_READS,
         )
     with pytest.raises(runtime.RuntimeRefusal, match="parent is missing"):
         runtime.run_worker(
-            [sys.executable, "worker.py"], scratch=scratch, env={},
+            [sys.executable, "worker.py"], scratch=scratch, env=offline,
             aggregate_path=scratch / "missing" / "aggregate.json", model_id="tumour-normal",
             eligible_reads=runtime.MIN_ELIGIBLE_READS,
         )
@@ -174,6 +175,12 @@ def test_worker_launch_uses_contained_deadline_and_private_aggregate(tmp_path, m
     ))
     with pytest.raises(runtime.RuntimeRefusal, match="failed"):
         runtime.run_worker(
-            [sys.executable, "worker.py"], scratch=scratch, env={}, aggregate_path=aggregate,
+            [sys.executable, "worker.py"], scratch=scratch, env=offline, aggregate_path=aggregate,
             model_id="tumour-normal", eligible_reads=runtime.MIN_ELIGIBLE_READS,
+        )
+    with pytest.raises(runtime.RuntimeRefusal, match="unapproved variable"):
+        runtime.run_worker(
+            [sys.executable, "worker.py"], scratch=scratch, env={**offline, "PYTHONPATH": "/tmp/inject"},
+            aggregate_path=aggregate, model_id="tumour-normal",
+            eligible_reads=runtime.MIN_ELIGIBLE_READS,
         )

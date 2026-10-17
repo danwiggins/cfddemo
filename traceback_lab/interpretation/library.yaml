@@ -2497,6 +2497,79 @@ entries:
     citations: ["doi:10.1038/s41588-018-0073-4"]
     citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "PMID 29610480: common-PMD definition."}
 
+  # ----------------------------------------------------------- methylbert
+  - algorithm_id: methylbert
+    metric_id: tumour_fraction
+    label: "MethylBERT tumour-source fraction (exploratory)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "MethylBERT study; ONT cfDNA Lab workflow not biologically qualified"
+    min_depth_x: null
+    reference: {kind: internal_cohort}
+    performance: null
+    performance_missing_reason: "No validated ONT cfDNA recovery for this operator-supplied checkpoint and basecalling model"
+    meaning_high: "More reads resemble the tumour class of the registered training data; not a clinical tumour fraction."
+    meaning_low: "Fewer reads resemble that class; low classified support or model mismatch may dominate."
+    confounders: ["training cohort", "DMR selection", "basecalling model", "classified-read support", "GPU/model version"]
+    next_steps:
+      analytical: ["Review classified_reads and the registered model provenance", "Compare with independent copy-number and methylation estimates"]
+      clinical_setting: null
+    license_ids: [methylbert-mit]
+    flags: []
+    headline: true
+    stability: {kind: proportion}
+    citations: ["doi:10.1038/s41467-025-55920-z"]
+    citation_checked: {by: "Lab integration", date: "2026-10-17", note: "The MethylBERT paper and pinned upstream source describe read-level tumour/normal deconvolution; they do not qualify this operator checkpoint or ONT Lab adapter."}
+
+  - algorithm_id: methylbert
+    metric_id: normal_fraction
+    label: "MethylBERT normal-source fraction"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "MethylBERT study; ONT cfDNA Lab workflow not biologically qualified"
+    min_depth_x: null
+    reference: {kind: internal_cohort}
+    performance: null
+    performance_missing_reason: "No validated ONT cfDNA recovery for this operator-supplied checkpoint"
+    meaning_high: "More reads resemble the normal class of the registered training data."
+    meaning_low: "Fewer reads resemble the normal class of the registered training data."
+    confounders: ["training cohort", "DMR selection", "basecalling model", "classified-read support"]
+    next_steps:
+      analytical: ["Read with tumour_fraction and classified_reads"]
+      clinical_setting: null
+    license_ids: [methylbert-mit]
+    flags: []
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1038/s41467-025-55920-z"]
+    citation_checked: {by: "Lab integration", date: "2026-10-17", note: "The complement of the exploratory tumour-source fraction; no checkpoint-specific ONT qualification."}
+
+  - algorithm_id: methylbert
+    metric_id: classified_reads
+    label: "Unique reads contributing to MethylBERT deconvolution"
+    value_kind: count
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "ONT MM/ML adapter to MethylBERT"
+    min_depth_x: null
+    reference: {kind: internal_cohort}
+    performance: null
+    performance_missing_reason: "No qualified minimum classified-read support is established"
+    meaning_high: "More eligible molecules contribute to this model estimate."
+    meaning_low: "The estimate may be unstable; compare this count with eligible input reads."
+    confounders: ["DMR coverage", "read length", "modification-call quality", "training model"]
+    next_steps:
+      analytical: ["Do not substitute classified reads for the 2.5-million eligible-input floor"]
+      clinical_setting: null
+    license_ids: [methylbert-mit]
+    flags: []
+    headline: false
+    stability: {kind: scales_with_depth, tolerance: 0.10}
+    citations: []
+    citation_checked: {by: "Lab integration", date: "2026-10-17", note: "Lab implementation denominator, not a published performance threshold."}
+
   # -------------------------------------------------------- hypometh-reads
   - algorithm_id: hypometh-reads
     metric_id: hypometh_read_fraction
