@@ -26,7 +26,7 @@ def test_disk_footnote_reload_preserves_results_and_does_not_execute_workers(
     entry = next(row for row in library["entries"]
                  if row["algorithm_id"] == "fragment-size" and row["headline"])
     original_footnote = entry["performance"]["value"]
-    library_path.write_text(yaml.safe_dump(library), encoding="utf-8")
+    library_path.write_text(yaml.safe_dump(library, allow_unicode=True), encoding="utf-8")
     monkeypatch.setattr(api_module, "LIBRARY_FILE", library_path)
 
     def run(source: str) -> dict:
@@ -48,7 +48,7 @@ def test_disk_footnote_reload_preserves_results_and_does_not_execute_workers(
     def persisted() -> dict[Path, bytes]:
         return {path.relative_to(store.results_dir): path.read_bytes()
                 for path in store.results_dir.rglob("*")
-                if path.is_file() and (path.name == "result.json" or "artifacts" in path.parts)}
+                if path.is_file()}
 
     def attempts() -> set[Path]:
         return {path.relative_to(store.results_dir)
@@ -81,10 +81,10 @@ def test_disk_footnote_reload_preserves_results_and_does_not_execute_workers(
                     if row["algorithm_id"] == "fragment-size")
 
     assert footnote() == original_footnote
-    edited_footnote = original_footnote + " D3 acceptance: revised evidence wording."
+    edited_footnote = original_footnote + " D3 acceptance — revised evidence wording."
     entry["performance"]["value"] = edited_footnote
     # Size changes guarantee reload detection even on coarse-mtime filesystems.
-    library_path.write_text(yaml.safe_dump(library), encoding="utf-8")
+    library_path.write_text(yaml.safe_dump(library, allow_unicode=True), encoding="utf-8")
     assert footnote() == edited_footnote  # Same API/holder; no cache clearing or restart.
     assert persisted() == before
     assert attempts() == before_attempts
@@ -93,6 +93,7 @@ def test_disk_footnote_reload_preserves_results_and_does_not_execute_workers(
     assert marker.read_bytes() == executions
 
     again = run("latest")
+    assert {step["algorithm_id"] for step in again["steps"]} == {"read-summary", "fragment-size"}
     assert all(step["cached"] for step in again["steps"])
     assert again["sample"] == first["sample"]
     assert identities() == before_identities
