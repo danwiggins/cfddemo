@@ -32,9 +32,10 @@ class Extraction:
     non_reference_cpg: int
     outside_regions: int
     low_confidence: int
+    unsupported_modification: int
 
 
-def _reference_sites(record: pysam.AlignedSegment) -> tuple[list[tuple[int, int, int, int]], int]:
+def _reference_sites(record: pysam.AlignedSegment) -> tuple[list[tuple[int, int, dict[str, int]]], int]:
     """Map cytosine MM/ML channels to reference-forward CG candidates.
 
     The neighboring *query* base need only align adjacently; it may mismatch
@@ -53,20 +54,20 @@ def _reference_sites(record: pysam.AlignedSegment) -> tuple[list[tuple[int, int,
     sequence = record.query_sequence or ""
     sites: dict[tuple[int, int], dict[str, int]] = {}
     for (base, strand, code), entries in parsed.items():
-        if base != "C" or code not in {"m", "h"}:
+        if base != "C":
             continue
         if any(quality < 0 for _, quality in entries):
             raise InvalidMM("MM call without ML")
         for position, quality in entries:
-            sites.setdefault((position, strand), {})[code] = int(quality)
+            sites.setdefault((position, strand), {})[str(code)] = int(quality)
     target_base = "G" if record.is_reverse else "C"
     positions = [index for index, base in enumerate(sequence) if base == target_base]
     for code, mode in mm_skip_modes(mm_tag(record) or "").items():
-        if code[0] != "C" or code[-1] not in {"m", "h"} or mode != ".":
+        if code[0] != "C" or mode != ".":
             continue
         strand = int(record.is_reverse) ^ int(code[1] == "-")
         for position in positions:
-            sites.setdefault((position, strand), {}).setdefault(code[-1], 0)
+            sites.setdefault((position, strand), {}).setdefault(code[2:], 0)
     cigar = record.cigartuples or []
     if len(cigar) == 1 and cigar[0][0] in {0, 7, 8} and not record.is_unmapped:
         start, span = record.reference_start, cigar[0][1]
@@ -76,7 +77,7 @@ def _reference_sites(record: pysam.AlignedSegment) -> tuple[list[tuple[int, int,
 
     else:
         reference_of = dict(record.get_aligned_pairs(matches_only=True)).get
-    mapped: list[tuple[int, int, int, int]] = []
+    mapped: list[tuple[int, int, dict[str, int]]] = []
     dropped = 0
     for (query_position, strand), channels in sorted(sites.items()):
         mod_position = reference_of(query_position)
@@ -84,7 +85,7 @@ def _reference_sites(record: pysam.AlignedSegment) -> tuple[list[tuple[int, int,
         if mod_position is None or adjacent != mod_position + (-1 if strand else 1):
             dropped += 1
             continue
-        mapped.append((mod_position - strand, strand, channels.get("m", 0), channels.get("h", 0)))
+        mapped.append((mod_position - strand, strand, channels))
     return mapped, dropped
 
 
@@ -107,7 +108,7 @@ def extract_cpg_calls(
         raise ValueError("cell-origin extraction needs positive cap and threshold in (0, 1)")
     salt = os.urandom(32)
     calls: list[ModkitCpgCall] = []
-    scanned = tagged = invalid = unaligned = non_reference = outside = low_confidence = candidates = 0
+    scanned = tagged = invalid = unaligned = non_reference = outside = low_confidence = unsupported = candidates = 0
     with pysam.AlignmentFile(str(bam_path), "rb") as bam, pysam.FastaFile(str(reference_fasta)) as fasta:
         for record in bam.fetch(until_eof=True):
             scanned += 1
@@ -127,7 +128,7 @@ def extract_cpg_calls(
                 salt + b"\0" + record.query_name.encode("utf-8")
             ).hexdigest()
             chromosome = record.reference_name
-            for position0, reverse, p_m, p_h in sites:
+            for position0, reverse, channels in sites:
                 if include_regions is not None and not include_regions.overlaps(
                     chromosome, position0, position0 + 1
                 ):
@@ -139,10 +140,15 @@ def extract_cpg_calls(
                 candidates += 1
                 if candidates > maximum_calls:
                     raise ValueError("cell-origin MM/ML calls exceed the locked cap")
-                p_c = max(0, 255 - p_m - p_h)
-                confidence = max(p_c, p_m, p_h) / 255.0
+                p_c = max(0, 255 - sum(channels.values()))
+                confidence = max((p_c, *channels.values())) / 255.0
                 if confidence < filter_threshold:
                     low_confidence += 1
+                    continue
+                p_m, p_h = channels.get("m", 0), channels.get("h", 0)
+                if any(value >= max(p_c, p_m, p_h) for code, value in channels.items()
+                       if code not in {"m", "h"}):
+                    unsupported += 1
                     continue
                 methylated = (p_m > p_c and p_m >= p_h) or (p_h > p_c and p_h > p_m)
                 calls.append(ModkitCpgCall(
@@ -155,7 +161,7 @@ def extract_cpg_calls(
                     state=CpgCallState.METHYLATED if methylated else CpgCallState.UNMETHYLATED,
                 ))
     return Extraction(
-        tuple(calls), scanned, tagged, invalid, unaligned, non_reference, outside, low_confidence,
+        tuple(calls), scanned, tagged, invalid, unaligned, non_reference, outside, low_confidence, unsupported,
     )
 
 

@@ -196,6 +196,7 @@ class CellOrigin(Base):
                 "non_reference_cpg": measurement.extraction.non_reference_cpg,
                 "outside_regions": measurement.extraction.outside_regions,
                 "low_confidence": measurement.extraction.low_confidence,
+                "unsupported_modification": measurement.extraction.unsupported_modification,
             },
         }
         return AlgorithmOutput(

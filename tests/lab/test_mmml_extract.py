@@ -49,6 +49,7 @@ def _write_input(tmp_path: Path) -> tuple[Path, Path]:
         add("hydroxymethyl", 100, "ACGTACGTAA", mm="C+h?,0;", ml=[250], mn=10)
         add("two-groups", 100, "ACGTACGTAA", mm="C+h?,0;C+m?,1;", ml=[250, 250], mn=10)
         add("competing", 100, "ACGTACGTAA", mm="C+h?,0;C+m?,0;", ml=[240, 10], mn=10)
+        add("unsupported", 100, "ACGTACGTAA", mm="C+a?,0;C+m?,0;", ml=[240, 5], mn=10)
         add("query-mismatch", 100, "ACATACGTAA", mm="C+m?,0;", ml=[250], mn=10)
         add("low-confidence", 100, "ACGTACGTAA", mm="C+m?,0;", ml=[100], mn=10)
         add("missing-ml", 100, "ACGTACGTAA", mm="C+m?,0;", mn=10)
@@ -78,12 +79,13 @@ def test_skip_modes_reverse_mapping_and_unknown_calls(tmp_path: Path) -> None:
         (202, "+", "methylated"),
         (206, "-", "methylated"),
     ]
-    assert result.records_scanned == 15
-    assert result.records_with_mm == 14
+    assert result.records_scanned == 16
+    assert result.records_with_mm == 15
     assert result.invalid_mm == 2  # absent ML and mismatched MN never become canonical
     assert result.low_confidence == 1
     assert result.dropped_unaligned == 2
     assert result.non_reference_cpg == 1
+    assert result.unsupported_modification == 1
     assert len({call.fragment_digest for call in result.calls}) == 8
 
 
@@ -123,6 +125,8 @@ def test_matches_pinned_modkit_on_synthetic_calls(
     with output.open(newline="") as stream:
         for row in csv.DictReader(stream, delimiter="\t"):
             if row["fail"] == "true":
+                continue
+            if row["call_code"] not in {"-", "m", "h"}:
                 continue
             state = "unmethylated" if row["call_code"] == "-" else "methylated"
             position0 = int(row["ref_position"]) - (row["ref_mod_strand"] == "-")
