@@ -14,9 +14,9 @@ import numpy as np
 from traceback_lab.algorithms import fetal_fraction_chry as fetal
 from traceback_lab.cli import main as lab_main
 from traceback_lab.fetal_chry_contract import (
-    FetalChrYContractError, inspect_contract, register_contract,
+    FetalChrYContractError, _parse, inspect_contract, register_contract,
 )
-from traceback_lab.registry import PlanItem, Requirements, Skip, execution_identity, load_registry
+from traceback_lab.registry import PlanItem, Ready, Requirements, Skip, execution_identity, load_registry
 from traceback_lab.runner import RunTarget, run_plan
 from traceback_lab.scrub import Scrubber
 from traceback_lab.store import LabStore, new_run_id
@@ -84,6 +84,20 @@ def test_calibration_refuses_unsupported_assertions_and_bounds(tmp_path: Path, c
     path, digest = _file(tmp_path, **change)
     with pytest.raises(FetalChrYContractError):
         register_contract(LabStore(tmp_path / "root"), path, digest)
+
+
+def test_deeply_nested_calibration_is_structured_failure(tmp_path: Path, capsys) -> None:
+    raw = b"[" * 2048 + b"]" * 2048
+    with pytest.raises(FetalChrYContractError, match="invalid JSON"):
+        _parse(raw)
+    path = tmp_path / "deeply-nested-private.json"
+    path.write_bytes(raw)
+    digest = hashlib.sha256(raw).hexdigest()
+    assert lab_main(["fetal", "chry-register", "--file", str(path), "--sha256", digest,
+                     "--root", str(tmp_path / "root"), "--json"]) != 0
+    response = json.loads(capsys.readouterr().out)
+    assert response["status"] == "blocked"
+    assert str(path) not in json.dumps(response)
 
 
 def test_synthetic_registration_needs_opt_in_and_cannot_run(tmp_path: Path) -> None:
@@ -256,3 +270,33 @@ def test_registered_calibration_enters_identity_and_derived_skip_is_published(tm
     assert results[0].skip_reason == "unsupported_input"
     saved = store.read_result(INPUT, derived_algorithm.id, results[0].parameters_sha256)
     assert saved is not None and saved.status == "skipped"
+
+
+def test_runner_passes_registered_calibration_to_ready_preflight(tmp_path: Path, monkeypatch) -> None:
+    contigs = [(f"chr{i}", 248_956_422 if i == 1 else 1_000_000) for i in range(1, 23)]
+    contigs += [("chrX", 1_000_000), ("chrY", 57_227_415)]
+    ctx = context_for(tmp_path / "data", contigs, [Read("anonymous", "chr1", 100, "A" * 75)])
+    summary, _ = fetal.load_summary(ctx)
+    monkeypatch.setattr(fetal, "load_summary", lambda _ctx: (summary, None))
+    store = LabStore(tmp_path / "root")
+    path, digest = _file(tmp_path)
+    contract = register_contract(store, path, digest)
+    algorithm = replace(fetal.FETAL_FRACTION_CHRY, upstream=(),
+                        requires=Requirements(min_eligible_reads=0))
+    original_preflight = algorithm.preflight
+    seen = []
+
+    def inspect_planned_assets(run_ctx):
+        decision = original_preflight(run_ctx)
+        seen.append((decision, run_ctx.extras.get("planned_asset_sha256s")))
+        return Skip("unsupported_input", "preflight verified without a worker")
+
+    monkeypatch.setattr(algorithm, "preflight", inspect_planned_assets)
+    target = RunTarget(INPUT, SOURCE, ctx.input_dir, "hg38", REFERENCE,
+                       eligible_reads=10, approx_depth_x=0.01)
+    run_id = new_run_id()
+    results = run_plan(store, None, store.run_log(run_id), target,
+                       [PlanItem(algorithm, False)], {}, run_id=run_id,
+                       scrubber=Scrubber(root=store.root))
+    assert len(results) == 1 and results[0].status == "skipped"
+    assert seen == [(Ready(), [contract.manifest_sha256])]

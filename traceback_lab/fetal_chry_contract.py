@@ -105,7 +105,7 @@ def _reject_constant(_value: str) -> None:
 def _parse(raw: bytes) -> FetalChrYContract:
     try:
         data = json.loads(raw, object_pairs_hook=_unique_fields, parse_constant=_reject_constant)
-    except (UnicodeError, ValueError) as exc:
+    except (UnicodeError, ValueError, RecursionError) as exc:
         raise FetalChrYContractError("fetal calibration is invalid JSON") from exc
     if not isinstance(data, dict) or set(data) != _FIELDS or data.get("schema") != SCHEMA:
         raise FetalChrYContractError("fetal calibration has invalid fields")
