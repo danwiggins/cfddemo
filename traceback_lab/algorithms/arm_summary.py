@@ -129,13 +129,21 @@ class ArmSummary(Base):
         if asset is None:
             raise ValueError("the registered arm-definition asset is unavailable")
         centromere_path, digest = asset
+        planned = ctx.extras.get("planned_arm_centromere_sha256")
+        if not isinstance(planned, str) or digest != planned:
+            raise ValueError("the arm-definition asset changed after execution planning")
+        centromere_bytes = centromere_path.read_bytes()
+        if hashlib.sha256(centromere_bytes).hexdigest() != planned:
+            raise ValueError("the arm-definition asset changed before worker consumption")
+        private_centromere = out / "arm-centromere.tsv"
+        private_centromere.write_bytes(centromere_bytes)
         source = ctx.extras.get("upstream", {})
         summary_dir, cn_dir = source.get("read-summary"), source.get("copy-number")
         if not summary_dir or not cn_dir:
             raise ValueError("arm summary needs selected read-summary and copy-number artifacts")
         summary = ReadSummary.open(Path(summary_dir) / "columns")
         lengths = dict(zip(summary.contigs, summary.lengths))
-        intervals = arm_intervals(centromeres_from_table(centromere_path), lengths)
+        intervals = arm_intervals(centromeres_from_table(private_centromere), lengths)
         payload = json.loads((Path(cn_dir) / "cn_bins.json").read_bytes())
         if not isinstance(payload, dict) or not isinstance(payload.get("bins"), list):
             raise ValueError("selected copy-number result has no bin track")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -69,7 +70,7 @@ def test_arm_summary_run_uses_pinned_centromere_and_selected_track(
         {"chr": "chr1", "start": 0, "end": 2, "log2": -1.0, "mask": None},
         {"chr": "chr1", "start": 2, "end": 4, "log2": 1.0, "mask": None},
     ]}))
-    digest = "a" * 64
+    digest = hashlib.sha256(centromere.read_bytes()).hexdigest()
     monkeypatch.setattr(arm_summary, "_registered_centromere", lambda root: (centromere, digest))
     monkeypatch.setattr(arm_summary, "centromeres_from_table", lambda path: {
         f"chr{index}": (4, 6) for index in range(1, 23)
@@ -82,6 +83,7 @@ def test_arm_summary_run_uses_pinned_centromere_and_selected_track(
         reference_id="synthetic", reference_sha256=_source(102), input_dir=tmp_path,
         eligible_reads=2_000_000,
         extras={"pon_selection": {"pon_sha256": "b" * 64},
+                "planned_arm_centromere_sha256": digest,
                 "upstream": {"read-summary": str(tmp_path), "copy-number": str(cn)}},
     )
     result = arm_summary.ARM_SUMMARY.run(ctx, tmp_path)
@@ -92,6 +94,11 @@ def test_arm_summary_run_uses_pinned_centromere_and_selected_track(
     artifact = json.loads(result.artifacts["arm_summaries.json"])
     assert artifact["arm_asset_sha256"] == digest
     assert artifact["policy"] == arm_summary.POLICY
+    assert (tmp_path / "arm-centromere.tsv").read_bytes() == centromere.read_bytes()
+
+    centromere.write_text("changed after planning")
+    with pytest.raises(ValueError, match="before worker consumption"):
+        arm_summary.ARM_SUMMARY.run(ctx, tmp_path)
 
 
 def test_unbuilt_cohort_is_a_cli_refusal_not_a_depth_result(
@@ -110,7 +117,7 @@ def test_unbuilt_cohort_is_a_cli_refusal_not_a_depth_result(
     payload = json.loads(capsys.readouterr().out)
     assert code == 4
     assert payload["status"] == "not_found"
-    assert payload["errors"][0]["code"] == "TBX-LAB-017"
+    assert payload["data"]["code"] == "TBX-LAB-017"
 
 
 def _member(index: int, value: float, *, protocol: str = "a" * 64) -> CohortMember:

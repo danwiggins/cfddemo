@@ -172,13 +172,14 @@ def run_plan(
             if name in done
         ]
         assets_of = getattr(algorithm, "asset_sha256s", None)
+        asset_digests = tuple(assets_of(store.root)) if callable(assets_of) else ()
         identity = execution_identity(
             algorithm,
             reference_sha256=target.reference_sha256,
             upstream=upstream,
             # Consumed assets enter the execution identity (D19), so a
             # re-registered asset never reuses an older result.
-            asset_sha256s=assets_of(store.root) if callable(assets_of) else (),
+            asset_sha256s=asset_digests,
         )
         step = algorithm.id if target.label == "full" else f"{algorithm.id}@{target.label}"
         existing = store.read_result(target.input_id, algorithm.id, identity)
@@ -199,6 +200,11 @@ def run_plan(
             for name in algorithm.upstream
             if name in done and done[name].artifacts_dir
         }
+        if algorithm.id == "arm-summary":
+            # Bind the worker's arm-definition bytes to the digest used above.
+            target.extras["planned_arm_centromere_sha256"] = (
+                asset_digests[0] if len(asset_digests) == 1 else None
+            )
         ctx = target.context(store.root)
         decision: Ready | Skip
         if blocked:
