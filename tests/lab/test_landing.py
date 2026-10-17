@@ -97,6 +97,15 @@ def test_clia_copy_is_one_source_with_both_verify_flags() -> None:
     assert "42 CFR 493.3(b)(2)" in copy["full"]
 
 
+def test_catalog_declares_library_entry_presence() -> None:
+    from traceback_lab.interpretation.engine import load_library
+    from traceback_lab.web.api import _catalog
+
+    rows = _catalog(load_library(), ["bam-qc", "missing-library-probe"], [])
+    assert rows[0]["has_library_entry"] is True
+    assert rows[1]["has_library_entry"] is False
+
+
 # ------------------------------------------------------------------------ DOM (headless)
 @pytest.fixture(scope="module")
 def page_root(tmp_path_factory, synthetic_world) -> Path:
@@ -265,6 +274,55 @@ def test_stability_intro_does_not_call_recorded_halves_absent(page_root, tmp_pat
                    want=lambda page: "Split halves were recorded, but no comparable pair is available." in page)
     assert "Split halves were recorded, but no comparable pair is available." in dom
     assert "Split-half markers absent" not in dom
+
+
+@needs_chrome
+def test_unchecked_library_entries_keep_their_badges_without_citations(page_root, tmp_path, monkeypatch) -> None:
+    from traceback_lab.web.api import LabApi
+
+    real_sample = LabApi.sample
+
+    def sample_with_citation_cases(api, id12):
+        payload = real_sample(api, id12)
+        metrics = [metric for algorithm in payload["algorithms"] if not algorithm["hidden"]
+                   for metric in algorithm["metrics"] if metric.get("entry")]
+        assert len(metrics) >= 3
+        for metric, label, checked in zip(metrics[:3],
+                                          ("Unchecked metric probe", "Checked metric probe", "Missing entry probe"),
+                                          (False, True, False)):
+            metric["label"] = label
+            metric["entry"]["citations"] = []
+            metric["entry"]["citation_checked"] = checked
+        metrics[2]["entry"] = None
+        catalog = [row for row in payload["catalog"] if row["tier"]]
+        assert len(catalog) >= 3
+        for row, label, checked in zip(catalog[:2],
+                                       ("Unchecked catalog probe", "Checked catalog probe"), (False, True)):
+            row["label"] = label
+            row["citation_checked"] = checked
+            row["footnote_source"] = "operator evidence source"
+        catalog[2]["label"] = "Missing catalog probe"
+        catalog[2]["has_library_entry"] = False
+        catalog[2]["citation_checked"] = False
+        return payload
+
+    monkeypatch.setattr(LabApi, "sample", sample_with_citation_cases)
+    sample_id = _id12(page_root)
+    with RunningLabServer(LabStore(page_root)) as server:
+        methods = _dom(server, tmp_path / "methods", route=f"/sample/{sample_id}/methods",
+                       want=lambda dom: "Unchecked metric probe" in dom)
+        evidence = _dom(server, tmp_path / "evidence", route=f"/sample/{sample_id}/evidence",
+                        want=lambda dom: "Unchecked catalog probe" in dom)
+
+    rows = re.findall(r"<tr>(.*?)</tr>", methods, re.S)
+    cards = re.findall(r'<article class="evidence-card"[^>]*>(.*?)</article>', evidence, re.S)
+    for blocks, label, expected in (
+        (rows, "Unchecked metric probe", 1), (rows, "Checked metric probe", 0),
+        (rows, "Missing entry probe", 0), (cards, "Unchecked catalog probe", 1),
+        (cards, "Checked catalog probe", 0), (cards, "Missing catalog probe", 0),
+    ):
+        block = next(block for block in blocks if label in block)
+        assert block.count("UNVERIFIED citation") == expected, label
 
 
 @needs_chrome
