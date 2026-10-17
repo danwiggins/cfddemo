@@ -56,7 +56,7 @@ def test_route_license_references_resolve_to_one_full_callout(route, subtab, tmp
     signal_algorithms = {
         None: ("copy-number",),
         "Fragmentomics": ("fragment-size", "end-motifs", "delfi-ratio", "long-tail", "mtdna",
-                           "tss-profile", "breakpoint-motifs"),
+                           "tss-profile", "breakpoint-motifs", "lionheart"),
         "Methylation": ("frag-x-meth", "global-5mc", "global-5hmc", "pmd-score",
                         "hypometh-reads", "modbase-qc"),
     }
