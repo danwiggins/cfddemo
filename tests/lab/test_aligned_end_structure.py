@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import traceback
 from dataclasses import replace
 from pathlib import Path
 
@@ -22,6 +23,15 @@ from traceback_lab.runner import RunTarget, run_plan
 from traceback_lab.scrub import Scrubber
 from traceback_lab.store import LabStore, new_run_id
 from traceback_lab.stability import Side, band_at, stable
+
+
+def test_missing_catalogue_traceback_does_not_expose_external_path(tmp_path: Path) -> None:
+    private = tmp_path / "private-donor-identifier" / "centers.bed"
+    with pytest.raises(EndCatalogueError) as caught:
+        end_catalog_assets._read_regular(private, 1024)
+    rendered = "".join(traceback.format_exception(caught.value))
+    assert "private-donor-identifier" not in rendered
+    assert "catalogue is absent, unreadable or changed" in rendered
 
 
 def _catalogues(tmp_path: Path) -> tuple[Path, Path, Path]:

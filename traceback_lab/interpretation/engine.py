@@ -39,7 +39,7 @@ REFERENCE_KINDS = ("none", "published_mean", "published_range", "internal_cohort
 STABILITY_KINDS = ("proportion", "relative", "absolute", "scales_with_depth", "unvalidated")
 VALUE_KINDS = ("proportion", "positive", "count", "signed", "vector", "categorical")
 NOT_INTERPRETABLE_REASONS = ("depth", "qc", "no_pon", "below_lod", "missing_channel",
-                           "no_stability_verdict")
+                           "no_stability_verdict", "comparison_unavailable")
 NO_REFERENCE_REASONS = ("none_published", "cohort_too_small", "no_library_entry")
 RANGE_STATES = ("in_range", "above_typical", "markedly_above", "below_typical", "markedly_below")
 OUT_OF_RANGE = ("markedly_above", "markedly_below", "above_typical", "below_typical")

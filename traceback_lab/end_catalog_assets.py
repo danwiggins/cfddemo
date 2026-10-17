@@ -64,8 +64,8 @@ def _read_regular(path: Path, limit: int) -> bytes:
             after = os.fstat(stream.fileno())
         current = os.lstat(canonical)
         current_alias = os.lstat(absolute)
-    except (OSError, RuntimeError) as exc:
-        raise EndCatalogueError("catalogue is absent, unreadable or changed") from exc
+    except (OSError, RuntimeError):
+        raise EndCatalogueError("catalogue is absent, unreadable or changed") from None
     def identity(info: os.stat_result) -> tuple[int, int, int, int, int]:
         return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
     if (len(raw) > limit or not stat.S_ISREG(current.st_mode)
@@ -119,8 +119,8 @@ def _parse_rows(raw: bytes, *, preferred: bool) -> dict[str, np.ndarray] | tuple
                 if values and position - values[-1] <= 200:
                     raise ValueError  # ±100 bp windows must not overlap.
                 values.append(position)
-    except (UnicodeError, ValueError) as exc:
-        raise EndCatalogueError("catalogue must be sorted hg38 BED with valid nonoverlapping coordinates") from exc
+    except (UnicodeError, ValueError):
+        raise EndCatalogueError("catalogue must be sorted hg38 BED with valid nonoverlapping coordinates") from None
     if not prior:
         raise EndCatalogueError("catalogue has no valid sites")
     def make(values: dict[str, list[int]]) -> dict[str, np.ndarray]:
@@ -203,8 +203,8 @@ def _read_registration(root: Path) -> dict:
                      not re.fullmatch(r"[A-Za-z0-9._-]{1,80}", data["license_id"])))):
             raise ValueError
         data["identity"] = identity
-    except (KeyError, TypeError, ValueError) as exc:
-        raise EndCatalogueError("end catalogue registration is invalid") from exc
+    except (KeyError, TypeError, ValueError):
+        raise EndCatalogueError("end catalogue registration is invalid") from None
     return data
 
 
@@ -237,8 +237,8 @@ def register_end_catalogues(
     try:
         center_path = centers.resolve(strict=True)
         preferred_path = preferred.resolve(strict=True)
-    except (OSError, RuntimeError) as exc:
-        raise EndCatalogueError("catalogue is absent, unreadable or changed") from exc
+    except (OSError, RuntimeError):
+        raise EndCatalogueError("catalogue is absent, unreadable or changed") from None
     data = {
         "schema": SCHEMA, "assembly": "hg38", "centers_path": str(center_path),
         "centers_sha256": hashlib.sha256(center_raw).hexdigest(),
@@ -267,6 +267,6 @@ def register_end_catalogues(
         finally:
             if os.path.exists(temporary):
                 os.unlink(temporary)
-    except OSError as exc:
-        raise EndCatalogueError("end catalogue registration could not be published") from exc
+    except OSError:
+        raise EndCatalogueError("end catalogue registration could not be published") from None
     return prepared
