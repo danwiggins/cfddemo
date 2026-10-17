@@ -50,6 +50,8 @@ class StepResult:
     first_line: str | None = None
     duration_s: float | None = None
     peak_rss_bytes: int | None = None
+    peak_tree_rss_bytes: int | None = None
+    peak_disk_bytes: int | None = None
     cached: bool = False
     input_label: str = "full"
     artifacts_dir: str | None = None
@@ -65,6 +67,8 @@ class StepResult:
             "first_line": self.first_line,
             "duration_s": self.duration_s,
             "peak_rss_bytes": self.peak_rss_bytes,
+            "peak_tree_rss_bytes": self.peak_tree_rss_bytes,
+            "peak_disk_bytes": self.peak_disk_bytes,
             "cached": self.cached,
             "input": self.input_label,
         }
@@ -249,7 +253,8 @@ def run_plan(
                 result = _publish_failure(
                     store, algorithm, target, identity, item, log, step,
                     first_line=scrubber.line(f"preflight raised {type(exc).__name__}: {exc}"),
-                    tail=[], exit_code=None, timed_out=False, duration_s=0.0, peak_rss=None,
+                    tail=[], exit_code=None, timed_out=False, duration_s=0.0,
+                    peak_rss=None, peak_disk=None,
                 )
                 results.append(result)
                 done[algorithm.id] = result
@@ -264,19 +269,21 @@ def run_plan(
                 and existing.skip_message == decision.message[:300]
             )
             if not same:
-                attempt = store.publish_result(
+                attempt_id = store.publish_result(
                     _envelope(algorithm, target, identity, status="skipped", skip=decision),
                     input_id=target.input_id,
                 )
             else:
                 selected = store.selected_attempt(target.input_id, algorithm.id, identity)
-                attempt = selected.name if selected is not None else None
+                attempt_id = selected.name if selected is not None else None
             log.append(
                 "step_end",
                 step=step,
                 status="skipped",
                 skip_reason=decision.reason_code,
                 parameters_sha256=identity,
+                input_id=target.input_id,
+                attempt_id=attempt_id,
             )
             result = StepResult(
                 algorithm.id,
@@ -287,7 +294,7 @@ def run_plan(
                 skip_message=decision.message,
                 input_label=target.label,
                 input_id=target.input_id,
-                attempt_id=attempt,
+                attempt_id=attempt_id,
             )
             results.append(result)
             done[algorithm.id] = result
@@ -316,6 +323,7 @@ def run_plan(
                 env=_worker_env(),
                 cwd=scratch,
                 echo=echo,
+                disk_path=scratch,
             )
             if outcome.ok:
                 try:
@@ -343,9 +351,11 @@ def run_plan(
                         first_line=scrubber.line(f"invalid output: {type(exc).__name__}: {exc}"),
                         tail=[], exit_code=0, timed_out=False,
                         duration_s=outcome.duration_s, peak_rss=outcome.peak_rss_bytes,
+                        peak_tree_rss=outcome.sampled_tree_peak_rss_bytes,
+                        peak_disk=outcome.peak_disk_bytes,
                     )
                 else:
-                    attempt = store.publish_result(
+                    attempt_id = store.publish_result(
                         envelope,
                         input_id=target.input_id,
                         artifacts_dir=scratch / "artifacts",
@@ -357,7 +367,11 @@ def run_plan(
                         status="ok",
                         duration_s=round(outcome.duration_s, 3),
                         peak_rss_bytes=outcome.peak_rss_bytes,
+                        peak_tree_rss_bytes=outcome.sampled_tree_peak_rss_bytes,
+                        peak_disk_bytes=outcome.peak_disk_bytes,
                         parameters_sha256=identity,
+                        input_id=target.input_id,
+                        attempt_id=attempt_id,
                         tool_versions={tool.name: tool.version for tool in algorithm.tools},
                     )
                     result = StepResult(
@@ -367,9 +381,11 @@ def run_plan(
                         identity,
                         duration_s=outcome.duration_s,
                         peak_rss_bytes=outcome.peak_rss_bytes,
+                        peak_tree_rss_bytes=outcome.sampled_tree_peak_rss_bytes,
+                        peak_disk_bytes=outcome.peak_disk_bytes,
                         input_label=target.label,
                         input_id=target.input_id,
-                        attempt_id=attempt,
+                        attempt_id=attempt_id,
                     )
                     _after_ok(store, target, algorithm, identity, result, envelope)
             else:
@@ -382,6 +398,8 @@ def run_plan(
                     first_line=scrubber.line(first), tail=tail, exit_code=stage.returncode,
                     timed_out=outcome.timed_out, duration_s=outcome.duration_s,
                     peak_rss=outcome.peak_rss_bytes,
+                    peak_tree_rss=outcome.sampled_tree_peak_rss_bytes,
+                    peak_disk=outcome.peak_disk_bytes,
                 )
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
@@ -442,6 +460,8 @@ def _publish_failure(
     timed_out: bool,
     duration_s: float,
     peak_rss: int | None,
+    peak_disk: int | None,
+    peak_tree_rss: int | None = None,
 ) -> StepResult:
     failure = Failure(
         first_line=first_line[:300] or "failed",
@@ -449,7 +469,7 @@ def _publish_failure(
         exit_code=exit_code,
         timed_out=timed_out,
     )
-    attempt = store.publish_result(
+    attempt_id = store.publish_result(
         _envelope(algorithm, target, identity, status="failed", failure=failure, duration_s=duration_s),
         input_id=target.input_id,
     )
@@ -460,8 +480,12 @@ def _publish_failure(
         first_line=failure.first_line,
         duration_s=round(duration_s, 3),
         peak_rss_bytes=peak_rss,
+        peak_tree_rss_bytes=peak_tree_rss,
+        peak_disk_bytes=peak_disk,
         timed_out=timed_out,
         parameters_sha256=identity,
+        input_id=target.input_id,
+        attempt_id=attempt_id,
     )
     return StepResult(
         algorithm.id,
@@ -471,9 +495,11 @@ def _publish_failure(
         first_line=failure.first_line,
         duration_s=duration_s,
         peak_rss_bytes=peak_rss,
+        peak_tree_rss_bytes=peak_tree_rss,
+        peak_disk_bytes=peak_disk,
         input_label=target.label,
         input_id=target.input_id,
-        attempt_id=attempt,
+        attempt_id=attempt_id,
     )
 
 
