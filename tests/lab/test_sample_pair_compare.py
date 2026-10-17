@@ -101,6 +101,30 @@ def test_store_selected_results_keep_hidden_and_null_metrics(tmp_path, monkeypat
     assert payload["unscored"] == []
 
 
+@pytest.mark.parametrize("change", ["version_bump", "removed"])
+def test_old_stored_result_after_registry_change_is_unpaired(tmp_path, monkeypatch, change) -> None:
+    from tests.lab.test_cohort_store import _sample as stored_sample
+
+    store = LabStore(tmp_path)
+    algorithm = SimpleNamespace(id="fragment-size", version="1", parameters={}, tools=[], upstream=())
+    monkeypatch.setattr(cohorts, "load_registry", lambda: (algorithm,))
+    first = stored_sample(store, 1, value=160.0)
+    second = stored_sample(store, 2, value=170.0)
+    assert web_api.views.load_sample(store, first).full.results["fragment-size"].metrics[0].value == 160.0
+    current = () if change == "removed" else (SimpleNamespace(
+        id="fragment-size", version="2", parameters={}, tools=[], upstream=(),
+    ),)
+    monkeypatch.setattr(cohorts, "load_registry", lambda: current)
+    assert cohorts.member_from_store(store, first).results == ()
+
+    payload = web_api.LabApi(store).compare_samples(first, second)
+    assert payload["state"] == "ready"
+    assert payload["metrics"] == []
+    assert payload["unscored"] == [
+        {"algorithm_id": "fragment-size", "metric_id": "*", "reason": "not_current_result"},
+    ]
+
+
 def test_sample_pair_rejects_protocol_or_unit_mismatch(tmp_path, monkeypatch) -> None:
     api, _, _ = world(tmp_path, monkeypatch, compat_b="d" * 64)
     payload = api.compare_samples(SOURCE_A[:12], SOURCE_B[:12])

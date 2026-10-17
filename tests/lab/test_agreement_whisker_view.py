@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from tests.lab.test_lab_server import _chrome, _dom_cdp
@@ -72,4 +74,7 @@ def test_agreement_points_and_findings_cutoff_whisker(tmp_path, monkeypatch) -> 
     assert 'class="strip-svg cutoff-whisker"' in findings
     assert "90% bootstrap interval 190 bp to 200 bp; separate value scale" in findings
     assert "Cutoff CI: 190 bp–200 bp on a separate value scale" in findings
+    whisker = findings.split('class="strip-svg cutoff-whisker"', 1)[1].split("</svg>", 1)[0]
+    segment = re.search(r'<line x1="([0-9.]+)" x2="([0-9.]+)" y1="14" y2="14"', whisker)
+    assert segment is not None and float(segment.group(2)) - float(segment.group(1)) > 50
     assert 'data-csp-violations="0"' in agreement and 'data-csp-violations="0"' in findings

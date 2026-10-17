@@ -698,6 +698,7 @@ class LabApi:
             selected_b = member_from_store(self.store, source_b)
         except (LabProblem, ValueError):
             return {**base, "state": "sample_unavailable", "which": "b", "metrics": [], "unscored": []}
+        not_current: set[str] = set()
         for source, sample, selected, which in (
             (source_a, sample_a, selected_a, "a"), (source_b, sample_b, selected_b, "b"),
         ):
@@ -708,7 +709,11 @@ class LabApi:
                 if envelope.status != "ok":
                     continue
                 pinned = current.get(algorithm_id)
-                if pinned is None or pinned.parameters_sha256 != envelope.provenance.parameters_sha256:
+                if pinned is None:
+                    # The stored view can outlive a registry version change or removal.
+                    not_current.add(algorithm_id)
+                    continue
+                if pinned.parameters_sha256 != envelope.provenance.parameters_sha256:
                     return {**base, "state": "stale_sample", "which": which, "metrics": [], "unscored": []}
                 for metric in envelope.metrics:
                     value = metric.value
@@ -726,6 +731,9 @@ class LabApi:
             envelope_b = sample_b.full.results.get(algorithm_id)
             if envelope_b is None or envelope_a.status != "ok" or envelope_b.status != "ok":
                 unscored.append({"algorithm_id": algorithm_id, "metric_id": "*", "reason": "missing_or_not_ok"})
+                continue
+            if algorithm_id in not_current or algorithm_id not in selected_results_a or algorithm_id not in selected_results_b:
+                unscored.append({"algorithm_id": algorithm_id, "metric_id": "*", "reason": "not_current_result"})
                 continue
             result_a, result_b = selected_results_a[algorithm_id], selected_results_b[algorithm_id]
             if result_a.cohort_compat_key != result_b.cohort_compat_key:

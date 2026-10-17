@@ -72,7 +72,7 @@ def test_sample_lenses_pin_eligible_loo_reference(
                               source_id=SOURCE, input_id=INPUT, reference_id="synthetic"),
         metrics=[Metric(metric_id="short_fraction_lt150", value=target_value)],
     )
-    sample = SimpleNamespace(example=False, full=SimpleNamespace(
+    sample = SimpleNamespace(example=False, operator_metadata=None, operator_metadata_problem=None, full=SimpleNamespace(
         input_id=INPUT, results={"fragment-size": envelope}, depth_x=lambda: 1.0,
     ), derived=[], by_transform=lambda transform: [])
     monkeypatch.setattr(web_api.views, "load_sample", lambda store, source_id: sample)

@@ -394,7 +394,6 @@
         if (Number.isFinite(value)) { low = Math.min(low, value); high = Math.max(high, value); }
       };
       expandRange(Number(metric.value));
-      for (const value of (metric.cohort_values || [])) expandRange(value);
       for (const value of (interval || [])) expandRange(value);
       const valueX = (v) => 110 + ((v - low) / (high - low || 1)) * 200;
       return h("figure", { class: "strip" }, svg("svg", { viewBox: `0 0 ${width} ${height}`, role: "img", "aria-label": metric.caption, class: "strip-svg" },
@@ -1231,6 +1230,8 @@
                 h("thead", {}, h("tr", {}, ...["Metric", "Overlay", "Sample A", "Sample B", "B−A"].map((name) => h("th", { scope: "col" }, name)))),
                 h("tbody", {}, ...rows))));
           } else nodes.push(h("p", { class: "empty" }, "No compatible scalar metric is available for this pair. Missing values are not zero."));
+          if (data.unscored.some((row) => row.reason === "not_current_result")) nodes.push(h("p", { class: "help" },
+            "A stored result is no longer current for its registered method. Recompute with the current method, or restore its registration before comparing."));
           if (data.unscored.length) nodes.push(h("details", {}, h("summary", {}, `Not paired (${data.unscored.length})`),
             dataTable("Unpaired metrics and reasons", ["Algorithm", "Metric", "Reason"],
               data.unscored.map((row) => [row.algorithm_id, row.metric_id, row.reason.replace(/_/g, " ")]))));
