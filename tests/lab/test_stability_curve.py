@@ -74,6 +74,30 @@ def test_unvalidated_depth_dependent_fraction_has_no_stability_verdict() -> None
     assert band_at(spec, Side(0.2), Side(0.8)) is None
 
 
+def test_signed_arm_scalar_without_a_rule_keeps_raw_split_difference() -> None:
+    def result(value):
+        metric = SimpleNamespace(metric_id="chr1p_log2", value=value, n=12, ci=None, ci_level=None)
+        return SimpleNamespace(status="ok", metrics=[metric], depth=None)
+
+    full = views.InputView("full", "a" * 64, None, {}, {"arm-summary": result(0.2)})
+    down = views.InputView("0.5", "b" * 64, "downsample", {"fraction": 0.5},
+                           {"arm-summary": result(0.15)}, 0.5)
+    a = views.InputView("split-A", "c" * 64, "split", {"half": "A"},
+                        {"arm-summary": result(0.1)}, 0.5)
+    b = views.InputView("split-B", "d" * 64, "split", {"half": "B"},
+                        {"arm-summary": result(0.3)}, 0.5)
+    sample = views.SampleView("e" * 64, "e" * 12, False, full, [down, a, b])
+    panel = next(p for p in views.stability_panels(sample)
+                 if p["algorithm_id"] == "arm-summary" and p["metric_id"] == "chr1p_log2")
+
+    assert panel["points"][0]["state"] == "ok_unvalidated"
+    assert panel["points"][0]["deviation"] is None
+    assert panel["verdict"] == "stability not validated"
+    assert panel["split_status"]["A"]["state"] == panel["split_status"]["B"]["state"] == "ok"
+    assert panel["split"]["absolute_diff"] == pytest.approx(0.2)
+    assert panel["split"]["stable"] is None
+
+
 def test_deliberately_unpublished_value_is_not_called_usable_or_unvalidated() -> None:
     provenance = Provenance(
         tool="bam-qc", tool_version="1", parameters_sha256="a" * 64,
@@ -227,6 +251,8 @@ def test_default_run_builds_the_curve_and_controls(default_run) -> None:
     with_split = [panel for panel in panels if panel["split"] is not None]
     assert {panel["algorithm_id"] for panel in with_split} >= {"bam-qc", "depth", "fragment-size"}
     assert all(panel["split_status"][half]["state"] == "ok" for panel in with_split for half in ("A", "B"))
+    assert all(panel["split"]["absolute_diff"] == abs(panel["split"]["a"] - panel["split"]["b"])
+               for panel in with_split)
     block = views.repeatability(panels)
     assert block["metrics"] == len([p for p in panels if p["split"]])
     _assert_default_scalar_selection(store, sample, payload)

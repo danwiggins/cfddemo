@@ -674,11 +674,15 @@
       const hasSplitHalf = Boolean(panel.split_status) &&
         (panel.split_status.A?.state !== "not_recorded" || panel.split_status.B?.state !== "not_recorded");
       const splitVerdict = panel.split?.stable === true ? "stable" : panel.split?.stable === false ? "unstable" : "no split-half stability verdict";
+      const metric = sample.algorithms.find((algorithm) => algorithm.algorithm_id === panel.algorithm_id)
+        ?.metrics.find((entry) => entry.metric_id === panel.metric_id);
+      const absoluteDiff = panel.split ? panel.split.absolute_diff ?? Math.abs(panel.split.a - panel.split.b) : null;
+      const splitDiffText = Number.isFinite(absoluteDiff)
+        ? `|A−B| = ${fmt(absoluteDiff)}${metric?.unit ? ` ${metric.unit}` : ""}; relative difference ${(panel.split.relative_abs_diff * 100).toFixed(1)}%`
+        : "";
       for (const f of fracs) marks.push(svg("text", { x: x(f), y: hgt - 18, "text-anchor": "middle", class: "axis" }, `${f * 100}%`));
       const scaleLabel = unit === "none" ? "no validated stability deviation scale" : unit === "unit" ? "the metric's unit" : "%";
       const label = `${panel.label}: ${panel.verdict}. Deviation from full depth: ${scaleLabel}${hasSplitHalf ? `; ${splitSummary}; ${splitVerdict}` : ""}.`;
-      const metric = sample.algorithms.find((algorithm) => algorithm.algorithm_id === panel.algorithm_id)
-        ?.metrics.find((entry) => entry.metric_id === panel.metric_id);
       const pointRows = panel.points.map((p) => ["Measured fraction", p.fraction * 100, p.value, p.deviation,
         p.band && Number.isFinite(p.band.lo) && Number.isFinite(p.band.hi) ? p.band.lo : null,
         p.band && Number.isFinite(p.band.lo) && Number.isFinite(p.band.hi) ? p.band.hi : null,
@@ -697,10 +701,11 @@
           `Band high (${unit === "percent" ? "%" : unit === "unit" ? metric?.unit || "metric unit" : "unavailable"})`, "State"], pointRows),
         h("p", { class: "help" }, unit === "none" ? "No validated stability deviation scale; numeric values are in the table." : unit === "unit" ? "y: difference from full depth (metric's unit)" : "y: relative deviation from full depth, % (clipped ±50%)"),
         hasSplitHalf ? h("p", { class: "help" }, `Split halves: ${splitSummary}. `,
+          splitDiffText ? `${splitDiffText}. ` : "",
           splitVerdict === "no split-half stability verdict" ? "No split-half stability verdict." : `Split-half verdict: ${splitVerdict}.`) : ""));
       for (const p of panel.points) tableRows.push([panel.label, `${p.fraction * 100}%`, p.value, p.deviation,
         stateReason(p.state, p.reason, p.state || "—")]);
-      if (panel.split) tableRows.push([panel.label, "split A / B", `${fmt(panel.split.a)} / ${fmt(panel.split.b)}`, `${(panel.split.relative_abs_diff * 100).toFixed(1)}% |A−B|`,
+      if (panel.split) tableRows.push([panel.label, "split A / B", `${fmt(panel.split.a)} / ${fmt(panel.split.b)}`, splitDiffText,
         panel.split_warning ? `${splitVerdict}; ${panel.split_warning}` : splitVerdict]);
       else if (hasSplitHalf) {
         const halfDeviation = (half) => {

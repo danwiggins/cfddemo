@@ -428,6 +428,8 @@ def cell_state(
     full_metric = _value(full.results.get(algorithm_id), metric_id)
     spec = entry.stability if entry else None
     if spec is None:
+        if entry is not None and entry["value_kind"] == "signed":
+            return {"state": "ok_unvalidated", "value": metric.value, "verdict": None}
         return {"state": "not_interpretable", "reason": "no_stability_verdict", "value": metric.value}
     if spec.get("kind") == "unvalidated":
         return {"state": "ok_unvalidated", "value": metric.value, "verdict": None}
@@ -507,8 +509,12 @@ def stability_panels(sample: SampleView, library: Library | None = None) -> list
         for metric in full_envelope.metrics:
             entry = library.entry(algorithm_id, metric.metric_id)
             spec = entry.stability if entry else None
-            if spec is None or not isinstance(metric.value, (int, float)) or isinstance(metric.value, bool):
+            if not isinstance(metric.value, (int, float)) or isinstance(metric.value, bool):
                 continue
+            if spec is None:
+                if entry is None or entry["value_kind"] != "signed":
+                    continue
+                spec = {"kind": "unvalidated"}
             points = []
             unstable_below = False
             for view in [*downs, sample.full]:
@@ -550,6 +556,7 @@ def stability_panels(sample: SampleView, library: Library | None = None) -> list
                 split = {
                     "a": a.value,
                     "b": b.value,
+                    "absolute_diff": abs(a.value - b.value),
                     "deviation_a": split_status["A"]["deviation"],
                     "deviation_b": split_status["B"]["deviation"],
                     "unit": split_status["A"]["unit"],
