@@ -168,6 +168,11 @@ intermediates they need, labelled "(upstream)".
 A result is reused only when its selected attempt matches the input, algorithm,
 and execution identity. Dependents also record the exact upstream attempts
 they consumed, including a parent-input summary reused by a derived control.
+Successful attempts record the effective execution-identity inputs in internal
+metadata. Cohort reads verify this record against the selected result, input,
+reference, upstream identities and consumed upstream attempts, then compare
+using the producer's recorded tools and parameters. They do not probe the
+reader's numerical runtime to reconstruct a historical result.
 An older dependent attempt without that record is recomputed once; leaf results
 remain cacheable. New attempts record artifact file sizes; older attempts
 remain readable, with known upstream layouts checked against their metadata.

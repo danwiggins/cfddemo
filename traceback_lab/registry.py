@@ -62,6 +62,7 @@ ALGORITHMS: tuple[str, ...] = (
     "global_5mc:GLOBAL_5MC",
     "global_5hmc:GLOBAL_5HMC",
     "pmd_score:PMD_SCORE",
+    "methylbert:METHYLBERT",
     "hypometh_reads:HYPOMETH_READS",
     "frag_x_meth:FRAG_X_METH",
 )
@@ -183,13 +184,14 @@ def execution_identity(
     asset_sha256s: Iterable[str] = (),
     upstream: Iterable[Mapping[str, str]] = (),
     tool_pins: Iterable[Mapping[str, str]] | None = None,
+    parameters: Mapping[str, Any] | None = None,
 ) -> str:
     """``parameters_sha256`` for one algorithm on one reference (D19)."""
 
     return parameters_sha256(
         algorithm_id=algorithm.id,
         algorithm_version=algorithm.version,
-        parameters=algorithm.parameters,
+        parameters=parameters if parameters is not None else algorithm.parameters,
         tools=list(tool_pins) if tool_pins is not None else [tool.identity() for tool in algorithm.tools],
         reference_sha256=reference_sha256,
         asset_sha256s=asset_sha256s,

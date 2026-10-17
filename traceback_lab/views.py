@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .envelope import ResultEnvelope
@@ -35,9 +36,9 @@ _ROW_ORDER = {state: index for index, state in enumerate(CELL_STATES)}
 _TIER_ORDER = {"PROVEN": 0, "NEWER": 1, "SPECULATIVE": 2, None: 3}
 
 
-def selected_results(
+def selected_result_snapshots(
     store: LabStore, input_id: str, identities: Mapping[str, str] | None = None
-) -> dict[str, ResultEnvelope]:
+) -> dict[str, tuple[Path, ResultEnvelope]]:
     """The selected result per algorithm for one input.
 
     Without ``identities`` the latest published execution identity wins; with them (a
@@ -49,7 +50,7 @@ def selected_results(
     """
 
     base = store.results_dir / input_id
-    out: dict[str, tuple[int | None, ResultEnvelope]] = {}
+    out: dict[str, tuple[int | None, Path, ResultEnvelope]] = {}
     ambiguous: set[str] = set()
     unreadable: set[str] = set()
     if not base.is_dir():
@@ -64,7 +65,7 @@ def selected_results(
             if wanted is not None and identity_dir.name != wanted:
                 continue
             try:
-                selected = store.selected_result_with_order(
+                selected = store.selected_result_snapshot(
                     input_id, algorithm_dir.name, identity_dir.name,
                 )
             except (OSError, ValueError):
@@ -80,17 +81,26 @@ def selected_results(
                     pass
                 unreadable.add(algorithm_dir.name)
                 continue
-            envelope, order = selected
+            attempt, envelope, order = selected
             current = out.get(algorithm_dir.name)
             if current is None or (order is not None and (current[0] is None or order > current[0])):
-                out[algorithm_dir.name] = (order, envelope)
+                out[algorithm_dir.name] = (order, attempt, envelope)
                 ambiguous.discard(algorithm_dir.name)
             elif order == current[0]:
                 ambiguous.add(algorithm_dir.name)
     return {
-        key: value for key, (_, value) in out.items()
+        key: (attempt, value) for key, (_, attempt, value) in out.items()
         if key not in ambiguous and key not in unreadable
     }
+
+
+def selected_results(
+    store: LabStore, input_id: str, identities: Mapping[str, str] | None = None
+) -> dict[str, ResultEnvelope]:
+    """The selected result envelopes for one input."""
+
+    return {key: envelope for key, (_, envelope) in
+            selected_result_snapshots(store, input_id, identities).items()}
 
 
 @dataclass

@@ -106,6 +106,8 @@ def _publish_cohort_cell_origin(store: LabStore, *, index: int, algorithm: co.Ce
         provenance=provenance(tool="fixture", parameters_sha256=read_hash,
                               source_id=source_id, input_id=input_id, reference_id="hg38"),
     ), input_id=input_id, execution_plan=read_plan)
+    read_attempt = store.selected_attempt(input_id, READ_SUMMARY.id, read_hash)
+    assert read_attempt is not None
     tools = [tool.identity() for tool in algorithm.tools]
     assets = algorithm.asset_sha256s(store.root)
     upstream = [{"algorithm_id": READ_SUMMARY.id, "parameters_sha256": read_hash}]
@@ -125,11 +127,13 @@ def _publish_cohort_cell_origin(store: LabStore, *, index: int, algorithm: co.Ce
         provenance=provenance(tool="fixture", parameters_sha256=cell_hash,
                               source_id=source_id, input_id=input_id, reference_id="hg38"),
         metrics=[Metric(metric_id="classified_fragments", value=100)],
-    ), input_id=input_id, execution_plan=plan)
+    ), input_id=input_id, execution_plan=plan, upstream_selections=[{
+        "algorithm_id": READ_SUMMARY.id, "input_id": input_id,
+        "parameters_sha256": read_hash, "attempt_id": read_attempt.name,
+    }])
     return source_id, cell_hash
 
 
-@pytest.mark.xfail(strict=True, reason="S5 owns the shared recorded-identity cohort reader repair")
 def test_cohort_reads_recorded_parser_pin_after_reader_upgrade(tmp_path, monkeypatch) -> None:
     store = LabStore(tmp_path)
     reader_b = replace(co.CELL_ORIGIN, tools=tuple(
