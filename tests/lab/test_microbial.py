@@ -714,6 +714,19 @@ def test_cohort_975_zero_fills_complete_absent_taxa_and_refuses_missing_referenc
     limited = profile_for_sample(store, sample, limited_generation, target, "ready")
     assert limited["taxa"][0]["cohort_n"] == 9
     assert limited["taxa"][0]["cohort_p975"] is None
+    invalid_members = list(members)
+    invalid_members[0] = CohortMember(
+        source_id=first.source_id, input_id=first.input_id,
+        aligner_identity=first.aligner_identity,
+        results=(CohortResult(algorithm_id="microbial", parameters_sha256=identity,
+                              cohort_compat_key=identity,
+                              metrics={**result.metrics, "taxon_123_rpm": -1.0}),),
+    )
+    invalid_generation = CohortGeneration(cohort_id="healthy-v1", version=3,
+                                          members=tuple(invalid_members))
+    invalid = profile_for_sample(store, sample, invalid_generation, target, "ready")
+    assert invalid["taxa"][0]["cohort_n"] == 9
+    assert invalid["taxa"][0]["cohort_p975"] is None
     missing_target = profile_for_sample(store, sample, generation, None, "ready")
     assert missing_target["state"] == "cohort_unavailable"
     assert "target" in missing_target["reason"].lower()

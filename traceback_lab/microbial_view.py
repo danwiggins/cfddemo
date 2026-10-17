@@ -176,7 +176,7 @@ def profile_for_sample(store: LabStore, sample: SampleView, generation: CohortGe
             if (isinstance(value, (int, float)) and not isinstance(value, bool)
                     and math.isfinite(value) and value >= 0):
                 values.append(float(value))
-            elif result.metrics.get("omitted_taxa") == 0:
+            elif metric_id not in result.metrics and result.metrics.get("omitted_taxa") == 0:
                 values.append(0.0)
         threshold = _p975(values) if available and len(values) >= COHORT_MIN else None
         rows.append({**row, "cohort_p975": threshold, "cohort_n": len(values),
