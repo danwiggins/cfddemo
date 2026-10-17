@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from pathlib import Path
@@ -31,11 +32,23 @@ def test_all_routes_have_no_page_overflow_and_44px_targets(size, tmp_path) -> No
             "body-map", "agreement", "evidence", "methods",
         )),
     ]
+    headings = {
+        "/": f"Traceback Lab — {ID12}",
+        **{f"/sample/{ID12}/{lens}": title for lens, title in (
+            ("findings", "Findings"), ("trust-qc", "Trust / QC"),
+            ("stability", "Stability"), ("signals", "Signals"),
+            ("compare", "Compare"), ("body-map", "Body map"),
+            ("agreement", "Agreement"), ("evidence", "Evidence"),
+            ("methods", "Methods"),
+        )},
+    }
+    assert set(headings) == set(routes)
     with _server(tmp_path, _sample()) as server:
         kind, source = server.app.assets["/assets/lab.js"]
         probe = b"""
         window.addEventListener('load', () => {
           const routes = __ROUTES__;
+          const headings = __HEADINGS__;
           const visible = (el) => {
             const style = getComputedStyle(el);
             return style.display !== 'none' && style.visibility !== 'hidden' && el.getClientRects().length > 0;
@@ -43,9 +56,20 @@ def test_all_routes_have_no_page_overflow_and_44px_targets(size, tmp_path) -> No
           const audit = async () => {
             while (document.body.dataset.ready !== '1') await new Promise((r) => setTimeout(r, 20));
             const failures = [];
+            const audited = [];
             for (const route of routes) {
               location.hash = `#${route}`;
-              await new Promise((r) => setTimeout(r, 150));
+              const deadline = performance.now() + 5000;
+              while (document.querySelector('#main h1')?.textContent.trim() !== headings[route]
+                     && performance.now() < deadline)
+                await new Promise((r) => setTimeout(r, 20));
+              const rendered = document.querySelector('#main h1')?.textContent.trim();
+              if (rendered !== headings[route]) {
+                failures.push(`${route}: render timeout; expected ${headings[route]}, saw ${rendered}`);
+                break;
+              }
+              await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+              audited.push(route);
               if (document.documentElement.scrollWidth > document.documentElement.clientWidth + 1)
                 failures.push(`${route}: page scroll ${document.documentElement.scrollWidth}/${document.documentElement.clientWidth}`);
               for (const el of document.querySelectorAll('a[href], button, select, summary, input')) {
@@ -57,17 +81,24 @@ def test_all_routes_have_no_page_overflow_and_44px_targets(size, tmp_path) -> No
             }
             document.body.dataset.auditFailures = failures.slice(0, 30).join(' | ');
             document.body.dataset.auditCount = String(failures.length);
+            document.body.dataset.auditedCount = String(audited.length);
+            document.body.dataset.auditedUniqueCount = String(new Set(audited).size);
             document.body.dataset.auditComplete = '1';
           };
           audit();
         });
-        """.replace(b"__ROUTES__", repr(routes).encode())
+        """.replace(b"__ROUTES__", json.dumps(routes).encode()).replace(
+            b"__HEADINGS__", json.dumps(headings).encode()
+        )
         server.app.assets["/assets/lab.js"] = (kind, source + probe)
         dom = _dom(server, tmp_path / "browser", size=size, route="/",
                    want=lambda d: 'data-audit-complete="1"' in d)
     body = re.search(r"<body([^>]*)>", dom).group(1)
     count = int(re.search(r'data-audit-count="(\d+)"', body).group(1))
     detail = re.search(r'data-audit-failures="([^"]*)"', body).group(1)
+    audited_count = int(re.search(r'data-audited-count="(\d+)"', body).group(1))
+    unique_count = int(re.search(r'data-audited-unique-count="(\d+)"', body).group(1))
+    assert (audited_count, unique_count) == (len(routes), len(routes)), f"{size}: {detail}"
     assert count == 0, f"{size}: {detail} ({count} total)"
 
 
