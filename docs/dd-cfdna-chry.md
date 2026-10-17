@@ -43,14 +43,15 @@ in the private contract and does not echo them in CLI output. The registration
 directory itself is sensitive transplant-related metadata, so protect the Lab
 root accordingly.
 Synthetic calibration needs `--allow-synthetic` at registration. That option
-irreversibly reserves the input's calibration slot for mechanics-only testing;
+reserves the input's calibration slot through the Lab registration path for mechanics-only testing;
 it does not permit a numeric donor-fraction result. If an existing registration
 is damaged, restore its exact original bytes from backup. A different
-calibration requires a new input identity; the Lab never overwrites the
-immutable provenance.
+calibration requires a new input identity; the Lab registration path does not
+overwrite existing provenance. Protect the Lab root and its backups from direct edits.
 
 The estimator counts eligible read starts on hg38 chrY outside its two
-pseudoautosomal intervals. It divides that count by all eligible reads to get
+pseudoautosomal intervals. It divides that count by all eligible reads on
+canonical chromosomes to get
 a rate per million. For rates inside the calibrated interval, the reported
 fraction is `(observed - female_background) / (full_male_response -
 female_background)`. It returns null below the background or above the full
@@ -68,3 +69,6 @@ this calculation. The aggregate count and rate are supporting metrics; no
 read identifiers or donor genotype are published. A numeric output still
 requires matched-mixture accuracy and limit-of-detection validation before
 biological or clinical interpretation.
+The 0.10 absolute repeatability band is an engineering comparison rule, not a
+confidence interval or a claim about assay precision; calibration uncertainty
+has not been estimated.

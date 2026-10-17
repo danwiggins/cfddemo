@@ -2670,7 +2670,7 @@ entries:
     license_ids: []
     flags: [FDA, PRIVACY]
     headline: true
-    stability: {kind: proportion}
+    stability: {kind: absolute, tolerance: 0.10}
     citations: []
     citation_checked: {by: "Lab donor calibration review", date: "2026-10-17", note: "Linear response is an explicit operator-supplied engineering calibration, not a published clinical estimator."}
 
