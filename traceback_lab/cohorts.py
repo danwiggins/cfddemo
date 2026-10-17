@@ -24,8 +24,9 @@ from .identity import SHA256_PATTERN, cohort_compat_key
 from .ingest import resolve_sample, source_ids
 from .problems import LabProblem
 from .registry import execution_identity, load_registry
-from .runner import _worker_env
-from .store import LabStore, new_run_id, open_regular_no_follow, write_atomic
+from .store import (MAX_EXECUTION_PLAN_BYTES, LabStore, new_run_id,
+                    open_regular_no_follow, write_atomic)
+from .views import selected_result_snapshots
 
 if TYPE_CHECKING:
     from .pon import PonInput
@@ -302,6 +303,75 @@ def _aligner(manifest: dict[str, Any], input_id: str) -> tuple[str, dict[str, An
     }
 
 
+def _recorded_selection(
+    store: LabStore, input_id: str, algorithm: Any, attempt: Path, latest: Any,
+    manifest: dict[str, Any],
+    upstream: list[dict[str, str]], current_assets: list[str] | None,
+    platform: str,
+) -> tuple[str, Any, dict[str, Any]] | None:
+    """Select a result by its recorded effective identity, without live probes."""
+    identity = latest.provenance.parameters_sha256
+    try:
+        with os.fdopen(open_regular_no_follow(attempt / "execution_plan.json"), "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                    or info.st_size > MAX_EXECUTION_PLAN_BYTES):
+                return None
+            plan = json.loads(stream.read(MAX_EXECUTION_PLAN_BYTES + 1))
+        if (not isinstance(plan, dict)
+                or plan.get("schema") != "traceback.lab.execution-plan.v1"
+                or plan.get("algorithm_id") != algorithm.id
+                or plan.get("algorithm_version") != algorithm.version
+                or plan.get("input_id") != input_id
+                or plan.get("reference_sha256") != manifest["reference_sha256"]
+                or plan.get("platform") != platform
+                or plan.get("upstream") != upstream
+                or not isinstance(plan.get("parameters"), dict)
+                or not isinstance(plan.get("tools"), list)
+                or not isinstance(plan.get("asset_sha256s"), list)):
+            return None
+        if any(plan["parameters"].get(key) != value
+               for key, value in algorithm.parameters.items()):
+            return None
+        if current_assets is not None and plan["asset_sha256s"] != current_assets:
+            return None
+        recorded_identity = execution_identity(
+            algorithm, reference_sha256=manifest["reference_sha256"],
+            upstream=plan["upstream"], asset_sha256s=plan["asset_sha256s"],
+            platform=platform if platform != "ont" else None,
+            tool_pins=plan["tools"], parameters=plan["parameters"],
+        )
+    except (OSError, ValueError, TypeError, AttributeError, KeyError, RecursionError):
+        return None
+    if recorded_identity != identity:
+        return None
+    return identity, latest, plan
+
+
+def _consumed_attempts_current(
+    store: LabStore, attempt: Path, upstream: list[dict[str, str]],
+    snapshots: dict[str, tuple[Path, Any]], input_id: str,
+) -> bool:
+    recorded = store.upstream_selections_at(attempt)
+    if recorded is None or [
+        {"algorithm_id": row["algorithm_id"], "parameters_sha256": row["parameters_sha256"]}
+        for row in recorded
+    ] != sorted(upstream, key=lambda row: row["algorithm_id"]):
+        return False
+    for row in recorded:
+        if row["input_id"] == input_id:
+            selected = snapshots.get(row["algorithm_id"])
+            if (selected is None or selected[0].name != row["attempt_id"]
+                    or selected[1].provenance.parameters_sha256 != row["parameters_sha256"]):
+                return False
+        else:
+            selected = store.selected_attempt(row["input_id"], row["algorithm_id"],
+                                              row["parameters_sha256"])
+            if selected is None or selected.name != row["attempt_id"]:
+                return False
+    return True
+
+
 def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) -> tuple[CohortResult, ...]:
     """Snapshot only selected status-ok results on the full input."""
 
@@ -326,7 +396,12 @@ def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) 
         )
     found: list[CohortResult] = []
     identities: dict[str, str] = {}
+    latest_results = selected_result_snapshots(store, input_id)
     for algorithm in load_registry():
+        snapshot = latest_results.get(algorithm.id)
+        if snapshot is None or snapshot[1].status != "ok":
+            continue
+        attempt, latest = snapshot
         supported = getattr(getattr(algorithm, "requires", None), "platforms", frozenset({"ont"}))
         if platform not in supported:
             continue
@@ -337,22 +412,41 @@ def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) 
         if len(upstream) != len(algorithm.upstream):
             continue
         assets_of = getattr(algorithm, "asset_sha256s", None)
+        identity_assets = getattr(algorithm, "identity_assets", None)
         identity_tools = getattr(algorithm, "identity_tools", None)
         try:
-            tool_identities = [tool.identity() for tool in
-                               (identity_tools(worker_pythonpath=_worker_env()["PYTHONPATH"])
-                                if callable(identity_tools) else algorithm.tools)]
-            identity = execution_identity(
-                algorithm, reference_sha256=manifest["reference_sha256"], upstream=upstream,
-                asset_sha256s=assets_of(store.root) if callable(assets_of) else (),
-                platform=platform if platform != "ont" else None,
-                tool_identities=tool_identities,
-            )
+            assets = (None if callable(identity_assets) else
+                      list(assets_of(store.root) if callable(assets_of) else ()))
+            stored = _recorded_selection(store, input_id, algorithm, attempt, latest, manifest,
+                                         upstream, assets, platform)
+            if stored is not None:
+                identity, chosen, plan = stored
+                tool_identities = plan["tools"]
+                effective_parameters = plan["parameters"]
+            else:
+                if (callable(identity_tools) or callable(identity_assets)
+                        or callable(getattr(algorithm, "identity_parameters", None))):
+                    # Dynamic identities need a producer-recorded plan. A
+                    # reader's GPU, packages or PATH cannot reconstruct one.
+                    continue
+                tool_identities = [tool.identity() for tool in algorithm.tools]
+                identity = execution_identity(
+                    algorithm, reference_sha256=manifest["reference_sha256"], upstream=upstream,
+                    asset_sha256s=assets or (), platform=platform if platform != "ont" else None,
+                    tool_identities=tool_identities,
+                )
+                if identity != latest.provenance.parameters_sha256:
+                    continue
+                chosen = latest
+                effective_parameters = algorithm.parameters
         except (OSError, ValueError, KeyError, LabProblem):
             # An unresolved asset cannot make an old result current-compatible.
             continue
-        chosen = store.read_result(input_id, algorithm.id, identity)
         if chosen is None or chosen.status != "ok":
+            continue
+        if algorithm.upstream and not _consumed_attempts_current(
+            store, attempt, upstream, latest_results, input_id,
+        ):
             continue
         if chosen.algorithm_version != algorithm.version or chosen.provenance.source_id != manifest["source_id"]:
             continue
@@ -364,9 +458,9 @@ def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) 
         }
         compat = cohort_compat_key(
             algorithm_id=algorithm.id, algorithm_version=algorithm.version,
-            parameters=algorithm.parameters, tools=tool_identities,
+            parameters=effective_parameters, tools=tool_identities,
             reference_sha256=manifest["reference_sha256"], aligner_identity=aligner,
-            pon_policy=str(algorithm.parameters.get("pon_policy", "none")),
+            pon_policy=str(effective_parameters.get("pon_policy", "none")),
             per_sample_asset_keys=("pon_asset_sha256",),
             platform=platform if platform != "ont" else None,
         )
