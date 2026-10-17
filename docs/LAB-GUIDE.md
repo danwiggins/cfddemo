@@ -586,8 +586,10 @@ unanimously declare `PL:ONT` or `PL:ILLUMINA`; align Illumina reads externally
 before supplying the BAM. For a damaged or mismatched stored input, restore
 that input from a known-good backup or re-ingest the original BAM under a fresh
 ROOT. Reusing the same ROOT does not replace an existing input manifest.
-Rewriting a BAM header changes its source identity; remove an unrecoverable
-member from its cohort before rebuilding that cohort.
+Rewriting a BAM header changes its source identity. If a cohort member cannot
+be restored, create a new cohort under a new name and add only intact samples
+before building it; the existing cohort generation remains available for
+historical inspection.
 
 ## Adding an algorithm
 
