@@ -6,16 +6,19 @@ import argparse
 import hashlib
 import json
 import random
+import sys
 from pathlib import Path
 
 import pysam
 import pytest
+import numpy as np
 
 from traceback_lab.asset_command import add_asset_parser
 from traceback_lab.assets import AssetError
 from traceback_lab.algorithms import viral_reads
 from traceback_lab.algorithms.viral_reads import VIRAL_READS, _count_hits, _derived_keep, _write_queries
 from traceback_lab.registry import InputContext, Ready, Skip
+from traceback_lab.read_summary import DS_SALT, SPLIT_SALT, downsample_mask, h64, split_mask
 from traceback_lab.store import LabStore
 from traceback_lab.tools import MIN_MINIMAP2, find_minimap2
 from traceback_lab.viral_assets import add_viral_reference, inspect_viral_reference
@@ -81,6 +84,9 @@ def test_registration_cli_identity_and_tamper(tmp_path: Path) -> None:
     with pytest.raises(AssetError):
         inspect_viral_reference(store)
     assert VIRAL_READS.asset_sha256s(store.root) == ()
+    status = VIRAL_READS.preflight(_context(store.root, tmp_path))
+    assert isinstance(status, Skip)
+    assert status.reason_code == "invalid_asset"
 
 
 @pytest.mark.parametrize("fasta_bytes,targets_bytes", [
@@ -115,8 +121,11 @@ def test_paf_counts_unique_primary_virus_and_excludes_cross_virus(tmp_path: Path
     paf = tmp_path / "hits.paf"
     def row(qid: int, virus: str, tag: str = "tp:A:P") -> str:
         return f"q{qid}\t500\t0\t500\t+\t{virus}\t3000\t0\t500\t500\t500\t60\t{tag}\n"
-    paf.write_text(row(1, "EBV") + row(1, "EBV") + row(2, "HPV") + row(2, "HBV") + row(3, "HBV", "tp:A:S"))
-    counts = _count_hits(paf, inspect_viral_reference(store), 3, tmp_path / "hits.sqlite")
+    paf.write_text(
+        row(1, "EBV") + row(1, "EBV") + row(2, "HPV") + row(2, "HBV")
+        + row(3, "HBV", "tp:A:S") + row(4, "EBV") + row(4, "HPV", "tp:A:S")
+    )
+    counts = _count_hits(paf, inspect_viral_reference(store), 4, tmp_path / "hits.sqlite")
     assert counts == {"EBV": 1, "HPV": 0, "HBV": 0}
 
 
@@ -158,6 +167,20 @@ def test_derived_membership_is_deterministic(tmp_path: Path) -> None:
     assert _derived_keep(parent, "read-1")
     assert 0 < sum(_derived_keep(downsample, f"read-{i}") for i in range(100)) < 100
     assert all(_derived_keep(half_a, f"read-{i}") != _derived_keep(half_b, f"read-{i}") for i in range(100))
+    names = [f"read-{index}" for index in range(100)]
+    ds_hashes = np.array([h64(DS_SALT, name) for name in names], dtype=np.uint64)
+    split_hashes = np.array([h64(SPLIT_SALT, name) for name in names], dtype=np.uint64)
+    assert [_derived_keep(downsample, name) for name in names] == downsample_mask(ds_hashes, 0.5).tolist()
+    assert [_derived_keep(half_a, name) for name in names] == split_mask(split_hashes, "A").tolist()
+    assert [_derived_keep(half_b, name) for name in names] == split_mask(split_hashes, "B").tolist()
+
+
+def test_preflight_rejects_invalid_derived_transform(tmp_path: Path) -> None:
+    for derived in ({"transform": "unknown"}, {"transform": "split", "half": "C"},
+                    {"transform": "downsample", "fraction": 2.0}):
+        status = VIRAL_READS.preflight(_context(tmp_path, tmp_path, derived=derived))
+        assert isinstance(status, Skip)
+        assert status.reason_code == "unsupported_transform"
 
 
 def test_real_minimap2_side_alignment_on_synthetic_bam(tmp_path: Path) -> None:
@@ -193,7 +216,7 @@ def test_real_minimap2_side_alignment_on_synthetic_bam(tmp_path: Path) -> None:
     output.mkdir()
     ctx = _context(store.root, input_dir)
     staged_queries = tmp_path / "queries.fasta"
-    assert _write_queries(ctx, staged_queries) == (4, 4)
+    assert _write_queries(ctx, staged_queries) == (4, 4, True)
     assert [line for line in staged_queries.read_text().splitlines() if line.startswith(">")] == [
         ">q1", ">q2", ">q3", ">q4",
     ]
@@ -209,6 +232,33 @@ def test_real_minimap2_side_alignment_on_synthetic_bam(tmp_path: Path) -> None:
     assert summary["hits"] == {"EBV": 2, "HPV": 1, "HBV": 1}
     assert summary["missing_sequences"] == 0
     assert summary["availability_reason"] is None
+
+
+def test_real_minimap2_excludes_reported_cross_group_secondary(tmp_path: Path) -> None:
+    tool = find_minimap2()
+    if tool.path is None or tool.numeric is None or tool.numeric < MIN_MINIMAP2:
+        pytest.skip("minimap2 >= 2.28 unavailable")
+    store = LabStore(tmp_path / "root")
+    fasta, targets, sequences = _sources(tmp_path)
+    fasta.write_text(
+        f">EBV\n{sequences['EBV']}\n>HPV\n{sequences['EBV']}\n>HBV\n{sequences['HBV']}\n"
+    )
+    _add(store, fasta, targets)
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    with pysam.AlignmentFile(str(input_dir / "aligned.bam"), "wb", header={
+        "HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 10000}],
+    }) as bam:
+        record = pysam.AlignedSegment()
+        record.query_name = "private-ambiguous"
+        record.flag = 4
+        record.query_sequence = sequences["EBV"][200:1400]
+        bam.write(record)
+    output = tmp_path / "output"
+    output.mkdir()
+    result = VIRAL_READS.run(_context(store.root, input_dir), output)
+    assert all(item["value"] == 0 and item["n"] == 1 for item in result.metrics)
+    assert json.loads(result.artifacts["viral_reads.json"])["hits"] == {"EBV": 0, "HPV": 0, "HBV": 0}
 
 
 @pytest.mark.parametrize("sequences,expected_reason,expected_value", [
@@ -246,3 +296,30 @@ def test_missing_sequence_never_looks_like_a_negative_result(
     assert summary["availability_reason"] == expected_reason
     if "virus" in sequences:
         assert summary["hits"]["EBV"] == 1
+
+
+def test_query_budget_returns_unavailable_without_running_aligner(tmp_path: Path, monkeypatch) -> None:
+    store = LabStore(tmp_path / "root")
+    fasta, targets, viruses = _sources(tmp_path)
+    _add(store, fasta, targets)
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    with pysam.AlignmentFile(str(input_dir / "aligned.bam"), "wb", header={
+        "HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 10000}],
+    }) as bam:
+        for index in range(2):
+            record = pysam.AlignedSegment()
+            record.query_name = f"private-{index}"
+            record.flag = 4
+            record.query_sequence = viruses["EBV"][200:1400]
+            bam.write(record)
+    monkeypatch.setattr(viral_reads, "MAX_QUERY_FASTA_BYTES", 100)
+    monkeypatch.setattr(viral_reads, "_minimap2", lambda: (sys.executable, "2.28", (2, 28)))
+    output = tmp_path / "output"
+    output.mkdir()
+    result = VIRAL_READS.run(_context(store.root, input_dir), output)
+    assert all(item["value"] is None and item["n"] == 2 for item in result.metrics)
+    summary = json.loads(result.artifacts["viral_reads.json"])
+    assert summary["availability_reason"] == "query_budget_exceeded"
+    assert summary["queries_with_sequence"] == 2
+    assert summary["hits"] == {"EBV": 0, "HPV": 0, "HBV": 0}

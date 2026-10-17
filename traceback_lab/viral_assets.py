@@ -172,8 +172,13 @@ def inspect_viral_reference(store: LabStore) -> ViralReference:
     if (descriptor.kind != KIND or descriptor.origin != "user"
             or descriptor.sha256 != fasta_sha or descriptor.size_bytes != fasta_size):
         raise AssetError("viral reference bytes differ from registration")
-    contigs = _fasta_contigs(_read_regular(fasta, MAX_FASTA_BYTES))
-    rows = _target_rows(_read_regular(targets, MAX_TARGETS_BYTES), contigs)
+    fasta_raw = _read_regular(fasta, MAX_FASTA_BYTES)
+    targets_raw = _read_regular(targets, MAX_TARGETS_BYTES)
+    if (hashlib.sha256(fasta_raw).hexdigest() != fasta_sha
+            or hashlib.sha256(targets_raw).hexdigest() != targets_sha):
+        raise AssetError("viral reference changed while it was inspected")
+    contigs = _fasta_contigs(fasta_raw)
+    rows = _target_rows(targets_raw, contigs)
     return ViralReference(descriptor, fasta, targets_sha, rows)
 
 
