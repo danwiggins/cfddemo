@@ -24,9 +24,8 @@ from types import SimpleNamespace
 import pytest
 import websocket
 
-from traceback_lab.envelope import Metric, ResultEnvelope, provenance
+from traceback_lab.envelope import Depth, Metric, ResultEnvelope, provenance
 from traceback_lab.store import LabStore
-from traceback_lab.envelope import Depth, Metric
 from traceback_lab import views
 from traceback_lab.web import api as api_module
 from traceback_lab.web.server import CSP, RunningLabServer
