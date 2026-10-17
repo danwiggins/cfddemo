@@ -68,6 +68,7 @@ ALGORITHMS: tuple[str, ...] = (
     "frag_x_meth:FRAG_X_METH",
     "fetal_fraction:FETAL_FRACTION",
     "fetal_fraction_chry:FETAL_FRACTION_CHRY",
+    "epi_clock:EPI_CLOCK",
 )
 
 
