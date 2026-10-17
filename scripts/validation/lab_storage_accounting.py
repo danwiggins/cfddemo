@@ -19,6 +19,12 @@ class InventoryError(ValueError):
     """The inventory cannot safely make the requested claim."""
 
 
+def _is_reparse(info: os.stat_result) -> bool:
+    """Windows junctions are directories even with follow_symlinks=False."""
+    return bool(getattr(info, "st_file_attributes", 0)
+                & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+
+
 def _sha(value: Any, label: str) -> str:
     if not isinstance(value, str) or not SHA256.fullmatch(value):
         raise InventoryError(f"{label} must be a lowercase SHA256")
@@ -27,10 +33,10 @@ def _sha(value: Any, label: str) -> str:
 
 def _require_directory(path: Path, label: str) -> None:
     try:
-        mode = path.lstat().st_mode
+        info = path.lstat()
     except OSError as exc:
         raise InventoryError(f"{label} is unavailable") from exc
-    if not stat.S_ISDIR(mode):
+    if _is_reparse(info) or not stat.S_ISDIR(info.st_mode):
         raise InventoryError(f"{label} is not a regular directory")
 
 
@@ -38,7 +44,8 @@ def _record(lab: Path, source_id: str) -> dict[str, Any]:
     _require_directory(lab / "sources", "source directory")
     path = lab / "sources" / f"{source_id}.json"
     try:
-        if not stat.S_ISREG(path.lstat().st_mode):
+        info = path.lstat()
+        if _is_reparse(info) or not stat.S_ISREG(info.st_mode):
             raise InventoryError("source record is not a regular file")
         with path.open("rb") as stream:
             data = stream.read(MAX_RECORD_BYTES + 1)
@@ -78,6 +85,8 @@ def _inventory(lab: Path, max_entries: int) -> tuple[dict[str, int], int, set[st
                         input_entries.add(entry.name)
                     if entry.name.startswith(".staging-"):
                         staging_entries += 1
+                    if _is_reparse(info):
+                        raise InventoryError("inventory contains a link or special file")
                     if stat.S_ISDIR(info.st_mode):
                         pending.append(Path(entry.path))
                     elif stat.S_ISREG(info.st_mode):

@@ -1,6 +1,8 @@
 """D30 inventory separates literal AC4 input bytes from the full footprint."""
 
 import json
+import os
+import subprocess
 
 import pytest
 
@@ -106,6 +108,30 @@ def test_refuses_symlinked_lab_root_or_internal_entry(tmp_path, where):
         pytest.skip(f"symlinks unavailable: {exc}")
     with pytest.raises(InventoryError, match="regular directory|link or special file"):
         account(linked_root, source)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="directory junctions are Windows-specific")
+@pytest.mark.parametrize("where", ["lab", "inside"])
+def test_refuses_windows_junctions(tmp_path, where):
+    source, _ = _fixture(tmp_path)
+    if where == "lab":
+        linked_root = tmp_path / "linked"
+        linked_root.mkdir()
+        link = linked_root / "lab"
+        target = tmp_path / "lab"
+    else:
+        linked_root = tmp_path
+        link = tmp_path / "lab" / "inputs" / "linked"
+        target = tmp_path / "lab" / "refs"
+    created = subprocess.run(["cmd", "/c", "mklink", "/J", str(link), str(target)],
+                             capture_output=True, text=True, check=False)
+    if created.returncode:
+        pytest.skip(f"junctions unavailable: {created.stderr}")
+    try:
+        with pytest.raises(InventoryError, match="regular directory|link or special file"):
+            account(linked_root, source)
+    finally:
+        os.rmdir(link)
 
 
 def test_refuses_empty_bam_even_with_nonempty_index(tmp_path):
