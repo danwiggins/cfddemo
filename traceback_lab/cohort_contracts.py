@@ -21,6 +21,26 @@ from .interpretation.engine import Cohort
 COHORT_SCHEMA = "traceback.lab.cohort-generation.v1"
 
 
+class SizeDensityVector(BaseModel):
+    """Publication-time copy of a selected 1 bp fragment-size histogram."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    attempt_id: str = Field(pattern=r"^a-\d{8}T\d{12}-[0-9a-f]{8}$")
+    artifact_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
+    count: tuple[StrictInt, ...] = Field(min_length=1000, max_length=1000)
+
+    @model_validator(mode="after")
+    def _valid_counts(self) -> SizeDensityVector:
+        if any(value < 0 for value in self.count) or sum(self.count[49:]) == 0:
+            raise ValueError("size density needs nonnegative counts and a 50–1000 bp denominator")
+        return self
+
+    @property
+    def denominator(self) -> int:
+        return sum(self.count[49:])
+
+
 class CohortResult(BaseModel):
     """One selected, status-ok result pinned by exact execution identity."""
 
@@ -30,6 +50,7 @@ class CohortResult(BaseModel):
     parameters_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
     cohort_compat_key: str = Field(pattern=SHA256_PATTERN.pattern)
     metrics: dict[str, StrictFloat | StrictInt | None]
+    size_density: SizeDensityVector | None = None
 
     @model_validator(mode="after")
     def _metric_values(self) -> CohortResult:
@@ -38,6 +59,8 @@ class CohortResult(BaseModel):
                 raise ValueError(f"invalid metric id {name!r}")
             if value is not None and (isinstance(value, bool) or not math.isfinite(value)):
                 raise ValueError(f"metric {name!r} must be finite or null")
+        if self.size_density is not None and self.algorithm_id != "fragment-size":
+            raise ValueError("only fragment-size results may carry size density")
         object.__setattr__(self, "metrics", MappingProxyType(dict(self.metrics)))
         return self
 
@@ -188,5 +211,5 @@ def project_metric(
 
 __all__ = [
     "COHORT_SCHEMA", "CohortGeneration", "CohortMember", "CohortResult",
-    "MetricProjection", "project_metric",
+    "MetricProjection", "SizeDensityVector", "project_metric",
 ]

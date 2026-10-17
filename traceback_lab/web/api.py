@@ -19,6 +19,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ..cohort_contracts import CohortGeneration, CohortMember, MetricProjection, project_metric
+from ..cohort_density import project_density_band
 from ..cohorts import list_cohorts, member_from_store, read_current
 from ..identity import resolve_prefix, shortest_unique_prefixes
 from ..ingest import source_ids, source_record
@@ -442,6 +443,12 @@ class LabApi:
         curve = views.depth_curve(sample, library)
         synthetic = views.synthetic(sample)
         defended_block, headline_block = _defended(algorithms, curve, panels, synthetic, library, order, depth_x)
+        fragment = sample.full.results.get("fragment-size")
+        density_band = project_density_band(
+            generation, target, source_id,
+            fragment.provenance.parameters_sha256 if fragment is not None and fragment.status == "ok" else None,
+            cohort_state,
+        )
         return {
             "found": True,
             "id12": self._id12s()[source_id],
@@ -459,6 +466,7 @@ class LabApi:
             "cohort_state": cohort_state,
             "cohort_problem": cohort_problem,
             "agreement_pairs": _agreement_pairs(sample, generation, target, source_id, cohort_state),
+            "size_density_band": density_band,
             "algorithms": algorithms,
             "curve": curve,
             "stability": panels,
