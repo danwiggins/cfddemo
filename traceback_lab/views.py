@@ -25,6 +25,7 @@ from typing import Any
 from .envelope import ResultEnvelope
 from .ingest import id12_for, input_manifest, source_record
 from .interpretation.engine import Library, classify, load_library
+from .platforms import for_input
 from .problems import LabProblem
 from .registry import load_registry
 from .sample_metadata import sex_assertion, sex_concordance
@@ -141,7 +142,41 @@ def load_sample(store: LabStore, source_id: str) -> SampleView | None:
     full_input = next((entry["input_id"] for entry in inputs if input_manifest(store, entry["input_id"])), None)
     if full_input is None:
         return None
-    full = InputView("full", full_input, None, {}, selected_results(store, full_input))
+    manifest = input_manifest(store, full_input) or {}
+    try:
+        platform = for_input(manifest, store.inputs_dir / full_input / "aligned.bam")
+    except (OSError, ValueError):
+        platform = "unknown"
+    platform_unverified = platform == "unknown"
+    legacy_not_ont = manifest.get("kind") == "prealigned" and "platform" not in manifest and platform == "illumina"
+    supported: set[str] | None = None
+    if platform_unverified:
+        supported = set()
+    elif legacy_not_ont:
+        supported = {algorithm.id for algorithm in load_registry() if "illumina" in algorithm.requires.platforms}
+    skip_message = (
+        "Stored input platform cannot be verified against its BAM; restore the registered input before viewing results"
+        if platform_unverified else
+        "Legacy result lacks verified ONT provenance; rerun or repair this sample"
+    )
+
+    def visible_results(input_id: str, identities: Mapping[str, str] | None = None) -> dict[str, ResultEnvelope]:
+        selected = selected_results(store, input_id, identities)
+        if supported is None:
+            return selected
+        return {
+            algorithm_id: envelope if algorithm_id in supported else ResultEnvelope(
+                algorithm_id=envelope.algorithm_id,
+                algorithm_version=envelope.algorithm_version,
+                status="skipped",
+                skip_reason="platform",
+                skip_message=skip_message,
+                provenance=envelope.provenance,
+            )
+            for algorithm_id, envelope in selected.items()
+        }
+
+    full = InputView("full", full_input, None, {}, visible_results(full_input))
     identities = {alg: envelope.provenance.parameters_sha256 for alg, envelope in full.results.items()}
     derived = []
     for entry in record.get("derived", []):
@@ -154,7 +189,7 @@ def load_sample(store: LabStore, source_id: str) -> SampleView | None:
                 entry["input_id"],
                 entry["transform"],
                 entry.get("parameters", {}),
-                selected_results(store, entry["input_id"], identities),
+                visible_results(entry["input_id"], identities),
                 fraction=fraction if entry["transform"] in ("downsample", "split") else 1.0,
             )
         )
