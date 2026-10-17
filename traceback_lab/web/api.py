@@ -331,14 +331,19 @@ class LabApi:
             )
             for row in interpreted:
                 entry = row.entry
+                license_ids = _result_license_ids(
+                    entry, algorithm_id, envelope.algorithm_version, envelope.status,
+                )
                 if entry is None and algorithm_id not in library.hidden_algorithms:
                     no_entry += 1
                 elif entry is not None and not entry.citation_verified and entry.get("citations"):
                     unverified.add((row.algorithm_id, row.metric_id))
-                for license_id in (entry.get("license_ids") or []) if entry else []:
+                for license_id in license_ids:
                     if license_id not in used_licenses:
                         used_licenses.append(license_id)
                 payload = _metric_payload(row, entry, qc_band(row.value, entry))
+                if payload["entry"] is not None:
+                    payload["entry"]["license_ids"] = license_ids
                 projection = projections.get(row.metric_id)
                 payload["eligible_n"] = projection.percentile_n if projection else None
                 payload["cohort_values"] = list(projection.values) if projection else []
@@ -355,6 +360,7 @@ class LabApi:
             algorithms.append(
                 {
                     "algorithm_id": algorithm_id,
+                    "algorithm_version": envelope.algorithm_version,
                     "hidden": algorithm_id in library.hidden_algorithms,
                     "status": envelope.status,
                     "skip_reason": envelope.skip_reason,
@@ -656,7 +662,10 @@ def _defended(
                 citation_verified=entry.citation_verified,
                 control_recovered=(spike["recovered"] if spike else False) if algorithm["algorithm_id"] == "copy-number" else None,
                 order=order.index(algorithm["algorithm_id"]) if algorithm["algorithm_id"] in order else 99,
-                license_ids=list(entry.get("license_ids") or []),
+                license_ids=_result_license_ids(
+                    entry, algorithm["algorithm_id"], algorithm.get("algorithm_version", ""),
+                    algorithm["status"],
+                ),
             )
         )
     block = defended(candidates)
@@ -670,6 +679,18 @@ EXCLUDED = [
     {"id": "jagged-ends", "reason": "needs Jag-seq library preparation; not computable from a standard ONT BAM"},
     {"id": "low-vaf-snv", "reason": "needs a matched tumour sample; not computable from one plasma BAM"},
 ]
+
+
+def _result_license_ids(
+    entry: Entry | None, algorithm_id: str, algorithm_version: str, status: str,
+) -> list[str]:
+    """Keep modkit disclosure on stored v1 results; v2 runs use the Lab decoder."""
+
+    licenses = list(entry.get("license_ids") or []) if entry else []
+    if (algorithm_id == "cell-origin" and algorithm_version == "1" and status == "ok"
+            and "modkit-ont-public" not in licenses):
+        licenses.append("modkit-ont-public")
+    return licenses
 
 
 def _all_used(used: list[str], library: Library, order: list[str]) -> list[str]:
@@ -701,6 +722,10 @@ def _catalog(library: Library, order: list[str], algorithms: list[dict[str, Any]
                         licenses.append(license_id)
         performance = entry.get("performance") if entry else None
         result = by_id.get(algorithm_id)
+        if result is not None:
+            licenses = _result_license_ids(
+                entry, algorithm_id, result.get("algorithm_version", ""), result["status"],
+            )
         rows.append(
             {
                 "algorithm_id": algorithm_id,
