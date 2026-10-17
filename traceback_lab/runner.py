@@ -199,15 +199,23 @@ def run_plan(
             if name in done
         ]
         assets_of = getattr(algorithm, "asset_sha256s", None)
+        identity_tools = getattr(algorithm, "identity_tools", None)
+        planned_tools = [tool.identity() for tool in
+                         (identity_tools() if callable(identity_tools) and not platform_rejected
+                          else algorithm.tools)]
+        planned_assets = list(assets_of(store.root)) if callable(assets_of) and not platform_rejected else []
         identity = execution_identity(
             algorithm,
             reference_sha256=target.reference_sha256,
             upstream=upstream,
             # Consumed assets enter the execution identity (D19), so a
             # re-registered asset never reuses an older result.
-            asset_sha256s=assets_of(store.root) if callable(assets_of) and not platform_rejected else (),
+            asset_sha256s=planned_assets,
             platform=target.platform if target.platform != "ont" else None,
+            tool_identities=planned_tools,
         )
+        target.extras["planned_asset_sha256s"] = list(planned_assets)
+        target.extras["planned_tool_identities"] = planned_tools
         step = algorithm.id if target.label == "full" else f"{algorithm.id}@{target.label}"
         existing = store.read_result(target.input_id, algorithm.id, identity)
         blocked = [name for name in algorithm.upstream if done.get(name) is None or done[name].status != "ok"]

@@ -115,6 +115,43 @@ def _runtime_identity(snakemake: Path, python: Path, samtools: Path, bedtools: P
     }
 
 
+def planned_runtime_sha256() -> str:
+    """Stable pre-cache identity of the actual Griffin execution environment."""
+
+    executables = {}
+    for name in ("snakemake", "samtools", "bedtools"):
+        found = shutil.which(name)
+        try:
+            resolved = Path(found).resolve() if found else None
+            executables[name] = {"path": str(resolved), "sha256": _digest(resolved)} if resolved else None
+        except OSError:
+            executables[name] = None
+    try:
+        python = Path(sys.executable).resolve()
+        python_identity = {"path": str(python), "sha256": _digest(python)}
+    except OSError:
+        python_identity = None
+    compat = Path(__file__).parent / "griffin_compat" / "sitecustomize.py"
+    try:
+        compat_sha256 = _digest(compat)
+    except OSError:
+        compat_sha256 = None
+    packages = {}
+    for name in ("numpy", "pandas", "scipy", "pysam", "PyYAML", "pybedtools", "pyBigWig", "matplotlib"):
+        try:
+            packages[name] = version(name)
+        except PackageNotFoundError:
+            packages[name] = None
+    payload = {
+        "executables": executables, "python": python_identity,
+        "python_version": sys.version, "compat_sha256": compat_sha256,
+        "packages": packages,
+        "environment": {key: os.environ.get(key, "") for key in
+                        ("PATH", "PYTHONPATH", "LD_LIBRARY_PATH", "CONDA_PREFIX")},
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 def _write_yaml(path: Path, data: dict) -> None:
     path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 

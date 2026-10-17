@@ -20,7 +20,7 @@ from typing import Any
 
 from ..adapters.griffin_run import (
     GRIFFIN_COMMIT, MIN_ELIGIBLE_AUTOSOMAL_PAIRS, GriffinRun, _require_paired_input,
-    count_d21_pairs, run_upstream,
+    count_d21_pairs, planned_runtime_sha256, run_upstream,
 )
 from ..griffin_assets import GriffinAssetError, inspect_griffin_assets, registration_available
 from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip, ToolPin
@@ -53,6 +53,9 @@ class Griffin(Base):
         ToolPin("Griffin", GRIFFIN_COMMIT, "method-patents"),
         ToolPin("Snakemake", "5.19.2"),
     )
+
+    def identity_tools(self) -> tuple[ToolPin, ...]:
+        return (*self.tools, ToolPin("Griffin runtime", planned_runtime_sha256()))
 
     def asset_sha256s(self, root: Path) -> list[str]:
         try:
@@ -123,6 +126,12 @@ class Griffin(Base):
         if ctx.platform != "illumina":
             raise RuntimeError("Griffin cannot run on a non-Illumina input")
         assets = inspect_griffin_assets(ctx.root)
+        planned_assets = ctx.extras.get("planned_asset_sha256s")
+        if planned_assets is not None and planned_assets != [assets.sha256]:
+            raise RuntimeError("Griffin registration changed after execution identity was set")
+        planned_tools = ctx.extras.get("planned_tool_identities")
+        if planned_tools is not None and planned_tools != [tool.identity() for tool in self.identity_tools()]:
+            raise RuntimeError("Griffin runtime changed after execution identity was set")
         scratch = (tempfile.TemporaryDirectory(prefix="griffin-derived-", dir=out.parent)
                    if ctx.derived is not None else nullcontext(None))
         with scratch as directory:

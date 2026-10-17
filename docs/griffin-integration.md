@@ -56,6 +56,11 @@ a valid corrected TSV with exactly the requested site-list names. Partial output
 inspectable after failure. Griffin's upstream shell rules interpolate paths
 without quoting, so the adapter refuses paths containing shell-special
 characters. The runner is POSIX-only, matching upstream's environment.
+The Lab's result key includes a pre-cache digest of the resolved executables,
+Python packages, compatibility shim, and relevant environment. Before computation,
+the worker rechecks that digest and the registered asset digest against the
+planned values; a changed runtime or registration cannot reuse or publish under
+the earlier key.
 
 The Lab now registers the exact upstream checkout, Griffin reference inputs,
 and operator-supplied TF-site lists with:
