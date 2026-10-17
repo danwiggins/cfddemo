@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from argparse import Namespace
@@ -55,8 +56,10 @@ def _registered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, 
     sites = tmp_path / "CTCF.txt"
     sites.write_text("Chrom\tposition\tStrand\nchr1\t100\t+\n", encoding="utf-8")
 
-    def fake_git(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        assert argv[:2] == ["git", "-C"]
+    def fake_git(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert Path(argv[0]).name == "git" and argv[1] == "-C"
+        assert "core.fsmonitor=false" in argv and f"core.hooksPath={os.devnull}" in argv
+        assert kwargs["env"]["GIT_CONFIG_GLOBAL"] == os.devnull
         return subprocess.CompletedProcess(
             argv, 0, (GRIFFIN_COMMIT + "\n" if argv[-2:] == ["rev-parse", "HEAD"]
                       else str(upstream.resolve()) + "\n" if argv[-2:] == ["rev-parse", "--show-toplevel"]
@@ -80,7 +83,9 @@ def test_registration_rejects_ignored_checkout_files(tmp_path: Path, monkeypatch
     upstream.mkdir()
     commands: list[list[str]] = []
 
-    def fake_git(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+    def fake_git(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert Path(argv[0]).name == "git" and "core.fsmonitor=false" in argv
+        assert kwargs["env"]["GIT_CONFIG_GLOBAL"] == os.devnull
         commands.append(argv)
         if argv[-2:] == ["rev-parse", "--show-toplevel"]:
             output = str(upstream.resolve()) + "\n"
@@ -455,6 +460,7 @@ def test_algorithm_publishes_primary_profile_and_input_bound_provenance(
                 "upstream_commit": GRIFFIN_COMMIT,
                 "platform": "illumina", "registration_sha256": registered_sha,
                 "eligible_autosomal_pairs": 5_000_000, "snakemake_version": "5.19.2",
+                "site_list_input_rows": {"CTCF": 10_000},
                 "output_sha256": hashlib.sha256(b"official corrected TSV").hexdigest(),
                 "runtime": {"environment": {"PATH": "/private/operator/bin"}},
                 "fingerprints": {"bam_indexes_sha256": {"patient.bam.bai": "a" * 64}},
@@ -477,6 +483,8 @@ def test_algorithm_publishes_primary_profile_and_input_bound_provenance(
     assert result.artifacts["griffin_corrected_coverage.tsv"] == b"official corrected TSV"
     public_provenance = json.loads(result.artifacts["griffin_provenance.json"])
     assert public_provenance["input_id"] == ctx.input_id
+    assert public_provenance["site_list_input_rows"] == {"CTCF": 10_000}
+    assert panel["profiles"][0]["site_count"] == 1000
     assert public_provenance["output_sha256"] == hashlib.sha256(b"official corrected TSV").hexdigest()
     assert len(public_provenance["full_provenance_sha256"]) == 64
     assert b"/private/operator" not in result.artifacts["griffin_provenance.json"]

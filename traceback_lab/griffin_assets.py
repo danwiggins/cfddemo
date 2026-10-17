@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
-from .adapters.griffin_run import GRIFFIN_COMMIT, _REF_FILES, _digest, _safe_path
+from .adapters.griffin_run import GRIFFIN_COMMIT, _REF_FILES, _digest, _git_run, _safe_path, _tool_path
 
 SCHEMA = "traceback.lab.griffin-assets.v1"
 MAX_REGISTRATION_BYTES = 128_000
@@ -64,20 +64,12 @@ def _file(path: Path) -> Path:
 def _checkout(root: Path) -> Path:
     source = _safe_path(root)
     try:
-        toplevel = subprocess.run(
-            ["git", "-C", str(source), "rev-parse", "--show-toplevel"],
-            check=True, capture_output=True, text=True,
-        ).stdout.strip()
-        head = subprocess.run(
-            ["git", "-C", str(source), "rev-parse", "HEAD"],
-            check=True, capture_output=True, text=True,
-        ).stdout.strip()
-        dirty = subprocess.run(
-            ["git", "-C", str(source), "status", "--porcelain", "--ignored", "--untracked-files=all"],
-            check=True, capture_output=True, text=True,
-        ).stdout.strip()
-    except (OSError, subprocess.CalledProcessError) as exc:
-        raise GriffinAssetError("Griffin checkout cannot be verified") from exc
+        git = _tool_path("git")
+        toplevel = _git_run(git, source, "rev-parse", "--show-toplevel")
+        head = _git_run(git, source, "rev-parse", "HEAD")
+        dirty = _git_run(git, source, "status", "--porcelain", "--ignored", "--untracked-files=all")
+    except (OSError, ValueError, subprocess.SubprocessError):
+        raise GriffinAssetError("Griffin checkout cannot be verified") from None
     if Path(toplevel).resolve() != source or head != GRIFFIN_COMMIT or dirty:
         raise GriffinAssetError("Griffin checkout must be clean at the pinned commit")
     return source

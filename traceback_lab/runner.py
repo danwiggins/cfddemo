@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -250,6 +251,17 @@ def run_plan(
             consumed is not None
             and store.selected_upstream_selections(target.input_id, algorithm.id, identity) == consumed
         )
+        if (callable(identity_tools) or callable(identity_assets) or callable(identity_parameters)) and existing is not None:
+            # Legacy cached results have no producer plan. A cohort cannot
+            # safely reconstruct a dynamic runtime or asset identity from its
+            # reader environment, so republish once with the recorded plan.
+            cached_attempt = store.selected_attempt(target.input_id, algorithm.id, identity)
+            try:
+                has_plan = cached_attempt is not None and stat.S_ISREG(
+                    (cached_attempt / "execution_plan.json").lstat().st_mode)
+            except OSError:
+                has_plan = False
+            cache_valid = cache_valid and has_plan
         if (existing is not None and existing.status == "ok" and not force and
                 not platform_rejected and not blocked and cache_valid):
             store.reselect_cached_result(target.input_id, algorithm.id, identity)
