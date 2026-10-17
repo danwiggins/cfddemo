@@ -20,7 +20,7 @@ rejects a control RDS with a different correction or strand layout. Its own
 eligibility gate counts Lab reads; NIPTeR performs its package-defined BAM
 binning, so the operator must verify equivalent filtering in the control and
 test sample before treating z-scores as comparable. The BAM must have canonical
-hg38 `chr1`–`chr22`, `chrX`, `chrY` order and hg38 chr1/chrY lengths because
+hg38 `chr1`–`chr22`, `chrX`, `chrY` order and all primary-chromosome lengths because
 NIPTeR's binning assumes chromosome order.
 
 ```json
@@ -52,7 +52,7 @@ path. Registration for an input is immutable.
 
 The adapter requires at least two million eligible reads, the full aligned
 input, matching source/input/reference IDs, a coordinate-sorted canonical
-hg38 BAM, the verified control RDS, and an installed Rscript with NIPTeR 1.0.2.
+hg38 BAM, the verified control RDS, and R 4.4.0 or newer with NIPTeR 1.0.2.
 The Rscript binary, the installed `NIPTeR`, `sets`, `Rsamtools`, and `S4Vectors`
 package files, R adapter code, contract, and RDS digests enter the execution
 identity. Other R dependencies are not byte-pinned. At execution the Lab

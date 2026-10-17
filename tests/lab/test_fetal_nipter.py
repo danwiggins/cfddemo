@@ -243,7 +243,7 @@ def test_nipter_requires_canonical_hg38_bam_header(tmp_path: Path) -> None:
     import pysam
 
     names = [f"chr{chrom}" for chrom in range(1, 23)] + ["chrX", "chrY"]
-    lengths = [248_956_422] + [1_000_000] * 22 + [57_227_415]
+    lengths = list(fetal._HG38_LENGTHS)
     path = tmp_path / "aligned.bam"
     def write() -> None:
         with pysam.AlignmentFile(str(path), "wb", header={"HD": {"VN": "1.6", "SO": "coordinate"},
@@ -252,6 +252,10 @@ def test_nipter_requires_canonical_hg38_bam_header(tmp_path: Path) -> None:
             pass
     write()
     assert fetal._compatible_bam_layout(path)
+    lengths[12] -= 1  # chr13 is one of the reported z-scores
+    write()
+    assert not fetal._compatible_bam_layout(path)
+    lengths[12] += 1
     with pysam.AlignmentFile(str(path), "wb", header={"HD": {"VN": "1.6", "SO": "unsorted"},
                                                   "SQ": [{"SN": name, "LN": length}
                                                          for name, length in zip(names, lengths)]}):
