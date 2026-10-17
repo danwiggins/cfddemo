@@ -754,6 +754,21 @@ def test_status_does_not_require_run_logs_from_other_writer_commands(tmp_path) -
     assert ended["run_log_unavailable"] is None
 
 
+@pytest.mark.parametrize("pointer", (
+    {"command": [], "run_id": "r-20261015-0101-abcd"},
+    {"command": {}, "run_id": "r-20261015-0101-abcd"},
+    {"command": "run", "run_id": []},
+    {"command": "run", "run_id": "invalid"},
+))
+def test_status_ignores_malformed_latest_run_pointer(tmp_path, pointer) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    store.last_run_file.write_text(json.dumps(pointer))
+    status = api_module.LabApi(store).status()
+    assert status["active"] is None and status["interrupted"] is None
+    assert status["run_log_unavailable"] is None
+
+
 def test_recent_run_candidates_are_bounded_and_do_not_use_unbounded_run_ids(tmp_path, monkeypatch) -> None:
     store = LabStore(tmp_path)
     store.runs_dir.mkdir(parents=True)
