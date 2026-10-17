@@ -5,7 +5,9 @@ transplant sample with pregnancy excluded. It uses a protocol-matched female
 chrY background and full male-donor response supplied by the operator. It is
 **SPECULATIVE**, not a rejection assay or clinical threshold.
 
-The operator registers one immutable, input-scoped JSON calibration. Save the
+After ingesting the input, the operator registers one immutable, input-scoped
+JSON calibration. Registration checks the stored input ID, source ID, and
+reference SHA-256 before reserving the immutable slot. Save the
 exact bytes, calculate their SHA-256, and run `traceback lab donor register
 --file CALIBRATION.json --sha256 HEX_SHA256 --root ROOT`. `traceback lab donor
 inspect INPUT_ID --root ROOT` verifies the registration. The schema is:
