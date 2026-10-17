@@ -429,16 +429,21 @@ def test_stored_dry_run_uses_selected_depth_without_writing(
                 capsys, "run", "latest", "--root", str(root),
                 "--only", "delfi-ratio", "--dry-run",
             )
+        stored_manifest = json.loads((store.inputs_dir / input_id / "manifest.json").read_text())
         for malformed in (
-            {"reference_id": "synth"},
-            {"reference_id": "synth", "reference_sha256": "invalid"},
+            {**stored_manifest, "reference_sha256": None},
+            {**stored_manifest, "reference_sha256": "invalid"},
             ["invalid"],
         ):
             with monkeypatch.context() as patch:
                 patch.setattr(run_module, "input_manifest", lambda _store, _input_id: malformed)
                 bad_code, bad = _json(capsys, "run", "latest", "--root", str(root), "--dry-run")
-                assert bad_code == 4 and bad["data"]["code"] == "TBX-LAB-017"
-                assert "fresh ROOT" in bad["data"]["fix"]
+                expected = "TBX-LAB-024" if isinstance(malformed, list) else "TBX-LAB-017"
+                assert bad_code == (3 if isinstance(malformed, list) else 4)
+                assert bad["data"]["code"] == expected
+                assert bad["data"]["input_id"] == input_id
+                if expected == "TBX-LAB-017":
+                    assert "fresh ROOT" in bad["data"]["fix"]
         with monkeypatch.context() as patch:
             patch.setattr(run_module, "source_record", lambda _store, _source_id: {
                 **record, "chunks": [{"size": "invalid"}],

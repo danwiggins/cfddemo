@@ -218,6 +218,24 @@ def _stored_platform(aligned: AlignedInput) -> str:
     return platform
 
 
+def _stored_reference_binding(aligned: AlignedInput) -> tuple[str, str]:
+    manifest = aligned.manifest
+    if (
+        not isinstance(manifest, dict)
+        or not isinstance(manifest.get("reference_id"), str)
+        or not manifest["reference_id"]
+        or not isinstance(manifest.get("reference_sha256"), str)
+        or not SHA256_PATTERN.fullmatch(manifest["reference_sha256"])
+    ):
+        raise LabProblem(
+            "TBX-LAB-017",
+            cause="the stored aligned input has no valid reference binding",
+            fix="Restore the stored input from a known-good backup, or re-ingest under a fresh ROOT",
+            data={"input_id": aligned.input_id},
+        )
+    return manifest["reference_id"], manifest["reference_sha256"]
+
+
 def _declared_platform(chunkset: ChunkSet) -> str:
     declared = {from_rg_lines(chunk.rg_lines) for chunk in chunkset.chunks}
     if len(declared) != 1 or "unknown" in declared:
@@ -307,24 +325,12 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
         source_id = resolve_sample(store, args.inputs[0])
         with_sex_assertion(source_record(store, source_id) or {}, args.sex)
         aligned, record = _stored_input(store, source_id)
-        manifest = aligned.manifest
-        if (
-            not isinstance(manifest, dict)
-            or not isinstance(manifest.get("reference_id"), str)
-            or not manifest["reference_id"]
-            or not isinstance(manifest.get("reference_sha256"), str)
-            or not SHA256_PATTERN.fullmatch(manifest["reference_sha256"])
-        ):
-            raise LabProblem(
-                "TBX-LAB-017",
-                cause="the stored aligned input has no valid reference binding",
-                fix="Restore the stored input from a known-good backup, or re-ingest under a fresh ROOT",
-            )
         platform = _stored_platform(aligned)
+        reference_id, reference_sha256 = _stored_reference_binding(aligned)
         data["sample"] = {
             "id12": id12_for(store, source_id), "input_id": aligned.input_id, "platform": platform,
         }
-        data["reference_id"] = manifest["reference_id"]
+        data["reference_id"] = reference_id
         data["alignment"] = "reused (stored sample)"
         excluded = record.get("excluded", [])
         if not isinstance(excluded, list) or not all(
@@ -373,7 +379,7 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
         summary = next((item.algorithm for item in items if item.algorithm.id == "read-summary"), None)
         if summary is not None and not args.force:
             identity = execution_identity(
-                summary, reference_sha256=manifest["reference_sha256"],
+                summary, reference_sha256=reference_sha256,
                 platform=platform if platform != "ont" else None,
             )
             selected = store.read_result(aligned.input_id, summary.id, identity)
@@ -519,10 +525,9 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     source_id = resolve_sample(store, args.inputs[0])
                     aligned, record = _stored_input(store, source_id)
                     _stored_platform(aligned)
+                    reference_id, reference_sha256 = _stored_reference_binding(aligned)
                     record = record_source_sex(store, source_id, args.sex)
                     example = bool(record.get("example"))
-                    reference_id = aligned.manifest["reference_id"]
-                    reference_sha256 = aligned.manifest["reference_sha256"]
                     scrubber = Scrubber(root=store.root)
                     progress(f"ingest                   stored sample {id12_for(store, source_id)}")
                 else:
