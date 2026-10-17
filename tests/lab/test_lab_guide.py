@@ -32,15 +32,18 @@ def _serve_banner(process, stdout_path: Path, stderr_path: Path, *, timeout: flo
     """Read the two serve banner lines without blocking past the startup budget."""
 
     deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+    while True:
         exited = process.poll() is not None
         with stdout_path.open("rb") as output:
             parts = output.read(8192).split(b"\n")
         if len(parts) >= 3:
+            if exited:
+                break
             return [line.decode("utf-8", errors="replace").rstrip("\r") for line in parts[:2]]
-        if exited:
+        remaining = deadline - time.monotonic()
+        if exited or remaining <= 0:
             break
-        time.sleep(0.1)
+        time.sleep(min(0.1, remaining))
     raise AssertionError(
         f"serve banner unavailable within {timeout:g}s (exit={process.poll()}): "
         f"stdout={stdout_path.read_text(errors='replace')[-2000:]!r}; "
@@ -79,7 +82,7 @@ def test_serve_banner_requires_two_complete_lines(tmp_path) -> None:
         _serve_banner(running, stdout_path, stderr_path, timeout=0.01)
     with stdout_path.open("ab") as output:
         output.write(b"4211/#bootstrap=token\n")
-    assert _serve_banner(running, stdout_path, stderr_path, timeout=0.01) == [
+    assert _serve_banner(running, stdout_path, stderr_path, timeout=0) == [
         "ROOT  /tmp/root", "http://127.0.0.1:54211/#bootstrap=token",
     ]
 
