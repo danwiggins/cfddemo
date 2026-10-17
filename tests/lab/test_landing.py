@@ -97,6 +97,15 @@ def test_clia_copy_is_one_source_with_both_verify_flags() -> None:
     assert "42 CFR 493.3(b)(2)" in copy["full"]
 
 
+def test_catalog_declares_library_entry_presence() -> None:
+    from traceback_lab.interpretation.engine import load_library
+    from traceback_lab.web.api import _catalog
+
+    rows = _catalog(load_library(), ["bam-qc", "missing-library-probe"], [])
+    assert rows[0]["has_library_entry"] is True
+    assert rows[1]["has_library_entry"] is False
+
+
 # ------------------------------------------------------------------------ DOM (headless)
 @pytest.fixture(scope="module")
 def page_root(tmp_path_factory, synthetic_world) -> Path:
@@ -205,12 +214,15 @@ def test_unchecked_library_entries_keep_their_badges_without_citations(page_root
             metric["entry"]["citation_checked"] = checked
         metrics[2]["entry"] = None
         catalog = [row for row in payload["catalog"] if row["tier"]]
-        assert len(catalog) >= 2
+        assert len(catalog) >= 3
         for row, label, checked in zip(catalog[:2],
                                        ("Unchecked catalog probe", "Checked catalog probe"), (False, True)):
             row["label"] = label
             row["citation_checked"] = checked
             row["footnote_source"] = "operator evidence source"
+        catalog[2]["label"] = "Missing catalog probe"
+        catalog[2]["has_library_entry"] = False
+        catalog[2]["citation_checked"] = False
         return payload
 
     monkeypatch.setattr(LabApi, "sample", sample_with_citation_cases)
@@ -226,7 +238,7 @@ def test_unchecked_library_entries_keep_their_badges_without_citations(page_root
     for blocks, label, expected in (
         (rows, "Unchecked metric probe", 1), (rows, "Checked metric probe", 0),
         (rows, "Missing entry probe", 0), (cards, "Unchecked catalog probe", 1),
-        (cards, "Checked catalog probe", 0),
+        (cards, "Checked catalog probe", 0), (cards, "Missing catalog probe", 0),
     ):
         block = next(block for block in blocks if label in block)
         assert block.count("UNVERIFIED citation") == expected, label
