@@ -129,9 +129,10 @@ def test_disk_sampler_includes_sibling_scratch(tmp_path: Path) -> None:
     assert result.peak_disk_bytes is not None and result.peak_disk_bytes >= 2_000_000
 
 
-def test_disk_sampler_failure_does_not_discard_successful_step() -> None:
+@pytest.mark.parametrize("error_type", [OSError, ValueError])
+def test_disk_sampler_failure_does_not_discard_successful_step(error_type: type[Exception]) -> None:
     def unavailable() -> int:
-        raise OSError("scratch changed during sampling")
+        raise error_type("scratch changed during sampling")
 
     result = run_pipeline(
         [Stage("ok", [PY, "-c", "print('done')"])], timeout_s=30,
@@ -139,6 +140,19 @@ def test_disk_sampler_failure_does_not_discard_successful_step() -> None:
     )
     assert result.ok
     assert result.peak_disk_bytes is None
+
+
+def test_rss_sampler_failure_preserves_worker_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    import traceback_lab.pipeline as pipeline
+
+    def unavailable(_pid: int) -> int:
+        raise ValueError("process enumeration unavailable")
+
+    monkeypatch.setattr(pipeline, "_process_tree_rss_bytes", unavailable)
+    result = run_pipeline([Stage("ok", [PY, "-c", "print('done')"])], timeout_s=30)
+    assert result.ok
+    assert result.peak_rss_bytes is not None and result.peak_rss_bytes > 0
+    assert result.sampled_tree_peak_rss_bytes is None
 
 
 def test_direct_and_sampled_tree_memory_remain_distinct() -> None:

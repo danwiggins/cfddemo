@@ -78,8 +78,8 @@ traceback lab run (<BAM|uBAM|chunk dir>... | <id12> | latest | --example)
     [--skip-bad-chunks] [--sex M|F] [--force] [--timeout-s 3600]
     [--threads N] [--sort-mem 1G] [--mmi PATH]
     [--dry-run] [--verbose] [--json] [--root R]
-  traceback lab simulate cna <id12|latest> [--tf 0.03,0.10,0.30] [--verbose]   synthetic CNA spike, copy-number recovery
-  traceback lab simulate split <id12|latest> [--verbose]                         split-half pseudo-replicate
+traceback lab simulate cna <id12|latest> [--tf 0.03,0.10,0.30] [--verbose]   synthetic CNA spike, copy-number recovery
+traceback lab simulate split <id12|latest> [--verbose]                         split-half pseudo-replicate
 traceback lab algorithms [--json]          registered algorithms (id, tier, min depth, licenses, footnote)
 traceback lab doctor [--json]              setup checks, each with a fix command
 traceback lab serve [--open]               the local page (loopback only)
@@ -190,12 +190,14 @@ and exits 6. Completed results are kept; rerun the same command.
 streams each tool's raw stderr to your terminal; only scrubbed stderr (paths,
 ROOT, home, login and chunk names redacted) is ever stored.
 
-  Each executed algorithm reports the direct worker's `wait4` peak RSS,
-  the sampled peak sum of worker and descendant RSS, and sampled peak
-  scratch-disk bytes separately in its step result and run log. The tree
-  sample may count shared pages more than once. Disk
-  includes temporary `lab/tmp/microbial-*` work created during that step.
-  Sampling can miss brief peaks; cached and skipped steps have no new measurement.
+Each executed algorithm reports the direct worker's `wait4` peak RSS,
+the sampled peak sum of live worker-group and descendant RSS, and sampled peak
+scratch-disk bytes separately in its step result and run log. The worker's
+`wait4` value can include descendants it waited for; the sampled sum can count
+shared pages more than once. Either memory number may be larger. Disk includes
+temporary `lab/tmp/microbial-*` work created during that step. Sampling can
+miss brief peaks, and a short step may have no tree sample. Cached and skipped
+steps have no new measurement.
 
 ## Algorithms
 

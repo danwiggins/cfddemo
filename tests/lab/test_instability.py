@@ -20,7 +20,7 @@ from traceback_lab.registry import AlgorithmOutput, InputContext, PlanItem, Skip
 from traceback_lab.run_command import _parent_intermediates
 from traceback_lab.runner import RunTarget, StepResult, run_plan
 from traceback_lab.scrub import Scrubber
-from traceback_lab.store import LabStore
+from traceback_lab.store import LabStore, new_run_id
 
 
 def _segment(value: float | None, bins: int) -> dict[str, float | int | None]:
@@ -223,6 +223,19 @@ def test_algorithm_run_records_resource_measurements(tmp_path: Path) -> None:
     assert step["peak_rss_bytes"] == result.peak_rss_bytes
     assert step["peak_tree_rss_bytes"] == result.peak_tree_rss_bytes
     assert step["peak_disk_bytes"] == result.peak_disk_bytes
+
+    cached_run_id = new_run_id()
+    cached_log = store.run_log(cached_run_id)
+    cached = run_plan(
+        store, None, cached_log, target, [PlanItem(FAKE_CN, False)],
+        {"copy-number": "tests.lab.test_instability:FAKE_CN"},
+        run_id=cached_run_id, scrubber=Scrubber(root=store.root),
+    )[0]
+    assert cached.status == "ok" and cached.cached
+    assert cached.parameters_sha256 == result.parameters_sha256
+    assert cached.attempt_id == result.attempt_id
+    assert (cached.peak_rss_bytes, cached.peak_tree_rss_bytes, cached.peak_disk_bytes) == (None, None, None)
+    assert cached.public()["cached"] is True
 
 
 def test_non_ok_copy_number_propagates_as_upstream_skip(tmp_path: Path) -> None:

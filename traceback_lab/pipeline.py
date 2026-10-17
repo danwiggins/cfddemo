@@ -188,7 +188,7 @@ def _proc_tree_rss_bytes(root_pid: int) -> int | None:
             measured = True
         except (OSError, ValueError, IndexError):
             continue
-    if not measured:
+    if not measured or resident_pages == 0:
         return None
     return resident_pages * os.sysconf("SC_PAGE_SIZE")
 
@@ -384,7 +384,7 @@ def run_pipeline(
             if now >= next_rss:
                 try:
                     rss = _process_tree_rss_bytes(leader.pid)
-                except OSError:
+                except Exception:  # noqa: BLE001 - optional telemetry cannot fail the worker
                     rss = None
                 if rss is not None:
                     peak_tree_rss = rss if peak_tree_rss is None else max(peak_tree_rss, rss)
@@ -392,7 +392,7 @@ def run_pipeline(
             if (disk_path is not None or disk_usage is not None) and now >= next_disk:
                 try:
                     size = disk_usage() if disk_usage is not None else directory_bytes(disk_path)
-                except OSError:
+                except Exception:  # noqa: BLE001 - optional telemetry cannot fail the worker
                     size = None
                 if size is not None:
                     peak_disk = size if peak_disk is None else max(peak_disk, size)
@@ -427,7 +427,7 @@ def run_pipeline(
     if disk_path is not None or disk_usage is not None:
         try:
             size = disk_usage() if disk_usage is not None else directory_bytes(disk_path)
-        except OSError:
+        except Exception:  # noqa: BLE001 - optional telemetry cannot fail the worker
             size = None
         if size is not None:
             peak_disk = size if peak_disk is None else max(peak_disk, size)
