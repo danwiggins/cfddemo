@@ -18,12 +18,18 @@ def test_tss_profile_chart_and_table(tmp_path, monkeypatch) -> None:
     sample = {
         "found": True, "id12": source_id[:12], "source_id": source_id,
         "cohort_version": None, "cohort_n": 0, "cohort_state": "not_built",
-        "excluded_chunks": [], "catalog": [], "licenses": [], "interpretation_version": "fixture",
+        "excluded_chunks": [], "interpretation_version": "fixture",
+        "catalog": [{"algorithm_id": "tss-profile", "tier": "NEWER", "origin_tier": "NEWER",
+                     "footnote": "No ONT calibration established", "citation_checked": True,
+                     "license_ids": ["non-commercial-not-adopted"]}],
+        "licenses": [{"license_id": "non-commercial-not-adopted",
+                      "headline": "NON-COMMERCIAL: Zhao-lab code (not adopted)",
+                      "body": "This TSS profile is an in-house implementation."}],
         "algorithms": [{
             "algorithm_id": "tss-profile", "status": "ok", "hidden": False,
             "metrics": [{"metric_id": "central_flank_ratio", "label": "TSS central-to-flank coverage ratio",
                          "value": 0.75, "unit": "ratio", "state": "no_reference",
-                         "caption": "No reference interval is published."}],
+                         "caption": "No reference interval is published.", "entry": {"flags": ["LEGAL"]}}],
             "provenance": {},
         }],
     }
@@ -49,5 +55,8 @@ def test_tss_profile_chart_and_table(tmp_path, monkeypatch) -> None:
     assert "TSS coverage profile" in html
     assert "Central/flank ratio: 0.750" in html
     assert "5,000,000 eligible autosomal reads" in html
-    assert "TSS coverage in 50 bp bins" in html
+    assert "TSS coverage in 50 bp bins" in html and "[-1000, -950)" in html
+    assert "plotted at bin centres" in html
+    assert "FLAG: LEGAL" in html
+    assert "NON-COMMERCIAL: Zhao-lab code (not adopted)" in html
     assert 'data-csp-violations="0"' in html

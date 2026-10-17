@@ -758,8 +758,10 @@
     const section = h("section", { class: "panel" }, h("h2", {}, "TSS coverage profile"));
     if (a.status !== "ok") return [section, absent(a, "tss-profile")];
     const ratio = a.metrics.find((m) => m.metric_id === "central_flank_ratio");
-    section.append(h("p", { class: "help" }, "GENCODE v46 protein-coding gene TSSs; 50 bp strand-oriented bins across ±1 kb. Central −150 to +50 bp coverage divided by outer-flank coverage. Descriptive gene-set profile only; no expression call or clinical cutoff."),
+    const flags = ratio && ratio.entry ? ratio.entry.flags || [] : [];
+    section.append(h("p", { class: "help" }, "GENCODE v46 protein-coding gene TSSs; 50 bp strand-oriented bins across ±1 kb, plotted at bin centres. Central −150 to +50 bp coverage divided by outer-flank coverage. Descriptive gene-set profile only; no expression call or clinical cutoff."),
       h("p", {}, `Central/flank ratio: ${ratio ? fmt(ratio.value, ratio.unit) : "—"}. ${ratio ? ratio.caption || "" : ""}`),
+      ...flags.map((flag) => flagPill(flag)),
       ...context(sample, "tss-profile", new Set()));
     const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading TSS coverage…"));
     section.append(slot);
@@ -773,14 +775,15 @@
           !/^[0-9a-f]{64}$/.test(data.annotation_sha256 || "")) {
         throw new Error("TSS panel dimensions or provenance invalid");
       }
-      const points = data.offset_bp.map((offset, i) => [offset, data.coverage_x[i]]);
+      const points = data.offset_bp.map((offset, i) => [offset + 25, data.coverage_x[i]]);
+      const rows = data.offset_bp.map((offset, i) => [`[${offset}, ${offset + 50})`, data.coverage_x[i]]);
       slot.replaceWith(h("p", { class: "help" }, `${data.gene_n.toLocaleString("en-US")} complete protein-coding gene windows; ${data.eligible_autosomal_reads.toLocaleString("en-US")} eligible autosomal reads. Annotation ${data.annotation_sha256.slice(0, 12)}.`),
         chart("Mean aligned-fragment coverage across strand-oriented protein-coding TSS windows", {
           grid: { left: 60, right: 20, top: 20, bottom: 40 },
-          xAxis: { type: "value", name: "bp from TSS", min: -1000, max: 1000 },
+          xAxis: { type: "value", name: "bp from TSS (bin centre)", min: -1000, max: 1000 },
           yAxis: { type: "value", name: "mean coverage ×" },
           series: [{ type: "line", showSymbol: false, data: points, lineStyle: { color: "#1f5f8b" } }],
-        }, dataTable("TSS coverage in 50 bp bins", ["Offset (bp)", "Mean coverage ×"], points)));
+        }, dataTable("TSS coverage in 50 bp bins", ["Bin interval (bp)", "Mean coverage ×"], rows)));
     }).catch((error) => slot.replaceWith(h("div", { class: "problem" }, `TSS profile could not be drawn (${error.message}).`)));
     return [section];
   }
