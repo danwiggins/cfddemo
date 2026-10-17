@@ -89,6 +89,28 @@ def test_skip_modes_reverse_mapping_and_unknown_calls(tmp_path: Path) -> None:
     assert len({call.fragment_digest for call in result.calls}) == 8
 
 
+def test_c_minus_dot_sites_follow_pysam_query_coordinates_on_both_orientations() -> None:
+    header = pysam.AlignmentHeader.from_dict({"SQ": [{"SN": "chr1", "LN": 1000}]})
+    for reverse, expected in (
+        (False, [(100, 1, 250), (104, 1, 0)]),
+        (True, [(102, 0, 0), (106, 0, 250)]),
+    ):
+        read = pysam.AlignedSegment(header)
+        read.query_name = "c-minus"
+        read.query_sequence = "ACGTACGTAA"
+        read.flag = 16 if reverse else 0
+        read.reference_id = 0
+        read.reference_start = 100
+        read.cigarstring = "10M"
+        read.set_tag("MM", "C-m.,0;")
+        read.set_tag("ML", array.array("B", [250]))
+        explicit = read.modified_bases[("C", 0 if reverse else 1, "m")]
+        assert explicit == [(6 if reverse else 1, 250)]
+        sites, dropped = mmml_extract._reference_sites(read)
+        assert dropped == 0
+        assert [(position, strand, channels["m"]) for position, strand, channels in sites] == expected
+
+
 def test_extraction_cap_refuses_before_unbounded_growth(tmp_path: Path) -> None:
     bam, fasta = _write_input(tmp_path)
     with pytest.raises(ValueError, match="locked cap"):
