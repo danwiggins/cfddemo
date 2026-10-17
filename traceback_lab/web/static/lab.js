@@ -299,7 +299,7 @@
           const line = await api(`/api/samples/${sample.id12}/run-log/${a.algorithm_id}`);
           logLine.replaceChildren(line.found
             ? `${line.run_id} · line ${line.line} · ${line.utc || "time unavailable"} · step_end ${line.step} status=${line.status}${line.skip_reason ? ` (${line.skip_reason})` : ""}${line.duration_s !== null ? ` · ${line.duration_s} s` : ""}`
-            : "No matching line in the 64 most recent runs.");
+            : "No matching line in the 64 recently updated runs.");
         } catch (error) {
           logLine.replaceChildren(error.session ? "Session expired; reopen Lab." : "Run log line unavailable.");
         }

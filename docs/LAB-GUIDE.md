@@ -250,9 +250,10 @@ script or style, no outside requests.
   The synthetic EXAMPLE cannot be scored against a real kit cohort.
 - **Trust/QC**: depth against each algorithm's minimum, the run table with
   scrubbed stderr for failures and a link to a matching numbered run-log line,
-  provisional QC bands, library health. The link checks the 64 most recent
-  runs and reveals only allowlisted status fields; an older or cached step may
-  have no matching line.
+  provisional QC bands, library health. The link checks the 64 recently updated
+  runs and reveals only allowlisted status fields. A line must name the selected
+  immutable result attempt; legacy logs without that ID, older runs, or cached
+  steps may have no matching line.
 - **Stability**: one small multiple per metric: deviation from full depth at
   each fraction, the stability band, and split halves A/B at 50%.
 

@@ -8,9 +8,9 @@ result's own attempt directory and no component is a symlink.
 
 from __future__ import annotations
 
-import os
 import json
 import math
+import os
 import re
 import shlex
 import stat
@@ -22,6 +22,7 @@ from typing import Any
 
 from ..cohort_contracts import project_metric
 from ..cohorts import list_cohorts, member_from_store, read_current
+from ..file_access import open_regular_no_follow
 from ..identity import resolve_prefix, shortest_unique_prefixes
 from ..ingest import source_ids, source_record
 from ..interpretation.engine import (
@@ -139,6 +140,31 @@ def _contained(attempt: Path, data_ref: str) -> Path | None:
     """Compatibility check used by tests: is ``data_ref`` readable without symlinks?"""
 
     return attempt / data_ref if _read_contained(attempt, [], data_ref) is not None else None
+
+
+def _read_run_log(path: Path, *, limit: int = 1024 * 1024) -> bytes | None:
+    """Read one regular log, rejecting symlink ancestors and growth past limit."""
+
+    try:
+        descriptor = open_regular_no_follow(path)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > limit:
+            return None
+        chunks = []
+        size = 0
+        while chunk := os.read(descriptor, min(64 * 1024, limit + 1 - size)):
+            size += len(chunk)
+            if size > limit:
+                return None
+            chunks.append(chunk)
+        return b"".join(chunks)
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
 
 
 class LabApi:
@@ -316,8 +342,19 @@ class LabApi:
         if result is None:
             return {"found": False}
         identity = result.provenance.parameters_sha256
-        for run_id in self.store.run_ids()[:64]:
-            raw = _read_contained(self.store.runs_dir, [], f"{run_id}.jsonl", limit=1024 * 1024)
+        selected = self.store.selected_attempt(sample.full.input_id, algorithm_id, identity)
+        if selected is None:
+            return {"found": False}
+        recent = []
+        for run_id in self.store.run_ids():
+            try:
+                info = os.stat(self.store.runs_dir / f"{run_id}.jsonl", follow_symlinks=False)
+            except OSError:
+                continue
+            if stat.S_ISREG(info.st_mode):
+                recent.append((info.st_mtime_ns, run_id))
+        for _, run_id in sorted(recent, reverse=True)[:64]:
+            raw = _read_run_log(self.store.runs_dir / f"{run_id}.jsonl")
             if raw is None:
                 continue
             lines = raw.splitlines()
@@ -341,6 +378,8 @@ class LabApi:
             for number, event in reversed(events):
                 if (event.get("event") != "step_end" or event.get("step") != algorithm_id
                         or event.get("parameters_sha256") != identity
+                        or event.get("attempt_id") != selected.name
+                        or event.get("status") != result.status
                         or event.get("status") not in ("ok", "skipped", "failed")):
                     continue
                 utc = event.get("utc")

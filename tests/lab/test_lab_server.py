@@ -24,6 +24,7 @@ from types import SimpleNamespace
 import pytest
 import websocket
 
+from traceback_lab.envelope import Metric, ResultEnvelope, provenance
 from traceback_lab.store import LabStore
 from traceback_lab.web import api as api_module
 from traceback_lab.web.server import CSP, RunningLabServer
@@ -688,19 +689,33 @@ def test_status_finds_an_interrupted_run_through_the_pointer(tmp_path) -> None:
     assert status["interrupted"] == {"run_id": run_id, "step": "align"}
 
 
+def _selected_sex_result(source_id: str, input_id: str, identity: str) -> ResultEnvelope:
+    return ResultEnvelope(
+        algorithm_id="sex-check", algorithm_version="1", status="ok",
+        provenance=provenance(
+            tool="test", source_id=source_id, input_id=input_id,
+            parameters_sha256=identity, reference_id="synth",
+        ),
+        metrics=[Metric(metric_id="call", value="male")],
+    )
+
+
 def test_run_log_line_is_authenticated_matched_and_allowlisted(tmp_path, monkeypatch) -> None:
     store = LabStore(tmp_path)
+    store.ensure()
     source_id, input_id, identity = "a" * 64, "b" * 64, "c" * 64
     id12 = source_id[:12]
+    result = _selected_sex_result(source_id, input_id, identity)
+    attempt_id = store.publish_result(result, input_id=input_id)
     run_id = "r-20261015-0101-abcd"
     log = store.run_log(run_id)
     log.append("run_start", command="run", flags={"private": "/secret/path"})
     log.append("sample", source_id=source_id, input_id=input_id, sample=id12)
     log.append("step_end", step="sex-check", parameters_sha256=identity,
-               status="failed", duration_s=1.25, first_line="/secret/path")
+               attempt_id=attempt_id, status="ok", duration_s=1.25, first_line="/secret/path")
     sample = SimpleNamespace(full=SimpleNamespace(
         input_id=input_id,
-        results={"sex-check": SimpleNamespace(provenance=SimpleNamespace(parameters_sha256=identity))},
+        results={"sex-check": result},
     ))
     monkeypatch.setattr(api_module.LabApi, "_resolve", lambda _self, _id: (source_id, []))
     monkeypatch.setattr(api_module.views, "load_sample", lambda _store, _source: sample)
@@ -712,22 +727,68 @@ def test_run_log_line_is_authenticated_matched_and_allowlisted(tmp_path, monkeyp
         assert response.status == 200
         payload = json.loads(data)
         assert payload == {"found": True, "run_id": run_id, "line": 3, "step": "sex-check",
-                           "utc": payload["utc"], "status": "failed", "skip_reason": None,
+                           "utc": payload["utc"], "status": "ok", "skip_reason": None,
                            "duration_s": 1.25}
         assert "/secret/path" not in data.decode()
-        sample.full.results["sex-check"].provenance.parameters_sha256 = "d" * 64
+        sample.full.results["sex-check"] = _selected_sex_result(source_id, input_id, "d" * 64)
         assert _get(running, path, cookie)[0].status == 404
-        sample.full.results["sex-check"].provenance.parameters_sha256 = identity
+        sample.full.results["sex-check"] = result
         sample.full.input_id = "e" * 64
         assert _get(running, path, cookie)[0].status == 404
         assert _get(running, path + "?root=/secret/path", cookie)[0].status == 400
 
 
-def test_run_log_line_refuses_symlinked_log(tmp_path) -> None:
+def test_run_log_line_uses_only_the_selected_attempt(tmp_path, monkeypatch) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    source_id, input_id, identity = "a" * 64, "b" * 64, "c" * 64
+    result = _selected_sex_result(source_id, input_id, identity)
+    first = store.publish_result(result, input_id=input_id)
+    old = store.run_log("r-20261015-0101-ffff")
+    old.append("sample", source_id=source_id, input_id=input_id)
+    old.append("step_end", step="sex-check", parameters_sha256=identity,
+               attempt_id=first, status="ok")
+    second = store.publish_result(result, input_id=input_id)
+    new = store.run_log("r-20261015-0101-0001")
+    new.append("sample", source_id=source_id, input_id=input_id)
+    new.append("step_end", step="sex-check", parameters_sha256=identity,
+               attempt_id=second, status="ok")
+    os.utime(old.path, ns=(200_000_000_000, 200_000_000_000))
+    os.utime(new.path, ns=(100_000_000_000, 100_000_000_000))
+    sample = SimpleNamespace(full=SimpleNamespace(input_id=input_id, results={"sex-check": result}))
+    monkeypatch.setattr(api_module.LabApi, "_resolve", lambda _self, _id: (source_id, []))
+    monkeypatch.setattr(api_module.views, "load_sample", lambda _store, _source: sample)
+    api = api_module.LabApi(store)
+    assert api.run_log_line(source_id[:12], "sex-check")["run_id"] == new.run_id
+    latest = store.run_log("r-20261015-0101-0000")
+    latest.append("sample", source_id=source_id, input_id=input_id)
+    latest.append("step_end", step="sex-check", parameters_sha256=identity,
+                  attempt_id=second, status="ok")
+    os.utime(latest.path, ns=(300_000_000_000, 300_000_000_000))
+    assert api.run_log_line(source_id[:12], "sex-check")["run_id"] == latest.run_id
+    latest.path.unlink()
+    new.path.unlink()
+    legacy = store.run_log("r-20261015-0101-bbbb")
+    legacy.append("sample", source_id=source_id, input_id=input_id)
+    legacy.append("step_end", step="sex-check", parameters_sha256=identity, status="ok")
+    assert api.run_log_line(source_id[:12], "sex-check") == {"found": False}
+
+
+def test_run_log_reader_refuses_symlinked_and_oversized_logs(tmp_path, monkeypatch) -> None:
     store = LabStore(tmp_path / "root")
     store.runs_dir.mkdir(parents=True)
     run_id = "r-20261015-0101-abcd"
     outside = tmp_path / "outside.jsonl"
     outside.write_text(json.dumps({"event": "step_end", "step": "sex-check", "status": "ok"}))
     (store.runs_dir / f"{run_id}.jsonl").symlink_to(outside)
-    assert api_module._read_contained(store.runs_dir, [], f"{run_id}.jsonl", limit=1024 * 1024) is None
+    assert api_module._read_run_log(store.runs_dir / f"{run_id}.jsonl") is None
+    link = tmp_path / "linked-root"
+    link.symlink_to(store.root, target_is_directory=True)
+    assert api_module._read_run_log(link / "lab" / "runs" / f"{run_id}.jsonl") is None
+    oversized = store.runs_dir / "oversized.jsonl"
+    oversized.write_bytes(b"x" * 9)
+    assert api_module._read_run_log(oversized, limit=8) is None
+    oversized.write_bytes(b"x")
+    reads = iter((b"1234", b"56789"))
+    monkeypatch.setattr(api_module.os, "read", lambda _fd, _size: next(reads))
+    assert api_module._read_run_log(oversized, limit=8) is None
