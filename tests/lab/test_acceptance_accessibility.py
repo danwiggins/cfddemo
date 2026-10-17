@@ -112,7 +112,8 @@ def test_all_routes_have_no_page_overflow_and_44px_targets(size, tmp_path) -> No
 
 
 @needs_chrome
-def test_wide_methods_table_scrolls_inside_its_wrapper_at_360px(tmp_path) -> None:
+@pytest.mark.parametrize("size", ["1280,800", "1024,768", "768,1024", "360,740"])
+def test_wide_methods_table_stays_inside_its_wrapper(size, tmp_path) -> None:
     with _server(tmp_path, _sample()) as server:
         kind, source = server.app.assets["/assets/lab.js"]
         server.app.assets["/assets/lab.js"] = (kind, source + b"""
@@ -127,9 +128,10 @@ def test_wide_methods_table_scrolls_inside_its_wrapper_at_360px(tmp_path) -> Non
             }, 20);
           });
         """)
-        dom = _dom(server, tmp_path / "browser", size="360,740",
+        dom = _dom(server, tmp_path / "browser", size=size,
                    route=f"/sample/{ID12}/methods", want=lambda d: 'data-table-scroll' in d)
-    assert 'data-table-scroll="true"' in dom
+    if size == "360,740":
+        assert 'data-table-scroll="true"' in dom
     assert 'data-table-overflow="auto"' in dom
     assert 'data-page-overflow="false"' in dom
 

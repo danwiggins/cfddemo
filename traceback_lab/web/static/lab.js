@@ -174,7 +174,22 @@
     const main = document.getElementById("main");
     main.replaceChildren();
     const route = state.route;
-    if (state.loading) { main.append(h("h1", { class: "view-title" }, "Loading…"), h("p", {}, "Loading Lab results…")); return; }
+    if (state.loading) {
+      setStatus("Loading Lab results…");
+      main.append(h("h1", { class: "view-title" }, "Loading…"));
+      if (route.name === "home") {
+        main.append(
+          h("section", { class: "clia-panel loading-clia" },
+            h("h2", { class: "clia-title" }, "What CLIA means for this demo"), h("p", {}, "Loading…")),
+          h("p", { class: "headline loading-headline" }, "Loading…"),
+          h("div", { class: "landing-band" },
+            h("section", { class: "panel defended loading-defended" }, h("h2", {}, "Defended results"), h("p", {}, "Loading…")),
+            h("section", { class: "panel curve loading-curve" }, h("h2", {}, "Depth → utility"), h("p", {}, "Loading…")),
+            h("section", { class: "panel controls loading-controls" }, h("h2", {}, "Positive controls"), h("p", {}, "Loading…"))),
+        );
+      } else main.append(h("section", { class: "panel loading-lens" }, h("p", {}, "Loading…")));
+      return;
+    }
     if (!state.samples.length && route.name !== "clia") {
       main.append(...emptyState());
       return;

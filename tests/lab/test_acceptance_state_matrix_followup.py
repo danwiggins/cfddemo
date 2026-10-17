@@ -75,6 +75,7 @@ def test_every_sample_surface_discloses_global_run_or_library_problem(state, cop
 @needs_chrome
 @pytest.mark.parametrize("route", ("home", *SAMPLE_ROUTES))
 def test_every_sample_surface_has_loading_copy_while_listing_is_pending(route, tmp_path) -> None:
+    observed = {}
     with _server(tmp_path, _sample()) as server:
         listing = server.app.api.samples
         release_listing = threading.Event()
@@ -86,15 +87,35 @@ def test_every_sample_surface_has_loading_copy_while_listing_is_pending(route, t
         server.app.api.samples = delayed_listing
         profile = tmp_path / "browser-profile"
         path = "/" if route == "home" else f"/sample/{ID12}/{route}"
+
+        def inspect(_command, evaluate) -> None:
+            observed.update(evaluate("""(() => ({
+              status: document.querySelector('#status').textContent.trim(),
+              sections: [...document.querySelectorAll('#main section')].map((section) => ({
+                loading: section.textContent.includes('Loading…'),
+                height: section.getBoundingClientRect().height,
+                classes: section.className,
+              })),
+            }))()"""))
+
         try:
             dom = _dom_cdp(
-                [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+                [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run", "--window-size=1280,800",
                  f"--user-data-dir={profile}", server.issue_link() + f"&route={path}"],
-                profile, ok=lambda page: "Loading Lab results…" in page, timeout=60,
+                profile, ok=lambda page: "Loading Lab results…" in page, interact=inspect, timeout=60,
             )
         finally:
             release_listing.set()
     assert "Loading Lab results…" in dom
+    assert observed["status"] == "Loading Lab results…"
+    assert all(section["loading"] for section in observed["sections"])
+    if route == "home":
+        assert len(observed["sections"]) == 4
+        assert observed["sections"][0]["height"] == 320
+        assert all(section["height"] >= 160 for section in observed["sections"][1:])
+    else:
+        assert len(observed["sections"]) == 1
+        assert observed["sections"][0]["height"] >= 160
 
 
 @needs_chrome
