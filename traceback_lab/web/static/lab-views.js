@@ -263,7 +263,12 @@
         h("ul", {}, ...r.worst.map((w) => h("li", {}, `${w.label}: ${(w.relative_abs_diff * 100).toFixed(1)}%${w.stable === false ? " (unstable)" : w.stable === null ? " (no validated verdict)" : ""}`))),
         h("a", { href: `#/sample/${sample.id12}/stability` }, "→ Stability"));
     } else {
-      rep.append(h("p", { class: "empty" }, `Run traceback lab run ${sample.id12}.`));
+      const recorded = (sample.stability || []).some((panel) =>
+        [panel.split_status?.A?.state, panel.split_status?.B?.state].some((state) => state && state !== "not_recorded"));
+      rep.append(recorded
+        ? h("p", { class: "empty" }, "Split halves were recorded, but no comparable pair is available. ",
+          h("a", { href: `#/sample/${sample.id12}/stability` }, "See Stability"))
+        : h("p", { class: "empty" }, `Run traceback lab run ${sample.id12}.`));
     }
     const known = h("div", { class: "control-block" }, h("span", { class: "control-badge" }, "KNOWN-STATUS"), " public sample",
       h("p", { class: "empty" }, "Not loaded. Needs public data access. ", flagPill("LEGAL", "FLAG: LEGAL — public data-use terms (EGA controlled access).")));

@@ -352,7 +352,7 @@ def stability_panels(sample: SampleView, library: Library | None = None) -> list
             split = None
             split_status = {
                 half: _split_half_status(halves.get(half), algorithm_id, metric.metric_id, metric.value, spec,
-                                         other_half_recorded=bool(halves))
+                                         other_half_recorded=any(other in halves for other in ("A", "B") if other != half))
                 for half in ("A", "B")
             }
             a = _value(halves["A"].results.get(algorithm_id), metric.metric_id) if "A" in halves else None

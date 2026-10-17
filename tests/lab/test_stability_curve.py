@@ -316,6 +316,12 @@ def test_missing_downsample_does_not_claim_instability() -> None:
     panel = next(panel for panel in views.stability_panels(sample)
                  if panel["algorithm_id"] == "fragment-size" and panel["metric_id"] == "mode_bp")
     assert panel["verdict"] == "no usable measurement below full depth"
+    sample.derived.append(views.InputView("split-X", "d" * 64, "split", {"half": "X"}, {}, 0.5))
+    panel = next(panel for panel in views.stability_panels(sample)
+                 if panel["algorithm_id"] == "fragment-size" and panel["metric_id"] == "mode_bp")
+    assert {half: item["state"] for half, item in panel["split_status"].items()} == {
+        "A": "not_recorded", "B": "not_recorded",
+    }
 
 
 def test_repeatability_preserves_raw_splits_without_inventing_a_verdict() -> None:
