@@ -4,6 +4,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+import pysam
 
 from traceback_lab import cohorts
 from traceback_lab.cohorts import add_sample, build_cohort, project_current_metric, project_sample_metric, read_current, read_roster
@@ -46,6 +47,11 @@ def _sample(store: LabStore, index: int, *, example: bool = False, value: float 
         "mmi_sha256": _sha(901) if aligned else None,
         "aligner_argv": ["minimap2", "-ax", "map-ont"] if aligned else None,
     }))
+    if not aligned:
+        header = {"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 1000}],
+                  "RG": [{"ID": "one", "PL": "ONT"}]}
+        with pysam.AlignmentFile(str(input_dir / "aligned.bam"), "wb", header=header):
+            pass
     result = ResultEnvelope(
         algorithm_id="fragment-size", algorithm_version="1", status="ok",
         provenance=provenance(tool="fixture", parameters_sha256=parameters,

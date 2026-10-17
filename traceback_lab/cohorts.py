@@ -308,7 +308,12 @@ def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) 
     del label
     from .platforms import for_input
 
-    platform = for_input(manifest, store.inputs_dir / input_id / "aligned.bam")
+    bam_path = store.inputs_dir / input_id / "aligned.bam"
+    # Older cohort fixtures/metadata may have no BAM. Never infer ONT for a
+    # prealigned input whose platform cannot be checked.
+    platform = for_input(manifest, bam_path) if bam_path.is_file() else (
+        "ont" if manifest.get("kind") == "aligned" else "unknown"
+    )
     found: list[CohortResult] = []
     identities: dict[str, str] = {}
     for algorithm in load_registry():
