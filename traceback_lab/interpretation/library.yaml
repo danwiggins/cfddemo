@@ -2821,5 +2821,5 @@ entries:
     flags: [LEGAL]
     headline: true
     stability: {kind: unvalidated}
-    citations: ["doi:10.1016/j.cell.2015.11.050"]
-    citation_checked: {by: "Lab S5 source review", date: "2026-10-17", note: "This support-depth metric is a Lab-specific descriptive count, not a measure or threshold validated by Snyder et al."}
+    citations: []
+    citation_checked: {by: "Lab S5 source review", date: "2026-10-17", note: "No citation displayed. This support-depth metric is a Lab-specific descriptive count, not a measure or threshold validated by Snyder et al."}

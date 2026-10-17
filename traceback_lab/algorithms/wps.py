@@ -1,7 +1,7 @@
 """Genome-wide long-fragment windowed protection score (WPS).
 
 For each base-centred 120 bp window, count 120–180 bp molecules that span the
-entire window and subtract molecules whose aligned-span end lies inside it.
+entire window and subtract molecules with either aligned-span endpoint inside it.
 The exact per-base scores are streamed as compressed 1 Mb chunks, with a
 separate 1 kb mean preview. These are descriptive tracks, not peak calls.
 """
