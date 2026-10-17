@@ -309,11 +309,22 @@ def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) 
     from .platforms import for_input
 
     bam_path = store.inputs_dir / input_id / "aligned.bam"
-    # Older cohort fixtures/metadata may have no BAM. Never infer ONT for a
-    # prealigned input whose platform cannot be checked.
-    platform = for_input(manifest, bam_path) if bam_path.is_file() else (
-        "ont" if manifest.get("kind") == "aligned" else "unknown"
-    )
+    # Older aligned metadata may have no BAM. A prealigned input cannot be
+    # assigned a platform without checking its original header.
+    try:
+        platform = for_input(manifest, bam_path) if bam_path.is_file() else (
+            "ont" if manifest.get("kind") == "aligned" else "unknown"
+        )
+    except (OSError, ValueError) as exc:
+        raise LabProblem(
+            "TBX-LAB-024", cause="cohort input platform disagrees with its BAM header",
+            fix="Inspect the stored input and rerun from the original BAM",
+        ) from exc
+    if platform == "unknown":
+        raise LabProblem(
+            "TBX-LAB-024", cause="cohort input has no verifiable platform declaration or BAM",
+            fix="Restore the source BAM with unanimous PL:ONT or PL:ILLUMINA read groups",
+        )
     found: list[CohortResult] = []
     identities: dict[str, str] = {}
     for algorithm in load_registry():
