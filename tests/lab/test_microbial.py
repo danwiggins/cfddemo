@@ -761,6 +761,44 @@ def test_streamed_classifier_timeout_kills_and_reaps_child(tmp_path, monkeypatch
     assert process.killed and process.reaped and process.stdin.closed
 
 
+def test_streamed_classifier_refuses_broken_pipe_on_final_flush(tmp_path, monkeypatch) -> None:
+    import io
+    import threading
+
+    bam = tmp_path / "aligned.bam"
+    with pysam.AlignmentFile(bam, "wb", header={"HD": {"VN": "1.6"}}) as stream:
+        read = pysam.AlignedSegment()
+        read.query_name = "private"
+        read.query_sequence = "A" * 75
+        read.flag = 4
+        stream.write(read)
+
+    class BrokenFlush(io.BytesIO):
+        def close(self):
+            super().close()
+            done.set()
+            raise BrokenPipeError("classifier closed before buffered input flushed")
+
+    done = threading.Event()
+
+    class EarlyExitProcess:
+        returncode = 0
+
+        def __init__(self, argv, **kwargs):
+            self.stdin = BrokenFlush()
+
+        def wait(self, timeout=None):
+            assert done.wait(timeout)
+            return 0
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(algorithm.subprocess, "Popen", EarlyExitProcess)
+    with pytest.raises(RuntimeError, match="input was incomplete"):
+        algorithm._classify_streamed(bam, 75, "kraken2", tmp_path, tmp_path / "report")
+
+
 def test_all_unclassified_candidates_yield_zero_without_bracken(tmp_path, monkeypatch) -> None:
     store, _ = _database(tmp_path)
     input_dir = tmp_path / "input"

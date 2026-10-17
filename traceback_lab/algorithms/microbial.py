@@ -208,12 +208,15 @@ def _classify_streamed(bam: Path, read_length: int, kraken: str, database: Path,
                                stderr=subprocess.DEVNULL)
     result: list[tuple[int, int, int, int]] = []
     errors: list[BaseException] = []
+    cancelled = threading.Event()
 
     def feed() -> None:
         rows = _candidate_rows(bam, read_length)
         try:
             assert process.stdin is not None
             while True:
+                if cancelled.is_set():
+                    return
                 try:
                     row = next(rows)
                 except StopIteration as done:
@@ -223,12 +226,15 @@ def _classify_streamed(bam: Path, read_length: int, kraken: str, database: Path,
         except BaseException as exc:
             errors.append(exc)
         finally:
-            rows.close()
+            try:
+                rows.close()
+            except BaseException as exc:
+                errors.append(exc)
             if process.stdin is not None:
                 try:
                     process.stdin.close()
-                except BrokenPipeError:
-                    pass
+                except BaseException as exc:
+                    errors.append(exc)
 
     writer = threading.Thread(target=feed, name="microbial-kraken-feed", daemon=True)
     writer.start()
@@ -239,10 +245,19 @@ def _classify_streamed(bam: Path, read_length: int, kraken: str, database: Path,
             raise RuntimeError("Kraken2 streamed classification failed or input was incomplete")
         return result[0]
     except BaseException:
+        cancelled.set()
         if process.poll() is None:
             process.kill()
         process.wait()
         writer.join(timeout=2)
+        if writer.is_alive() and process.stdin is not None:
+            raw = getattr(process.stdin, "raw", None)
+            try:
+                if raw is not None:
+                    raw.close()
+            except OSError:
+                pass
+            writer.join(timeout=2)
         raise
 
 
@@ -258,7 +273,8 @@ class Microbial(Base):
         "clipping": "first registered Bracken read-length bases",
         "bracken_level": "S", "bracken_threshold": 1,
         "microbial_roots": _ROOTS, "max_taxa": MAX_TAXA,
-        "candidate_staging": "FASTA up to 512 MiB; otherwise stream complete input to Kraken2",
+        "candidate_fasta_budget_bytes": MAX_CANDIDATE_FASTA_BYTES,
+        "candidate_staging": "stream complete input to Kraken2 above FASTA budget",
     })
 
     @property  # type: ignore[override]
