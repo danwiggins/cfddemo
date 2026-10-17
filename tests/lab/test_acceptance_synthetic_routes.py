@@ -430,7 +430,10 @@ def test_synthetic_status_copy_in_live_region(state, copy_text, tmp_path) -> Non
         server.app.api.status = status
         dom = _dom(server, tmp_path / "browser", route=f"/sample/{ID12}/trust-qc",
                    want=lambda d: copy_text in d)
-    assert copy_text in dom and 'aria-live="polite"' in dom
+    status_region = re.search(
+        r'<p(?=[^>]*\bid="status")(?=[^>]*\brole="status")(?=[^>]*\baria-live="polite")[^>]*>(.*?)</p>', dom, re.S,
+    )
+    assert status_region is not None and copy_text in status_region.group(1)
     if state == "run-in-progress":
         run = dom.split("<h2>Run</h2>", 1)[1].split("</table>", 1)[0]
         assert '<th scope="row">bam-qc</th><td>ok' in run
