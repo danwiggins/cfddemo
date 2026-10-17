@@ -215,7 +215,7 @@
       }
       const secondary = (sample.stability || []).filter((p) => p.algorithm_id === row.algorithm_id && p.metric_id !== row.metric_id);
       const detail = h("div", { class: "curve-detail", hidden: true },
-        h("p", {}, `${row.label}: full-depth state ${(CELL[row.full_state] || ["", row.full_state])[1]}; tier ${row.tier}; literature minimum ${row.min_depth_x ? row.min_depth_x + "x (literature, not measured)" : "none"}; input gate ${row.input_gate || "none"}.`),
+        h("p", {}, `${row.label}: full-depth state ${(CELL[row.full_state] || ["", row.full_state])[1]}; tier ${row.tier}; literature minimum ${row.min_depth_x ? row.min_depth_x + "x (literature, not measured)" : "none"}${row.input_gate ? `; input gate ${row.input_gate}` : ""}.`),
         secondary.length ? h("table", { class: "data-table" }, h("caption", {}, "Secondary metrics by fraction"),
           h("thead", {}, h("tr", {}, h("th", { scope: "col" }, "Metric"), ...curve.fractions.map((f) => h("th", { scope: "col" }, `${f * 100}%`)))),
           h("tbody", {}, ...secondary.map((p) => h("tr", {}, h("th", { scope: "row" }, p.label), ...curve.fractions.map((f) => {
