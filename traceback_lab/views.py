@@ -7,7 +7,7 @@ serves these structures; the CLI can print them too.
 Depth→utility curve (D24): one row per (non-hidden) algorithm, keyed by its
 ``headline: true`` metric.  Cells: one per measured fraction (downsample
 inputs plus the full input).  States: ``failed``, ``skipped``,
-``not_interpretable``, ``ok_unstable`` or ``ok_usable``.  "Usable" means not
+``not_interpretable``, ``ok_unvalidated``, ``ok_unstable`` or ``ok_usable``.  "Usable" means not
 skipped, not not-interpretable, and stable against the full-depth value under
 the metric's D32 stability function (the full-depth cell is usable by
 definition).  Above this run's depth there are no cells; the library's
@@ -30,7 +30,7 @@ from .sample_metadata import sex_assertion, sex_concordance
 from .stability import Side, band_at, deviation, stable
 from .store import LabStore
 
-CELL_STATES = ("ok_usable", "ok_unstable", "not_interpretable", "skipped", "failed")
+CELL_STATES = ("ok_usable", "ok_unvalidated", "ok_unstable", "not_interpretable", "skipped", "failed")
 _ROW_ORDER = {state: index for index, state in enumerate(CELL_STATES)}
 _TIER_ORDER = {"PROVEN": 0, "NEWER": 1, "SPECULATIVE": 2, None: 3}
 
@@ -222,7 +222,7 @@ def cell_state(
     full_metric = _value(full.results.get(algorithm_id), metric_id)
     verdict = stable(entry.stability if entry else None, _side(metric, view.fraction), _side(full_metric, 1.0))
     return {
-        "state": "ok_usable" if verdict is not False else "ok_unstable",
+        "state": "ok_usable" if verdict is True else "ok_unstable" if verdict is False else "ok_unvalidated",
         "value": metric.value,
         "verdict": verdict,
     }
@@ -338,6 +338,7 @@ def stability_panels(sample: SampleView, library: Library | None = None) -> list
                 if point["state"] != "ok_usable":
                     break
                 usable_to = point["fraction"]
+            unvalidated = any(point["state"] == "ok_unvalidated" for point in points)
             panels.append(
                 {
                     "algorithm_id": algorithm_id,
@@ -347,7 +348,7 @@ def stability_panels(sample: SampleView, library: Library | None = None) -> list
                     "full_value": metric.value,
                     "points": points,
                     "split": split,
-                    "verdict": f"usable to {usable_to:g}" if usable_to is not None else "not measured below full depth" if not downs else "unstable below full depth",
+                    "verdict": f"usable to {usable_to:g}" if usable_to is not None else "not measured below full depth" if not downs else "stability not validated" if unvalidated else "unstable below full depth",
                 }
             )
     panels.sort(key=lambda panel: (not panel["headline"], order.index(panel["algorithm_id"])))
@@ -360,7 +361,7 @@ def repeatability(panels: list[dict[str, Any]]) -> dict[str, Any] | None:
     rows = [
         (panel["split"]["relative_abs_diff"], panel["label"], panel["split"]["stable"])
         for panel in panels
-        if panel.get("split") is not None
+        if panel.get("split") is not None and panel["split"]["stable"] is not None
     ]
     if not rows:
         return None

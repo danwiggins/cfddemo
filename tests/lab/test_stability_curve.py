@@ -7,6 +7,7 @@ import json
 import pytest
 
 from traceback_lab import views
+from traceback_lab.envelope import Depth, Metric, Provenance, ResultEnvelope
 from traceback_lab.stability import Side, band_at, deviation, stable
 from traceback_lab.store import LabStore
 from traceback_runner import cli as signed_cli
@@ -58,6 +59,41 @@ def test_unvalidated_depth_dependent_fraction_has_no_stability_verdict() -> None
     assert stable(spec, Side(0.2, n=1_000_000), Side(0.8, n=1_000_000)) is None
     assert deviation(spec, 0.2, 0.8, 0.5) == (None, "none")
     assert band_at(spec, Side(0.2), Side(0.8)) is None
+
+
+def test_wps_control_values_are_measured_but_not_declared_usable() -> None:
+    provenance = Provenance(
+        tool="wps", tool_version="1", parameters_sha256="a" * 64,
+        source_id="b" * 64, input_id="c" * 64, reference_id="hg38",
+        timestamp_utc="2026-10-17T00:00:00Z",
+    )
+
+    def view(label: str, fraction: float, value: float, transform: str | None = None) -> views.InputView:
+        result = ResultEnvelope(
+            algorithm_id="wps", algorithm_version="1", status="ok", provenance=provenance,
+            depth=Depth(eligible_reads=1_000_000, approx_depth_x=20 * fraction),
+            metrics=[Metric(metric_id="mean_wps", value=12 * fraction),
+                     Metric(metric_id="positive_bin_fraction", value=value)],
+        )
+        return views.InputView(label, "c" * 64, transform, {"half": label[-1]} if transform == "split" else {},
+                               {"wps": result}, fraction)
+
+    full = view("full", 1.0, 0.7)
+    half = view("0.5", 0.5, 0.4, "downsample")
+    sample = views.SampleView("b" * 64, "b" * 12, False, full,
+                              [half, view("split-A", 0.5, 0.2, "split"),
+                               view("split-B", 0.5, 0.6, "split")])
+    library = views.load_library()
+    cell = views.cell_state(half, full, "wps", "positive_bin_fraction", library)
+    assert cell == {"state": "ok_unvalidated", "value": 0.4, "verdict": None}
+    assert views.cell_state(half, full, "wps", "mean_wps", library)["state"] == "ok_unvalidated"
+    panel = next(p for p in views.stability_panels(sample, library)
+                 if p["metric_id"] == "positive_bin_fraction")
+    assert panel["verdict"] == "stability not validated"
+    assert panel["points"][0]["value"] == 0.4
+    assert panel["points"][0]["deviation"] is None
+    assert panel["split"]["stable"] is None
+    assert views.repeatability(views.stability_panels(sample, library)) is None
 
 
 def test_deviation_and_band_units() -> None:

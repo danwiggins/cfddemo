@@ -2748,9 +2748,9 @@ entries:
     license_ids: [method-patents]
     flags: [LEGAL]
     headline: true
-    stability: {kind: scales_with_depth, tolerance: 0.5}
+    stability: {kind: unvalidated}
     citations: ["doi:10.1016/j.cell.2015.11.050"]
-    citation_checked: {by: "Lab S5 source review", date: "2026-10-16", note: "Snyder et al. define WPS as spanning fragments minus fragments with an endpoint in a 120 bp window for 120–180 bp fragments. This in-house ONT implementation publishes a 1 kb mean, not their nucleosome peak calls; raw WPS scales with depth, so the 0.5 tolerance compares depth-scaled values as an unvalidated engineering rule."}
+    citation_checked: {by: "Lab S5 source review", date: "2026-10-17", note: "Snyder et al. define WPS as spanning fragments minus fragments with an endpoint in a 120 bp window for 120–180 bp fragments. This in-house ONT implementation publishes a 1 kb mean, not their nucleosome peak calls; raw WPS scales with depth and no validated stability tolerance applies."}
 
   - algorithm_id: wps
     metric_id: positive_bin_fraction
