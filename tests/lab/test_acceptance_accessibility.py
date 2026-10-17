@@ -184,6 +184,51 @@ def test_mobile_lens_deep_link_and_route_changes_reveal_current_tab(tmp_path) ->
 
 
 @needs_chrome
+def test_mobile_nav_uses_final_width_after_lens_content_renders(tmp_path) -> None:
+    """A classic page scrollbar may narrow the nav after its links are added."""
+
+    observed = {}
+    with _server(tmp_path, _sample()) as server:
+        kind, source = server.app.assets["/assets/lab-views.js"]
+        server.app.assets["/assets/lab-views.js"] = (kind, source + b"""
+          const originalMethods = window.TracebackLabViews.methods;
+          window.TracebackLabViews.methods = (sample) => {
+            const nav = document.getElementById('lenses');
+            nav.style.width = 'calc(100% - 47px)';
+            nav.dispatchEvent(new Event('scroll'));
+            return originalMethods(sample);
+          };
+        """)
+        profile = tmp_path / "browser-profile"
+
+        def inspect(_command, evaluate) -> None:
+            observed.update(evaluate("""(() => {
+              const nav = document.querySelector('#lenses');
+              const tab = nav.querySelector('[aria-current="page"]').getBoundingClientRect();
+              const box = nav.getBoundingClientRect();
+              return {
+                width: innerWidth, navWidth: nav.clientWidth,
+                scroll: nav.scrollLeft, maxScroll: nav.scrollWidth - nav.clientWidth,
+                visible: tab.left >= box.left && tab.right <= box.right,
+                leftFade: nav.classList.contains('more-left'),
+                rightFade: nav.classList.contains('more-right')
+              };
+            })()"""))
+
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", "--window-size=360,740",
+             server.issue_link() + f"&route=/sample/{ID12}/methods"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'aria-current="page">Methods' in dom,
+            interact=inspect, viewport=(360, 740),
+        )
+
+    assert observed["width"] == 360 and observed["navWidth"] < 328, observed
+    assert observed["visible"] and observed["leftFade"] and not observed["rightFade"], observed
+    assert observed["scroll"] >= observed["maxScroll"] - 1, observed
+
+
+@needs_chrome
 @pytest.mark.parametrize("size", ["1280,800", "1024,768", "768,1024", "360,740"])
 def test_all_routes_have_no_page_overflow_and_44px_targets(size, tmp_path) -> None:
     routes = [

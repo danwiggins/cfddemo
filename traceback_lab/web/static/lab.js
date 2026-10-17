@@ -118,6 +118,7 @@
     render();
     const title = document.querySelector("main h1");
     if (title) { title.setAttribute("tabindex", "-1"); title.focus({ preventScroll: false }); }
+    revealCurrentNav();
   }
 
   // -- render -------------------------------------------------------------------------
@@ -186,7 +187,6 @@
       if (lens.count) label += lens.count(sample);
       nav.append(h("a", { href: `#/sample/${sample.id12}/${lens.id}`, "aria-current": lens.id === current ? "page" : null }, label));
     }
-    revealCurrentNav();
   }
 
   function render() {
