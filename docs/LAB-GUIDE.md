@@ -94,7 +94,9 @@ cached results. Trust/QC compares a definite male/female call with the assertion
 at read time as a pre-analytic check. An absent assertion or indeterminate call
 has no mismatch verdict. The page marks the check as privacy-sensitive and does
 not present it as a diagnostic sex or gender determination. A later conflicting
-assertion is refused, not silently substituted.
+assertion is refused, not silently substituted. If the stored assertion metadata
+is malformed, measurements remain visible, while Trust/QC shows an explicit
+no-verdict repair notice (TBX-LAB-023); writes still refuse the malformed record.
 
 `traceback lab run <chunk dir>` takes one file, several files or a directory
 of MinKNOW chunks (`*.bam`, not recursive). It:

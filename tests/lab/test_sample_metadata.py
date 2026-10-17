@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from traceback_lab.problems import LabProblem
+from traceback_lab.algorithms.sex_check import call_sex
 from traceback_lab.ingest import write_source
+from traceback_lab.problems import LabProblem
 from traceback_lab.sample_metadata import SCHEMA, sex_assertion, sex_concordance, with_sex_assertion
 from traceback_lab.store import LabStore
-from traceback_lab.views import InputView, SampleView, sex_check_view
+from traceback_lab.views import InputView, SampleView, load_sample, sex_check_view
+from traceback_lab.web.api import LabApi
 
 
 def test_versioned_assertion_is_immutable_and_refuses_conflicts() -> None:
@@ -26,6 +29,8 @@ def test_versioned_assertion_is_immutable_and_refuses_conflicts() -> None:
         with_sex_assertion(recorded, "F")
     with pytest.raises(LabProblem, match="TBX-LAB-023"):
         sex_assertion({"operator_metadata": {"sex": "M"}})
+    with pytest.raises(LabProblem, match="TBX-LAB-023"):
+        with_sex_assertion({"operator_metadata": {"sex": "M"}}, "M")
 
 
 @pytest.mark.parametrize(
@@ -56,6 +61,40 @@ def test_sample_view_uses_full_measured_call_without_changing_it() -> None:
     assert measurement.metrics[0].value == "female"
     measurement.status = "skipped"
     assert sex_check_view(sample)["state"] == "no_verdict"
+
+
+def test_real_sex_check_call_vocabulary_is_compared_without_reinterpreting_it() -> None:
+    assert sex_concordance("F", call_sex(0.049))["state"] == "concordant"
+    assert sex_concordance("M", call_sex(0.31))["state"] == "concordant"
+    assert sex_concordance("M", call_sex(0.0))["state"] == "mismatch"
+    for ratio in (None, 0.05, 0.3):
+        assert sex_concordance("M", call_sex(ratio))["reason"] == "no_definite_call"
+
+
+def test_malformed_optional_metadata_keeps_sample_list_and_measurements_available(tmp_path: Path) -> None:
+    store = LabStore(tmp_path / "root")
+    store.ensure()
+    input_id = "b" * 64
+    manifest = store.inputs_dir / input_id / "manifest.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"kind": "prealigned"}')
+    store.sources_dir.mkdir(parents=True)
+    for source_id, metadata in (("a" * 64, {"sex": "M"}), ("c" * 64, None)):
+        record = {"source_id": source_id, "inputs": [{"input_id": input_id, "used_utc": "2026-10-16T00:00:00Z"}]}
+        if metadata is not None:
+            record["operator_metadata"] = metadata
+        (store.sources_dir / f"{source_id}.json").write_text(json.dumps(record))
+    api = LabApi(store)
+    listing = api.samples()["samples"]
+    assert {row["id12"] for row in listing} == {"a" * 12, "c" * 12}
+    bad = load_sample(store, "a" * 64)
+    assert bad is not None and bad.full.input_id == input_id
+    check = sex_check_view(bad)
+    assert check["state"] == "no_verdict" and check["reason"] == "malformed_metadata"
+    assert check["problem"]["code"] == "TBX-LAB-023"
+    assert "Restore" in check["problem"]["fix"]
+    assert api.sample("a" * 12)["preanalytic_sex"] == check
+    assert api.sample("c" * 12)["preanalytic_sex"]["reason"] == "no_assertion"
 
 
 def test_first_ingest_records_assertion_without_changing_source_or_input_id(tmp_path: Path) -> None:

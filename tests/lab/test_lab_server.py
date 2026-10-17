@@ -624,6 +624,9 @@ def test_headless_page_renders_a_chart_with_zero_csp_violations(server, tmp_path
          "Pre-analytic mismatch: operator-declared M differs from the measured chrX/chrY call (female)"),
         ({"state": "no_verdict", "reason": "no_definite_call", "declared": "M", "observed": None},
          "No definite measured chrX/chrY call is available; no comparison verdict."),
+        ({"state": "no_verdict", "reason": "malformed_metadata", "declared": None, "observed": "female",
+          "problem": {"code": "TBX-LAB-023", "fix": "Restore the local sample record from a known-good backup before rerunning"}},
+         "Stored operator sex assertion metadata is malformed; no comparison verdict."),
     ],
 )
 def test_trust_qc_shows_preanalytic_verdict_and_privacy_flag(server, tmp_path, monkeypatch, comparison, expected) -> None:
@@ -638,6 +641,8 @@ def test_trust_qc_shows_preanalytic_verdict_and_privacy_flag(server, tmp_path, m
     assert expected in dom
     assert "FLAG: PRIVACY — can reveal pregnancy or transplant status." in dom
     assert "This is not a diagnostic sex or gender determination." in dom
+    if comparison["reason"] == "malformed_metadata":
+        assert "TBX-LAB-023: Restore the local sample record" in dom
 
 
 def test_read_contained_refuses_symlinked_ancestors_and_hard_links(tmp_path) -> None:
