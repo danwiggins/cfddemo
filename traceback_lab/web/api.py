@@ -986,6 +986,17 @@ class LabApi:
         except (LabProblem, ValueError):
             return {**base, "state": "sample_unavailable", "which": "b", "metrics": [], "unscored": []}
         not_current: set[str] = set()
+        pon_dependent = _pon_dependent_algorithms()
+        # Pair Compare has no shared cohort-generation pin. Its independent
+        # member projection must never pool a selected PoN-bound CN or consumer.
+        selected_pon = any(
+            cn is not None and cn.status == "ok" and any(
+                metric.metric_id == "pon_policy" and metric.value not in (None, "none")
+                for metric in cn.metrics
+            )
+            for sample in samples for cn in (sample.full.results.get("copy-number"),)
+        )
+        unpaired_dependent = set(pon_dependent) if selected_pon else set()
         for source, sample, selected, which in (
             (source_a, sample_a, selected_a, "a"), (source_b, sample_b, selected_b, "b"),
         ):
@@ -995,12 +1006,20 @@ class LabApi:
             for algorithm_id, envelope in sample.full.results.items():
                 if envelope.status != "ok":
                     continue
+                if algorithm_id in unpaired_dependent:
+                    continue
                 pinned = current.get(algorithm_id)
                 if pinned is None:
+                    if algorithm_id in pon_dependent:
+                        unpaired_dependent.update(pon_dependent)
+                        continue
                     # The stored view can outlive a registry version change or removal.
                     not_current.add(algorithm_id)
                     continue
                 if pinned.parameters_sha256 != envelope.provenance.parameters_sha256:
+                    if algorithm_id in pon_dependent:
+                        unpaired_dependent.update(pon_dependent)
+                        continue
                     return {**base, "state": "stale_sample", "which": which, "metrics": [], "unscored": []}
                 for metric in envelope.metrics:
                     value = metric.value
@@ -1014,6 +1033,10 @@ class LabApi:
         unscored: list[dict[str, str]] = []
         for algorithm_id, envelope_a in sample_a.full.results.items():
             if algorithm_id in library.hidden_algorithms:
+                continue
+            if algorithm_id in unpaired_dependent:
+                unscored.append({"algorithm_id": algorithm_id, "metric_id": "*",
+                                 "reason": "selected_pon_not_paired" if selected_pon else "selected_method_not_paired"})
                 continue
             envelope_b = sample_b.full.results.get(algorithm_id)
             if envelope_b is None or envelope_a.status != "ok" or envelope_b.status != "ok":
@@ -1059,7 +1082,8 @@ class LabApi:
                 })
         for algorithm_id in sample_b.full.results.keys() - sample_a.full.results.keys():
             if algorithm_id not in library.hidden_algorithms:
-                unscored.append({"algorithm_id": algorithm_id, "metric_id": "*", "reason": "missing_or_not_ok"})
+                reason = ("selected_pon_not_paired" if selected_pon else "selected_method_not_paired") if algorithm_id in unpaired_dependent else "missing_or_not_ok"
+                unscored.append({"algorithm_id": algorithm_id, "metric_id": "*", "reason": reason})
         return {**base, "state": "ready", "input_id_a": selected_a.input_id,
                 "input_id_b": selected_b.input_id, "aligner_a": selected_a.aligner_identity,
                 "aligner_b": selected_b.aligner_identity, "metrics": rows, "unscored": unscored}

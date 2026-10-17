@@ -228,18 +228,29 @@ def test_unreadable_selected_copy_number_blocks_its_pon_consumer(tmp_path) -> No
 
 
 @needs_chrome
-def test_unreadable_derived_result_is_visible_on_stability_page(tmp_path) -> None:
+@pytest.mark.parametrize("route", ("home", "stability"))
+@pytest.mark.parametrize("reason", ("result unreadable", "result selection ambiguous"))
+def test_unavailable_result_keeps_state_and_reason_in_browser(route, reason, tmp_path) -> None:
     # The API case above owns the malformed-store setup; this checks the
     # renderer's explicit state copy with a lightweight synthetic response.
     from tests.lab.test_acceptance_synthetic_routes import _sample, _server
 
     sample = _sample()
+    sample["curve"]["rows"] = [{
+        "algorithm_id": "fragment-size", "metric_id": "mode_bp", "label": "Fragment mode",
+        "tier": "NEWER", "min_depth_x": None, "full_state": "unavailable",
+        "cells": [{"fraction": 1.0, "label": "full", "state": "unavailable",
+                   "reason": reason, "depth_x": 1.0}],
+    }]
     sample["stability"][0]["points"] = [{"fraction": 0.5, "label": "0.5", "state": "unavailable",
-                                           "reason": "result unreadable", "value": None, "deviation": None,
+                                           "reason": reason, "value": None, "deviation": None,
                                            "unit": "percent", "band": None}]
+    path = "/" if route == "home" else f"/sample/{sample['id12']}/stability"
     with _server(tmp_path, sample) as server:
-        dom = _dom(server, tmp_path / "browser", route=f"/sample/{sample['id12']}/stability")
-    assert "result unreadable" in dom
+        dom = _dom(server, tmp_path / "browser", route=path)
+    assert f"unavailable ({reason})" in dom
+    if route == "stability":
+        assert ("unreadable" if reason == "result unreadable" else "ambiguous") + "</text>" in dom
 
 
 @needs_chrome

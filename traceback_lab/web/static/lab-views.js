@@ -54,7 +54,10 @@
 
   function flagPill(type, text) { return h("span", { class: "flag-pill" }, text || FLAG_TEXT[type] || `FLAG: ${type}`); }
   function tierBadge(tier) { return tier ? h("span", { class: `tier tier-${tier}` }, tier) : h("span", { class: "tier" }, "—"); }
-  function stateReason(state, reason, fallback) { return state === "failed" ? fallback : reason || fallback; }
+  function stateReason(state, reason, fallback) {
+    return state !== "failed" && typeof reason === "string" && reason
+      ? `${fallback} (${reason.replace(/_/g, " ")})` : fallback;
+  }
   function stateChip(metric) {
     const [glyph, text] = STATE[metric.state] || ["", metric.state || "—"];
     const reason = metric.reason ? ` (${metric.reason.replace(/_/g, " ")})` : "";
@@ -601,7 +604,10 @@
           const clipped = unit !== "unit" && Math.abs(p.deviation) > clip;
           marks.push(svg("text", { x: x(p.fraction), y: y(p.deviation) + 4, "text-anchor": "middle", class: "pt" }, clipped ? (p.deviation > 0 ? "↑" : "↓") : "●"));
         } else {
-          marks.push(svg("text", { x: x(p.fraction), y: hgt - 6, "text-anchor": "middle", class: "gap" }, stateReason(p.state, p.reason, p.state || "gap").toString().slice(0, 10)));
+          const description = (CELL[p.state] || ["", p.state || "gap"])[1];
+          const gapLabel = p.reason === "result unreadable" ? "unreadable"
+            : p.reason === "result selection ambiguous" ? "ambiguous" : description.slice(0, 10);
+          marks.push(svg("text", { x: x(p.fraction), y: hgt - 6, "text-anchor": "middle", class: "gap" }, gapLabel));
         }
       }
       if (panel.split) {

@@ -123,6 +123,45 @@ def test_old_stored_result_after_registry_change_is_unpaired(tmp_path, monkeypat
     assert payload["unscored"] == [
         {"algorithm_id": "fragment-size", "metric_id": "*", "reason": "not_current_result"},
     ]
+@pytest.mark.parametrize("pon_sources", ((SOURCE_A, SOURCE_B), (SOURCE_A,), (SOURCE_B,)))
+def test_sample_pair_keeps_independent_metrics_when_selected_pon_is_unpaired(tmp_path, monkeypatch, pon_sources) -> None:
+    api, samples, selected = world(tmp_path, monkeypatch)
+    for source, input_id in ((SOURCE_A, INPUT_A), (SOURCE_B, INPUT_B)):
+        if source not in pon_sources:
+            continue
+        samples[source].full.results["copy-number"] = ResultEnvelope(
+            algorithm_id="copy-number", algorithm_version="2", status="ok",
+            provenance=provenance(
+                tool="fixture", parameters_sha256="d" * 64,
+                source_id=source, input_id=input_id, reference_id="synthetic",
+            ),
+            metrics=[Metric(metric_id="pon_policy", value="lab_loo_v1"),
+                     Metric(metric_id="tumor_fraction", value=0.2)],
+        )
+        samples[source].full.results["instability"] = ResultEnvelope(
+            algorithm_id="instability", algorithm_version="1", status="ok",
+            provenance=provenance(
+                tool="fixture", parameters_sha256="e" * 64,
+                source_id=source, input_id=input_id, reference_id="synthetic",
+            ),
+        )
+        # Even a matching compatibility key cannot stand in for a shared,
+        # pinned PoN generation in this two-sample view.
+        selected[source] = selected[source].model_copy(update={
+            "results": (*selected[source].results, CohortResult(
+                algorithm_id="copy-number", parameters_sha256="d" * 64,
+                cohort_compat_key="f" * 64, metrics={"tumor_fraction": 0.2},
+            )),
+        })
+
+    payload = api.compare_samples(SOURCE_A[:12], SOURCE_B[:12])
+    assert payload["state"] == "ready"
+    assert [(row["algorithm_id"], row["metric_id"], row["delta_b_minus_a"])
+            for row in payload["metrics"]] == [("fragment-size", "mode_bp", 10.0)]
+    assert {(row["algorithm_id"], row["reason"]) for row in payload["unscored"]} == {
+        ("copy-number", "selected_pon_not_paired"),
+        ("instability", "selected_pon_not_paired"),
+    }
 
 
 def test_sample_pair_rejects_protocol_or_unit_mismatch(tmp_path, monkeypatch) -> None:
@@ -214,7 +253,10 @@ def test_sample_pair_selector_overlay_and_table_fallback(tmp_path, monkeypatch) 
         "aligner_a": "fixture aligner", "aligner_b": "fixture aligner",
         "metrics": [{"algorithm_id": "fragment-size", "metric_id": "mode_bp", "label": "Size mode",
                      "unit": "bp", "value_a": 160.0, "value_b": 170.0, "delta_b_minus_a": 10.0}],
-        "unscored": [{"algorithm_id": "copy-number", "metric_id": "*", "reason": "incompatible_protocol"}],
+        "unscored": [
+            {"algorithm_id": "copy-number", "metric_id": "*", "reason": "incompatible_protocol"},
+            {"algorithm_id": "instability", "metric_id": "*", "reason": "selected_pon_not_paired"},
+        ],
     })
     with RunningLabServer(LabStore(tmp_path)) as server:
         profile = tmp_path / "sample-pair-chrome"
@@ -232,5 +274,6 @@ def test_sample_pair_selector_overlay_and_table_fallback(tmp_path, monkeypatch) 
         html,
     )
     assert "incompatible protocol" in html
+    assert "selected pon not paired" in html
     assert "Source IDs do not establish a shared donor or timepoint" in html
     assert 'data-csp-violations="0"' in html
