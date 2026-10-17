@@ -1,11 +1,22 @@
-# Synthetic runner durability and recovery
+# Local runner durability and recovery
 
-Status: first implementation wave; synthetic inputs and in-process stages only.
+Status: v1 runner recovery contract, first proven with synthetic inputs;
+subsequently used by an unqualified local-BAM path.
 
-This runner proves local orchestration behavior. It does **not** provide OCI
+Current scope: this document records `traceback_runner.runner.Runner`'s v1
+receipt and recovery contract. The separately implemented Lab runner uses
+`traceback_lab.runner.run_plan` and a per-algorithm worker process with a
+default 3,600-second timeout. It records `ok`, `skipped`, or `failed` attempts;
+missing or failed work and affected dependents can recompute on rerun. Those
+Lab attempts are unsigned research outputs and do not inherit this runner's
+signed-record or receipt-adoption claims. See `docs/LAB-GUIDE.md` for the Lab
+operator path.
+
+This runner provides local orchestration and is used by the unqualified
+local-BAM path in `docs/OPERATOR-GUIDE.md`. It does **not** provide OCI
 isolation, zero-egress enforcement, secret stripping, production signing,
-qualified hardware execution, real genomic processing, or scientific/protocol
-qualification. Real-data execution remains disabled.
+qualified hardware execution, or scientific/protocol qualification. Its
+real-input output is development-signed, local, and unqualified.
 
 ## Public interface
 
@@ -100,8 +111,8 @@ and qualification evidence.
 - Disk-pressure, timeout, and OOM enforcement.
 - Signed workflow resolution and signed result bundles.
 - Reviewed expand/contract migrations and active-job rollback exercises.
-- Real modBAM/POD5, Dorado, hg38, workstation, scientific, and protocol
-  qualification.
+- POD5/Dorado, exact reference and workstation, scientific, and protocol
+  qualification. The available local-BAM path is unqualified.
 
 ### Recovery review hardening
 

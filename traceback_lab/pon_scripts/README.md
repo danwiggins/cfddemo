@@ -18,3 +18,14 @@ asset mapping.
 isolated R process. It checks source columns, their arithmetic median, and
 full-versus-leave-one-out bin identity before a panel becomes an asset.
 Its bytes are pinned both before a build and at isolated R execution.
+
+## Current Lab selection boundary
+
+`traceback_lab.pon_consumer` binds a selected immutable panel digest into
+copy-number's per-run execution identity and verifies the same selected bytes
+before worker publication. An explicit `--cohort` requires a built internal,
+protocol-matched cohort; an unbuilt default uses the no-PoN baseline. A
+protocol or toolchain mismatch suppresses the PoN-dependent method while
+independent cohort metrics can remain available. This source and its GPL terms
+remain separate from signed runner release authority and scientific
+qualification.

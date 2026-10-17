@@ -1,5 +1,11 @@
 # Versioned compatibility decisions
 
+This page describes the signed-result E05 measurement compatibility contract.
+The Lab's unsigned cohort and panel-of-normals matching uses its own stored
+protocol and input provenance checks (`traceback_lab.cohorts` and
+`traceback_lab.pon_consumer`). A Lab PoN match does not establish E05
+comparability, longitudinal D03 eligibility, or clinical qualification.
+
 `evidence_inspector.compatibility` is the pure E05 compatibility boundary. It
 compares two immutable measurement records and can select records only against
 an explicit caller-supplied anchor. It does not execute tools, select a provider
