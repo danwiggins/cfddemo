@@ -175,8 +175,11 @@ def profile_for_sample(store: LabStore, sample: SampleView, generation: CohortGe
             or envelope.provenance.parameters_sha256 != expected):
         return {"state": "stale", "reason": "Microbial input or pinned toolchain differs; restore the pinned environment or rerun under the current one",
                 "taxa": []}
-    artifacts = store.selected_artifacts(sample.full.input_id, "microbial", expected)
-    profile = _read_profile(artifacts / "microbial_profile.json") if artifacts else None
+    selected = store.selected_result_artifacts(sample.full.input_id, "microbial", expected)
+    if selected is None or selected[0] != envelope:
+        return {"state": "stored_profile_unavailable", "reason": "Selected microbial result changed while loading its profile",
+                "taxa": []}
+    profile = _read_profile(selected[1] / "microbial_profile.json")
     if (profile is None or profile.get("source_id") != sample.source_id
             or profile.get("input_id") != sample.full.input_id
             or profile.get("database_sha256") != database.sha256

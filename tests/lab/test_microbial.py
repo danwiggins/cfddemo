@@ -270,7 +270,7 @@ def test_sample_page_uses_bounded_receipt_and_reports_changed_database(tmp_path,
         ]
         return identity
     monkeypatch.setattr(view, "execution_identity", pinned_identity)
-    monkeypatch.setattr(store, "selected_artifacts", lambda *_args: artifacts)
+    monkeypatch.setattr(store, "selected_result_artifacts", lambda *_args: (measured, artifacts))
     monkeypatch.setattr(db, "_digest_file", lambda _path: pytest.fail("page streamed database bytes"))
 
     assert profile_for_sample(store, sample, None, None, "not_built")["state"] == "cohort_unavailable"
@@ -324,7 +324,7 @@ def _profile_with_nonzero_exclusions(tmp_path: Path, monkeypatch) -> dict:
     monkeypatch.setattr(view, "inspect_database", lambda _store, **_kwargs: SimpleNamespace(
         sha256="d" * 64, source_label="anonymous synthetic database", read_length=75))
     monkeypatch.setattr(view, "resolve_reference", lambda *_args, **_kwargs: SimpleNamespace(sha256="f" * 64))
-    monkeypatch.setattr(store, "selected_artifacts", lambda *_args: artifacts)
+    monkeypatch.setattr(store, "selected_result_artifacts", lambda *_args: (measured, artifacts))
     return profile_for_sample(store, sample, None, None, "not_built")
 
 
@@ -809,7 +809,7 @@ def test_cohort_975_zero_fills_complete_absent_taxa_and_refuses_missing_referenc
         sha256="d" * 64, source_label="synthetic database", read_length=75))
     monkeypatch.setattr(view, "resolve_reference", lambda *_args, **_kwargs: SimpleNamespace(sha256="f" * 64))
     monkeypatch.setattr(view, "execution_identity", lambda *_args, **_kwargs: identity)
-    monkeypatch.setattr(store, "selected_artifacts", lambda *_args: artifacts)
+    monkeypatch.setattr(store, "selected_result_artifacts", lambda *_args: (measured, artifacts))
     members = []
     for index in range(10):
         result = CohortResult(
@@ -895,6 +895,11 @@ def test_cohort_975_zero_fills_complete_absent_taxa_and_refuses_missing_referenc
     assert "target" in missing_target["reason"].lower()
     unavailable = profile_for_sample(store, sample, None, None, "not_built")
     assert unavailable["state"] == "cohort_unavailable" and unavailable["cohort_p975"] is None
+    changed = measured.model_copy(update={"metrics": [
+        *measured.metrics[:-1], Metric(metric_id="taxon_123_rpm", value=9.0)]})
+    monkeypatch.setattr(store, "selected_result_artifacts", lambda *_args: (changed, artifacts))
+    assert profile_for_sample(store, sample, generation, target, "ready")["state"] == "stored_profile_unavailable"
+    monkeypatch.setattr(store, "selected_result_artifacts", lambda *_args: (measured, artifacts))
     bad_profile = json.loads((artifacts / "microbial_profile.json").read_text())
     bad_profile["taxa"][0]["rpm_primary"] = 9.0
     (artifacts / "microbial_profile.json").write_text(json.dumps(bad_profile))
