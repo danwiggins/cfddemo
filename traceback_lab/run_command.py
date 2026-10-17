@@ -32,6 +32,7 @@ from .ingest import (
     require_budget,
     resolve_reference,
     resolve_sample,
+    record_source_sex,
     source_record,
     write_source,
     aligner_argv_identity,
@@ -45,6 +46,7 @@ from .problems import (
 )
 from .runner import DEFAULT_TIMEOUT_S, RunTarget, StepResult, run_plan
 from .scrub import Scrubber
+from .sample_metadata import with_sex_assertion
 from .store import LabStore, new_run_id
 from .tools import find_minimap2, find_samtools, require_aligner_tools
 
@@ -73,6 +75,7 @@ def add_run_parser(commands: Any, common: Callable[[argparse.ArgumentParser], No
     run.add_argument("--no-controls", dest="controls", action="store_false", help="skip the CNA spike and split halves")
     run.add_argument("--tf", default="0.03,0.10,0.30", metavar="TF,TF", help="synthetic CNA spike tumour fractions")
     run.add_argument("--skip-bad-chunks", action="store_true", help="exclude truncated chunks (provisional)")
+    run.add_argument("--sex", choices=("M", "F"), help="operator-declared sample sex for a read-time pre-analytic check")
     run.add_argument("--force", action="store_true", help="recompute every result")
     run.add_argument("--timeout-s", type=float, default=DEFAULT_TIMEOUT_S, metavar="S")
     run.add_argument("--threads", type=_threads, metavar="N", help="alignment threads (default min(8, cores-2))")
@@ -163,6 +166,7 @@ def _flags(args: argparse.Namespace) -> dict[str, Any]:
         "sort_mem": args.sort_mem,
         "mmi_override": args.mmi is not None,
         "reference_id": args.reference_id,
+        "declared_sex": args.sex,
         "stored_sample": len(args.inputs) == 1 and _is_stored(args.inputs[0]),
     }
 
@@ -262,6 +266,7 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
     lines = [f"ROOT      {store.root}"]
     if len(args.inputs) == 1 and _is_stored(args.inputs[0]):
         source_id = resolve_sample(store, args.inputs[0])
+        with_sex_assertion(source_record(store, source_id) or {}, args.sex)
         aligned, _ = _stored_input(store, source_id)
         data["sample"] = {"id12": id12_for(store, source_id), "input_id": aligned.input_id}
         data["alignment"] = "reused (stored sample)"
@@ -270,6 +275,7 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
     else:
         paths = collect_paths(args.inputs)
         chunkset = inspect_chunks(paths, store, skip_bad_chunks=args.skip_bad_chunks, write_cache=False)
+        with_sex_assertion(source_record(store, chunkset.source_id) or {}, args.sex)
         reference = resolve_reference(store.root, args.reference_id)
         data["reference_id"] = reference.reference_id
         data["chunks"] = {"count": len(chunkset.chunks), "bytes": chunkset.total_bytes, "excluded": chunkset.excluded_indexes}
@@ -378,6 +384,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                 if stored:
                     source_id = resolve_sample(store, args.inputs[0])
                     aligned, record = _stored_input(store, source_id)
+                    record = record_source_sex(store, source_id, args.sex)
                     example = bool(record.get("example"))
                     reference_id = aligned.manifest["reference_id"]
                     reference_sha256 = aligned.manifest["reference_sha256"]
@@ -395,6 +402,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     chunkset = inspect_chunks(
                         paths, store, skip_bad_chunks=args.skip_bad_chunks, progress=progress
                     )
+                    with_sex_assertion(source_record(store, chunkset.source_id) or {}, args.sex)
                     reference = resolve_reference(store.root, args.reference_id, example=args.example)
                     reference_id, reference_sha256 = reference.reference_id, reference.sha256
                     example = bool(args.example)
@@ -479,7 +487,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                             echo=_echo(args.verbose),
                             progress=progress,
                         )
-                    write_source(store, chunkset, aligned, example=example)
+                    write_source(store, chunkset, aligned, example=example, declared_sex=args.sex)
                     align_info = aligned.manifest.get("align", {})
                     log.append(
                         "step_end",

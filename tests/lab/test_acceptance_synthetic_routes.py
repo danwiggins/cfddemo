@@ -123,7 +123,8 @@ def _sample() -> dict:
         for row in licensed
     ]
     return {
-        "found": True, "id12": ID12, "source_id": "c" * 64, "example": False,
+        "found": True, "id12": ID12, "source_id": "c" * 64,
+        "full_input_id": "b" * 64, "example": False,
         "run_utc": "2026-10-16T00:00:00Z", "depth": {"approx_depth_x": 1.0},
         "excluded_chunks": [], "interpretation_version": LIBRARY.version,
         "cohort_version": None, "cohort_n": 0,
@@ -334,11 +335,16 @@ def test_unknown_sample_copy_on_every_sample_route(route, tmp_path) -> None:
 
 STATUS_CASES = [
     ("run-in-progress", "A Lab run is in progress (step: bam-qc"),
-    ("interrupted", f"The last run ({ID12}) stopped during bam-qc."),
+    ("interrupted", "The last run (r-20261015-0101-abcd) stopped during bam-qc."),
     ("run-finished", "New results are available."),
     ("results-changed", "Results changed on disk since this page loaded."),
     ("disconnected", "Lab server not responding since"),
 ]
+
+
+def _run_marker() -> dict:
+    return {"run_id": "r-20261015-0101-abcd", "step": "bam-qc",
+            "source_id": "c" * 64, "input_id": "b" * 64}
 
 
 @needs_chrome
@@ -357,12 +363,12 @@ def test_synthetic_status_copy_in_live_region(state, copy_text, tmp_path) -> Non
             baseline = {"generation": 1, "active": None, "interrupted": None,
                         "library": sample["library_health"]}
             if state == "run-in-progress":
-                baseline["active"] = {"step": "bam-qc", "started_utc": "2026-10-16T00:00:00Z"}
+                baseline["active"] = {**_run_marker(), "started_utc": "2026-10-16T00:00:00Z"}
             elif state == "interrupted":
-                baseline["interrupted"] = {"run_id": ID12, "step": "bam-qc"}
+                baseline["interrupted"] = _run_marker()
             elif state == "run-finished":
                 if calls == 1:
-                    baseline["active"] = {"step": "bam-qc", "started_utc": "2026-10-16T00:00:00Z"}
+                    baseline["active"] = {**_run_marker(), "started_utc": "2026-10-16T00:00:00Z"}
                 else:
                     baseline["generation"] = 2
             elif state == "results-changed":
@@ -378,7 +384,13 @@ def test_synthetic_status_copy_in_live_region(state, copy_text, tmp_path) -> Non
                    want=lambda d: copy_text in d)
     assert copy_text in dom and 'aria-live="polite"' in dom
     if state == "run-in-progress":
-        assert "bam-qc</th><td>running" in dom
+        run = dom.split("<h2>Run</h2>", 1)[1].split("</table>", 1)[0]
+        assert '<th scope="row">bam-qc</th><td>ok' in run
+        assert 'latest run in progress' in run
+    if state == "interrupted":
+        run = dom.split("<h2>Run</h2>", 1)[1].split("</table>", 1)[0]
+        assert '<th scope="row">bam-qc</th><td>ok' in run
+        assert 'latest run interrupted' in run
     if state in ("run-finished", "results-changed"):
         assert ">Reload</button>" in dom
     if state == "results-changed":
@@ -436,15 +448,22 @@ def test_unreadable_result_copy_on_each_required_surface(route, copy_text, tmp_p
 
 
 @needs_chrome
-@pytest.mark.xfail(strict=True, reason="AC21 gap: interrupted step is not marked in Trust/QC run row")
-def test_interrupted_step_marked_in_trust_run_row(tmp_path) -> None:
+@pytest.mark.parametrize("scope", ("matching", "other-sample", "unscoped"))
+def test_interrupted_note_is_scoped_and_preserves_selected_result(tmp_path, scope) -> None:
     sample = _sample()
+    marker = _run_marker()
+    if scope == "other-sample":
+        marker["source_id"] = "d" * 64
+    elif scope == "unscoped":
+        marker.pop("source_id")
+        marker.pop("input_id")
     with _server(tmp_path, sample) as server:
         server.app.api.status = lambda: {
             "generation": 1, "active": None,
-            "interrupted": {"run_id": ID12, "step": "bam-qc"},
+            "interrupted": marker,
             "library": sample["library_health"],
         }
         dom = _dom(server, tmp_path / "browser", route=f"/sample/{ID12}/trust-qc")
     run = dom.split("<h2>Run</h2>", 1)[1].split("</table>", 1)[0]
-    assert re.search(r'<th scope="row">bam-qc</th>\s*<td[^>]*>interrupted</td>', run)
+    assert '<th scope="row">bam-qc</th><td>ok' in run
+    assert ("latest run interrupted" in run) == (scope == "matching")

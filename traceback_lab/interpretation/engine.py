@@ -287,6 +287,7 @@ def classify(
     depth_x: float | None = None,
     not_interpretable: str | None = None,
     cohort: Cohort | None = None,
+    include_interval: bool = True,
 ) -> Interpretation:
     """The D7/D8 state of one metric value (the algorithm itself is ``ok``)."""
 
@@ -329,10 +330,10 @@ def classify(
         width = (hi - lo) or abs(hi) or 1.0
         caption = f"Published range {lo:g}–{hi:g} {reference.get('unit', '')} ({reference.get('source', '')}, n = {reference.get('n', '?')}). Not a percentile."
         if number > hi:
-            return Interpretation("above_typical", None, kind, interval=(lo, hi), severity=(number - hi) / width, caption=caption)
+            return Interpretation("above_typical", None, kind, interval=(lo, hi) if include_interval else None, severity=(number - hi) / width, caption=caption)
         if number < lo:
-            return Interpretation("below_typical", None, kind, interval=(lo, hi), severity=(lo - number) / width, caption=caption)
-        return Interpretation("in_range", None, kind, interval=(lo, hi), caption=caption)
+            return Interpretation("below_typical", None, kind, interval=(lo, hi) if include_interval else None, severity=(lo - number) / width, caption=caption)
+        return Interpretation("in_range", None, kind, interval=(lo, hi) if include_interval else None, caption=caption)
     # internal_cohort / provisional_external
     if cohort is None or cohort.n < COHORT_MIN:
         n = 0 if cohort is None else cohort.n
@@ -356,7 +357,7 @@ def classify(
             state, severity = "below_typical", (low - number) / span
         else:
             state, severity = "in_range", 0.0
-        return Interpretation(state, None, kind, exploratory_n=cohort.n, interval=(low, high), severity=severity, caption=caption)
+        return Interpretation(state, None, kind, exploratory_n=cohort.n, interval=(low, high) if include_interval else None, severity=severity, caption=caption)
     p = percentile_of(number, values)
     if p > 99:
         state = "markedly_above"
@@ -368,10 +369,11 @@ def classify(
         state = "below_typical"
     else:
         state = "in_range"
-    interval = bootstrap_p95_interval(values)
+    interval = bootstrap_p95_interval(values) if include_interval else None
     caption = (
-        f"p = {p:.1f} against n = {cohort.n}. Whisker: 90% bootstrap interval of the 95th-percentile "
-        f"cut-off ({BOOTSTRAP_RESAMPLES} resamples).{suffix}"
+        f"p = {p:.1f} against n = {cohort.n}."
+        + (f" Whisker: 90% bootstrap interval of the 95th-percentile cut-off ({BOOTSTRAP_RESAMPLES} resamples)." if include_interval else "")
+        + suffix
     )
     return Interpretation(state, None, kind, percentile=p, interval=interval, severity=abs(p - 50), caption=caption)
 
@@ -423,6 +425,7 @@ def interpret_result(
     depth_x: float | None = None,
     cohorts: Mapping[str, Cohort] | None = None,
     not_interpretable: Mapping[str, str] | None = None,
+    include_interval: bool = True,
 ) -> list[InterpretedMetric]:
     """Join one result's metrics to the library.  A failed or skipped algorithm
     shows no metrics (D7).  A metric without an entry is kept as
@@ -443,6 +446,7 @@ def interpret_result(
             depth_x=depth_x,
             not_interpretable=reason,
             cohort=(cohorts or {}).get(metric.metric_id),
+            include_interval=include_interval,
         )
         out.append(
             InterpretedMetric(
@@ -464,6 +468,7 @@ def license_callouts(entries: Iterable[Entry | None], library: Library) -> list[
 
 
 __all__ = [
+    "COHORT_MIN",
     "Cohort",
     "Entry",
     "InterpretedMetric",

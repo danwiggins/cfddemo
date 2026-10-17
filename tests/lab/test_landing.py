@@ -192,10 +192,24 @@ def test_findings_grouping_and_flags(page_root, tmp_path) -> None:
         dom = _dom(server, tmp_path, route=f"/sample/{_id12(page_root)}/findings")
     assert "FLAG: CLIA — health-assessment labels on an individual sample" in dom
     summary = re.search(r'class="findings-summary">([^<]*)<', dom).group(1)
-    numbers = [int(n) for n in re.findall(r"(\d+) (?:outside|not interpretable|awaiting|in range)", summary)]
-    assert len(numbers) == 4
-    groups = re.findall(r"<summary>(Not interpretable|No reference|In range) \((\d+)\)", dom)
-    assert [name for name, _ in groups] == ["Not interpretable", "No reference", "In range"]
+    labels = ["outside a reference", "not interpretable", "without a reference", "in range"]
+    counts = []
+    for label in labels:
+        matches = re.findall(rf"(\d+) {label}", summary)
+        assert len(matches) == 1, summary
+        counts.append(int(matches[0]))
+    groups = {name: int(count) for name, count in re.findall(r"<summary>(Not interpretable|No reference|In range) \((\d+)\)", dom)}
+    assert list(groups) == ["Not interpretable", "No reference", "In range"]
+    assert counts[0] == dom.count('class="finding-card"')
+    assert counts[1:] == [groups["Not interpretable"], groups["No reference"], groups["In range"]]
+    from traceback_lab.web.api import LabApi
+
+    payload = LabApi(LabStore(page_root)).sample(_id12(page_root))
+    visible_metrics = sum(
+        1 for algorithm in payload["algorithms"] if not algorithm["hidden"] and algorithm["status"] == "ok"
+        for metric in algorithm["metrics"] if metric["value"] is None or not isinstance(metric["value"], (dict, list))
+    )
+    assert sum(counts) == visible_metrics
     assert "No metric is outside a reference." in dom  # pre-cohort: no card groups
     assert "Cell-type composition (cell-origin)" in dom and "no composition at this depth" in dom
 

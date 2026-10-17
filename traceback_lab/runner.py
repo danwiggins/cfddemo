@@ -225,16 +225,21 @@ def run_plan(
                 and existing.skip_message == decision.message[:300]
             )
             if not same:
-                store.publish_result(
+                attempt_id = store.publish_result(
                     _envelope(algorithm, target, identity, status="skipped", skip=decision),
                     input_id=target.input_id,
                 )
+            else:
+                selected = store.selected_attempt(target.input_id, algorithm.id, identity)
+                attempt_id = selected.name if selected is not None else None
             log.append(
                 "step_end",
                 step=step,
                 status="skipped",
                 skip_reason=decision.reason_code,
                 parameters_sha256=identity,
+                input_id=target.input_id,
+                attempt_id=attempt_id,
             )
             result = StepResult(
                 algorithm.id,
@@ -301,7 +306,7 @@ def run_plan(
                         duration_s=outcome.duration_s, peak_rss=outcome.peak_rss_bytes,
                     )
                 else:
-                    store.publish_result(
+                    attempt_id = store.publish_result(
                         envelope,
                         input_id=target.input_id,
                         artifacts_dir=scratch / "artifacts",
@@ -313,6 +318,8 @@ def run_plan(
                         duration_s=round(outcome.duration_s, 3),
                         peak_rss_bytes=outcome.peak_rss_bytes,
                         parameters_sha256=identity,
+                        input_id=target.input_id,
+                        attempt_id=attempt_id,
                         tool_versions={tool.name: tool.version for tool in algorithm.tools},
                     )
                     result = StepResult(
@@ -402,7 +409,7 @@ def _publish_failure(
         exit_code=exit_code,
         timed_out=timed_out,
     )
-    store.publish_result(
+    attempt_id = store.publish_result(
         _envelope(algorithm, target, identity, status="failed", failure=failure, duration_s=duration_s),
         input_id=target.input_id,
     )
@@ -415,6 +422,8 @@ def _publish_failure(
         peak_rss_bytes=peak_rss,
         timed_out=timed_out,
         parameters_sha256=identity,
+        input_id=target.input_id,
+        attempt_id=attempt_id,
     )
     return StepResult(
         algorithm.id,

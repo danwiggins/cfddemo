@@ -286,10 +286,32 @@
     out.push(h("section", { class: "panel" }, h("h2", {}, "Depth against each algorithm's minimum"),
       h("div", { class: "table-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "Algorithm"), h("th", {}, "Depth"), h("th", {}, "Verdict"))), h("tbody", {}, ...rows)))));
     // Run table.
-    const running = state.lastStatus && state.lastStatus.active ? state.lastStatus.active.step : null;
+    const active = state.lastStatus && state.lastStatus.active;
+    const interrupted = state.lastStatus && state.lastStatus.interrupted;
+    const pending = [active, interrupted].find((run) => run && run.source_id === sample.source_id &&
+      run.input_id === sample.full_input_id && !sample.algorithms.some((a) => a.algorithm_id === run.step));
     const runRows = sample.algorithms.map((a) => {
-      const status = running === a.algorithm_id ? "running" : a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status;
-      const cells = [h("th", { scope: "row" }, a.algorithm_id + (a.hidden ? " (intermediate)" : "")), h("td", { class: a.status === "failed" ? "problem" : null }, status), h("td", { class: "num" }, a.duration_s !== null && a.duration_s !== undefined ? `${a.duration_s.toFixed(1)} s` : "—")];
+      const status = a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status;
+      const matches = (run) => run && run.step === a.algorithm_id && run.source_id === sample.source_id && run.input_id === a.provenance.input_id;
+      const runNote = matches(active) ? "latest run in progress" : matches(interrupted) ? "latest run interrupted" : null;
+      const cells = [h("th", { scope: "row" }, a.algorithm_id + (a.hidden ? " (intermediate)" : "")),
+        h("td", { class: a.status === "failed" ? "problem" : null }, status,
+          runNote ? h("span", { class: "state-chip run-note" }, runNote) : ""),
+        h("td", { class: "num" }, a.duration_s !== null && a.duration_s !== undefined ? `${a.duration_s.toFixed(1)} s` : "—")];
+      const logLine = h("span", { class: "help", "aria-live": "polite" });
+      const logLink = h("a", { href: `#/sample/${sample.id12}/trust-qc`, onclick: async (event) => {
+        event.preventDefault();
+        logLine.replaceChildren("Loading run log line…");
+        try {
+          const line = await api(`/api/samples/${sample.id12}/run-log/${a.algorithm_id}`);
+          logLine.replaceChildren(line.found
+            ? `${line.run_id} · line ${line.line} · ${line.utc || "time unavailable"} · step_end ${line.step} status=${line.status}${line.skip_reason ? ` (${line.skip_reason})` : ""}${line.duration_s !== null ? ` · ${line.duration_s} s` : ""}`
+            : "Run log line unavailable (checked 64 recently updated runs; logs over 1 MiB or 4,096 lines are not shown).");
+        } catch (error) {
+          logLine.replaceChildren(error.session ? "Session expired; reopen Lab." : "Run log line unavailable.");
+        }
+      } }, "Run log line →");
+      cells.push(h("td", {}, logLink, " ", logLine));
       const detail = a.failure
         ? h("details", {}, h("summary", {}, "Last 50 stderr lines (scrubbed)"), h("pre", { class: "stderr" }, a.failure.stderr_tail.join("\n") || a.failure.first_line))
         : a.skip_message ? h("span", {}, a.skip_message) : "";
@@ -297,7 +319,8 @@
       return h("tr", {}, ...cells);
     });
     out.push(h("section", { class: "panel" }, h("h2", {}, "Run"),
-      h("div", { class: "table-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, ...["Algorithm", "Status", "Duration", "Detail"].map((t) => h("th", { scope: "col" }, t)))), h("tbody", {}, ...runRows)))));
+      pending ? h("p", { class: "status-line" }, `Latest run ${pending === active ? "in progress" : "interrupted"} during ${pending.step}; no result was published for this step.`) : "",
+      h("div", { class: "table-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, ...["Algorithm", "Status", "Duration", "Run log", "Detail"].map((t) => h("th", { scope: "col" }, t)))), h("tbody", {}, ...runRows)))));
     // QC bands.
     const banded = [];
     for (const a of sample.algorithms) for (const m of a.metrics) if (m.qc_band) banded.push([m.label, fmt(m.value), m.qc_band]);
@@ -306,9 +329,31 @@
       h("p", { class: "help" }, "provisional (not from literature)"),
       h("div", { class: "table-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "Metric"), h("th", {}, "Value"), h("th", {}, "Band"))),
         h("tbody", {}, ...banded.map(([label, value, band]) => h("tr", {}, h("th", { scope: "row" }, label), h("td", {}, value), h("td", {}, h("span", { class: "qc-band" }, glyph[band])))))))));
+    const sex = sample.preanalytic_sex;
+    let sexMessage;
+    if (sex && sex.reason === "malformed_metadata") {
+      sexMessage = "Stored operator sex assertion metadata is malformed; no comparison verdict. Measured results remain available.";
+    } else if (!sex || sex.state === "no_verdict") {
+      sexMessage = sex && sex.reason === "no_definite_call"
+        ? "No definite measured chrX/chrY call is available; no comparison verdict."
+        : "No operator sex assertion was supplied; no comparison was made.";
+    } else if (sex.state === "mismatch") {
+      sexMessage = `Pre-analytic mismatch: operator-declared ${sex.declared} differs from the measured chrX/chrY call (${sex.observed}). Review sample metadata and processing.`;
+    } else if (sex.state === "concordant") {
+      sexMessage = `Operator assertion (${sex.declared}) and measured chrX/chrY call (${sex.observed}) agree.`;
+    } else {
+      sexMessage = "Comparison state is unavailable; no comparison verdict.";
+    }
+    out.push(h("section", { class: "panel" }, h("h2", {}, "Pre-analytic sex assertion check"),
+      h("p", {}, h("span", { class: "flag-pill" }, "FLAG: PRIVACY — can reveal pregnancy or transplant status.")),
+      h("p", { class: sex && (sex.state === "mismatch" || sex.reason === "malformed_metadata") ? "problem" : "status-line" }, sexMessage),
+      sex && sex.problem ? h("p", { class: "problem" }, `${sex.problem.code}: ${sex.problem.fix}`) : "",
+      h("p", { class: "help" }, "This is not a diagnostic sex or gender determination.")));
     const health = sample.library_health;
     out.push(h("section", { class: "panel" }, h("h2", {}, "Library health"),
-      h("p", {}, `no_library_entry: ${health.no_library_entry} · UNVERIFIED citations: ${health.unverified_citations} · interpretation v${health.version} · cohort healthy-v1 (n = ${sample.cohort_n})`),
+      h("p", {}, `no_library_entry: ${health.no_library_entry} · UNVERIFIED citations: ${health.unverified_citations} · interpretation v${health.version} · cohort ${sample.cohort_version || "none yet"} (members = ${sample.cohort_n})`),
+      ["cohort_unavailable", "target_unavailable", "stale_target"].includes(sample.cohort_state)
+        ? h("p", { class: "problem" }, `Cohort reference unavailable (${sample.cohort_state.replace(/_/g, " ")}); sample measurements remain visible without cohort states. ${sample.cohort_problem ? sample.cohort_problem.fix : "Check cohort build and reload."}`) : "",
       health.error ? h("div", { class: "problem" }, `Interpretation library on disk is invalid (${health.error}). Showing v${health.version}, loaded at ${health.loaded_at}.`) : ""));
     out.push(sizeDensity(sample));
     return out;
@@ -364,9 +409,10 @@
           ` Interpretation library on disk is invalid (${status.library.error}). Showing v${status.library.version}, loaded at ${status.library.loaded_at}.`));
       }
       setControlsEnabled(true);
-      const wasRunning = previous && previous.active ? previous.active.step : null;
-      const nowRunning = status.active ? status.active.step : null;
-      if (wasRunning !== nowRunning && state.route.name === "lens") render();
+      const runMarker = (row) => row ? [row.run_id, row.step, row.source_id, row.input_id].join(":") : null;
+      if (state.route.name === "lens" &&
+          (runMarker(previous && previous.active) !== runMarker(status.active) ||
+           runMarker(previous && previous.interrupted) !== runMarker(status.interrupted))) render();
     } catch (error) {
       if (error.session) { setStatus("Session expired. Restart `traceback lab serve --open`; it opens a fresh page."); return; }
       state.missed += 1;

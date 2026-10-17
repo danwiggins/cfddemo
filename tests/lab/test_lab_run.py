@@ -116,6 +116,71 @@ def test_run_aligns_publishes_and_reruns_from_cache(lab_world, capsys, monkeypat
         assert str(chunks) not in text and "SYNTH0001" not in text
 
 
+def test_sex_assertion_is_local_metadata_and_does_not_rekey_results(
+    lab_world, capsys, monkeypatch, shared_mmi,
+) -> None:
+    _registry(monkeypatch, "SUMMARY", "COUNTER")
+    root = lab_world["root"]
+    args = ("run", str(lab_world["chunks"]), "--root", str(root), "--mmi", str(shared_mmi))
+    code, first = _json(capsys, *args)
+    assert code == 0
+    original = first["data"]["sample"]
+    store = LabStore(root)
+    generation = store.generation()
+    result_bytes = {path.relative_to(store.results_dir): path.read_bytes()
+                    for path in store.results_dir.rglob("result.json")}
+
+    code, asserted = _json(capsys, "run", "latest", "--sex", "M", "--root", str(root))
+    assert code == 0 and asserted["data"]["sample"] == original
+    assert all(step["cached"] for step in asserted["data"]["steps"])
+    assert store.generation() == generation + 1
+    assert {path.relative_to(store.results_dir): path.read_bytes()
+            for path in store.results_dir.rglob("result.json")} == result_bytes
+    from traceback_lab.ingest import source_record
+    from traceback_lab.views import load_sample, sex_check_view
+
+    record = source_record(LabStore(root), original["source_id"])
+    assert record is not None and record["operator_metadata"]["sex"] == "M"
+    sample = load_sample(LabStore(root), original["source_id"])
+    assert sample is not None
+    assert sex_check_view(sample)["state"] == "no_verdict"  # fake registry has no sex-check
+
+    code, conflict = _json(capsys, "run", "latest", "--sex", "F", "--root", str(root))
+    assert code == 3 and conflict["data"]["code"] == "TBX-LAB-023"
+    assert {"cause", "fix", "retryable", "docs"} <= set(conflict["data"])
+    code, human, _ = _lab(capsys, "run", "latest", "--sex", "F", "--root", str(root))
+    assert code == 3
+    for label in ("CODE", "CAUSE", "FIX", "RETRYABLE", "DOCS"):
+        assert any(line.startswith(label) for line in human.splitlines())
+    assert source_record(LabStore(root), original["source_id"]) == record
+    code, same = _json(capsys, "run", "latest", "--sex", "M", "--root", str(root))
+    assert code == 0 and same["data"]["sample"] == original
+    assert store.generation() == generation + 1
+    code, reingested = _json(capsys, *args)
+    assert code == 0 and reingested["data"]["sample"] == original
+    assert store.generation() == generation + 1
+    assert source_record(LabStore(root), original["source_id"])["operator_metadata"] == record["operator_metadata"]
+
+    code, conflict = _json(capsys, *args, "--sex", "F")
+    assert code == 3 and conflict["data"]["code"] == "TBX-LAB-023"
+    assert source_record(LabStore(root), original["source_id"])["operator_metadata"] == record["operator_metadata"]
+
+    # Optional metadata corruption blocks a new assertion, but must not block
+    # unrelated measurement work or disappear during source-record refresh.
+    malformed = {"schema": "invalid", "sex": "M", "recorded_utc": "invalid"}
+    source_file = store.sources_dir / f"{original['source_id']}.json"
+    source_file.write_text(json.dumps({**record, "operator_metadata": malformed}))
+    for target in ("latest", str(lab_world["chunks"])):
+        extra = () if target == "latest" else ("--mmi", str(shared_mmi))
+        code, dry = _json(capsys, "run", target, "--root", str(root), *extra, "--dry-run")
+        assert code == 0 and dry["data"]["dry_run"]
+        code, rerun = _json(capsys, "run", target, "--root", str(root), *extra)
+        assert code == 0 and rerun["data"]["sample"] == original
+        assert source_record(store, original["source_id"])["operator_metadata"] == malformed
+        code, refused = _json(capsys, "run", target, "--root", str(root), *extra, "--sex", "M")
+        assert code == 3 and refused["data"]["code"] == "TBX-LAB-023"
+
+
 def test_missing_cached_upstream_artifact_recomputes_only_that_step(
     lab_world, capsys, monkeypatch, shared_mmi,
 ) -> None:
@@ -181,6 +246,18 @@ def test_failed_algorithm_exits_8_with_scrubbed_stderr_and_rerun_recomputes_only
     persisted = json.dumps(envelope.model_dump())
     assert "DonorName" not in persisted and "/Users/someone" not in persisted
     assert "<path>" in persisted
+    step_events = [event for event in store.run_log(data["run_id"]).events()
+                   if event.get("event") == "step_end" and event.get("step") in steps]
+    assert {"failed", "skipped"} <= {event["status"] for event in step_events}
+    for event in step_events:
+        selected = store.selected_attempt(input_id, event["step"], event["parameters_sha256"])
+        assert selected is not None and event["attempt_id"] == selected.name
+        assert event["input_id"] == input_id
+    first_success = next(event for run_id in store.run_ids()
+                         for event in store.run_log(run_id).events()
+                         if event.get("event") == "step_end" and event.get("step") == "read-summary")
+    selected_success = store.selected_attempt(input_id, "read-summary", first_success["parameters_sha256"])
+    assert selected_success is not None and first_success["attempt_id"] == selected_success.name
 
 
 def test_algorithm_timeout_kills_its_grandchild(lab_world, capsys, monkeypatch, shared_mmi) -> None:

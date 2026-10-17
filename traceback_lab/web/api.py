@@ -8,7 +8,10 @@ result's own attempt directory and no component is a symlink.
 
 from __future__ import annotations
 
+import json
+import math
 import os
+import re
 import shlex
 import stat
 import threading
@@ -17,11 +20,13 @@ from collections.abc import Iterable
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from ..cohort_contracts import project_metric
+from ..cohort_contracts import CohortGeneration, CohortMember, MetricProjection, project_metric
 from ..cohorts import list_cohorts, member_from_store, read_current
+from ..file_access import open_regular_no_follow
 from ..identity import resolve_prefix, shortest_unique_prefixes
 from ..ingest import source_ids, source_record
 from ..interpretation.engine import (
+    COHORT_MIN,
     LIBRARY_FILE,
     LICENSES_FILE,
     Entry,
@@ -138,22 +143,85 @@ def _contained(attempt: Path, data_ref: str) -> Path | None:
     return attempt / data_ref if _read_contained(attempt, [], data_ref) is not None else None
 
 
+def _read_run_log(path: Path, *, limit: int = 1024 * 1024) -> bytes | None:
+    """Read one regular log, rejecting symlink ancestors and growth past limit."""
+
+    try:
+        descriptor = open_regular_no_follow(path)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > limit:
+            return None
+        chunks = []
+        size = 0
+        while chunk := os.read(descriptor, min(64 * 1024, limit + 1 - size)):
+            size += len(chunk)
+            if size > limit:
+                return None
+            chunks.append(chunk)
+        return b"".join(chunks)
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
+
+
+def _run_events(store: LabStore, run_id: str) -> list[tuple[int, dict[str, Any]]]:
+    if not isinstance(run_id, str) or not re.fullmatch(r"r-\d{8}-\d{4}-[0-9a-f]{4,8}", run_id):
+        return []
+    raw = _read_run_log(store.runs_dir / f"{run_id}.jsonl")
+    if raw is None:
+        return []
+    lines = raw.splitlines()
+    if len(lines) > 4096:
+        return []
+    events = []
+    for number, line in enumerate(lines, 1):
+        try:
+            event = json.loads(line)
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if isinstance(event, dict):
+            events.append((number, event))
+    return events
+
+
+def _run_sample_identity(events: list[tuple[int, dict[str, Any]]]) -> dict[str, str]:
+    for _, event in reversed(events):
+        if event.get("event") != "sample":
+            continue
+        source_id, input_id = event.get("source_id"), event.get("input_id")
+        if (isinstance(source_id, str) and re.fullmatch(r"[0-9a-f]{64}", source_id)
+                and isinstance(input_id, str) and re.fullmatch(r"[0-9a-f]{64}", input_id)):
+            return {"source_id": source_id, "input_id": input_id}
+        return {}
+    return {}
+
+
 class LabApi:
     def __init__(self, store: LabStore) -> None:
         self.store = store
         self.libraries = LibraryHolder()
 
-    # -- status (D22): two small reads, never the lock ---------------------------
+    # -- status (D22): bounded reads, never the lock -----------------------------
     def status(self) -> dict[str, Any]:
         status = self.store.status()
         interrupted = None
-        if status["active"] is None:
+        if status["active"] is not None:
+            events = _run_events(self.store, status["active"]["run_id"])
+            status["active"] = {**status["active"], **_run_sample_identity(events)}
+        else:
             # Bounded (D22): one pointer file and that one run's log, never a scan.
             last = self.store.last_run_id()
             if last is not None:
-                summary = summarize_run(self.store.run_log(last).events(), self.store)
-                if summary["status"] == "interrupted":
-                    interrupted = {"run_id": summary["run_id"], "step": summary["open_step"]}
+                events = _run_events(self.store, last)
+                if events:
+                    summary = summarize_run([event for _, event in events], self.store)
+                    if summary["status"] == "interrupted":
+                        interrupted = {"run_id": last, "step": summary["open_step"],
+                                       **_run_sample_identity(events)}
         try:
             self.libraries.get()
         except (LibraryError, OSError):
@@ -165,14 +233,104 @@ class LabApi:
         ids = source_ids(self.store)
         return shortest_unique_prefixes(ids) if ids else {}
 
+    def _published_sample_cohort(self) -> tuple[CohortGeneration | None, dict[str, str] | None]:
+        """Read one immutable generation pointer for an entire API response."""
+
+        try:
+            return read_current(self.store, "healthy-v1"), None
+        except LabProblem as problem:
+            return None, _recovery_problem(problem)
+
+    def _sample_cohort(
+        self, source_id: str, sample: Any,
+        snapshot: tuple[CohortGeneration | None, dict[str, str] | None] | None = None,
+    ) -> tuple[CohortGeneration | None, CohortMember | None, str, dict[str, str] | None]:
+        """Pin the default kit cohort and the same full input shown by the page.
+
+        A broken cohort or stale target must not turn an unrelated published
+        reference into a cohort result.  The metric then remains unreferenced.
+        """
+
+        if sample.example:
+            return None, None, "example", None
+        generation, problem = snapshot if snapshot is not None else self._published_sample_cohort()
+        if problem is not None:
+            return None, None, "cohort_unavailable", problem
+        if generation is None:
+            return None, None, "not_built", None
+        try:
+            target = member_from_store(self.store, source_id)
+        except LabProblem as error:
+            return generation, None, "target_unavailable", _recovery_problem(error)
+        except ValueError:
+            error = LabProblem("TBX-LAB-017", cause="sample has no readable current full input",
+                               fix="Inspect Lab runs, restore the input, then reload the sample")
+            return generation, None, "target_unavailable", _recovery_problem(error)
+        if target.source_id != source_id or target.input_id != sample.full.input_id:
+            error = LabProblem("TBX-LAB-017", cause="sample results changed while its cohort reference was loading",
+                               fix="Reload the sample to pin its current full input")
+            return generation, None, "stale_target", _recovery_problem(error)
+        return generation, target, "ready", None
+
+    @staticmethod
+    def _interpret_sample_envelope(
+        envelope: Any, library: Library, depth_x: float | None, source_id: str,
+        generation: CohortGeneration | None, target: CohortMember | None,
+        *, include_interval: bool = True,
+    ) -> tuple[list[Any], dict[str, MetricProjection]]:
+        """Apply D8 only to library-declared cohort metrics, using D31 keys."""
+
+        if envelope.status != "ok" or generation is None or target is None:
+            return interpret_result(envelope, library, depth_x=depth_x,
+                                    include_interval=include_interval), {}
+        target_result = next((row for row in target.results if row.algorithm_id == envelope.algorithm_id), None)
+        if target_result is None or target_result.parameters_sha256 != envelope.provenance.parameters_sha256:
+            return interpret_result(envelope, library, depth_x=depth_x,
+                                    include_interval=include_interval), {}
+        projections: dict[str, MetricProjection] = {}
+        entries: dict[tuple[str, str], Entry] | None = None
+        for metric in envelope.metrics:
+            entry = library.entry(envelope.algorithm_id, metric.metric_id)
+            if entry is None or entry["reference"]["kind"] not in ("internal_cohort", "provisional_external"):
+                continue
+            if entry["value_kind"] in ("vector", "categorical"):
+                continue
+            projection = project_metric(
+                generation, algorithm_id=envelope.algorithm_id, metric_id=metric.metric_id,
+                cohort_compat_key=target_result.cohort_compat_key, target_source_id=source_id,
+            )
+            projections[metric.metric_id] = projection
+            if entry["reference"]["kind"] != generation.kind:
+                if entries is None:
+                    entries = dict(library.entries)
+                entries[(envelope.algorithm_id, metric.metric_id)] = Entry(
+                    envelope.algorithm_id, metric.metric_id,
+                    {**entry.raw, "reference": {"kind": generation.kind}},
+                )
+        interpreted = interpret_result(
+            envelope,
+            library if entries is None else Library(
+                version=library.version, entries=entries, licenses=library.licenses,
+                hidden_algorithms=library.hidden_algorithms,
+            ),
+            depth_x=depth_x,
+            cohorts={key: projection.interpretation_cohort() for key, projection in projections.items()},
+            include_interval=include_interval,
+        )
+        return interpreted, projections
+
     def samples(self) -> dict[str, Any]:
         library = self.libraries.get()
+        cohort_snapshot = self._published_sample_cohort()
         rows = []
         for source_id, id12 in self._id12s().items():
             record = source_record(self.store, source_id) or {}
             sample = views.load_sample(self.store, source_id)
             if sample is None:
                 continue
+            generation, target, cohort_state, cohort_problem = self._sample_cohort(
+                source_id, sample, cohort_snapshot,
+            )
             used = max((entry.get("used_utc", "") for entry in record.get("inputs", [])), default="")
             counts = {"ok": 0, "skipped": 0, "failed": 0}
             outside = 0
@@ -180,7 +338,11 @@ class LabApi:
                 if envelope.algorithm_id in library.hidden_algorithms:
                     continue
                 counts[envelope.status] = counts.get(envelope.status, 0) + 1
-                for row in interpret_result(envelope, library, depth_x=sample.full.depth_x()):
+                interpreted, _ = self._interpret_sample_envelope(
+                    envelope, library, sample.full.depth_x(), source_id, generation, target,
+                    include_interval=False,
+                )
+                for row in interpreted:
                     outside += int(row.interpretation.out_of_range)
             spikes = views.synthetic(sample)
             rows.append(
@@ -189,6 +351,12 @@ class LabApi:
                     "run_utc": used,
                     "depth_x": sample.full.depth_x(),
                     "example": sample.example,
+                    "cohort_version": generation.version_id if generation else None,
+                    "cohort_kind": generation.kind if generation else None,
+                    "cohort_n": generation.percentile_n if generation else 0,
+                    "cohort_min": COHORT_MIN,
+                    "cohort_state": cohort_state,
+                    "cohort_problem": cohort_problem,
                     "counts": counts,
                     "outside_reference": outside,
                     "controls": {
@@ -218,6 +386,7 @@ class LabApi:
         library = self.libraries.get()
         record = source_record(self.store, source_id) or {}
         depth_x = sample.full.depth_x()
+        generation, target, cohort_state, cohort_problem = self._sample_cohort(source_id, sample)
         algorithms = []
         no_entry = 0
         unverified: set[tuple[str, str]] = set()
@@ -225,7 +394,10 @@ class LabApi:
         for algorithm_id, envelope in sample.full.results.items():
             metrics = []
             cis = {m.metric_id: (m.ci, m.ci_level) for m in envelope.metrics}
-            for row in interpret_result(envelope, library, depth_x=depth_x):
+            interpreted, projections = self._interpret_sample_envelope(
+                envelope, library, depth_x, source_id, generation, target,
+            )
+            for row in interpreted:
                 entry = row.entry
                 if entry is None and algorithm_id not in library.hidden_algorithms:
                     no_entry += 1
@@ -235,6 +407,14 @@ class LabApi:
                     if license_id not in used_licenses:
                         used_licenses.append(license_id)
                 payload = _metric_payload(row, entry, qc_band(row.value, entry))
+                projection = projections.get(row.metric_id)
+                payload["eligible_n"] = projection.percentile_n if projection else None
+                payload["cohort_values"] = list(projection.values) if projection else []
+                payload["cohort_excluded"] = dict(projection.exclusions) if projection else {}
+                payload["cohort_mean"] = (
+                    sum(projection.values) / projection.percentile_n
+                    if projection and projection.percentile_n >= COHORT_MIN else None
+                )
                 stored = cis.get(row.metric_id)
                 payload["ci"] = list(stored[0]) if stored and stored[0] else None
                 payload["ci_level"] = stored[1] if stored else None
@@ -275,13 +455,20 @@ class LabApi:
             "found": True,
             "id12": self._id12s()[source_id],
             "source_id": source_id,
+            "full_input_id": sample.full.input_id,
             "example": sample.example,
             "run_utc": max((entry.get("used_utc", "") for entry in record.get("inputs", [])), default=""),
             "depth": next((env.depth.model_dump() for env in sample.full.results.values() if env.depth), None),
             "excluded_chunks": record.get("excluded", []),
+            "preanalytic_sex": views.sex_check_view(sample),
             "interpretation_version": library.version,
-            "cohort_version": None,
-            "cohort_n": 0,
+            "cohort_version": generation.version_id if generation else None,
+            "cohort_kind": generation.kind if generation else None,
+            "cohort_n": generation.percentile_n if generation else 0,
+            "cohort_min": COHORT_MIN,
+            "cohort_id": generation.cohort_id if generation else "healthy-v1",
+            "cohort_state": cohort_state,
+            "cohort_problem": cohort_problem,
             "algorithms": algorithms,
             "unreadable_results": sorted(sample.full.unreadable),
             "curve": curve,
@@ -300,6 +487,63 @@ class LabApi:
                 "unverified_citations": len(unverified),
             },
         }
+
+    def run_log_line(self, id12: str, algorithm_id: str) -> dict[str, Any]:
+        """Return a bounded, allowlisted step-end line for the selected full result."""
+
+        source_id, _ = self._resolve(id12)
+        if source_id is None:
+            return {"found": False}
+        sample = views.load_sample(self.store, source_id)
+        if sample is None:
+            return {"found": False}
+        result = sample.full.results.get(algorithm_id)
+        if result is None:
+            return {"found": False}
+        identity = result.provenance.parameters_sha256
+        selected = self.store.selected_attempt(sample.full.input_id, algorithm_id, identity)
+        if selected is None:
+            return {"found": False}
+        recent = []
+        for run_id in self.store.run_ids():
+            try:
+                info = os.stat(self.store.runs_dir / f"{run_id}.jsonl", follow_symlinks=False)
+            except OSError:
+                continue
+            if stat.S_ISREG(info.st_mode):
+                recent.append((info.st_mtime_ns, run_id))
+        for _, run_id in sorted(recent, reverse=True)[:64]:
+            events = _run_events(self.store, run_id)
+            if not any(
+                event.get("event") == "sample"
+                and event.get("source_id") == source_id
+                and event.get("input_id") == sample.full.input_id
+                for _, event in events
+            ):
+                continue
+            for number, event in reversed(events):
+                if (event.get("event") != "step_end" or event.get("step") != algorithm_id
+                        or event.get("parameters_sha256") != identity
+                        or event.get("input_id") != sample.full.input_id
+                        or event.get("attempt_id") != selected.name
+                        or event.get("status") != result.status
+                        or event.get("status") not in ("ok", "skipped", "failed")):
+                    continue
+                utc = event.get("utc")
+                reason = event.get("skip_reason")
+                duration = event.get("duration_s")
+                return {
+                    "found": True,
+                    "run_id": run_id,
+                    "line": number,
+                    "step": algorithm_id,
+                    "utc": utc if isinstance(utc, str) and re.fullmatch(r"[0-9TZ:.+-]{1,40}", utc) else None,
+                    "status": event["status"],
+                    "skip_reason": reason if isinstance(reason, str) and re.fullmatch(r"[a-z0-9_-]{1,64}", reason) else None,
+                    "duration_s": duration if isinstance(duration, (int, float)) and not isinstance(duration, bool)
+                    and math.isfinite(duration) and 0 <= duration <= 1e9 else None,
+                }
+        return {"found": False}
 
     # -- Compare (L1.6): one pinned immutable cohort generation ----------------------
     def cohorts(self) -> dict[str, Any]:

@@ -7,7 +7,7 @@
 # original evidence (D4).  citation_checked records who confirmed that every
 # DOI resolves and every displayed number matches the source (D27); an entry
 # without it renders an "UNVERIFIED citation" badge.
-version: 0.6.1
+version: 0.6.2
 hidden_algorithms: [read-summary, meth-calls]
 entries:
   # ---------------------------------------------------------------- bam-qc
@@ -406,7 +406,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "Illumina"
     min_depth_x: 0.0055
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: enrichment
       value: "Size selection of 90-150 bp fragments gave >2-fold median ctDNA enrichment in >95% of cases"
@@ -435,7 +435,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "cfDNA literature (platform not stated)"
     min_depth_x: 0.0055
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance: null
     performance_missing_reason: "none published"
     meaning_high: "Stronger ~10 bp rhythm in short fragments, reported for tumour-derived DNA."
@@ -740,7 +740,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "ONT"
     min_depth_x: null
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: classes
       value: "Single-cohort classes, no published cut-off: 1-4 kb fragments marked delayed blood processing (over 40% of samples stored 6-24 h showed it; rapidly processed samples did not); >7.5 kb marked cell lysis during plasma processing"
@@ -769,7 +769,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "ONT"
     min_depth_x: null
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: classes
       value: "Over 40% of samples stored 6-24 h before processing showed the 1-4 kb signature; rapidly processed samples did not. No published cut-off"
@@ -798,7 +798,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "ONT"
     min_depth_x: null
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     qc_band: {direction: lower_is_better, pass: 0.001, warn: 0.01}
     performance:
       kind: classes
@@ -911,7 +911,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "Illumina WGS"
     min_depth_x: null
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance: null
     performance_missing_reason: "none published"
     meaning_high: "Longer mitochondrial fragments (less protected, platelet-derived, or lysis)."
@@ -935,7 +935,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 5.0
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
@@ -964,7 +964,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 5.0
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
@@ -993,7 +993,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 0.2
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Major cell types held from full depth down to 0.2x (about 2.5M fragments); degraded at 0.05x and below"
@@ -1022,7 +1022,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 0.2
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Major cell types held from full depth down to 0.2x (about 2.5M fragments); degraded at 0.05x and below"
@@ -1051,7 +1051,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 0.2
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Major cell types held from full depth down to 0.2x (about 2.5M fragments); degraded at 0.05x and below"
@@ -1080,7 +1080,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 0.2
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Major cell types held from full depth down to 0.2x (about 2.5M fragments); degraded at 0.05x and below"
@@ -1109,7 +1109,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 0.2
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Major cell types held from full depth down to 0.2x (about 2.5M fragments); degraded at 0.05x and below"
@@ -1138,7 +1138,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 5.0
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
@@ -1167,7 +1167,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 5.0
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
@@ -1196,7 +1196,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 5.0
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
@@ -1225,7 +1225,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 5.0
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
@@ -1254,7 +1254,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 5.0
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
@@ -1283,7 +1283,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 5.0
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
@@ -1312,7 +1312,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 5.0
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
@@ -1341,7 +1341,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 5.0
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
@@ -1370,7 +1370,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 5.0
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
@@ -1399,7 +1399,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 5.0
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
@@ -1428,7 +1428,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 5.0
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
@@ -1457,7 +1457,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 5.0
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
@@ -1486,7 +1486,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 5.0
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
@@ -1515,7 +1515,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 5.0
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
@@ -1544,7 +1544,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 5.0
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
@@ -1573,7 +1573,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 5.0
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
@@ -1602,7 +1602,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 5.0
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
@@ -1631,7 +1631,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 5.0
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
@@ -1660,7 +1660,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 5.0
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
@@ -1689,7 +1689,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 0.2
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Major cell types held from full depth down to 0.2x (about 2.5M fragments); degraded at 0.05x and below"
@@ -1718,7 +1718,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 5.0
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
@@ -1747,7 +1747,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 5.0
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
@@ -1776,7 +1776,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 5.0
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
@@ -1805,7 +1805,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 5.0
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
@@ -1834,7 +1834,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 5.0
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
@@ -1863,7 +1863,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 5.0
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
@@ -1892,7 +1892,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 5.0
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
@@ -1921,7 +1921,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 5.0
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
@@ -1950,7 +1950,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 5.0
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
@@ -1979,7 +1979,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 5.0
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
@@ -2008,7 +2008,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 5.0
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
@@ -2037,7 +2037,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 5.0
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
@@ -2066,7 +2066,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS atlas; ONT deconvolution reported"
     min_depth_x: 5.0
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
       value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
@@ -2121,7 +2121,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "Illumina"
     min_depth_x: null
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: auc
       value: "Interval MDS over the 100 most variable genomic intervals reached AUC 0.84 in cross-validation (25 matched pairs, early breast cancer); genome-wide MDS gave AUC 0.44. Direction: MDS is higher in hepatocellular carcinoma"
@@ -2150,7 +2150,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "Illumina"
     min_depth_x: null
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: direction
       value: "CCCA was much lower in hepatocellular carcinoma than in subjects without HCC; no threshold published in the abstract"
@@ -2180,7 +2180,7 @@ entries:
     origin_tier: PROVEN
     origin_platform: "Illumina (commercial lung test)"
     min_depth_x: null
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: sensitivity
       value: "Original DELFI classifier: sensitivity 57% to >99% across seven cancer types at 98% specificity, AUC 0.94. This Lab computes the ratio profile only (no GC correction, no classifier), so the figure does not transfer"
@@ -2210,7 +2210,7 @@ entries:
     origin_tier: SPECULATIVE
     origin_platform: "ONT"
     min_depth_x: null
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance: null
     performance_missing_reason: "none published; no ONT cfDNA reference for a genome-wide 5mC fraction was found"
     meaning_high: "Globally well-methylated cfDNA, typical of blood-cell-derived DNA."
@@ -2235,7 +2235,7 @@ entries:
     origin_tier: SPECULATIVE
     origin_platform: "5hmC-Seal (short-read), not ONT"
     min_depth_x: null
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: direction
       value: "A global loss of 5hmC was reported in cfDNA of 203 breast cancer patients vs 60 healthy individuals, measured with 5hmC-Seal chemistry (short-read), not ONT"
@@ -2265,7 +2265,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS; one small ONT cfDNA study"
     min_depth_x: null
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance:
       kind: direction
       value: "On ONT cfDNA, solo-WCGW CpGs in common PMDs were more hypomethylated (relative to each sample's genome average) in cancer bins (mean -0.10, SD 0.07) than healthy bins (mean -0.05, SD 0.04); 7 healthy samples. This Lab uses every CpG call, not solo-WCGW, so the numbers do not transfer"
@@ -2294,7 +2294,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS"
     min_depth_x: null
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance: null
     performance_missing_reason: "none published for an all-CpG ONT measure"
     meaning_high: "PMDs keep their methylation."
@@ -2318,7 +2318,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS"
     min_depth_x: null
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance: null
     performance_missing_reason: "none published for an all-CpG ONT measure"
     meaning_high: "Well-methylated genome outside PMDs."
@@ -2343,7 +2343,7 @@ entries:
     origin_tier: NEWER
     origin_platform: "WGBS (UXM fragment-level classes)"
     min_depth_x: null
-    reference: {kind: none}
+    reference: {kind: internal_cohort}
     performance: null
     performance_missing_reason: "none published for a genome-wide read share; the thresholds come from the UXM fragment classes"
     meaning_high: "Many fully unmethylated molecules: more DNA from cell types unmethylated at random sites, or a global hypomethylation signal."
