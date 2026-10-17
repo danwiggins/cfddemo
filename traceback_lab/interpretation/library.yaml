@@ -2647,7 +2647,7 @@ entries:
       analytical: ["Review the registered accession list and alignment evidence", "Confirm a signal with an independent assay"]
       clinical_setting: null
     license_ids: [viral-reference-terms-vary]
-    flags: [LEGAL]
+    flags: [LEGAL, PRIVACY]
     headline: true
     citations: []
     citation_checked: {by: "Lab method contract", date: "2026-10-16", note: "No ONT cfDNA assay citation or clinical cutoff is claimed; qPCR context comes from the approved D10 catalog."}
@@ -2671,7 +2671,7 @@ entries:
       analytical: ["Review which HPV accession versions are registered", "Confirm a signal with an independent assay"]
       clinical_setting: null
     license_ids: [viral-reference-terms-vary]
-    flags: [LEGAL]
+    flags: [LEGAL, PRIVACY]
     headline: false
     citations: []
     citation_checked: {by: "Lab method contract", date: "2026-10-16", note: "No ONT cfDNA assay citation or clinical cutoff is claimed; HPV coverage is bundle-specific."}
@@ -2695,7 +2695,7 @@ entries:
       analytical: ["Review the registered accession list and alignment evidence", "Confirm a signal with an independent assay"]
       clinical_setting: null
     license_ids: [viral-reference-terms-vary]
-    flags: [LEGAL]
+    flags: [LEGAL, PRIVACY]
     headline: false
     citations: []
     citation_checked: {by: "Lab method contract", date: "2026-10-16", note: "No ONT cfDNA assay citation or clinical cutoff is claimed; qPCR context is separate."}

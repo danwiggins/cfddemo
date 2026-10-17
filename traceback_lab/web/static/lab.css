@@ -59,6 +59,11 @@ pre.stderr { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; 
 .lab-chrome .lab-status:not(:empty) { display: block; }
 #main { width: min(76rem, calc(100% - 2rem)); margin-inline: auto; display: block; padding-block: .25rem 3rem; }
 .clia-panel { margin: 0; padding: .5rem .75rem; background: #ffffff; border: 1px solid var(--rule); border-radius: .5rem; overflow: visible; }
+.loading-clia { min-height: 12rem; box-sizing: border-box; }
+.loading-headline { min-height: 2.5rem; }
+.loading-defended, .loading-curve { min-height: 13rem; }
+.loading-controls, .loading-lens { min-height: 10rem; }
+@media (min-width: 1024px) { .loading-clia { height: 320px; } }
 .clia-title { margin: 0 0 .3rem; font: 700 1.5rem/1.15 ui-serif, Georgia, serif; }
 .clia-short { column-count: 1; column-gap: 2rem; font-size: .9rem; line-height: 1.3; }
 .clia-short p { margin: 0 0 .15rem; break-inside: avoid; }

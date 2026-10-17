@@ -38,9 +38,9 @@
     { id: "trust-qc", label: "Trust/QC" },
     { id: "stability", label: "Stability" },
     { id: "signals", label: "Signals" },
-    { id: "compare", label: "Compare" },
     { id: "body-map", label: "Body map" },
     { id: "agreement", label: "Agreement" },
+    { id: "compare", label: "Compare" },
     { id: "evidence", label: "Evidence" },
     { id: "methods", label: "Methods" },
   );
@@ -53,6 +53,11 @@
   }
 
   function flagPill(type, text) { return h("span", { class: "flag-pill" }, text || FLAG_TEXT[type] || `FLAG: ${type}`); }
+  function metricFlag(metric, type) {
+    return type === "PRIVACY" && metric.algorithm_id === "viral-reads"
+      ? flagPill(type, "FLAG: PRIVACY — viral-read signals can reveal sensitive infection-related information.")
+      : flagPill(type);
+  }
   function tierBadge(tier) { return tier ? h("span", { class: `tier tier-${tier}` }, tier) : h("span", { class: "tier" }, "—"); }
   function stateReason(state, reason, fallback) { return state === "failed" ? fallback : reason || fallback; }
   function stateChip(metric) {
@@ -418,7 +423,7 @@
       h("p", {}, "Performance: ", perf ? `${perf.value} (${perf.platform || ""}${perf.depth ? ", " + perf.depth : ""}; ${perf.source || ""})` : (entry.performance_missing_reason || "none published"),
         spacedUnverifiedBadge(metric.entry)),
       meaning ? h("p", {}, meaning.split(". ")[0] + ".") : "",
-      h("p", {}, ...(entry.flags || []).map((f) => flagPill(f)), ...licenses),
+      h("p", {}, ...(entry.flags || []).map((f) => metricFlag(metric, f)), ...licenses),
       toggle, details);
   }
 
@@ -475,7 +480,8 @@
       for (const m of groups[key]) { out.push(card(sample, m, seen, first)); first = false; }
     }
     const reasons = (list) => { const c = {}; for (const m of list) c[m.reason || "—"] = (c[m.reason || "—"] || 0) + 1; return Object.entries(c).map(([k, v]) => `${k.replace(/_/g, " ")} ${v}`).join(" · "); };
-    const extras = (m) => [h("span", {}, ...(m.entry && m.entry.license_ids || []).map((id) => seen.has(id) ? licenseRef(sample, id) : (seen.add(id), licenseRef(sample, id)))), unverifiedBadge(m.entry)];
+    const extras = (m) => [h("span", {}, ...(m.entry && m.entry.flags || []).map((flag) => metricFlag(m, flag)),
+      ...(m.entry && m.entry.license_ids || []).map((id) => seen.has(id) ? licenseRef(sample, id) : (seen.add(id), licenseRef(sample, id)))), unverifiedBadge(m.entry)];
     out.push(collapsed(`Not interpretable (${groups.not_interpretable.length})`, reasons(groups.not_interpretable), ["Metric", "Value", "Reason", "Needs", ""],
       groups.not_interpretable.map((m) => [m.label, fmt(m.value, m.unit), (m.reason || "").replace(/_/g, " "), m.entry && m.entry.min_depth_x ? `${m.entry.min_depth_x}x` : "—", extras(m)])));
     out.push(collapsed(`No reference (${groups.no_reference.length})`, reasons(groups.no_reference), ["Metric", "Value", "Reason", "Reference shown", ""],
