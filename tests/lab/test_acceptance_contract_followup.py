@@ -21,7 +21,35 @@ def test_viral_results_show_the_required_privacy_disclosure(tmp_path) -> None:
     for metric in viral["metrics"][1:]:
         metric.update(state="no_reference", reason="no_reference")
     with _server(tmp_path, sample) as server:
-        dom = _dom(server, tmp_path / "browser", route=f"/sample/{ID12}/findings")
+        kind, source = server.app.assets["/assets/lab.js"]
+        server.app.assets["/assets/lab.js"] = (kind, source + b"""
+          window.addEventListener('load', () => {
+            const timer = setInterval(() => {
+              if (document.body.dataset.ready !== '1') return;
+              const group = [...document.querySelectorAll('#main details.finding-group')]
+                .find((item) => item.querySelector('summary')?.textContent.startsWith('No reference'));
+              if (!group || !group.querySelector('tr .flag-pill')) return;
+              group.open = true;
+              const wrap = group.querySelector('.table-wrap');
+              const pill = group.querySelector('tr .flag-pill');
+              document.body.dataset.viralRows = String(group.querySelectorAll('tbody tr').length);
+              document.body.dataset.viralPageOverflow = String(
+                document.documentElement.scrollWidth > document.documentElement.clientWidth + 1);
+              document.body.dataset.viralWrapContained = String(
+                wrap.getBoundingClientRect().right <= window.innerWidth + 1);
+              document.body.dataset.viralWrapOverflow = getComputedStyle(wrap).overflowX;
+              document.body.dataset.viralPillWrap = getComputedStyle(pill).whiteSpace;
+              clearInterval(timer);
+            }, 20);
+          });
+        """)
+        dom = _dom(server, tmp_path / "browser", size="360,740",
+                   route=f"/sample/{ID12}/findings", want=lambda page: 'data-viral-rows' in page)
+    assert 'data-viral-rows="' in dom and 'data-viral-rows="0"' not in dom
+    assert 'data-viral-page-overflow="false"' in dom
+    assert 'data-viral-wrap-contained="true"' in dom
+    assert 'data-viral-wrap-overflow="auto"' in dom
+    assert 'data-viral-pill-wrap="nowrap"' not in dom
     cards = re.findall(r'<article class="finding-card">(.*?)</article>', dom, re.DOTALL)
     marker = f'id="card-viral-reads-{viral["metrics"][0]["metric_id"]}"'
     card = next(card for card in cards if marker in card)
