@@ -23,7 +23,7 @@ from ..assets import AssetError
 from ..methylbert_assets import copy_methylbert_bundle, inspect_methylbert_bundle
 from ..methylbert_bundle import BundleError, unpack_bundle, verify_bundle
 from ..methylbert_runtime import (
-    MIN_ELIGIBLE_READS, RuntimeRefusal, require_ready, run_worker,
+    MIN_ELIGIBLE_READS, PINNED_UPSTREAM_COMMIT, RuntimeRefusal, require_ready, run_worker,
 )
 from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip, ToolPin
 from ..store import LabStore
@@ -100,7 +100,7 @@ class Methylbert(Base):
     requires: Requirements = field(default_factory=lambda: Requirements(mm_tags=True, min_eligible_reads=MIN_ELIGIBLE_READS))
     consumes: str = "full_bam"
     cost: str = "slow"
-    tools: tuple[ToolPin, ...] = (ToolPin("methylbert", "pinned-upstream-commit", "methylbert-mit"),)
+    tools: tuple[ToolPin, ...] = (ToolPin("methylbert", PINNED_UPSTREAM_COMMIT, "methylbert-mit"),)
     parameters: dict[str, Any] = field(default_factory=lambda: {
         "method": "methylbert tumour/normal deconvolution", "input": "Dorado MM/ML ONT BAM",
         "minimum_eligible_reads": MIN_ELIGIBLE_READS, "worker": "offline-private-v1",
@@ -117,7 +117,9 @@ class Methylbert(Base):
             model = None
         return {**self.parameters, "basecall_model": model,
                 "bundle_sha256": ctx.extras.get("methylbert_bundle_sha256"),
-                "code_sha256": ctx.extras.get("methylbert_code_sha256")}
+                "code_sha256": ctx.extras.get("methylbert_code_sha256"),
+                "min_classified_reads": ctx.extras.get("methylbert_min_classified_reads"),
+                "child_sha256": _digest(Path(__file__).resolve().parents[1] / "methylbert_child.py")}
 
     def preflight(self, ctx: InputContext) -> Ready | Skip:
         if ctx.example:
@@ -131,6 +133,9 @@ class Methylbert(Base):
         code_sha = _sha(ctx.extras.get("methylbert_code_sha256"))
         if bundle_sha is None or code_sha is None:
             return Skip("missing_asset", "supply a trusted registered bundle and installed-code SHA-256")
+        minimum_support = ctx.extras.get("methylbert_min_classified_reads")
+        if type(minimum_support) is not int or not 1 <= minimum_support <= ctx.eligible_reads:
+            return Skip("unqualified_support", "supply an independently established minimum classified-read count")
         fasta_text = ctx.extras.get("reference_fasta")
         if not isinstance(fasta_text, str):
             return Skip("reference", "the registered reference FASTA is unavailable")
@@ -151,6 +156,9 @@ class Methylbert(Base):
             record = inspect_methylbert_bundle(LabStore(ctx.root), bundle_sha)
             bundle = verify_bundle(record.file)
         except (AssetError, BundleError) as exc:
+            directory = LabStore(ctx.root).lab / "assets" / "methylbert-bundle" / bundle_sha
+            if directory.exists() or directory.is_symlink():
+                raise RuntimeError("registered MethylBERT bundle failed integrity verification") from exc
             return Skip("missing_asset", f"the trusted MethylBERT bundle is unavailable: {type(exc).__name__}")
         try:
             import torch
@@ -177,6 +185,10 @@ class Methylbert(Base):
         fasta = Path(str(ctx.extras["reference_fasta"]))
         if _digest(fasta) != ctx.reference_sha256:
             raise RuntimeError("the registered reference FASTA changed since input alignment")
+        child = Path(__file__).resolve().parents[1] / "methylbert_child.py"
+        planned = ctx.extras.get("planned_parameters", {})
+        if _digest(child) != planned.get("child_sha256"):
+            raise RuntimeError("MethylBERT child code changed since execution identity was selected")
         with tempfile.TemporaryDirectory(prefix="methylbert-", dir=out.parent) as private_name:
             private = Path(private_name)
             private.chmod(0o700)
@@ -194,21 +206,25 @@ class Methylbert(Base):
                 "model_id": bundle.model_id,
                 "n_mers": bundle.n_mers, "seq_len": bundle.seq_len,
                 "eligible_reads": ctx.eligible_reads,
+                "min_classified_reads": ctx.extras["methylbert_min_classified_reads"],
             }), encoding="utf-8")
-            child = Path(__file__).resolve().parents[1] / "methylbert_child.py"
             aggregate = run_worker(
                 [sys.executable, "-I", "-X", f"pycache_prefix={private / 'pycache'}", str(child), str(request)],
                 scratch=private, env=_offline_env(private), aggregate_path=aggregate_path,
                 model_id=bundle.model_id, eligible_reads=int(ctx.eligible_reads),
             )
+            if aggregate.classified_reads < int(ctx.extras["methylbert_min_classified_reads"]):
+                raise RuntimeError("MethylBERT classified-read support is below the qualified floor")
         provenance = {
             "bundle_sha256": bundle_sha, "installed_code_sha256": code_sha,
+            "child_sha256": planned["child_sha256"],
             "reference_sha256": ctx.reference_sha256, "model_id": bundle.model_id,
             "n_mers": bundle.n_mers, "seq_len": bundle.seq_len,
             "dmrs_sha256": bundle.files.get("dmrs.tsv"),
             "training_table_sha256": bundle.files.get("train_seq.csv"),
             "basecall_model": header_model(ctx.input_dir / "aligned.bam"),
             "eligible_reads": ctx.eligible_reads, "classified_reads": aggregate.classified_reads,
+            "min_classified_reads": ctx.extras["methylbert_min_classified_reads"],
         }
         return AlgorithmOutput(
             metrics=[

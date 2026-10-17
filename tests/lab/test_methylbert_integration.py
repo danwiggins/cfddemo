@@ -6,18 +6,19 @@ import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pysam
 import pytest
 
 import traceback_lab.algorithms.methylbert as adapter
 from traceback_lab.methylbert_bundle import Bundle
-from traceback_lab.methylbert_child import _training_counts
+from traceback_lab.methylbert_child import _training_counts, _tumour_dmrs
 from traceback_lab.methylbert_runtime import Aggregate, MIN_ELIGIBLE_READS, RuntimeRefusal
 from traceback_lab.registry import InputContext, Ready, Skip, execution_identity, load_registry
 
 
-def _context(tmp_path: Path, **extras: str) -> InputContext:
+def _context(tmp_path: Path, **extras: Any) -> InputContext:
     return InputContext(
         root=tmp_path, source_id="source", input_id="input", reference_id="hg38",
         reference_sha256="a" * 64, input_dir=tmp_path / "input",
@@ -38,7 +39,8 @@ def test_registry_and_absent_checkpoint_skip_without_gpu_probe(tmp_path, monkeyp
 
 def test_bundle_code_and_basecaller_each_change_execution_identity(tmp_path, monkeypatch):
     monkeypatch.setattr(adapter, "header_model", lambda *_: "dorado-model-A")
-    first = _context(tmp_path, methylbert_bundle_sha256="b" * 64, methylbert_code_sha256="c" * 64)
+    first = _context(tmp_path, methylbert_bundle_sha256="b" * 64, methylbert_code_sha256="c" * 64,
+                     methylbert_min_classified_reads=100000)
 
     def identity(ctx):
         algorithm = adapter.METHYLBERT
@@ -48,8 +50,12 @@ def test_bundle_code_and_basecaller_each_change_execution_identity(tmp_path, mon
         )
 
     original = identity(first)
-    assert original != identity(_context(tmp_path, methylbert_bundle_sha256="d" * 64, methylbert_code_sha256="c" * 64))
-    assert original != identity(_context(tmp_path, methylbert_bundle_sha256="b" * 64, methylbert_code_sha256="d" * 64))
+    assert original != identity(_context(tmp_path, methylbert_bundle_sha256="d" * 64, methylbert_code_sha256="c" * 64,
+                                         methylbert_min_classified_reads=100000))
+    assert original != identity(_context(tmp_path, methylbert_bundle_sha256="b" * 64, methylbert_code_sha256="d" * 64,
+                                         methylbert_min_classified_reads=100000))
+    assert original != identity(_context(tmp_path, methylbert_bundle_sha256="b" * 64, methylbert_code_sha256="c" * 64,
+                                         methylbert_min_classified_reads=200000))
     monkeypatch.setattr(adapter, "header_model", lambda *_: "dorado-model-B")
     assert original != identity(first)
 
@@ -58,6 +64,7 @@ def test_preflight_uses_measured_eligible_depth_not_classified_support(tmp_path,
     ctx = _context(
         tmp_path, reference_fasta=str(tmp_path / "reference.fa"),
         methylbert_bundle_sha256="b" * 64, methylbert_code_sha256="c" * 64,
+        methylbert_min_classified_reads=100000,
     )
     monkeypatch.setattr(adapter, "_ont_header", lambda *_: True)
     monkeypatch.setattr(adapter, "header_model", lambda *_: "dorado-model")
@@ -73,6 +80,11 @@ def test_preflight_uses_measured_eligible_depth_not_classified_support(tmp_path,
         assert model is bundle
 
     monkeypatch.setattr(adapter, "require_ready", ready)
+    without_floor = _context(
+        tmp_path, reference_fasta=str(tmp_path / "reference.fa"),
+        methylbert_bundle_sha256="b" * 64, methylbert_code_sha256="c" * 64,
+    )
+    assert adapter.METHYLBERT.preflight(without_floor).reason_code == "unqualified_support"
     assert isinstance(adapter.METHYLBERT.preflight(ctx), Ready)
     assert observed["eligible_reads"] == MIN_ELIGIBLE_READS
     assert observed["reference_sha256"] == "a" * 64
@@ -117,6 +129,7 @@ def test_private_worker_lifecycle_publishes_only_aggregate(tmp_path, monkeypatch
     ctx = _context(
         tmp_path, reference_fasta=str(fasta),
         methylbert_bundle_sha256="b" * 64, methylbert_code_sha256="c" * 64,
+        methylbert_min_classified_reads=100000, planned_parameters={"child_sha256": "a" * 64},
     )
     monkeypatch.setattr(adapter.METHYLBERT, "preflight", lambda *_: Ready())
     monkeypatch.setattr(adapter, "_digest", lambda *_: "a" * 64)
@@ -152,6 +165,15 @@ def test_private_worker_lifecycle_publishes_only_aggregate(tmp_path, monkeypatch
     assert result.metrics[2]["n"] == MIN_ELIGIBLE_READS
     assert set(result.artifacts) == {"methylbert_provenance.json"}
     assert json.loads(result.artifacts["methylbert_provenance.json"])["bundle_sha256"] == "b" * 64
+    assert json.loads(result.artifacts["methylbert_provenance.json"])["child_sha256"] == "a" * 64
+    assert json.loads(result.artifacts["methylbert_provenance.json"])["min_classified_reads"] == 100000
+
+    def low_support(_argv, *, scratch, **_kwargs):
+        return Aggregate("model-1", 0.25, 0.75, 99999)
+
+    monkeypatch.setattr(adapter, "run_worker", low_support)
+    with pytest.raises(RuntimeError, match="qualified floor"):
+        adapter.METHYLBERT.run(ctx, out)
 
     def failing_worker(_argv, *, scratch, **_kwargs):
         nonlocal private_path
@@ -164,13 +186,19 @@ def test_private_worker_lifecycle_publishes_only_aggregate(tmp_path, monkeypatch
     assert private_path is not None and not private_path.exists()
 
 
-def test_training_margins_require_both_classes_and_count_dmrs(tmp_path):
+def test_training_margins_and_tumour_dmrs_are_checked_separately(tmp_path):
     table = tmp_path / "train_seq.csv"
     table.write_text("ctype\tdmr_label\nN\t0\nN\t2\nT\t2\n", encoding="utf-8")
-    margins, n_dmrs = _training_counts(table)
+    margins, training_labels = _training_counts(table)
     assert margins["N"] == pytest.approx(2 / 3)
     assert margins["T"] == pytest.approx(1 / 3)
-    assert n_dmrs == 3
+    assert training_labels == {0, 2}
+    dmrs = tmp_path / "dmrs.tsv"
+    dmrs.write_text("chr\tstart\tend\tctype\tdmr_id\nchr1\t0\t100\tT\t0\nchr1\t100\t200\tT\t1\nchr1\t200\t300\tT\t2\n", encoding="utf-8")
+    assert _tumour_dmrs(dmrs) == {0, 1, 2}
+    dmrs.write_text("chr\tstart\tend\tctype\tdmr_id\nchr1\t0\t100\tN\t0\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="tumour-specific"):
+        _tumour_dmrs(dmrs)
     table.write_text("ctype\tdmr_label\nN\t0\n", encoding="utf-8")
     with pytest.raises(ValueError, match="both classes"):
         _training_counts(table)

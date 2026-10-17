@@ -245,6 +245,7 @@ def run_plan(
         }
         target.extras["planned_asset_sha256s"] = planned_assets
         target.extras["planned_tool_pins"] = planned_tools
+        target.extras["planned_parameters"] = planned_parameters
         ctx = target.context(store.root)
         decision: Ready | Skip
         if blocked:

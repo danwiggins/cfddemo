@@ -83,6 +83,7 @@ def add_run_parser(commands: Any, common: Callable[[argparse.ArgumentParser], No
     run.add_argument("--mmi", type=Path, metavar="PATH", help="reuse an existing minimap2 index")
     run.add_argument("--methylbert-bundle-sha256", type=_sha256, metavar="SHA256", help="operator-trusted registered MethylBERT tumour/normal bundle")
     run.add_argument("--methylbert-code-sha256", type=_sha256, metavar="SHA256", help="trusted digest of the pinned installed MethylBERT Python sources")
+    run.add_argument("--methylbert-min-classified", type=_positive_count, metavar="N", help="independently qualified minimum unique classified reads for this MethylBERT model")
     run.add_argument("--dry-run", action="store_true", help="print the plan; write nothing, take no lock")
     run.add_argument("--verbose", action="store_true", help="stream tool stderr live (never stored)")
     common(run)
@@ -110,6 +111,12 @@ def _sha256(value: str) -> str:
     if not re.fullmatch(r"[0-9a-f]{64}", value):
         raise argparse.ArgumentTypeError("MethylBERT SHA-256 must be 64 lowercase hexadecimal characters")
     return value
+
+
+def _positive_count(value: str) -> int:
+    if not value.isdecimal() or len(value) > 12 or int(value) < 1:
+        raise argparse.ArgumentTypeError("MethylBERT minimum classified reads must be a positive integer")
+    return int(value)
 
 
 def _progress(as_json: bool) -> Callable[[str], None]:
@@ -180,6 +187,7 @@ def _flags(args: argparse.Namespace) -> dict[str, Any]:
         "stored_sample": len(args.inputs) == 1 and _is_stored(args.inputs[0]),
         "methylbert_bundle_sha256": getattr(args, "methylbert_bundle_sha256", None),
         "methylbert_code_sha256": getattr(args, "methylbert_code_sha256", None),
+        "methylbert_min_classified_reads": getattr(args, "methylbert_min_classified", None),
     }
 
 
@@ -190,6 +198,7 @@ def _is_stored(text: str) -> bool:
 def _target_from_input(
     aligned: AlignedInput, reference_id: str, reference_sha256: str, example: bool, store: LabStore,
     *, methylbert_bundle_sha256: str | None = None, methylbert_code_sha256: str | None = None,
+    methylbert_min_classified_reads: int | None = None,
 ) -> RunTarget:
     extras: dict[str, Any] = {}
     try:
@@ -198,6 +207,7 @@ def _target_from_input(
         pass  # algorithms that need the FASTA fail or skip on their own
     extras["methylbert_bundle_sha256"] = methylbert_bundle_sha256
     extras["methylbert_code_sha256"] = methylbert_code_sha256
+    extras["methylbert_min_classified_reads"] = methylbert_min_classified_reads
     return RunTarget(
         input_id=aligned.input_id,
         source_id=aligned.source_id,
@@ -523,6 +533,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     aligned, reference_id, reference_sha256, example, store,
                     methylbert_bundle_sha256=getattr(args, "methylbert_bundle_sha256", None),
                     methylbert_code_sha256=getattr(args, "methylbert_code_sha256", None),
+                    methylbert_min_classified_reads=getattr(args, "methylbert_min_classified", None),
                 )
                 results = run_plan(
                     store,

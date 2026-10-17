@@ -22,14 +22,14 @@ def _read_request(path: Path) -> dict[str, object]:
     value = json.loads(path.read_bytes())
     if not isinstance(value, dict) or set(value) != {
         "bam", "reference", "model_dir", "scratch", "aggregate", "code_sha256",
-        "reference_sha256", "model_id", "n_mers", "seq_len", "eligible_reads",
+        "reference_sha256", "model_id", "n_mers", "seq_len", "eligible_reads", "min_classified_reads",
     }:
         raise ValueError("MethylBERT child request is malformed")
     return value
 
 
-def _training_counts(path: Path) -> tuple[object, int]:
-    """Compute exact N/T margins and DMR count without retaining training rows."""
+def _training_counts(path: Path) -> tuple[object, set[int]]:
+    """Compute exact N/T margins and observed labels without retaining rows."""
 
     import pandas as pd
 
@@ -37,21 +37,47 @@ def _training_counts(path: Path) -> tuple[object, int]:
     labels: set[int] = set()
     with path.open("r", encoding="utf-8", newline="") as stream:
         reader = csv.DictReader(stream, delimiter="\t")
-        if not {"ctype", "dmr_label"}.issubset(reader.fieldnames or ()):
+        if (not {"ctype", "dmr_label"}.issubset(reader.fieldnames or ())
+                or len(set(reader.fieldnames or ())) != len(reader.fieldnames or ())):
             raise ValueError("training table lacks class and DMR labels")
         for row in reader:
             cell = row["ctype"]
             if cell not in ("N", "T"):
                 raise ValueError("training table is not a two-class N/T model")
             label = int(row["dmr_label"])
-            if label < 0 or label > 1_000_000:
+            if label < 0 or label > 100_000:
                 raise ValueError("training DMR label is invalid")
             counts[cell] += 1
             labels.add(label)
     total = counts["N"] + counts["T"]
     if not counts["N"] or not counts["T"] or not labels:
         raise ValueError("training table lacks both classes or DMRs")
-    return pd.Series({"N": counts["N"] / total, "T": counts["T"] / total}), max(len(labels), max(labels) + 1)
+    return pd.Series({"N": counts["N"] / total, "T": counts["T"] / total}), labels
+
+
+def _tumour_dmrs(path: Path) -> set[int]:
+    """Require the pinned upstream's tumour-specific, dense DMR labels."""
+
+    labels: set[int] = set()
+    with path.open("r", encoding="utf-8", newline="") as stream:
+        reader = csv.DictReader(stream, delimiter="\t")
+        required = {"chr", "start", "end", "ctype", "dmr_id"}
+        if (not required.issubset(reader.fieldnames or ())
+                or len(set(reader.fieldnames or ())) != len(reader.fieldnames or ())):
+            raise ValueError("DMR table lacks unambiguous coordinates and tumour labels")
+        for row in reader:
+            if row["ctype"] != "T":
+                raise ValueError("MethylBERT requires tumour-specific DMRs for the N/T class mapping")
+            label = int(row["dmr_id"])
+            if label < 0 or label > 100_000 or label in labels:
+                raise ValueError("DMR labels must be unique and bounded")
+            start, end = int(row["start"]), int(row["end"])
+            if not row["chr"] or start < 0 or end <= start:
+                raise ValueError("DMR coordinates are invalid")
+            labels.add(label)
+    if not labels or labels != set(range(len(labels))):
+        raise ValueError("DMR labels must be dense from zero")
+    return labels
 
 
 def _file_sha256(path: Path) -> str:
@@ -121,7 +147,14 @@ def main(argv: list[str]) -> int:
     model_dir = Path(str(request["model_dir"]))
     if request["n_mers"] != 3 or type(request["seq_len"]) is not int or not 1 <= request["seq_len"] <= 4096:
         raise ValueError("MethylBERT tokenizer does not match the registered bundle")
-    margins, n_dmrs = _training_counts(model_dir / "train_seq.csv")
+    if (type(request["eligible_reads"]) is not int or type(request["min_classified_reads"]) is not int
+            or not 1 <= request["min_classified_reads"] <= request["eligible_reads"]):
+        raise ValueError("MethylBERT classified-support floor is invalid")
+    margins, training_labels = _training_counts(model_dir / "train_seq.csv")
+    dmr_labels = _tumour_dmrs(model_dir / "dmrs.tsv")
+    if not training_labels.issubset(dmr_labels):
+        raise ValueError("training labels do not match the registered tumour DMRs")
+    n_dmrs = len(dmr_labels)
     # The pinned trainer expects these pickle files beside bert.model rather
     # than inside it. Move only the already-verified private copies.
     for name in ("dmr_encoder.pickle", "read_classification_model.pickle"):
@@ -144,19 +177,28 @@ def main(argv: list[str]) -> int:
         raise ValueError("MethylBERT trainer fell back from CUDA")
     trainer.load(str(model_dir / "bert.model"), load_fine_tune=True, n_dmrs=n_dmrs)
     rows, logits = trainer.read_classification(data_loader=loader, tokenizer=tokenizer, logit=True)
-    if logits.ndim != 2 or logits.shape[1] != 2 or not np.isfinite(logits).all():
+    if (logits.ndim != 2 or logits.shape[1] != 2 or not np.isfinite(logits).all()
+            or np.any(logits < 0) or np.any(logits > 1)
+            or not np.allclose(logits.sum(axis=1), 1.0, atol=1e-5, rtol=0)):
         raise ValueError("MethylBERT classifier produced invalid probabilities")
-    if len(rows) != len(logits) or not {"name", "methyl_seq", "dmr_label"}.issubset(rows.columns):
+    if len(rows) != len(logits) or not {"name", "methyl_seq", "dmr_label", "dmr_ctype", "ctype_label"}.issubset(rows.columns):
         raise ValueError("MethylBERT classifier returned malformed per-read rows")
-    rows = rows.drop(columns=["ctype_label"], errors="ignore")
+    if not rows["dmr_ctype"].eq("T").all() or not rows["ctype_label"].eq(0).all():
+        raise ValueError("MethylBERT inference rows violate the tumour-DMR class mapping")
+    if not set(rows["dmr_label"]).issubset(dmr_labels):
+        raise ValueError("MethylBERT inference DMR labels differ from the registered bundle")
+    rows = rows.drop(columns=["ctype_label"])
     rows["P_N"] = logits[:, 0]
     rows["P_ctype"] = logits[:, 1]
     rows = rows[rows["methyl_seq"].str.count("[01]") > 0]
     classified = int(rows["name"].nunique())
-    if not 1 <= classified <= int(request["eligible_reads"]):
+    if not request["min_classified_reads"] <= classified <= request["eligible_reads"]:
         raise ValueError("MethylBERT classified-read support is invalid")
     estimate, _fisher = purity_estimation(rows, margins, n_grid=10000, adjustment=False)
     fractions = dict(zip(estimate["cell_type"], estimate["pred"]))
+    if (set(fractions) != {"T", "N"} or not all(np.isfinite(value) and 0 <= value <= 1 for value in fractions.values())
+            or not np.isclose(fractions["T"] + fractions["N"], 1.0, atol=1e-6, rtol=0)):
+        raise ValueError("MethylBERT deconvolution returned invalid tumour/normal fractions")
     _save_aggregate(
         Path(str(request["aggregate"])), model_id=str(request["model_id"]),
         tumour=float(fractions["T"]), normal=float(fractions["N"]), classified=classified,
