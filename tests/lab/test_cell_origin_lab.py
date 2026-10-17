@@ -283,7 +283,11 @@ def test_low_marker_support_publishes_a_skip_without_a_composition(
         "low_support", f"cell-origin classified fragment and marker floors are not met at {tmp_path}/donor.tsv",
     ))
     monkeypatch.setattr(lab_worker, "load_entry", lambda _entry: co.CELL_ORIGIN)
-    monkeypatch.setattr(lab_worker.signal, "signal", lambda *_args: None)
+    monkeypatch.setattr(lab_worker, "signal", SimpleNamespace(
+        SIGTERM=lab_worker.signal.SIGTERM,
+        SIGKILL=lab_worker.signal.SIGKILL,
+        signal=lambda *_args: None,
+    ))
 
     def fake_pipeline(stages, **_kwargs):
         assert lab_worker.main([stages[0].argv[-1]]) == 0
