@@ -146,7 +146,7 @@ def _sample_with_unvalidated_wps(server, monkeypatch):
         })
         # The read-side sample depth comes from the first result; put the
         # injected WPS measurement first so this fixture exercises its gate.
-        view.results = {"wps": wps, **view.results}
+        view.results = {"wps": wps, **{key: result for key, result in view.results.items() if key != "wps"}}
     original = views.load_sample
     monkeypatch.setattr(api_module.views, "load_sample", lambda store, source_id: sample if source_id == sample.source_id else original(store, source_id))
     return sample.id12
