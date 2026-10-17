@@ -37,7 +37,12 @@ source_files = {
     "k100_minus_exclusion_lists.mappable_regions.hg38.bed": "mappable.bed",
 }
 for name in griffin_run._REF_FILES:
-    shutil.copy2(proof / source_files.get(name, "exclude.bed"), assets / name)
+    if name in source_files:
+        shutil.copy2(proof / source_files[name], assets / name)
+    else:
+        # The toy generator does not emit an exclusion list. Keep the
+        # production-config smoke self-contained with an inert toy interval.
+        (assets / name).write_text("chr1\t0\t1\n", encoding="ascii")
 
 frequency = assets / "genome_GC_frequency"
 frequency.mkdir()
