@@ -97,10 +97,13 @@ def test_capture_copies_exact_selected_artifact_and_does_not_drift(tmp_path, mon
     assert CohortGeneration(cohort_id="healthy-v1", version=1, members=(captured,)).model_dump(mode="json")["members"][0]["results"][0]["size_density"]["count"][99] == 3
 
     artifact.unlink()
-    artifact.symlink_to(tmp_path / "outside.json")
+    outside = tmp_path / "outside.json"
+    outside.write_bytes(content)
+    artifact.symlink_to(outside)
     with pytest.raises(LabProblem) as error:
         capture_density_vectors(store, (member,))
     assert "fragment-size density" in error.value.cause
+    assert outside.read_bytes() == content
 
 
 def test_size_density_contract_rejects_bad_denominator_and_dimension() -> None:
