@@ -184,6 +184,7 @@ def execution_identity(
     asset_sha256s: Iterable[str] = (),
     upstream: Iterable[Mapping[str, str]] = (),
     platform: str | None = None,
+    tool_identities: Iterable[Mapping[str, str]] | None = None,
 ) -> str:
     """``parameters_sha256`` for one algorithm on one reference (D19)."""
 
@@ -191,7 +192,8 @@ def execution_identity(
         algorithm_id=algorithm.id,
         algorithm_version=algorithm.version,
         parameters=algorithm.parameters,
-        tools=[tool.identity() for tool in algorithm.tools],
+        tools=([tool.identity() for tool in algorithm.tools] if tool_identities is None
+               else list(tool_identities)),
         reference_sha256=reference_sha256,
         asset_sha256s=asset_sha256s,
         upstream=upstream,

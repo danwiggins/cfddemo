@@ -17,7 +17,7 @@ from traceback_lab.adapters.griffin_run import count_d21_pairs
 from traceback_lab.algorithms.griffin import GRIFFIN
 from traceback_lab.griffin_assets import GriffinAssetError, inspect_griffin_assets, register_griffin_assets
 from traceback_lab.problems import EXIT_BLOCKED
-from traceback_lab.registry import InputContext, PlanItem, Skip
+from traceback_lab.registry import InputContext, PlanItem, Skip, execution_identity
 from traceback_lab.runner import RunTarget, run_plan
 from traceback_lab.scrub import Scrubber
 from traceback_lab.store import LabStore, new_run_id
@@ -400,3 +400,28 @@ def test_algorithm_publishes_primary_profile_and_input_bound_provenance(
     assert panel["profiles"][0]["bin_start_bp"] == [-15, 0, 15]
     assert result.artifacts["griffin_corrected_coverage.tsv"] == b"official corrected TSV"
     assert json.loads(result.artifacts["griffin_provenance.json"])["input_id"] == ctx.input_id
+
+
+def test_runtime_identity_changes_cache_key_and_run_refuses_planned_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import traceback_lab.algorithms.griffin as module
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(module, "planned_runtime_sha256", lambda: "a" * 64)
+    tools_a = [tool.identity() for tool in GRIFFIN.identity_tools()]
+    key_a = execution_identity(GRIFFIN, reference_sha256="3" * 64, tool_identities=tools_a)
+    monkeypatch.setattr(module, "planned_runtime_sha256", lambda: "b" * 64)
+    tools_b = [tool.identity() for tool in GRIFFIN.identity_tools()]
+    key_b = execution_identity(GRIFFIN, reference_sha256="3" * 64, tool_identities=tools_b)
+    assert key_a != key_b
+
+    monkeypatch.setattr(module, "inspect_griffin_assets", lambda _: SimpleNamespace(sha256="c" * 64))
+    base = dict(root=tmp_path, source_id="1" * 64, input_id="2" * 64,
+                reference_id="hg38", reference_sha256="3" * 64,
+                input_dir=tmp_path, platform="illumina", eligible_reads=5_000_000)
+    with pytest.raises(RuntimeError, match="registration changed"):
+        GRIFFIN.run(InputContext(**base, extras={"planned_asset_sha256s": ["d" * 64]}), tmp_path)
+    with pytest.raises(RuntimeError, match="runtime changed"):
+        GRIFFIN.run(InputContext(**base, extras={"planned_asset_sha256s": ["c" * 64],
+                                                 "planned_tool_identities": tools_a}), tmp_path)
