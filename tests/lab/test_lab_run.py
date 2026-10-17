@@ -346,6 +346,17 @@ def test_stored_dry_run_uses_selected_depth_without_writing(
     )
     assert code == 0, first
     store = LabStore(root)
+    source_file = store.sources_dir / f"{first['data']['sample']['source_id']}.json"
+    record = json.loads(source_file.read_text())
+    record["excluded"] = [4]
+    source_file.write_text(json.dumps(record))
+    input_id = first["data"]["sample"]["input_id"]
+    identity = next((store.results_dir / input_id / "read-summary").iterdir()).name
+    selected_summary = store.read_result(input_id, "read-summary", identity)
+    assert selected_summary is not None
+    expected_eligible = next(
+        metric.value for metric in selected_summary.metrics if metric.metric_id == "eligible_reads"
+    )
 
     def snapshot() -> dict[str, str]:
         return {
@@ -371,7 +382,13 @@ def test_stored_dry_run_uses_selected_depth_without_writing(
         unavailable = []
         for selected in (None, SimpleNamespace(status="failed", metrics=[])):
             with monkeypatch.context() as patch:
-                patch.setattr(LabStore, "read_result", lambda _store, *_args: selected)
+                def selected_result(_store, selected_input_id, algorithm_id, parameters_sha256):
+                    assert (selected_input_id, algorithm_id, parameters_sha256) == (
+                        input_id, "read-summary", identity,
+                    )
+                    return selected
+
+                patch.setattr(LabStore, "read_result", selected_result)
                 missing_code, missing = _json(
                     capsys, "run", "latest", "--root", str(root),
                     "--only", "delfi-ratio", "--dry-run",
@@ -382,11 +399,16 @@ def test_stored_dry_run_uses_selected_depth_without_writing(
             selected = SimpleNamespace(
                 status="ok", metrics=[SimpleNamespace(metric_id="eligible_reads", value=2_000_000)],
             )
-            patch.setattr(LabStore, "read_result", lambda _store, *_args: selected)
+            patch.setattr(LabStore, "read_result", selected_result)
             met_code, met = _json(
                 capsys, "run", "latest", "--root", str(root),
                 "--only", "delfi-ratio", "--dry-run",
             )
+        for malformed in ({"reference_id": "synth"}, ["invalid"]):
+            with monkeypatch.context() as patch:
+                patch.setattr(run_module, "input_manifest", lambda _store, _input_id: malformed)
+                bad_code, bad = _json(capsys, "run", "latest", "--root", str(root), "--dry-run")
+                assert bad_code == 4 and bad["data"]["code"] == "TBX-LAB-017"
         assert snapshot() == before
     assert code == human_code == forced_code == met_code == 0
     data = payload["data"]
@@ -394,11 +416,12 @@ def test_stored_dry_run_uses_selected_depth_without_writing(
     assert data["sample"]["input_id"] == first["data"]["sample"]["input_id"]
     assert data["reference_id"] == "synth"
     assert data["chunks"]["count"] == 3 and data["chunks"]["bytes"] > 0
+    assert data["chunks"]["excluded"] == [4]
     assert data["alignment"] == "reused (stored sample)"
     assert data["budget"]["required_bytes"] == 0
     assert data["budget"]["free_bytes"] == 3 * 1024**3
     assert data["budget"]["analysis_scratch"] == "not predicted"
-    assert data["eligible_reads"] < 1_000_000
+    assert data["eligible_reads"] == expected_eligible < 1_000_000
     assert data["plan"] == [
         {"algorithm_id": "read-summary", "upstream": True, "decision": "reused (selected result)"},
         {
@@ -409,8 +432,9 @@ def test_stored_dry_run_uses_selected_depth_without_writing(
     ]
     assert "REFERENCE synth" in human
     assert "3 stored chunk(s)" in human
+    assert "excluded [4]" in human
     assert "will skip (below eligible-read minimum)" in human
-    assert "has 3.0 GB (reused)" in human
+    assert "has 3.0 GB (reused; not a sufficiency check)" in human
     assert "ANALYSIS  scratch disk not predicted" in human
     assert "eligible_reads" not in forced["data"]
     assert all(row["decision"] == "decided at run time" for row in forced["data"]["plan"])

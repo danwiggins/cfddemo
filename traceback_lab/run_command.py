@@ -270,17 +270,38 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
         source_id = resolve_sample(store, args.inputs[0])
         with_sex_assertion(source_record(store, source_id) or {}, args.sex)
         aligned, record = _stored_input(store, source_id)
+        manifest = aligned.manifest
+        if (
+            not isinstance(manifest, dict)
+            or not isinstance(manifest.get("reference_id"), str)
+            or not manifest["reference_id"]
+            or not isinstance(manifest.get("reference_sha256"), str)
+            or not manifest["reference_sha256"]
+        ):
+            raise LabProblem(
+                "TBX-LAB-017",
+                cause="the stored aligned input has no valid reference binding",
+                fix="Rerun with the original chunk paths: `traceback lab run <chunk dir>`",
+                data={"candidates": []},
+            )
         data["sample"] = {"id12": id12_for(store, source_id), "input_id": aligned.input_id}
-        data["reference_id"] = aligned.manifest["reference_id"]
+        data["reference_id"] = manifest["reference_id"]
         data["alignment"] = "reused (stored sample)"
         chunks = record.get("chunks")
-        if isinstance(chunks, list) and all(
-            isinstance(chunk, dict) and isinstance(chunk.get("size"), int) and chunk["size"] >= 0
+        if isinstance(chunks, list) and chunks and all(
+            isinstance(chunk, dict) and isinstance(chunk.get("size"), int)
+            and not isinstance(chunk["size"], bool) and chunk["size"] >= 0
             for chunk in chunks
         ):
+            excluded = record.get("excluded", [])
+            if not isinstance(excluded, list) or not all(
+                isinstance(index, int) and not isinstance(index, bool) and index >= 0
+                for index in excluded
+            ):
+                excluded = None
             data["chunks"] = {
                 "count": len(chunks), "bytes": sum(chunk["size"] for chunk in chunks),
-                "excluded": record.get("excluded", []),
+                "excluded": excluded,
             }
         data["budget"] = {
             "required_bytes": 0,
@@ -292,13 +313,23 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
         lines.append(f"SAMPLE    {id12_for(store, source_id)} (stored)")
         lines.append(f"REFERENCE {data['reference_id']}")
         if "chunks" in data:
-            lines.append(f"INPUT     {data['chunks']['count']} stored chunk(s) · {data['chunks']['bytes'] / GIB:.2f} GB")
+            excluded = data["chunks"]["excluded"]
+            suffix = " · exclusions unknown" if excluded is None else (f" · excluded {excluded}" if excluded else "")
+            lines.append(
+                f"INPUT     {data['chunks']['count']} stored chunk(s) · "
+                f"{data['chunks']['bytes'] / GIB:.2f} GB{suffix}"
+            )
+        else:
+            lines.append("INPUT     unknown (stored chunk record incomplete)")
         lines.append("ALIGN     reused (stored sample)")
-        lines.append(f"DISK      ingest/align needs 0 GB, has {data['budget']['free_bytes'] / GIB:.1f} GB (reused)")
+        lines.append(
+            f"DISK      ingest/align needs 0 GB, has {data['budget']['free_bytes'] / GIB:.1f} GB "
+            "(reused; not a sufficiency check)"
+        )
         lines.append("ANALYSIS  scratch disk not predicted")
         summary = next((item.algorithm for item in items if item.algorithm.id == "read-summary"), None)
         if summary is not None and not args.force:
-            identity = execution_identity(summary, reference_sha256=aligned.manifest["reference_sha256"])
+            identity = execution_identity(summary, reference_sha256=manifest["reference_sha256"])
             selected = store.read_result(aligned.input_id, summary.id, identity)
             if selected is not None and selected.status == "ok":
                 values = {metric.metric_id: metric.value for metric in selected.metrics}
