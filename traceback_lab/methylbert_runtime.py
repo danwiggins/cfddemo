@@ -55,11 +55,16 @@ def numerical_runtime_identity(*, probe_gpu: bool) -> dict[str, Any]:
             import torch
 
             available = bool(torch.cuda.is_available())
-            cuda = {"available": available, "torch_cuda": torch.version.cuda}
+            count = torch.cuda.device_count() if available else 0
+            cuda = {"available": available and count > 0, "torch_cuda": torch.version.cuda,
+                    "device_count": count}
             if available:
                 cuda.update({
-                    "device": torch.cuda.get_device_name(0),
-                    "capability": list(torch.cuda.get_device_capability(0)),
+                    "devices": [
+                        {"name": torch.cuda.get_device_name(index),
+                         "capability": list(torch.cuda.get_device_capability(index))}
+                        for index in range(count)
+                    ],
                     "cudnn": torch.backends.cudnn.version(),
                 })
         except (ImportError, OSError, RuntimeError):

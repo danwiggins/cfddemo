@@ -33,11 +33,13 @@ def _ready(**changes):
 
 def test_numerical_runtime_identity_is_lightweight_until_a_model_needs_cuda(monkeypatch):
     monkeypatch.setattr(runtime.metadata, "version", lambda name: f"pinned-{name}")
+    visible = ["fixture GPU 0"]
     torch = SimpleNamespace(
         version=SimpleNamespace(cuda="12.4"),
         cuda=SimpleNamespace(
-            is_available=lambda: True, get_device_name=lambda _index: "fixture GPU",
-            get_device_capability=lambda _index: (8, 6),
+            is_available=lambda: True, device_count=lambda: len(visible),
+            get_device_name=lambda index: visible[index],
+            get_device_capability=lambda index: (8, 6 + index),
         ),
         backends=SimpleNamespace(cudnn=SimpleNamespace(version=lambda: 90100)),
     )
@@ -47,9 +49,14 @@ def test_numerical_runtime_identity_is_lightweight_until_a_model_needs_cuda(monk
     assert set(without_model["packages"]) == set(runtime.NUMERICAL_PACKAGES)
     with_model = runtime.numerical_runtime_identity(probe_gpu=True)
     assert with_model["cuda"] == {
-        "available": True, "torch_cuda": "12.4", "device": "fixture GPU",
-        "capability": [8, 6], "cudnn": 90100,
+        "available": True, "torch_cuda": "12.4", "device_count": 1,
+        "devices": [{"name": "fixture GPU 0", "capability": [8, 6]}], "cudnn": 90100,
     }
+    visible.append("fixture GPU 1")
+    two_devices = runtime.numerical_runtime_identity(probe_gpu=True)
+    assert two_devices["cuda"]["device_count"] == 2
+    assert two_devices["cuda"]["devices"][1] == {"name": "fixture GPU 1", "capability": [8, 7]}
+    assert two_devices != with_model
 
 
 def test_child_runtime_guard_refuses_a_changed_numerical_package(monkeypatch):
