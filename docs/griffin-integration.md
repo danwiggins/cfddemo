@@ -37,6 +37,10 @@ adapter remains necessary for the Lab's primary input. The caller supplies
 the registered hg38 FASTA and its SHA-256, Griffin's
 reference assets (including mappability BigWig, exclusion BEDs and all
 15–500 bp genome GC-frequency tables), and high-mappability TF-site lists.
+Every supplied TF-site row must lie on an autosome in the workflow chromosome
+sizes; the attempt records input row counts, while Griffin may retain fewer
+sites after its own filtering. A complete status never implies zero site
+attrition or adequate fragment support at each site.
 It requires the 5M D21 gate, a clean upstream checkout at the pinned commit,
 and a fresh per-input attempt directory. The adapter's `eligible_autosomal_pairs`
 input is a count of eligible autosomal **pairs**. The adapter independently
@@ -60,6 +64,9 @@ the resolved Snakemake, Python, samtools, and bedtools executable digests and
 the numerical Python package versions, and checks the runtime again after
 execution. The attempt contains a `bin/python` launcher for the recorded Lab interpreter
 and a hashed compatibility shim for Snakemake 5.19.2 on Python 3.11+. The
+shim is first on the workflow's `PYTHONPATH` and can shadow an operator
+environment's own `sitecustomize.py`; this is confined to workflow
+subprocesses and must be checked when qualifying a real installation. The
 adapter invokes Snakemake through that interpreter; PATH and PYTHONPATH make
 upstream scripts' `#!/usr/bin/env python` resolve to it too. The generated config sets the pinned
 upstream default `mappability_correction: false`, so the accepted output is
