@@ -47,6 +47,17 @@ from .. import views
 _LOGGED_SAMPLE_COMMANDS = frozenset({"run", "simulate cna", "simulate split", "cohort build"})
 
 
+def _safe_result_selections(sample: Any, order: list[str]) -> dict[str, Any]:
+    known = set(order)
+    unreadable = sample.full.unreadable
+    ambiguous = sample.full.ambiguous
+    return {
+        "unreadable_results": sorted(unreadable & known),
+        "ambiguous_results": sorted(ambiguous & known),
+        "malformed_result_selections": bool((unreadable | ambiguous) - known),
+    }
+
+
 def _recovery_problem(problem: LabProblem) -> dict[str, str]:
     """Only operator-safe fields cross the local Compare API boundary."""
 
@@ -562,8 +573,7 @@ class LabApi:
                         "spike": None if not spikes else all(row["recovered"] for row in spikes if row["tf_expected"] >= 0.1),
                         "split": bool(sample.by_transform("split")),
                     },
-                    "unreadable_results": sorted(sample.full.unreadable),
-                    "ambiguous_results": sorted(sample.full.ambiguous),
+                    **_safe_result_selections(sample, [a.id for a in _registry()]),
                 }
             )
         rows.sort(key=lambda row: row["run_utc"], reverse=True)
@@ -691,8 +701,7 @@ class LabApi:
             "agreement_pairs": _agreement_pairs(sample, generation, target, source_id, cohort_state),
             "size_density_band": density_band,
             "algorithms": algorithms,
-            "unreadable_results": sorted(sample.full.unreadable),
-            "ambiguous_results": sorted(sample.full.ambiguous),
+            **_safe_result_selections(sample, order),
             "identity_pairs": identity_pairs,
             "identity_pairs_reason": (
                 "Somalier is unavailable; reinstall the pinned tool and rerun identity before comparing."
