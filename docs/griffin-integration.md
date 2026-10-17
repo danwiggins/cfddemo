@@ -24,9 +24,10 @@ BAM **when the BAM is paired-end WGS**. Griffin's scripts require paired
 reads with positive template length in both GC counting and coverage. The
 adapter requires at least one BAM read group and every group to declare
 `PL:ILLUMINA`; it scans all primary BAM records for pairing and the 100–200 bp
-profile-window gate before creating an attempt. It does
-not infer library type from an early coordinate-sorted slice. Native ONT
-single-end BAMs are rejected. It compares the BAM's `@SQ` names and lengths
+profile-window gate before creating an attempt. It does not infer library type
+from an early coordinate-sorted slice. Read-group platform labels are
+declarations, not independent instrument attestation. Native ONT single-end
+BAMs lack the required paired records. It compares the BAM's `@SQ` names and lengths
 and the workflow chromosome sizes with the registered FASTA index. Every
 autosome in that index must appear in the workflow sizes, so the coverage
 space cannot omit autosomes included in the depth count. This checks
@@ -36,6 +37,10 @@ adapter remains necessary for the Lab's primary input. The caller supplies
 the registered hg38 FASTA and its SHA-256, Griffin's
 reference assets (including mappability BigWig, exclusion BEDs and all
 15–500 bp genome GC-frequency tables), and high-mappability TF-site lists.
+Every supplied TF-site row must lie on an autosome in the workflow chromosome
+sizes; the attempt records input row counts, while Griffin may retain fewer
+sites after its own filtering. A complete status never implies zero site
+attrition or adequate fragment support at each site.
 It requires the 5M D21 gate, a clean upstream checkout at the pinned commit,
 and a fresh per-input attempt directory. The adapter's `eligible_autosomal_pairs`
 input is a count of eligible autosomal **pairs**. The adapter independently
@@ -43,6 +48,11 @@ recounts first mates of proper, primary, mapped, same-contig, nonduplicate,
 non-QC-failed autosomal pairs at MAPQ ≥ 20. This is the paired subset of the
 Lab's D21 eligible-record rule; the proper-pair bit depends on the aligner.
 The adapter refuses a mismatch before creating an attempt. The attempt
+also requires at least one eligible 100–200 bp fragment, a compatibility
+check rather than proof of a usable profile-window distribution. Read-group
+platform labels are declarations, not independent instrument attestation.
+Full site-level fragment support and biological qualification remain open.
+The attempt
 records the verified count, exact counting predicate, sample ID, gate, and hashes for
 BAM, BAM index, reference, reference index, site lists and reference assets.
 It copies the pinned scripts and two Snakefiles into the attempt without
@@ -54,6 +64,9 @@ the resolved Snakemake, Python, samtools, and bedtools executable digests and
 the numerical Python package versions, and checks the runtime again after
 execution. The attempt contains a `bin/python` launcher for the recorded Lab interpreter
 and a hashed compatibility shim for Snakemake 5.19.2 on Python 3.11+. The
+shim is first on the workflow's `PYTHONPATH` and can shadow an operator
+environment's own `sitecustomize.py`; this is confined to workflow
+subprocesses and must be checked when qualifying a real installation. The
 adapter invokes Snakemake through that interpreter; PATH and PYTHONPATH make
 upstream scripts' `#!/usr/bin/env python` resolve to it too. The generated config sets the pinned
 upstream default `mappability_correction: false`, so the accepted output is

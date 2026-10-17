@@ -13,11 +13,12 @@ from traceback_lab.adapters.griffin import GriffinFormatError, read_corrected_pr
 from traceback_lab.adapters.griffin_run import GRIFFIN_COMMIT, GriffinRun, run_upstream
 
 
-def _write(path: Path, *, correction: str = "GC_corrected", sample: str = "S1") -> Path:
+def _write(path: Path, *, correction: str = "GC_corrected", sample: str = "S1",
+           site_count: int = 1000) -> Path:
     path.write_text(
         "-15\t0\t15\tcentral_coverage\tamplitude\tcorrection\t"
         "number_of_sites\tsite_name\tsmoothing\tCNA_normalization\tsample\n"
-        f"0.8\t0.5\t0.9\t0.5\t2.1\t{correction}\t1000\tCTCF\tTrue\tFalse\t{sample}\n",
+        f"0.8\t0.5\t0.9\t0.5\t2.1\t{correction}\t{site_count}\tCTCF\tTrue\tFalse\t{sample}\n",
         encoding="utf-8",
     )
     return path
@@ -33,6 +34,17 @@ def test_reads_minimal_corrected_profile_contract(tmp_path: Path) -> None:
     assert profile.coverage == (0.8, 0.5, 0.9)
     assert profile.central_coverage == 0.5
     assert profile.smoothing is True
+
+
+def test_site_list_cannot_extend_beyond_profiled_autosomes(tmp_path: Path) -> None:
+    from traceback_lab.adapters.griffin_run import _require_site_contigs
+
+    sites = tmp_path / "sites.txt"
+    sites.write_text("Chrom\tposition\nchr1\t100\nchrX\t200\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="outside the workflow scope"):
+        _require_site_contigs(sites, ("chr1",))
+    sites.write_text("Chrom\tposition\nchr1\t100\n", encoding="utf-8")
+    assert _require_site_contigs(sites, ("chr1",)) == 1
 
 
 def test_reads_pinned_upstream_healthy_demo_fixture() -> None:
@@ -151,7 +163,7 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
     sites.write_bytes(b"Chrom\tposition\nchr1\t100\n")
     tool_dir = tmp_path / "tools"
     tool_dir.mkdir()
-    for name in ("snakemake", "samtools", "bedtools"):
+    for name in ("git", "snakemake", "samtools", "bedtools"):
         (tool_dir / name).write_bytes(name.encode("ascii"))
     input_id = "abcdef012345"
     sample = f"lab_{input_id}"
@@ -162,8 +174,13 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
     snakemake_version = "5.19.2"
 
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        if argv[:2] == ["git", "-C"]:
-            return subprocess.CompletedProcess(argv, 0, GRIFFIN_COMMIT + "\n" if argv[-2:] == ["rev-parse", "HEAD"] else "")
+        if Path(argv[0]).name == "git" and argv[1] == "-C":
+            assert not any(key.startswith("GIT_") and key not in {
+                "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_OPTIONAL_LOCKS",
+            } for key in kwargs["env"])
+            answer = (str(upstream) + "\n" if argv[-2:] == ["rev-parse", "--show-toplevel"]
+                      else GRIFFIN_COMMIT + "\n" if argv[-2:] == ["rev-parse", "HEAD"] else "")
+            return subprocess.CompletedProcess(argv, 0, answer)
         if argv[-1] == "--version":
             assert argv[:2] == [sys.executable, str(tool_dir / "snakemake")]
             return subprocess.CompletedProcess(argv, 0, snakemake_version + "\n")
@@ -183,7 +200,7 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
         else:
             output = directory / "results" / sample / f"{sample}.GC_corrected.coverage.tsv"
             output.parent.mkdir(parents=True)
-            _write(output, sample=sample)
+            _write(output, sample=sample, site_count=1)
             if wrong_site:
                 output.write_text(output.read_text(encoding="utf-8").replace("\tCTCF\t", "\tOTHER\t"),
                                   encoding="utf-8")
@@ -236,6 +253,8 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
         assert manifest["runtime"]["executables"][name]["sha256"] == hashlib.sha256(name.encode()).hexdigest()
     assert manifest["runtime"]["packages"]["numpy"]
     assert manifest["fingerprints"]["bam_sha256"] == hashlib.sha256(b"bam").hexdigest()
+    assert manifest["fingerprints"]["git_sha256"] == hashlib.sha256(b"git").hexdigest()
+    assert manifest["site_list_input_rows"] == {"CTCF": 1}
     assert manifest["fingerprints"]["bam_indexes_sha256"]["aligned.bam.bai"] == hashlib.sha256(b"index").hexdigest()
     assert manifest["fingerprints"]["reference_index_sha256"] == hashlib.sha256(b"index").hexdigest()
     assert len(manifest["fingerprints"]["generated_configs_sha256"]) == 7
@@ -293,6 +312,20 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
             site_lists={"CTCF": sites}, attempt_dir=tmp_path / "wrong-pair-count-attempt",
         ))
     assert not (tmp_path / "wrong-pair-count-attempt").exists()
+    def mutate_bam_during_count(_: Path) -> int:
+        bam.write_bytes(b"changed while counting")
+        return 5_000_000
+
+    monkeypatch.setattr(griffin_run, "count_d21_pairs", mutate_bam_during_count)
+    with pytest.raises(RuntimeError, match="changed while Griffin input eligibility was measured"):
+        run_upstream(GriffinRun(
+            input_id=input_id, bam=bam, reference_fasta=reference,
+            reference_id="hg38", reference_sha256=hashlib.sha256(reference.read_bytes()).hexdigest(),
+            eligible_autosomal_pairs=5_000_000, upstream_root=upstream, ref_assets=assets,
+            site_lists={"CTCF": sites}, attempt_dir=tmp_path / "changed-during-count-attempt",
+        ))
+    assert not (tmp_path / "changed-during-count-attempt").exists()
+    bam.write_bytes(b"bam")
     monkeypatch.setattr(griffin_run, "count_d21_pairs", lambda _: 5_000_000)
     snakemake_version = "6.0"
     with pytest.raises(ValueError, match="pinned Snakemake 5.19.2"):
@@ -328,7 +361,9 @@ def test_pinned_checkout_gate_precedes_attempt(
     upstream.mkdir()
 
     def fake_git(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(argv, 0, head if argv[-2:] == ["rev-parse", "HEAD"] else status)
+        answer = (str(upstream) if argv[-2:] == ["rev-parse", "--show-toplevel"]
+                  else head if argv[-2:] == ["rev-parse", "HEAD"] else status)
+        return subprocess.CompletedProcess(argv, 0, answer)
 
     monkeypatch.setattr(subprocess, "run", fake_git)
     attempt = tmp_path / "attempt"

@@ -92,6 +92,17 @@ def _tool_path(command: str, *, path: str | None = None) -> Path:
     return _safe_path(Path(found))
 
 
+def _git_run(git: Path, upstream: Path, *args: str) -> str:
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_OPTIONAL_LOCKS": "0", "LC_ALL": "C"})
+    return subprocess.run(
+        [str(git), "-C", str(upstream), "-c", "core.fsmonitor=false",
+         "-c", f"core.hooksPath={os.devnull}", *args],
+        check=True, capture_output=True, text=True, env=env,
+    ).stdout.strip()
+
+
 def _runtime_identity(snakemake: Path, python: Path, samtools: Path, bedtools: Path,
                       workflow_path: str, workflow_pythonpath: str, compat: Path) -> dict:
     packages = {}
@@ -265,6 +276,22 @@ def _require_chrom_sizes(reference: Path, chrom_sizes: Path) -> tuple[str, ...]:
     return tuple(autosomes)
 
 
+def _require_site_contigs(path: Path, chromosomes: tuple[str, ...]) -> int:
+    allowed = set(chromosomes)
+    rows = 0
+    with path.open("r", encoding="utf-8") as stream:
+        for line_number, line in enumerate(stream, 1):
+            chrom = line.split("\t", 1)[0].strip()
+            if line_number == 1 and chrom.lower() in {"chrom", "chromosome"}:
+                continue
+            if chrom not in allowed:
+                raise ValueError("Griffin TF-site list contains a chromosome outside the workflow scope")
+            rows += 1
+    if rows == 0:
+        raise ValueError("Griffin TF-site list has no scoped sites")
+    return rows
+
+
 def count_d21_pairs(bam: Path, keep_name: Callable[[str], bool] | None = None) -> int:
     """Count one eligible autosomal molecule per proper Illumina pair."""
 
@@ -318,16 +345,13 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
     if os.name != "posix":
         raise RuntimeError("the pinned Griffin workflow requires a POSIX runtime")
     upstream = _safe_path(config.upstream_root)
-    commit = subprocess.run(
-        ["git", "-C", str(upstream), "rev-parse", "HEAD"],
-        check=True, capture_output=True, text=True,
-    ).stdout.strip()
+    git = _tool_path("git")
+    if Path(_git_run(git, upstream, "rev-parse", "--show-toplevel")).resolve() != upstream:
+        raise ValueError("Griffin checkout is not the pinned repository root")
+    commit = _git_run(git, upstream, "rev-parse", "HEAD")
     if commit != GRIFFIN_COMMIT:
         raise ValueError("Griffin checkout is not the pinned upstream commit")
-    dirty = subprocess.run(
-        ["git", "-C", str(upstream), "status", "--porcelain"],
-        check=True, capture_output=True, text=True,
-    ).stdout.strip()
+    dirty = _git_run(git, upstream, "status", "--porcelain", "--ignored", "--untracked-files=all")
     if dirty:
         raise ValueError("Griffin checkout has uncommitted changes")
     bam = _safe_path(config.bam)
@@ -343,11 +367,14 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
     reference_index = reference.with_suffix(reference.suffix + ".fai")
     if not reference_index.is_file():
         raise ValueError("the registered reference FASTA needs an index for Griffin")
+    counted_bam_sha256 = _digest(bam)
     if _require_paired_input(bam) == 0:
         raise ValueError("Griffin's pinned 100–200 bp profile window has no qualifying fragments")
     reference_index = _safe_path(reference_index)
     _require_reference_header(bam, reference)
     measured_pairs = count_d21_pairs(bam)
+    if _digest(bam) != counted_bam_sha256:
+        raise RuntimeError("BAM changed while Griffin input eligibility was measured")
     if measured_pairs != config.eligible_autosomal_pairs:
         raise ValueError("caller-supplied eligible autosomal pair count differs from the BAM")
     for filename in _REF_FILES:
@@ -361,10 +388,13 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
     if any(not path.is_file() for path in frequency_files):
         raise ValueError("Griffin genome GC-frequency reference is incomplete (15–500 bp)")
     site_paths: dict[str, str] = {}
+    site_input_rows: dict[str, int] = {}
     for name, path in config.site_lists.items():
         if not re.fullmatch(r"[A-Za-z0-9_-]+", name):
             raise ValueError("site-list names must be shell-safe")
-        site_paths[name] = str(_safe_path(path))
+        scoped_path = _safe_path(path)
+        site_input_rows[name] = _require_site_contigs(scoped_path, chromosomes)
+        site_paths[name] = str(scoped_path)
     sample = "lab_" + config.input_id
     attempt = config.attempt_dir
     if not attempt.is_absolute():
@@ -375,7 +405,8 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
     if not _SAFE_TOKEN.fullmatch(str(attempt.absolute())):
         raise ValueError("Griffin attempt needs a shell-safe POSIX path")
     fingerprints = {
-        "bam_sha256": _digest(bam),
+        "git_sha256": _digest(git),
+        "bam_sha256": counted_bam_sha256,
         "bam_indexes_sha256": {path.name: _digest(path) for path in bam_indexes},
         "reference_sha256": config.reference_sha256,
         "reference_index_sha256": _digest(reference_index),
@@ -505,10 +536,10 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
             or {str(path.relative_to(attempt)): _digest(path) for path in generated_configs}
             != fingerprints["generated_configs_sha256"]):
         raise RuntimeError("Griffin workflow source or generated configuration changed during computation")
-    if (subprocess.run(["git", "-C", str(upstream), "rev-parse", "HEAD"], check=True,
-                       capture_output=True, text=True).stdout.strip() != commit
-            or subprocess.run(["git", "-C", str(upstream), "status", "--porcelain"], check=True,
-                              capture_output=True, text=True).stdout.strip()):
+    if (_digest(git) != fingerprints["git_sha256"]
+            or _git_run(git, upstream, "rev-parse", "--show-toplevel") != str(upstream)
+            or _git_run(git, upstream, "rev-parse", "HEAD") != commit
+            or _git_run(git, upstream, "status", "--porcelain", "--ignored", "--untracked-files=all")):
         raise RuntimeError("pinned Griffin checkout changed during computation")
     if (tuple(_safe_path(path) for path in bam_index_candidates if path.is_file()) != bam_indexes
             or {path.name: _digest(path) for path in bam_indexes} != fingerprints["bam_indexes_sha256"]
@@ -526,6 +557,8 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
     profiles = read_corrected_profiles(output, expected_sample=sample)
     if {profile.site_name for profile in profiles} != set(site_paths):
         raise GriffinFormatError("Griffin output site lists do not match the requested site lists")
+    if any(profile.site_count > site_input_rows[profile.site_name] for profile in profiles):
+        raise GriffinFormatError("Griffin output exceeds the requested TF-site list")
     manifest = {
         "status": "complete", "input_id": config.input_id,
         "upstream_commit": commit, "reference_id": config.reference_id,
@@ -533,6 +566,7 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
         "sample": sample, "eligible_autosomal_pairs": config.eligible_autosomal_pairs,
         "minimum_eligible_autosomal_pairs": MIN_ELIGIBLE_AUTOSOMAL_PAIRS,
         "eligibility_source": "bam_verified", "eligibility_predicate": D21_PAIR_PREDICATE,
+        "site_list_input_rows": site_input_rows,
         "snakemake_version": snakemake_version, "runtime": runtime,
         "fingerprints": fingerprints,
         "gc_bias_sha256": _digest(gc_bias), "output_sha256": _digest(output),

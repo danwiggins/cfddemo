@@ -389,17 +389,26 @@ def test_dynamic_runtime_identity_controls_cohort_selection(store: LabStore, mon
     current_hash = execution_identity(
         algorithm, reference_sha256=_sha(900), tool_identities=tools,
     )
+    plan = {
+        "schema": "traceback.lab.execution-plan.v1",
+        "algorithm_id": "fragment-size", "algorithm_version": "1", "input_id": _sha(101),
+        "reference_sha256": _sha(900), "platform": "ont",
+        "parameters": dict(algorithm.parameters), "tools": tools,
+        "asset_sha256s": [], "upstream": [],
+    }
     store.publish_result(ResultEnvelope(
         algorithm_id="fragment-size", algorithm_version="1", status="ok",
         provenance=provenance(tool="fixture", parameters_sha256=current_hash,
                               source_id=source_id, input_id=_sha(101), reference_id="synthetic"),
         metrics=[Metric(metric_id="mode_bp", value=100.0)],
-    ), input_id=_sha(101))
+    ), input_id=_sha(101), execution_plan=plan)
     add_sample(store, "healthy", source_id)
     selected = build_cohort(store, "healthy").members[0].results
     assert len(selected) == 1 and selected[0].parameters_sha256 == current_hash
     monkeypatch.setattr(algorithm, "identity_tools", lambda *, worker_pythonpath: (ToolPin("runtime", "b" * 64),))
-    assert build_cohort(store, "healthy").members[0].results == ()
+    # Cohort reads use the producer-recorded runtime, not this reader's PATH.
+    selected_again = build_cohort(store, "healthy").members[0].results
+    assert len(selected_again) == 1 and selected_again[0].parameters_sha256 == current_hash
 
 
 def test_unsupported_platform_skips_asset_hashing_during_cohort_build(store: LabStore, monkeypatch: pytest.MonkeyPatch) -> None:
