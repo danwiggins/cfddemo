@@ -88,6 +88,13 @@ def test_refuses_incomplete_or_unsafe_inventory(tmp_path):
         account(tmp_path, source)
 
 
+def test_refuses_empty_bam_even_with_nonempty_index(tmp_path):
+    source, full = _fixture(tmp_path)
+    _write(tmp_path, f"inputs/{full}/aligned.bam", 0)
+    with pytest.raises(InventoryError, match="zero bytes"):
+        account(tmp_path, source)
+
+
 @pytest.mark.parametrize("entry", [{"kind": "aligned"}, {"kind": "aligned", "input_id": None}])
 def test_refuses_malformed_full_input_record(tmp_path, entry):
     source, _ = _fixture(tmp_path)
@@ -121,3 +128,17 @@ def test_prealigned_source_is_accepted(tmp_path):
     data["inputs"][0]["kind"] = "prealigned"
     path.write_text(json.dumps(data))
     assert account(tmp_path, source)["full_input_id"] == full
+
+
+def test_chunk_sizes_distinguish_absent_empty_and_malformed(tmp_path):
+    source, _ = _fixture(tmp_path)
+    path = tmp_path / "lab" / "sources" / f"{source}.json"
+    assert account(tmp_path, source)["recorded_included_chunk_bytes"] is None
+    data = json.loads(path.read_text())
+    data["chunks"] = []
+    path.write_text(json.dumps(data))
+    assert account(tmp_path, source)["recorded_included_chunk_bytes"] == 0
+    data["chunks"] = [{"size": "bad"}]
+    path.write_text(json.dumps(data))
+    with pytest.raises(InventoryError, match="source chunk row"):
+        account(tmp_path, source)

@@ -94,13 +94,15 @@ def account(root: Path, source_id: str, input_id: str | None = None, *,
     derived = record.get("derived")
     if not isinstance(full, list) or not isinstance(derived, list):
         raise InventoryError("source input lists are malformed")
-    chunks = record.get("chunks")
-    if (isinstance(chunks, list) and chunks
-            and all(isinstance(row, dict) and type(row.get("size")) is int
-                    and row["size"] >= 0 for row in chunks)):
-        recorded_chunk_bytes: int | None = sum(row["size"] for row in chunks)
-    else:
+    if "chunks" not in record:
         recorded_chunk_bytes = None
+    else:
+        chunks = record["chunks"]
+        if (not isinstance(chunks, list)
+                or any(not isinstance(row, dict) or type(row.get("size")) is not int
+                       or row["size"] < 0 for row in chunks)):
+            raise InventoryError("source chunk row is malformed")
+        recorded_chunk_bytes = sum(row["size"] for row in chunks)
     full_ids = []
     for row in full:
         if not isinstance(row, dict) or row.get("kind") not in {"aligned", "prealigned"}:
@@ -126,8 +128,8 @@ def account(root: Path, source_id: str, input_id: str | None = None, *,
     if bam_bytes is None or bai_bytes is None:
         raise InventoryError("required aligned BAM or index is unavailable")
     denominator = bam_bytes + bai_bytes
-    if denominator == 0:
-        raise InventoryError("aligned BAM and index have zero combined bytes")
+    if bam_bytes == 0 or bai_bytes == 0:
+        raise InventoryError("aligned BAM or index has zero bytes")
     other_input_present = bool(input_entries - sample_ids - {"index.json"})
     sample_inputs = 0
     other_inputs = 0
