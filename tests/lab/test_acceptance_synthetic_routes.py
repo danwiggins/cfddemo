@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import re
 import time
 from html.parser import HTMLParser
@@ -12,12 +13,11 @@ import pytest
 
 from tests.lab.test_lab_server import _chrome, _dom_cdp
 from tests.lab.test_landing import _dom, needs_chrome
-from traceback_lab.interpretation.engine import load_library
+from traceback_lab.interpretation.engine import classify, load_library
 from traceback_lab.registry import load_registry
 from traceback_lab.store import LabStore
 from traceback_lab.web.api import _catalog
 from traceback_lab.web.server import RunningLabServer
-
 
 ID12 = "3f9a1c2b7e04"
 LIBRARY = load_library()
@@ -29,6 +29,11 @@ LICENSE_IDS = {
     for license_id in entry.get("license_ids") or []
 }
 DISCLOSURE_ROUTES = ("home", "findings", "stability", "evidence", "methods")
+CONTEXT_LICENSE_ROUTES = (
+    ("signals", {"gpl-copyleft"}),
+    ("body-map", {"loyfer-atlas-terms-unknown", "modkit-ont-public", "yissum-uxm"}),
+    ("agreement", {"gpl-copyleft"}),
+)
 SAMPLE_ROUTES = (
     "findings", "trust-qc", "stability", "signals", "compare",
     "body-map", "agreement", "evidence", "methods",
@@ -172,6 +177,35 @@ def test_disclosure_fixture_is_nonvacuous_and_registry_complete() -> None:
     assert LICENSE_IDS == {license_id for row in sample["defended"]["rows"] for license_id in row["license_ids"]}
 
 
+def _low_depth_liver_sample() -> dict:
+    sample = _sample()
+    sample["depth"]["approx_depth_x"] = 0.2
+    liver = next(metric for algorithm in sample["algorithms"] if algorithm["algorithm_id"] == "cell-origin"
+                 for metric in algorithm["metrics"] if metric["metric_id"] == "fraction_liver_hep")
+    result = classify(0.031, LIBRARY.entry("cell-origin", "fraction_liver_hep"), depth_x=0.2)
+    liver.update(value=0.031, state=result.state, reason=result.reason, caption=result.caption,
+                 reference_kind=result.reference_kind, interval=result.interval)
+    return sample
+
+
+def test_actual_liver_metric_is_depth_gated_at_point_two_x_with_estimate_retained() -> None:
+    sample = _low_depth_liver_sample()
+    liver = next(metric for algorithm in sample["algorithms"] if algorithm["algorithm_id"] == "cell-origin"
+                 for metric in algorithm["metrics"] if metric["metric_id"] == "fraction_liver_hep")
+    assert (liver["state"], liver["reason"], liver["value"]) == ("not_interpretable", "depth", 0.031)
+    assert "Needs 5x; this input is 0.2x. The estimate stays visible." == liver["caption"]
+
+
+@needs_chrome
+def test_low_depth_liver_metric_keeps_numeric_estimate_in_findings(tmp_path) -> None:
+    with _server(tmp_path, _low_depth_liver_sample()) as server:
+        dom = _dom(server, tmp_path / "browser", route=f"/sample/{ID12}/findings",
+                   want=lambda d: 'data-ready="1"' in d and "Not interpretable" in d)
+    row = re.search(r"<tr><td>Liver-Hep share of cfDNA.*?</tr>", dom, re.DOTALL)
+    assert row is not None, "the liver metric must appear in the not-interpretable table"
+    assert "0.031" in row.group() and "depth" in row.group() and "5x" in row.group()
+
+
 @needs_chrome
 @pytest.mark.parametrize("route", DISCLOSURE_ROUTES)
 def test_every_registry_license_has_one_callout_on_disclosure_route(route, tmp_path) -> None:
@@ -190,7 +224,7 @@ def test_every_registry_license_has_one_callout_on_disclosure_route(route, tmp_p
     if route == "home":
         assert dom.index("License callouts") < dom.index('id="license-')
     if route == "findings":
-        cards = re.findall(r'<article class="finding-card">(.*?)</article>', dom, re.S)
+        cards = re.findall(r'<article class="finding-card">(.*?)</article>', dom, re.DOTALL)
         assert len(cards) == sum(len(a["metrics"]) for a in sample["algorithms"])
         for card in cards:
             assert card.count('class="tier ') == 1
@@ -201,11 +235,35 @@ def test_every_registry_license_has_one_callout_on_disclosure_route(route, tmp_p
 
 
 @needs_chrome
+@pytest.mark.parametrize("route,expected", CONTEXT_LICENSE_ROUTES)
+def test_context_routes_show_full_license_callouts(route, expected, tmp_path) -> None:
+    sample = _sample()
+    with _server(tmp_path, sample) as server:
+        if route == "signals":
+            kind, source = server.app.assets["/assets/lab.js"]
+            server.app.assets["/assets/lab.js"] = (kind, source + b"""
+              (() => {
+                const timer = setInterval(() => {
+                  const tab = [...document.querySelectorAll('.subtab')]
+                    .find((item) => item.textContent === 'Copy number');
+                  if (tab) { tab.click(); clearInterval(timer); }
+                }, 25);
+              })();
+            """)
+        dom = _dom(server, tmp_path / "browser", route=f"/sample/{ID12}/{route}",
+                   want=lambda d: all(f'id="license-{identity}"' in d for identity in expected))
+    parsed = _license_nodes(dom)
+    assert expected <= set(parsed.callouts), (route, parsed.callouts)
+    assert len(parsed.callouts) == len(set(parsed.callouts)), route
+    assert set(parsed.refs) <= set(parsed.callouts), (route, parsed.refs)
+
+
+@needs_chrome
 def test_every_registered_metric_flag_is_on_its_finding_card(tmp_path) -> None:
     sample = _sample()
     with _server(tmp_path, sample) as server:
         dom = _dom(server, tmp_path / "browser", route=f"/sample/{ID12}/findings")
-    cards = re.findall(r'<article class="finding-card">(.*?)</article>', dom, re.S)
+    cards = re.findall(r'<article class="finding-card">(.*?)</article>', dom, re.DOTALL)
     assert len(cards) == sum(len(a["metrics"]) for a in sample["algorithms"])
     for algorithm in sample["algorithms"]:
         for metric in algorithm["metrics"]:
@@ -260,6 +318,23 @@ def test_full_callout_computed_type_and_border(tmp_path) -> None:
             document.body.dataset.licenseBorder = border.borderLeftWidth;
             document.body.dataset.licenseColor = border.borderLeftColor;
             document.body.dataset.licenseToken = getComputedStyle(document.documentElement).getPropertyValue('--license').trim();
+            const expectedColor = getComputedStyle(block).borderLeftColor;
+            const failures = [];
+            const blocks = [...document.querySelectorAll('.license-callout')];
+            for (const item of blocks) {
+              const heading = item.querySelector('h3');
+              const paragraph = item.querySelector('p');
+              if (!heading || !paragraph) { failures.push(item.id); continue; }
+              const headingStyle = getComputedStyle(heading);
+              const paragraphStyle = getComputedStyle(paragraph);
+              const itemStyle = getComputedStyle(item);
+              if (parseFloat(headingStyle.fontSize) < 20 || parseFloat(paragraphStyle.fontSize) < 20
+                  || parseInt(headingStyle.fontWeight, 10) < 700 || parseInt(paragraphStyle.fontWeight, 10) < 700
+                  || parseFloat(itemStyle.borderLeftWidth) < 3 || itemStyle.borderLeftColor !== expectedColor)
+                failures.push(item.id);
+            }
+            document.body.dataset.licenseCount = String(blocks.length);
+            document.body.dataset.licenseFailures = failures.join(',');
             clearInterval(timer);
           }, 20);
         })();
@@ -269,6 +344,8 @@ def test_full_callout_computed_type_and_border(tmp_path) -> None:
                    want=lambda d: "data-license-title-size" in d)
     body = re.search(r"<body([^>]*)>", dom).group(1)
     attrs = dict(re.findall(r'data-([a-z-]+)="([^"]*)"', body))
+    assert int(attrs["license-count"]) == len(LICENSE_IDS)
+    assert attrs["license-failures"] == ""
     assert float(attrs["license-title-size"].removesuffix("px")) >= 20
     assert float(attrs["license-body-size"].removesuffix("px")) >= 20
     assert int(attrs["license-title-weight"]) >= 700 and int(attrs["license-body-weight"]) >= 700
@@ -293,7 +370,7 @@ STATE_CASES = [
     ("pre-cohort", "findings", "eligible cohort n = 0 of 10 needed"),
     ("invalid-library", "trust-qc", "Interpretation library on disk is invalid"),
     ("unknown-sample", "findings", "No Lab sample matches aaaaaaaaaaaa."),
-    ("chart-failed", "signals", "Chart could not be drawn"),
+    ("chart-failed", "signals", "Chart could not be drawn (synthetic renderer failure)"),
 ]
 
 
@@ -320,9 +397,21 @@ def test_synthetic_state_copy_on_surface(state, route, copy_text, tmp_path) -> N
     target = "aaaaaaaaaaaa" if state == "unknown-sample" else ID12
     path = None if route == "home" else f"/sample/{target}/{route}"
     with _server(tmp_path, sample) as server:
+        if state == "chart-failed":
+            density = json.dumps({"span_bp": [49, 50, 167, 700, 701], "count": [1, 2, 3, 4, 5]}).encode()
+            server.app.api.artifact = lambda id12, label, algorithm_id, panel_id: (
+                density if (id12, label, algorithm_id, panel_id) ==
+                (ID12, "full", "fragment-size", "size-density") else None
+            )
+            kind, _ = server.app.assets["/assets/vendor/echarts.min.js"]
+            server.app.assets["/assets/vendor/echarts.min.js"] = (
+                kind, b"window.echarts={init(){throw new Error('synthetic renderer failure')}};",
+            )
         dom = _dom(server, tmp_path / "browser", route=path,
                    want=lambda d: copy_text in d if state == "chart-failed" else 'data-ready="1"' in d)
     assert copy_text in dom, (state, route)
+    if state == "chart-failed":
+        assert "Data table" in dom and "167" in dom
     if state == "partial-exit-8" and route == "findings":
         assert "Details in Trust/QC" in dom
 
@@ -389,18 +478,22 @@ def test_synthetic_status_copy_in_live_region(state, copy_text, tmp_path) -> Non
         server.app.api.status = status
         dom = _dom(server, tmp_path / "browser", route=f"/sample/{ID12}/trust-qc",
                    want=lambda d: copy_text in d)
-    assert copy_text in dom and 'aria-live="polite"' in dom
+    status_region = re.search(
+        r'<p(?=[^>]*\bid="status")(?=[^>]*\brole="status")(?=[^>]*\baria-live="polite")[^>]*>(.*?)</p>', dom, re.S,
+    )
+    assert status_region is not None and copy_text in status_region.group(1)
     if state == "run-in-progress":
         run = dom.split("<h2>Run</h2>", 1)[1].split("</table>", 1)[0]
-        assert '<th scope="row">bam-qc</th><td>ok' in run
+        assert re.search(r'<th scope="row">bam-qc</th><td[^>]*>ok(?:\s|<)', run)
         assert 'latest run in progress' in run
+        assert '0.0 s (selected result)' in run
     if state == "interrupted":
         run = dom.split("<h2>Run</h2>", 1)[1].split("</table>", 1)[0]
-        assert '<th scope="row">bam-qc</th><td>ok' in run
+        assert re.search(r'<th scope="row">bam-qc</th><td[^>]*>ok(?:\s|<)', run)
         assert 'latest run interrupted' in run
     if state == "status-unavailable":
         run = dom.split("<h2>Run</h2>", 1)[1].split("</table>", 1)[0]
-        assert '<th scope="row">bam-qc</th><td>ok' in run
+        assert re.search(r'<th scope="row">bam-qc</th><td[^>]*>ok(?:\s|<)', run)
         assert 'latest run interrupted' not in run
         assert 'stopped during bam-qc' not in dom
     if state in ("run-finished", "results-changed"):
@@ -513,5 +606,5 @@ def test_interrupted_note_is_scoped_and_preserves_selected_result(tmp_path, scop
         }
         dom = _dom(server, tmp_path / "browser", route=f"/sample/{ID12}/trust-qc")
     run = dom.split("<h2>Run</h2>", 1)[1].split("</table>", 1)[0]
-    assert '<th scope="row">bam-qc</th><td>ok' in run
+    assert re.search(r'<th scope="row">bam-qc</th><td[^>]*>ok(?:\s|<)', run)
     assert ("latest run interrupted" in run) == (scope == "matching")

@@ -44,6 +44,37 @@ from ..store import LabStore, summarize_run
 from .. import views
 
 _LOGGED_SAMPLE_COMMANDS = frozenset({"run", "simulate cna", "simulate split"})
+_STATUS_COMMANDS = _LOGGED_SAMPLE_COMMANDS | frozenset({
+    "asset add", "cohort add", "cohort build", "identity sites add", "identity compare",
+})
+_STATUS_STEPS = frozenset({
+    "start", "sites", "relate", "ingest", "align", "derive", "read-summary",
+    "pmd", "tss-annotation", "viral-fasta", "methylbert-bundle", "meth-tf-reference",
+})
+
+
+def _safe_status_step(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    if value in _STATUS_STEPS:
+        return value
+    algorithm, _, derived = value.partition("@")
+    if algorithm not in {item.id for item in _registry()}:
+        return None
+    if not derived:
+        return algorithm if "@" not in value else None
+    return value if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,39}", derived) else None
+
+
+def _safe_result_selections(sample: Any, order: list[str]) -> dict[str, Any]:
+    known = set(order)
+    unreadable = sample.full.unreadable
+    ambiguous = sample.full.ambiguous
+    return {
+        "unreadable_results": sorted(unreadable & known),
+        "ambiguous_results": sorted(ambiguous & known),
+        "malformed_result_selections": bool((unreadable | ambiguous) - known),
+    }
 
 
 def _recovery_problem(problem: LabProblem) -> dict[str, str]:
@@ -341,8 +372,15 @@ class LabApi:
                 else:
                     summary = summarize_run([event for _, event in events], self.store)
                     if summary["status"] == "interrupted":
-                        interrupted = {"run_id": last, "step": summary["open_step"],
+                        interrupted = {"run_id": last, "step": _safe_status_step(summary["open_step"]),
                                        **_run_sample_identity(events)}
+        if status["active"] is not None:
+            command = status["active"].get("command")
+            status["active"] = {
+                **status["active"],
+                "command": command if isinstance(command, str) and command in _STATUS_COMMANDS else None,
+                "step": _safe_status_step(status["active"].get("step")),
+            }
         try:
             self.libraries.get()
         except (LibraryError, OSError):
@@ -485,8 +523,7 @@ class LabApi:
                         "spike": None if not spikes else all(row["recovered"] for row in spikes if row["tf_expected"] >= 0.1),
                         "split": bool(sample.by_transform("split")),
                     },
-                    "unreadable_results": sorted(sample.full.unreadable),
-                    "ambiguous_results": sorted(sample.full.ambiguous),
+                    **_safe_result_selections(sample, [a.id for a in _registry()]),
                 }
             )
         rows.sort(key=lambda row: row["run_utc"], reverse=True)
@@ -597,8 +634,7 @@ class LabApi:
             "cohort_state": cohort_state,
             "cohort_problem": cohort_problem,
             "algorithms": algorithms,
-            "unreadable_results": sorted(sample.full.unreadable),
-            "ambiguous_results": sorted(sample.full.ambiguous),
+            **_safe_result_selections(sample, order),
             "identity_pairs": identity_pairs,
             "identity_pairs_reason": (
                 "Somalier is unavailable; reinstall the pinned tool and rerun identity before comparing."

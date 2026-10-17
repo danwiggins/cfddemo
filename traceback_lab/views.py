@@ -59,7 +59,7 @@ def _selected_results_with_unreadable(
     base = store.results_dir / input_id
     out: dict[str, tuple[int | None, ResultEnvelope, str]] = {}
     ambiguous: set[str] = set()
-    unreadable: set[str] = set()
+    unreadable_orders: dict[str, list[int | None]] = {}
     if not base.is_dir():
         return {}, set(), set(), {}
     for algorithm_dir in sorted(base.iterdir()):
@@ -86,7 +86,9 @@ def _selected_results_with_unreadable(
                     continue
                 except OSError:
                     pass
-                unreadable.add(algorithm_dir.name)
+                unreadable_orders.setdefault(algorithm_dir.name, []).append(
+                    store.selected_order_from_selector(input_id, algorithm_dir.name, identity_dir.name)
+                )
                 continue
             attempt_id, envelope, order = selected
             current = out.get(algorithm_dir.name)
@@ -95,6 +97,11 @@ def _selected_results_with_unreadable(
                 ambiguous.discard(algorithm_dir.name)
             elif order == current[0]:
                 ambiguous.add(algorithm_dir.name)
+    unreadable = {
+        algorithm_id for algorithm_id, orders in unreadable_orders.items()
+        if any(order is None or algorithm_id not in out or out[algorithm_id][0] is None
+               or order >= out[algorithm_id][0] for order in orders)
+    }
     return {
         key: value for key, (_, value, _) in out.items()
         if key not in ambiguous and key not in unreadable

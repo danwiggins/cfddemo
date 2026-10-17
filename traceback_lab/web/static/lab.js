@@ -6,6 +6,7 @@
 (function () {
   // Record CSP violations first, so the headless CSP test can read them.
   const violations = [];
+  document.body.dataset.cspViolations = "0";
   document.addEventListener("securitypolicyviolation", (event) => {
     violations.push(`${event.violatedDirective} ${event.blockedURI || ""}`.trim());
     document.body.dataset.cspViolations = String(violations.length);
@@ -122,8 +123,20 @@
   // -- render -------------------------------------------------------------------------
   function setStatus(text, action) {
     const status = document.getElementById("status");
-    status.replaceChildren(text ? text : "");
-    if (action) status.append(" ", h("button", { type: "button", class: "control reload", onclick: () => location.reload() }, action));
+    let message = status.querySelector("[data-status-message]");
+    if (!message) {
+      message = h("span", { "data-status-message": "" });
+      status.prepend(message);
+    }
+    message.textContent = text || "";
+    status.querySelector("[data-library-error]")?.remove();
+    let reload = status.querySelector("button.reload");
+    if (action) {
+      if (!reload) {
+        reload = h("button", { type: "button", class: "control reload", onclick: () => location.reload() }, action);
+        status.append(h("span", { "data-reload-action": "" }, " ", reload));
+      } else reload.textContent = action;
+    } else if (reload) reload.closest("[data-reload-action]").remove();
   }
 
   function renderSwitcher() {
@@ -177,10 +190,21 @@
     }
     const lens = route.name === "lens" ? route.lens : null;
     const views = window.TracebackLabViews || {};
-    if (route.name === "home" && views.landing) { main.append(...views.landing(sample)); return; }
+    const appendSample = (nodes) => {
+      main.append(...nodes);
+      if (sample.excluded_chunks && sample.excluded_chunks.length) {
+        const notice = h("div", { class: "status-line" },
+          h("p", {}, `Provisional: this input excludes ${sample.excluded_chunks.length} truncated chunks; depth reflects the reads present.`),
+          h("details", {}, h("summary", {}, `Excluded chunk indexes (${sample.excluded_chunks.length})`),
+            h("p", {}, `Excluded chunk indexes: ${sample.excluded_chunks.join(", ")}.`)));
+        const heading = main.querySelector("h1");
+        if (heading) heading.after(notice); else main.prepend(notice);
+      }
+    };
+    if (route.name === "home" && views.landing) { appendSample(views.landing(sample)); return; }
     const chosen = lens || LENSES[0].id;
-    if (chosen === "trust-qc") { main.append(...trustQc(sample)); return; }
-    if (views[chosen]) { main.append(...views[chosen](sample)); return; }
+    if (chosen === "trust-qc") { appendSample(trustQc(sample)); return; }
+    if (views[chosen]) { appendSample(views[chosen](sample)); return; }
     main.append(h("h1", { class: "view-title" }, "Unknown sample"), h("p", {}, "No such lens. ", h("a", { href: "#/" }, "Back to Lab home")));
   }
 
@@ -196,11 +220,12 @@
   }
 
   // -- charts ---------------------------------------------------------------------------
+  const chartCell = (value) => typeof value === "number" && Number.isFinite(value) ? String(value) : fmt(value);
   function dataTable(caption, headers, rows) {
     const table = h("table", { class: "data-table" },
       h("caption", {}, caption),
       h("thead", {}, h("tr", {}, ...headers.map((name) => h("th", { scope: "col" }, name)))),
-      h("tbody", {}, ...rows.map((row) => h("tr", {}, ...row.map((cell) => h("td", {}, fmt(cell)))))));
+      h("tbody", {}, ...rows.map((row) => h("tr", {}, ...row.map((cell) => h("td", {}, chartCell(cell)))))));
     return h("details", { class: "chart-table" }, h("summary", {}, "Data table"), h("div", { class: "table-wrap" }, table));
   }
 
@@ -270,7 +295,7 @@
       h("h1", { class: "view-title" }, "Trust / QC"),
     ];
     if (sample.excluded_chunks && sample.excluded_chunks.length) {
-      out.push(h("p", { class: "status-line" }, `Provisional: this input excludes ${sample.excluded_chunks.length} truncated chunks; depth reflects the reads present.`));
+      out.push(h("p", { class: "help" }, "See the excluded chunk indexes in the provisional input notice above."));
     }
     // Depth vs minimum-depth bars.
     const visible = sample.algorithms.filter((a) => !a.hidden);
@@ -294,28 +319,38 @@
     const interruptedLabel = active && interrupted && active.run_id !== interrupted.run_id
       ? "earlier run interrupted" : "latest run interrupted";
     const unavailable = new Set([...(sample.unreadable_results || []), ...(sample.ambiguous_results || [])]);
-    const pending = [active, interrupted].find((run) => run && run.step && run.source_id === sample.source_id &&
+    const pending = [active, interrupted].find((run) => run && run.step && !run.step.includes("@") && run.source_id === sample.source_id &&
       run.input_id === sample.full_input_id && !unavailable.has(run.step) &&
       !sample.algorithms.some((a) => a.algorithm_id === run.step));
     const runRows = sample.algorithms.map((a) => {
       const status = a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status;
       const matches = (run) => run && run.step === a.algorithm_id && run.source_id === sample.source_id && run.input_id === a.provenance?.input_id;
       const runNote = matches(active) ? "latest run in progress" : matches(interrupted) ? interruptedLabel : null;
+      const duration = a.duration_s !== null && a.duration_s !== undefined ? `${a.duration_s.toFixed(1)} s` : "—";
       const cells = [h("th", { scope: "row" }, a.algorithm_id + (a.hidden ? " (intermediate)" : "")),
-        h("td", { class: a.status === "failed" ? "problem" : null }, status, runNote ? " " : "",
-          runNote ? h("span", { class: "state-chip run-note" }, runNote) : ""),
-        h("td", { class: "num" }, a.duration_s !== null && a.duration_s !== undefined ? `${a.duration_s.toFixed(1)} s` : "—")];
+        h("td", { class: a.status === "failed" ? "problem" : null,
+          "data-run-algorithm": a.algorithm_id, "data-run-input": a.provenance?.input_id || "" }, status, " ",
+          h("span", { class: "state-chip run-note", "data-run-note": "", hidden: !runNote }, runNote || "")),
+        h("td", { class: "num", "data-run-duration": duration }, runNote === "latest run in progress" && duration !== "—"
+          ? `${duration} (selected result)` : duration)];
       const pin = a.provenance;
       const canPin = pin && /^[0-9a-f]{64}$/.test(pin.input_id) && /^[0-9a-f]{64}$/.test(pin.parameters_sha256) &&
         /^a-\d{8}T\d{12}-[0-9a-f]{8}$/.test(pin.attempt_id);
       const logKey = `${sample.id12}:${a.algorithm_id}:${pin?.input_id}:${pin?.parameters_sha256}:${pin?.attempt_id}`;
-      const logLine = h("span", { class: "help", "aria-live": "polite", "data-run-log-line": "" }, state.runLogLines.get(logKey) || "");
+      const logLine = h("span", { class: "help", "aria-live": "polite", "data-run-log-line": "",
+        "data-run-log-key": logKey }, state.runLogLines.get(logKey) || "");
       const showLogLine = (message) => {
         state.runLogLines.set(logKey, message);
         if (logLine.isConnected) logLine.replaceChildren(message);
-        else if (state.route.name === "lens" && state.sample && state.sample.id12 === sample.id12) render();
+        else if (state.route.name === "lens" && state.route.lens === "trust-qc" &&
+                 state.sample && state.sample.id12 === sample.id12) {
+          const current = [...document.querySelectorAll("[data-run-log-key]")]
+            .find((node) => node.dataset.runLogKey === logKey);
+          if (current) current.replaceChildren(message);
+        }
       };
-      const logLink = canPin ? h("button", { type: "button", class: "control", onclick: async () => {
+      const logLink = canPin ? h("button", { type: "button", class: "control",
+        "aria-label": `Run log line for ${a.algorithm_id}`, onclick: async () => {
         if (state.lastStatus && state.generationAtLoad !== null && state.lastStatus.generation > state.generationAtLoad) {
           showLogLine("Results changed on disk; reload before viewing this run log line.");
           return;
@@ -345,8 +380,13 @@
       runRows.push(h("tr", {}, h("th", { scope: "row" }, id), h("td", { class: "problem" }, "result selection ambiguous"),
         h("td", {}, "—"), h("td", {}, "—"), h("td", {}, "More than one selected result was found.")));
     }
+    if (sample.malformed_result_selections) {
+      runRows.push(h("tr", {}, h("th", { scope: "row" }, "Result"), h("td", { class: "problem" }, "malformed result selection"),
+        h("td", {}, "—"), h("td", {}, "—"), h("td", {}, "A stored result selection could not be identified.")));
+    }
     out.push(h("section", { class: "panel" }, h("h2", {}, "Run"),
-      pending ? h("p", { class: "status-line" }, `${pending === active ? "Latest run in progress" : interruptedLabel.replace(/^./, (letter) => letter.toUpperCase())} during ${pending.step}; no result was published for this step.`) : "",
+      h("p", { class: "status-line", "data-run-pending": "", hidden: !pending }, pending
+        ? `${pending === active ? "Latest run in progress" : interruptedLabel.replace(/^./, (letter) => letter.toUpperCase())} during ${pending.step || "a step"}; no result was published for this step.` : ""),
       h("div", { class: "table-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, ...["Algorithm", "Status", "Duration", "Run log", "Detail"].map((t) => h("th", { scope: "col" }, t)))), h("tbody", {}, ...runRows)))));
     // QC bands.
     const banded = [];
@@ -423,6 +463,40 @@
   }
 
   // -- polling (D22: generation + heartbeat, never the lock) --------------------------------
+  function updateTrustQcRunStatus(status) {
+    if (state.route.name !== "lens" || state.route.lens !== "trust-qc" || !state.sample?.found) return;
+    const sample = state.sample;
+    const active = status.active;
+    const interrupted = status.interrupted;
+    const interruptedLabel = active && interrupted && active.run_id !== interrupted.run_id
+      ? "earlier run interrupted" : "latest run interrupted";
+    const matches = (run, algorithm, input) => run && run.step === algorithm &&
+      run.source_id === sample.source_id && run.input_id === input;
+    for (const cell of document.querySelectorAll("#main [data-run-algorithm]")) {
+      const algorithm = cell.dataset.runAlgorithm;
+      const input = cell.dataset.runInput;
+      const note = matches(active, algorithm, input) ? "latest run in progress"
+        : matches(interrupted, algorithm, input) ? interruptedLabel : "";
+      const chip = cell.querySelector("[data-run-note]");
+      chip.textContent = note;
+      chip.hidden = !note;
+      const duration = cell.nextElementSibling;
+      const base = duration.dataset.runDuration;
+      duration.textContent = note === "latest run in progress" && base !== "—"
+        ? `${base} (selected result)` : base;
+    }
+    const unavailable = new Set([...(sample.unreadable_results || []), ...(sample.ambiguous_results || [])]);
+    const pending = [active, interrupted].find((run) => run && run.step && !run.step.includes("@") && run.source_id === sample.source_id &&
+      run.input_id === sample.full_input_id && !unavailable.has(run.step) &&
+      !sample.algorithms.some((algorithm) => algorithm.algorithm_id === run.step));
+    const pendingLine = document.querySelector("#main [data-run-pending]");
+    if (pendingLine) {
+      pendingLine.textContent = pending
+        ? `${pending === active ? "Latest run in progress" : interruptedLabel.replace(/^./, (letter) => letter.toUpperCase())} during ${pending.step || "a step"}; no result was published for this step.` : "";
+      pendingLine.hidden = !pending;
+    }
+  }
+
   async function poll() {
     try {
       const status = await api("/api/status");
@@ -447,9 +521,11 @@
           ? ` Earlier run (${status.interrupted.run_id}) stopped during ${status.interrupted.step || "a step"}.` : "";
         const logNotice = logIssue ? ` ${logIssue.run_id ? `Run log for ${logIssue.run_id}` : "Run status"} is unavailable (${logReason}).` : "";
         if (["run", "simulate cna", "simulate split"].includes(status.active.command)) {
-          setStatus(`A Lab run is in progress (step: ${status.active.step || "starting"}, ${minutes} min). Results below are from completed steps.${priorInterrupted}${logNotice}`);
+          setStatus(`A Lab run is in progress (step: ${status.active.step || "starting"}, ${minutes} min). Results below are from completed steps.${priorInterrupted}${logNotice}`,
+            status.generation > state.generationAtLoad ? "Reload" : null);
         } else {
-          setStatus(`Lab ${status.active.command || "work"} is in progress. Results below are from completed steps.${priorInterrupted}${logNotice}`);
+          setStatus(`Lab ${status.active.command || "work"} is in progress. Results below are from completed steps.${priorInterrupted}${logNotice}`,
+            status.generation > state.generationAtLoad ? "Reload" : null);
         }
       } else if (status.interrupted) {
         // A run that died (stale heartbeat, open log) is "interrupted", even
@@ -467,14 +543,11 @@
         setStatus("");
       }
       if (status.library && status.library.error) {
-        document.getElementById("status").append(h("span", { class: "problem" },
+        document.getElementById("status").append(h("span", { class: "problem", "data-library-error": "" },
           ` Interpretation library on disk is invalid (${status.library.error}). Showing v${status.library.version}, loaded at ${status.library.loaded_at}.`));
       }
       setControlsEnabled(true);
-      const runMarker = (row) => row ? [row.run_id, row.step, row.source_id, row.input_id].join(":") : null;
-      if (state.route.name === "lens" &&
-          (runMarker(previous && previous.active) !== runMarker(status.active) ||
-           runMarker(previous && previous.interrupted) !== runMarker(status.interrupted))) render();
+      updateTrustQcRunStatus(status);
     } catch (error) {
       if (error.session) { setStatus("Session expired. Restart `traceback lab serve --open`; it opens a fresh page."); return; }
       state.missed += 1;

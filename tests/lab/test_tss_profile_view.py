@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -35,7 +36,8 @@ def test_tss_profile_chart_and_table(tmp_path, monkeypatch, ratio, rendered) -> 
         }],
     }
     panel = {
-        "offset_bp": list(range(-1000, 1000, 50)), "coverage_x": [0.75] * 40,
+        "offset_bp": list(range(-1000, 1000, 50)),
+        "coverage_x": [0.123456789 + index * 0.001 for index in range(40)],
         "gene_n": 19_130, "eligible_autosomal_reads": 5_000_000,
         "annotation_sha256": "d" * 64,
     }
@@ -45,14 +47,34 @@ def test_tss_profile_chart_and_table(tmp_path, monkeypatch, ratio, rendered) -> 
     monkeypatch.setattr(web_api.LabApi, "sample", lambda self, value: sample)
     monkeypatch.setattr(web_api.LabApi, "artifact", lambda self, *args: json.dumps(panel).encode())
 
+    observed = {}
     with RunningLabServer(LabStore(tmp_path)) as server:
         profile = tmp_path / "tss-chrome"
+        def inspect(_command, evaluate) -> None:
+            observed.update(evaluate("""(() => {
+              const wrap = [...document.querySelectorAll('#main .chart-wrap')].find((item) =>
+                item.querySelector('.echart[aria-label*="Mean aligned-fragment coverage"]'));
+              const chart = wrap.querySelector('.echart');
+              const details = wrap.querySelector(':scope > details.chart-table');
+              details.open = true;
+              const table = details.querySelector('table');
+              const option = window.echarts.getInstanceByDom(chart).getOption();
+              return {
+                adjacent: wrap.children[0] === chart && wrap.children[1].contains(table),
+                visible: table.getClientRects().length > 0,
+                animation: option.animation,
+                points: option.series.filter((series) => series.type === 'line').flatMap((series) => series.data),
+                rows: [...table.querySelectorAll('tbody tr')].map((row) =>
+                  [...row.querySelectorAll('td')].map((cell) => cell.textContent.trim())),
+              };
+            })()"""))
         html = _dom_cdp([
             _chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
             f"--user-data-dir={profile}", "--window-size=1280,800",
             server.issue_link() + f"&route=/sample/{source_id[:12]}/signals",
-        ], profile, ok=lambda page: 'data-ready="1"' in page and "19,130 complete protein-coding gene windows" in page,
-            timeout=60)
+        ], profile, ok=lambda page: 'data-ready="1"' in page and 'data-rendered="1"' in page
+            and "19,130 complete protein-coding gene windows" in page,
+            timeout=60, interact=inspect)
     assert "TSS coverage profile" in html
     assert f"Central/flank ratio: {rendered}" in html
     assert "5,000,000 eligible autosomal reads" in html
@@ -61,3 +83,13 @@ def test_tss_profile_chart_and_table(tmp_path, monkeypatch, ratio, rendered) -> 
     assert "FLAG: LEGAL" in html
     assert "NON-COMMERCIAL: Zhao-lab code (not adopted)" in html
     assert 'data-csp-violations="0"' in html
+    assert observed["adjacent"] and observed["visible"] and observed["animation"] is False
+    assert len(observed["points"]) == len(observed["rows"]) == 40
+    for index, (point, (interval, displayed)) in enumerate(zip(
+        observed["points"], observed["rows"], strict=True,
+    )):
+        match = re.fullmatch(r"\[(-?\d+), (-?\d+)\)", interval)
+        assert match is not None
+        assert point[0] == (int(match[1]) + int(match[2])) / 2
+        assert point[0] == panel["offset_bp"][index] + 25
+        assert float(displayed) == point[1] == panel["coverage_x"][index]

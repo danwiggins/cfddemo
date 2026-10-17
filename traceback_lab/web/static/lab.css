@@ -26,6 +26,7 @@ body.lab { background: #f3f1ec; }
 .tier-NEWER { background: #ffffff; color: var(--ink); border: 2px solid var(--ink); }
 .tier-SPECULATIVE { background: #ffffff; color: var(--ink); border: 2px dashed var(--ink); }
 .state-chip { display: inline-block; padding: .15rem .5rem; border-radius: 1rem; background: var(--flag-bg); color: var(--ink); font-weight: 600; }
+.run-note[hidden], [data-run-pending][hidden] { display: none; }
 .run-note { margin-left: .5rem; }
 .qc-band { display: inline-block; padding: .1rem .45rem; border: 1px solid var(--neutral); border-radius: .25rem; }
 .unverified { display: inline-block; padding: .15rem .45rem; background: #fff1c7; color: #573b00; font-weight: 700; font-size: .875rem; }
