@@ -23,6 +23,7 @@ def _read_request(path: Path) -> dict[str, object]:
     if not isinstance(value, dict) or set(value) != {
         "bam", "reference", "model_dir", "scratch", "aggregate", "code_sha256",
         "reference_sha256", "model_id", "n_mers", "seq_len", "eligible_reads", "min_classified_reads",
+        "numerical_runtime",
     }:
         raise ValueError("MethylBERT child request is malformed")
     return value
@@ -120,7 +121,9 @@ def main(argv: list[str]) -> int:
     # -I excludes the source checkout and environment PYTHONPATH. Insert only
     # the Lab source that owns this script; the model package stays site-local.
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-    from traceback_lab.methylbert_runtime import PINNED_UPSTREAM_COMMIT, installed_identity
+    from traceback_lab.methylbert_runtime import (
+        PINNED_UPSTREAM_COMMIT, installed_identity, require_numerical_runtime,
+    )
 
     identity = installed_identity()
     if identity.commit != PINNED_UPSTREAM_COMMIT or identity.sha256 != request["code_sha256"]:
@@ -132,6 +135,7 @@ def main(argv: list[str]) -> int:
         raise ValueError("MethylBERT child imports from outside the attested installation")
     if installed_identity() != identity:
         raise ValueError("MethylBERT installed sources changed during child import")
+    require_numerical_runtime(request["numerical_runtime"])
 
     import numpy as np
     import torch

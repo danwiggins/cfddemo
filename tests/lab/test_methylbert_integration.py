@@ -14,7 +14,7 @@ import pytest
 import traceback_lab.algorithms.methylbert as adapter
 from traceback_lab.methylbert_bundle import Bundle
 from traceback_lab.methylbert_child import _training_counts, _tumour_dmrs
-from traceback_lab.methylbert_runtime import Aggregate, MIN_ELIGIBLE_READS, RuntimeRefusal
+from traceback_lab.methylbert_runtime import Aggregate, MIN_ELIGIBLE_READS, NUMERICAL_PACKAGES, RuntimeRefusal
 from traceback_lab.registry import InputContext, Ready, Skip, execution_identity, load_registry
 from traceback_lab.runner import RunTarget, _envelope
 from traceback_lab.store import LabStore
@@ -56,6 +56,14 @@ def test_methylbert_specific_skips_publish_and_select(tmp_path, reason):
 
 def test_bundle_code_and_basecaller_each_change_execution_identity(tmp_path, monkeypatch):
     monkeypatch.setattr(adapter, "header_model", lambda *_: "dorado-model-A")
+    runtime = {"python": "3.11", "packages": {"torch": "2.1"}, "cuda": None}
+    probes = []
+
+    def numerical_runtime(*, probe_gpu):
+        probes.append(probe_gpu)
+        return runtime
+
+    monkeypatch.setattr(adapter, "numerical_runtime_identity", numerical_runtime)
     first = _context(tmp_path, methylbert_bundle_sha256="b" * 64, methylbert_code_sha256="c" * 64,
                      methylbert_min_classified_reads=100000)
 
@@ -67,6 +75,8 @@ def test_bundle_code_and_basecaller_each_change_execution_identity(tmp_path, mon
         )
 
     original = identity(first)
+    identity(_context(tmp_path))
+    assert probes[:2] == [True, False]
     assert original != identity(_context(tmp_path, methylbert_bundle_sha256="d" * 64, methylbert_code_sha256="c" * 64,
                                          methylbert_min_classified_reads=100000))
     assert original != identity(_context(tmp_path, methylbert_bundle_sha256="b" * 64, methylbert_code_sha256="d" * 64,
@@ -74,6 +84,8 @@ def test_bundle_code_and_basecaller_each_change_execution_identity(tmp_path, mon
     assert original != identity(_context(tmp_path, methylbert_bundle_sha256="b" * 64, methylbert_code_sha256="c" * 64,
                                          methylbert_min_classified_reads=200000))
     monkeypatch.setattr(adapter, "header_model", lambda *_: "dorado-model-B")
+    assert original != identity(first)
+    runtime = {"python": "3.11", "packages": {"torch": "2.2"}, "cuda": None}
     assert original != identity(first)
 
 
@@ -97,6 +109,10 @@ def test_preflight_uses_measured_eligible_depth_not_classified_support(tmp_path,
         assert model is bundle
 
     monkeypatch.setattr(adapter, "require_ready", ready)
+    monkeypatch.setattr(adapter, "numerical_runtime_identity", lambda **_kwargs: {
+        "python": "3.11", "packages": {name: "fixture" for name in NUMERICAL_PACKAGES},
+        "cuda": {"available": True},
+    })
     without_floor = _context(
         tmp_path, reference_fasta=str(tmp_path / "reference.fa"),
         methylbert_bundle_sha256="b" * 64, methylbert_code_sha256="c" * 64,
@@ -146,12 +162,15 @@ def test_private_worker_lifecycle_publishes_only_aggregate(tmp_path, monkeypatch
     ctx = _context(
         tmp_path, reference_fasta=str(fasta),
         methylbert_bundle_sha256="b" * 64, methylbert_code_sha256="c" * 64,
-        methylbert_min_classified_reads=100000, planned_parameters={"child_sha256": "a" * 64},
+        methylbert_min_classified_reads=100000, planned_parameters={
+            "child_sha256": "a" * 64, "numerical_runtime": {"packages": {"torch": "fixture"}},
+        },
     )
     monkeypatch.setattr(adapter.METHYLBERT, "preflight", lambda *_: Ready())
     monkeypatch.setattr(adapter, "_digest", lambda *_: "a" * 64)
     monkeypatch.setattr(adapter, "_write_eligible_bam", lambda *_: MIN_ELIGIBLE_READS)
     monkeypatch.setattr(adapter, "header_model", lambda *_: "dorado-model")
+    monkeypatch.setattr(adapter, "numerical_runtime_identity", lambda **_kwargs: {"packages": {"torch": "fixture"}})
 
     def private_copy(_store, _sha, destination):
         destination.write_bytes(b"private model")
@@ -172,6 +191,7 @@ def test_private_worker_lifecycle_publishes_only_aggregate(tmp_path, monkeypatch
         assert model_id == "model-1"
         assert eligible_reads == MIN_ELIGIBLE_READS
         assert (scratch / "request.json").exists()
+        assert json.loads((scratch / "request.json").read_text())["numerical_runtime"] == {"packages": {"torch": "fixture"}}
         return Aggregate("model-1", 0.25, 0.75, 500000)
 
     monkeypatch.setattr(adapter, "run_worker", fake_worker)
@@ -183,6 +203,12 @@ def test_private_worker_lifecycle_publishes_only_aggregate(tmp_path, monkeypatch
     assert set(result.artifacts) == {"methylbert_provenance.json"}
     assert json.loads(result.artifacts["methylbert_provenance.json"])["bundle_sha256"] == "b" * 64
     assert json.loads(result.artifacts["methylbert_provenance.json"])["child_sha256"] == "a" * 64
+    assert json.loads(result.artifacts["methylbert_provenance.json"])["numerical_runtime"] == {"packages": {"torch": "fixture"}}
+
+    monkeypatch.setattr(adapter, "numerical_runtime_identity", lambda **_kwargs: {"packages": {"torch": "changed"}})
+    with pytest.raises(RuntimeError, match="numerical runtime changed"):
+        adapter.METHYLBERT.run(ctx, out)
+    monkeypatch.setattr(adapter, "numerical_runtime_identity", lambda **_kwargs: {"packages": {"torch": "fixture"}})
     assert json.loads(result.artifacts["methylbert_provenance.json"])["min_classified_reads"] == 100000
 
     def low_support(_argv, *, scratch, **_kwargs):

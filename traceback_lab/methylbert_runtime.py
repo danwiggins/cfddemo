@@ -11,10 +11,12 @@ import hashlib
 import math
 import os
 import stat
+import sys
 from importlib import metadata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 from traceback_runner.contained_process import run_contained
@@ -35,10 +37,47 @@ CHILD_ENV_KEYS = frozenset({
     "HOME", "TMPDIR", "TMP", "TEMP", "HF_HOME", "HF_HUB_OFFLINE",
     "HF_DATASETS_OFFLINE", "TRANSFORMERS_OFFLINE", "TOKENIZERS_PARALLELISM", "NO_PROXY",
 })
+NUMERICAL_PACKAGES = ("torch", "transformers", "numpy", "pandas", "scipy", "scikit-learn", "pysam")
+
+
+def numerical_runtime_identity(*, probe_gpu: bool) -> dict[str, Any]:
+    """Key numerical dependencies without importing Torch for an absent model."""
+
+    versions: dict[str, str | None] = {}
+    for name in NUMERICAL_PACKAGES:
+        try:
+            versions[name] = metadata.version(name)
+        except metadata.PackageNotFoundError:
+            versions[name] = None
+    cuda: dict[str, Any] | None = None
+    if probe_gpu:
+        try:
+            import torch
+
+            available = bool(torch.cuda.is_available())
+            cuda = {"available": available, "torch_cuda": torch.version.cuda}
+            if available:
+                cuda.update({
+                    "device": torch.cuda.get_device_name(0),
+                    "capability": list(torch.cuda.get_device_capability(0)),
+                    "cudnn": torch.backends.cudnn.version(),
+                })
+        except (ImportError, OSError, RuntimeError):
+            cuda = {"available": False, "torch_cuda": None}
+    return {"python": sys.version.split()[0], "packages": versions, "cuda": cuda}
 
 
 class RuntimeRefusal(ValueError):
     """Model, input, environment, or aggregate result violates the contract."""
+
+
+def require_numerical_runtime(expected: object) -> dict[str, Any]:
+    """Refuse package or CUDA drift before loading a trusted checkpoint."""
+
+    actual = numerical_runtime_identity(probe_gpu=True)
+    if not isinstance(expected, dict) or actual != expected:
+        raise RuntimeRefusal("MethylBERT numerical runtime differs from the selected execution identity")
+    return actual
 
 
 @dataclass(frozen=True)

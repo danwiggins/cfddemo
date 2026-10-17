@@ -23,7 +23,8 @@ from ..assets import AssetError
 from ..methylbert_assets import copy_methylbert_bundle, inspect_methylbert_bundle
 from ..methylbert_bundle import BundleError, unpack_bundle, verify_bundle
 from ..methylbert_runtime import (
-    MIN_ELIGIBLE_READS, PINNED_UPSTREAM_COMMIT, RuntimeRefusal, require_ready, run_worker,
+    MIN_ELIGIBLE_READS, PINNED_UPSTREAM_COMMIT, RuntimeRefusal, numerical_runtime_identity,
+    require_ready, run_worker,
 )
 from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip, ToolPin
 from ._base import Base, load_summary, metric
@@ -114,10 +115,14 @@ class Methylbert(Base):
             model = header_model(ctx.input_dir / "aligned.bam")
         except (OSError, ValueError):
             model = None
+        probe_gpu = (_sha(ctx.extras.get("methylbert_bundle_sha256")) is not None
+                     and _sha(ctx.extras.get("methylbert_code_sha256")) is not None
+                     and type(ctx.extras.get("methylbert_min_classified_reads")) is int)
         return {**self.parameters, "basecall_model": model,
                 "bundle_sha256": ctx.extras.get("methylbert_bundle_sha256"),
                 "code_sha256": ctx.extras.get("methylbert_code_sha256"),
                 "min_classified_reads": ctx.extras.get("methylbert_min_classified_reads"),
+                "numerical_runtime": numerical_runtime_identity(probe_gpu=probe_gpu),
                 "child_sha256": _digest(Path(__file__).resolve().parents[1] / "methylbert_child.py")}
 
     def preflight(self, ctx: InputContext) -> Ready | Skip:
@@ -169,6 +174,11 @@ class Methylbert(Base):
             gpu = False
         if not gpu:
             return Skip("missing_gpu", "MethylBERT needs a usable CUDA GPU")
+        runtime = numerical_runtime_identity(probe_gpu=True)
+        if runtime["cuda"] is None or not runtime["cuda"]["available"]:
+            return Skip("missing_gpu", "MethylBERT CUDA device could not be identified")
+        if any(version is None for version in runtime["packages"].values()):
+            return Skip("model_not_ready", "MethylBERT numerical runtime packages are incomplete")
         try:
             require_ready(
                 bundle, reference_sha256=ctx.reference_sha256, eligible_reads=eligible,
@@ -193,6 +203,8 @@ class Methylbert(Base):
         planned = ctx.extras.get("planned_parameters", {})
         if _digest(child) != planned.get("child_sha256"):
             raise RuntimeError("MethylBERT child code changed since execution identity was selected")
+        if numerical_runtime_identity(probe_gpu=True) != planned.get("numerical_runtime"):
+            raise RuntimeError("MethylBERT numerical runtime changed since execution identity was selected")
         with tempfile.TemporaryDirectory(prefix="methylbert-", dir=out.parent) as private_name:
             private = Path(private_name)
             private.chmod(0o700)
@@ -211,6 +223,7 @@ class Methylbert(Base):
                 "n_mers": bundle.n_mers, "seq_len": bundle.seq_len,
                 "eligible_reads": ctx.eligible_reads,
                 "min_classified_reads": ctx.extras["methylbert_min_classified_reads"],
+                "numerical_runtime": planned["numerical_runtime"],
             }), encoding="utf-8")
             aggregate = run_worker(
                 [sys.executable, "-I", "-X", f"pycache_prefix={private / 'pycache'}", str(child), str(request)],
@@ -222,6 +235,7 @@ class Methylbert(Base):
         provenance = {
             "bundle_sha256": bundle_sha, "installed_code_sha256": code_sha,
             "child_sha256": planned["child_sha256"],
+            "numerical_runtime": planned["numerical_runtime"],
             "reference_sha256": ctx.reference_sha256, "model_id": bundle.model_id,
             "n_mers": bundle.n_mers, "seq_len": bundle.seq_len,
             "dmrs_sha256": bundle.files.get("dmrs.tsv"),

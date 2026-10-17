@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -28,6 +29,38 @@ def _ready(**changes):
     }
     values.update(changes)
     return runtime.require_ready(_bundle(), **values)
+
+
+def test_numerical_runtime_identity_is_lightweight_until_a_model_needs_cuda(monkeypatch):
+    monkeypatch.setattr(runtime.metadata, "version", lambda name: f"pinned-{name}")
+    torch = SimpleNamespace(
+        version=SimpleNamespace(cuda="12.4"),
+        cuda=SimpleNamespace(
+            is_available=lambda: True, get_device_name=lambda _index: "fixture GPU",
+            get_device_capability=lambda _index: (8, 6),
+        ),
+        backends=SimpleNamespace(cudnn=SimpleNamespace(version=lambda: 90100)),
+    )
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    without_model = runtime.numerical_runtime_identity(probe_gpu=False)
+    assert without_model["cuda"] is None
+    assert set(without_model["packages"]) == set(runtime.NUMERICAL_PACKAGES)
+    with_model = runtime.numerical_runtime_identity(probe_gpu=True)
+    assert with_model["cuda"] == {
+        "available": True, "torch_cuda": "12.4", "device": "fixture GPU",
+        "capability": [8, 6], "cudnn": 90100,
+    }
+
+
+def test_child_runtime_guard_refuses_a_changed_numerical_package(monkeypatch):
+    expected = {"python": "3.11", "packages": {"torch": "2.1"}, "cuda": {"device": "fixture"}}
+    monkeypatch.setattr(runtime, "numerical_runtime_identity", lambda **_kwargs: expected)
+    assert runtime.require_numerical_runtime(expected) == expected
+    monkeypatch.setattr(runtime, "numerical_runtime_identity", lambda **_kwargs: {
+        **expected, "packages": {"torch": "2.2"},
+    })
+    with pytest.raises(runtime.RuntimeRefusal, match="numerical runtime differs"):
+        runtime.require_numerical_runtime(expected)
 
 
 def test_install_identity_requires_pinned_git_source_and_hashes_record_listed_code(tmp_path, monkeypatch):
