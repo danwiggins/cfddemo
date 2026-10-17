@@ -28,6 +28,14 @@ def test_echarts_scatter_values_match_adjacent_table_without_animation(route, ex
             key = (algorithm["algorithm_id"], metric["metric_id"])
             if key in values:
                 metric["value"] = values[key]
+    sample["concordance"] = {"pairs": [
+        {"id": "cn-meth", "label": "Methylation TF vs copy-number TF", "state": "ok",
+         "x": 0.17, "y": 0.13, "x_label": "copy-number TF", "y_label": "methylation TF",
+         "baseline_median": None, "reference_n": 0},
+        {"id": "cn-size", "label": "Size shift vs copy-number TF", "state": "ok",
+         "x": 0.17, "y": 12.0, "x_label": "copy-number TF", "y_label": "size shift (bp)",
+         "baseline_median": 155.0, "reference_n": 12},
+    ]}
 
     observed = []
     with _server(tmp_path, sample) as server:
