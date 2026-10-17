@@ -279,6 +279,9 @@ Downsample and split results use the same selected read-summary rows as other
 Lab measurements. The 10x gate is recalculated from those selected rows;
 CNA-derived inputs remain unsupported. The reported 10x minimum is an input
 gate, not a validated adequacy threshold.
+The raw count score changes with retained depth, so a downsampled score should
+not be read as a biological difference from the full-input score; split halves
+are descriptive repeatability checks only.
 The score has no validated stability tolerance or biological acceptance
 interval. Both are ONT aligned-span proxies, not confirmed physical
 cleavage positions. The [OCF study](https://pubmed.ncbi.nlm.nih.gov/30808726/)

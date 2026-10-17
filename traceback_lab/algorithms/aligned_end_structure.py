@@ -7,6 +7,7 @@ tissue-origin inference or a reimplementation of paired-end short-read OCF.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,7 @@ from typing import Any
 import numpy as np
 
 from ..end_catalog_assets import EndCatalogueError, end_catalogue_identity, inspect_end_catalogues
-from ..read_summary import CHUNK_ROWS, FLAG_EXCLUDE, MIN_MAPQ, depth_stamp
+from ..read_summary import CHUNK_ROWS, FLAG_EXCLUDE, MIN_MAPQ, depth_stamp, validate_fraction
 from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip
 from ._base import Base, load_summary, metric, ratio
 
@@ -71,8 +72,20 @@ class AlignedEndStructure(Base):
     def preflight(self, ctx: InputContext) -> Ready | Skip:
         if ctx.example:
             return Skip("example_reference", "aligned-end structure requires a genuine hg38 ONT input")
-        if ctx.derived is not None and ctx.derived.get("transform") not in {"downsample", "split"}:
-            return Skip("derived_input", "aligned-end structure supports only downsample and split row masks")
+        if ctx.derived is not None:
+            # DerivedSpec is one transform of a full parent, never a chained lineage.
+            if not isinstance(ctx.derived, Mapping):
+                return Skip("derived_input", "aligned-end structure requires a valid derived row mask")
+            transform = ctx.derived.get("transform")
+            if transform not in {"downsample", "split"}:
+                return Skip("derived_input", "aligned-end structure supports only downsample and split row masks")
+            try:
+                if transform == "downsample":
+                    validate_fraction(float(ctx.derived["fraction"]))
+                elif ctx.derived["half"] not in {"A", "B"}:
+                    raise ValueError("invalid split half")
+            except (ValueError, KeyError, TypeError):
+                return Skip("derived_input", "aligned-end structure requires a valid derived row mask")
         if ctx.reference_id != "hg38":
             return Skip("reference", "aligned-end structure requires a full, genuine hg38 ONT input")
         try:
@@ -87,8 +100,8 @@ class AlignedEndStructure(Base):
             try:
                 summary, mask = load_summary(ctx)
                 depth = depth_stamp(summary, mask)["approx_depth_x"]
-            except (OSError, RuntimeError, ValueError, KeyError, TypeError):
-                return Skip("derived_input", "aligned-end structure requires a valid derived read-summary mask")
+            except (OSError, RuntimeError, ValueError):
+                return Skip("upstream", "aligned-end structure could not read the derived read summary")
         if depth is None or not np.isfinite(depth) or depth < MIN_DEPTH_X:
             return Skip("depth", "aligned-end structure needs at least 10x observed eligible depth")
         expected = ctx.extras.get("planned_asset_sha256s")
@@ -178,6 +191,8 @@ class AlignedEndStructure(Base):
             "preferred_source": catalogues.preferred_source,
             "terms": catalogues.terms,
             "observed_depth_x": observed_depth_x,
+            "depth_basis": "selected_read_summary" if ctx.derived is not None else "run_target",
+            "derived_selection": dict(ctx.derived) if ctx.derived is not None else None,
             "interpretation": "ONT aligned-span proxy; exploratory; no tissue-origin calibration",
             "offset_bp": list(range(-RADIUS, RADIUS + 1)),
             "u_count": u_counts.tolist(), "d_count": d_counts.tolist(),

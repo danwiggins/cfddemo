@@ -87,6 +87,7 @@ def test_exact_ocf_like_sign_and_preferred_end_support(tmp_path: Path) -> None:
     assert artifact["valid_molecules"] == 1 and artifact["preferred_u_hits"] == 1
     assert artifact["preferred_d_hits"] == 1
     assert artifact["observed_depth_x"] == 10.0
+    assert artifact["depth_basis"] == "run_target" and artifact["derived_selection"] is None
     assert len(artifact["centers_sha256"]) == 64 and len(artifact["preferred_sha256"]) == 64
     assert artifact["source_label"] == "synthetic hg38 end catalogues"
     assert artifact["centers_source"] == "synthetic-centers-v1"
@@ -169,7 +170,7 @@ def test_depth_full_input_and_pinned_asset_gates(tmp_path: Path) -> None:
     (root / "input" / "manifest.json").write_text(json.dumps({"kind": "prealigned"}), encoding="utf-8")
     assert ALIGNED_END_STRUCTURE.preflight(_context(root, summary_parent)).reason_code == "input_kind"
     (root / "input" / "manifest.json").write_text(json.dumps({"kind": "aligned"}), encoding="utf-8")
-    assert ALIGNED_END_STRUCTURE.preflight(_context(root, summary_parent, derived={"transform": "split", "half": "A"})).reason_code == "derived_input"
+    assert ALIGNED_END_STRUCTURE.preflight(_context(root, summary_parent, derived={"transform": "split", "half": "A"})).reason_code == "upstream"
     assert ALIGNED_END_STRUCTURE.preflight(_context(root, summary_parent, example=True)).reason_code == "example_reference"
     old_identity = inspect_end_catalogues(root).identity
     centers.write_text("chr1\t491\t511\n", encoding="ascii")
@@ -205,7 +206,17 @@ def test_downsample_and_split_use_selected_depth_and_rows(tmp_path: Path) -> Non
         artifact = json.loads(ALIGNED_END_STRUCTURE.run(ctx, tmp_path / "out").artifacts["aligned_end_structure.json"])
         assert artifact["valid_molecules"] == 100
         assert artifact["observed_depth_x"] == 12.1
+        assert artifact["depth_basis"] == "selected_read_summary"
+        assert artifact["derived_selection"] == derived
         assert artifact["preferred_u_hits"] == artifact["preferred_d_hits"] == 100
+
+    # Excluded selected rows cannot supply the subset's 10x eligibility.
+    flags = np.zeros(rows, dtype=COLUMNS["flag"])
+    flags[:40] = 0x400
+    flags.tofile(columns / "flag.bin")
+    assert ALIGNED_END_STRUCTURE.preflight(_context(
+        root, parent, derived={"transform": "split", "half": "A"}, depth=99.0,
+    )).reason_code == "depth"
 
     # An untrusted depth hint cannot make a low-depth subset eligible.
     assert ALIGNED_END_STRUCTURE.preflight(_context(
@@ -407,7 +418,7 @@ def test_cli_registration_and_inspection_return_path_free_results(tmp_path: Path
 
 
 @pytest.mark.parametrize("condition,expected", [
-    ("depth", "depth"), ("derived", "derived_input"), ("missing_manifest", "input_kind"),
+    ("depth", "depth"), ("derived", "upstream"), ("missing_manifest", "input_kind"),
     ("reference", "reference"), ("example", "example_reference"),
 ])
 def test_preflight_skip_publishes_through_runner(
