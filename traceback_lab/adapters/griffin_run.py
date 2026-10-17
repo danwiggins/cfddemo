@@ -18,7 +18,7 @@ import sys
 from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Mapping
+from typing import Callable, Mapping
 
 import yaml
 
@@ -205,7 +205,7 @@ def _ref_options(reference: Path, assets: Path, scripts: Path) -> dict:
     }
 
 
-def _require_paired_input(bam: Path) -> int:
+def _require_paired_input(bam: Path, keep_name: Callable[[str], bool] | None = None) -> int:
     """Validate paired Illumina input; return reads in Griffin's 100–200 bp window."""
 
     import pysam
@@ -219,6 +219,8 @@ def _require_paired_input(bam: Path) -> int:
                 "native ONT single-end BAM is incompatible"
             )
         for read in alignments.fetch(until_eof=True):
+            if keep_name is not None and not keep_name(read.query_name or ""):
+                continue
             if read.is_unmapped or read.is_secondary or read.is_supplementary:
                 continue
             primary += 1
@@ -310,7 +312,7 @@ def _require_site_contigs(path: Path, chromosomes: tuple[str, ...]) -> int:
     return rows
 
 
-def count_d21_pairs(bam: Path) -> int:
+def count_d21_pairs(bam: Path, keep_name: Callable[[str], bool] | None = None) -> int:
     """Count one eligible autosomal molecule per proper Illumina pair."""
 
     import pysam
@@ -327,6 +329,8 @@ def count_d21_pairs(bam: Path) -> int:
             raise ValueError("Griffin requires canonical hg38 autosomes")
         count = 0
         for read in alignments.fetch(until_eof=True):
+            if keep_name is not None and not keep_name(read.query_name or ""):
+                continue
             if (read.is_paired and read.is_proper_pair and read.is_read1 and
                     not read.is_unmapped and not read.mate_is_unmapped and
                     not read.is_secondary and not read.is_supplementary and

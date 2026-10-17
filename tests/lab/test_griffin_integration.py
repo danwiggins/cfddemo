@@ -20,7 +20,7 @@ from traceback_lab.adapters.griffin_run import count_d21_pairs
 from traceback_lab.algorithms.griffin import GRIFFIN
 from traceback_lab.griffin_assets import GriffinAssetError, inspect_griffin_assets, register_griffin_assets
 from traceback_lab.problems import EXIT_BLOCKED
-from traceback_lab.registry import InputContext, PlanItem, Skip, execution_identity
+from traceback_lab.registry import InputContext, PlanItem, Ready, Skip, execution_identity
 from traceback_lab.runner import RunTarget, run_plan
 from traceback_lab.scrub import Scrubber
 from traceback_lab.store import LabStore, new_run_id
@@ -489,6 +489,124 @@ def test_algorithm_publishes_primary_profile_and_input_bound_provenance(
     assert len(public_provenance["full_provenance_sha256"]) == 64
     assert b"/private/operator" not in result.artifacts["griffin_provenance.json"]
     assert b"patient.bam.bai" not in result.artifacts["griffin_provenance.json"]
+
+
+def test_derived_split_counts_selected_pairs_and_uses_transient_bam(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import pysam
+    import traceback_lab.algorithms.griffin as module
+    from traceback_lab.algorithms.cell_origin import derived_name_predicate
+    from traceback_lab.derived import split
+
+    root, _ = _registered(tmp_path, monkeypatch)
+    registered = inspect_griffin_assets(root)
+    _available_toolchain(monkeypatch)
+    monkeypatch.setattr(module, "inspect_griffin_assets", lambda _: registered)
+    monkeypatch.setattr(module, "MIN_ELIGIBLE_AUTOSOMAL_PAIRS", 100)
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    source = input_dir / "aligned.bam"
+    keep_a = derived_name_predicate({"transform": "split", "half": "A"})
+    names_a: list[str] = []
+    names_b: list[str] = []
+    for index in range(1000):
+        name = f"pair{index}"
+        chosen = names_a if keep_a(name) else names_b
+        if len(chosen) < (120 if chosen is names_a else 80):
+            chosen.append(name)
+        if len(names_a) == 120 and len(names_b) == 80:
+            break
+    assert len(names_a) == 120 and len(names_b) == 80
+    header = {"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 100000}],
+              "RG": [{"ID": "rg1", "PL": "ILLUMINA"}]}
+    with pysam.AlignmentFile(str(source), "wb", header=header) as out:
+        for index, name in enumerate(names_a + names_b):
+            for first in (True, False):
+                read = pysam.AlignedSegment()
+                read.query_name = name
+                read.query_sequence = "A" * 75
+                read.flag = 99 if first else 147
+                read.reference_id = 0
+                read.reference_start = index * 200 + (0 if first else 75)
+                read.mapping_quality = 60
+                read.cigarstring = "75M"
+                read.next_reference_id = 0
+                read.next_reference_start = index * 200 + (75 if first else 0)
+                read.template_length = 150 if first else -150
+                out.write(read)
+    reference = tmp_path / "hg38.fa"
+    reference.write_bytes(b">chr1\nACGT\n")
+    base = dict(root=root, source_id="1" * 64, input_id="2" * 64,
+                reference_id="hg38", reference_sha256=hashlib.sha256(reference.read_bytes()).hexdigest(),
+                input_dir=input_dir, platform="illumina", eligible_reads=5_000_000,
+                extras={"reference_fasta": str(reference)})
+    a = InputContext(**{**base, "input_id": split("A").input_id(base["input_id"])},
+                     derived={"transform": "split", "half": "A"})
+    b = InputContext(**{**base, "input_id": split("B").input_id(base["input_id"])},
+                     derived={"transform": "split", "half": "B"})
+    assert a.input_id != b.input_id
+    decision = module.GRIFFIN.preflight(a)
+    assert isinstance(decision, Ready), decision
+    assert module.GRIFFIN.preflight(b).reason_code == "depth"
+
+    def fake_workflow(config: object) -> tuple[GriffinProfile, ...]:
+        assert config.bam.name == "selected.bam"
+        assert config.bam.parent.name.startswith("griffin-derived-")
+        assert config.eligible_autosomal_pairs == 120
+        assert count_d21_pairs(config.bam) == 120
+        assert Path(str(config.bam) + ".bai").is_file()
+        sample = "lab_" + a.input_id
+        corrected = (config.attempt_dir / "griffin_nucleosome_profiling" / "results" /
+                     sample / f"{sample}.GC_corrected.coverage.tsv")
+        corrected.parent.mkdir(parents=True)
+        corrected.write_bytes(b"official corrected TSV")
+        (config.attempt_dir / "provenance.json").write_text(json.dumps({
+            "status": "complete", "input_id": a.input_id, "upstream_commit": GRIFFIN_COMMIT,
+            "platform": "illumina", "registration_sha256": config.registration_sha256,
+            "eligible_autosomal_pairs": 120, "snakemake_version": "5.19.2",
+            "output_sha256": hashlib.sha256(b"official corrected TSV").hexdigest(),
+        }), encoding="utf-8")
+        return (GriffinProfile(sample, "CTCF", 1000, (-15, 0, 15), (0.9, 0.5, 0.8), 0.5, 2.1, True, False),)
+
+    monkeypatch.setattr(module, "run_upstream", fake_workflow)
+    out = tmp_path / "scratch" / "artifacts"
+    out.mkdir(parents=True)
+    result = module.GRIFFIN.run(a, out)
+    assert result.metrics[0]["value"] == 0.5
+    assert json.loads(result.artifacts["griffin_provenance.json"])["eligible_autosomal_pairs"] == 120
+    assert not list(out.parent.glob("griffin-derived-*"))
+
+    def fail_workflow(_: object) -> None:
+        raise RuntimeError("upstream failed")
+
+    monkeypatch.setattr(module, "run_upstream", fail_workflow)
+    with pytest.raises(RuntimeError, match="upstream failed"):
+        module.GRIFFIN.run(a, out)
+    assert not list(out.parent.glob("griffin-derived-*"))
+
+
+def test_derived_name_selection_validates_and_nests_downsamples() -> None:
+    import numpy as np
+    from traceback_lab.algorithms.cell_origin import derived_name_predicate
+    from traceback_lab.read_summary import DS_SALT, SPLIT_SALT, downsample_mask, h64, split_mask
+
+    half = derived_name_predicate({"transform": "downsample", "fraction": 0.5})
+    quarter = derived_name_predicate({"transform": "downsample", "fraction": 0.25})
+    names = [f"pair{index}" for index in range(100)]
+    assert {name for name in names if quarter(name)} < {name for name in names if half(name)}
+    for fraction in (0.25, 0.5):
+        keep = derived_name_predicate({"transform": "downsample", "fraction": fraction})
+        hashes = np.asarray([h64(DS_SALT, name) for name in names], dtype=np.uint64)
+        assert [keep(name) for name in names] == downsample_mask(hashes, fraction).tolist()
+    for letter in ("A", "B"):
+        keep = derived_name_predicate({"transform": "split", "half": letter})
+        hashes = np.asarray([h64(SPLIT_SALT, name) for name in names], dtype=np.uint64)
+        assert [keep(name) for name in names] == split_mask(hashes, letter).tolist()
+    with pytest.raises(ValueError):
+        derived_name_predicate({"transform": "split", "half": "invalid"})
+    with pytest.raises(ValueError):
+        derived_name_predicate({"transform": "cna", "tf": 0.1})
 
 
 def test_runtime_identity_changes_cache_key_and_run_refuses_planned_drift(

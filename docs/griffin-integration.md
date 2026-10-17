@@ -103,9 +103,12 @@ while the Lab's input ID and declared platform keep cached results sample-specif
 requires the 5M D21 paired-molecule gate and a paired-end hg38 BAM, runs the exact workflow,
 and saves the validated corrected TSV and input-bound provenance alongside
 the profile panel. The primary registered TF list supplies the scalar
-`central_coverage`; all registered lists remain visible in the panel. Native
-ONT, example, and derived inputs skip explicitly. No arbitrary TF activity or
-diagnostic threshold is asserted.
+`central_coverage`; all registered lists remain visible in the panel. Downsample
+and split controls use the shared read-name selection to create a temporary
+paired BAM; the selected records must still contain at least 5M D21 eligible
+autosomal pairs, and the temporary BAM is removed after the workflow. Native
+ONT, example, and other derived transforms (including CNA) skip explicitly. No arbitrary TF activity
+or diagnostic threshold is asserted.
 
 Both complete pinned Snakemake workflows ran on a 30 kb synthetic reference
 and 500 toy paired-end fragments. A second bounded run called the production
