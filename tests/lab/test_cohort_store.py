@@ -168,10 +168,10 @@ def test_reader_sees_complete_old_or_new_generation(store: LabStore, monkeypatch
     assert read_current(store, "healthy") == built[0]
 
 
-def test_changed_asset_digest_cannot_reuse_old_result(store: LabStore) -> None:
+def test_changed_asset_digest_cannot_reuse_old_result(store: LabStore, monkeypatch: pytest.MonkeyPatch) -> None:
     source_id = _sample(store, 1)
     algorithm = cohorts.load_registry()[0]
-    algorithm.asset_sha256s = lambda root: (_sha(901),)
+    monkeypatch.setattr(algorithm, "asset_sha256s", lambda root: (_sha(901),), raising=False)
     current_hash = parameters_sha256(
         algorithm_id="fragment-size", algorithm_version="1", parameters={}, tools=[],
         reference_sha256=_sha(900), asset_sha256s=(_sha(901),),
@@ -186,14 +186,14 @@ def test_changed_asset_digest_cannot_reuse_old_result(store: LabStore) -> None:
     store.publish_result(result, input_id=input_id)
     add_sample(store, "healthy", source_id)
     assert len(build_cohort(store, "healthy").members[0].results) == 1
-    algorithm.asset_sha256s = lambda root: (_sha(902),)
+    monkeypatch.setattr(algorithm, "asset_sha256s", lambda root: (_sha(902),))
     assert build_cohort(store, "healthy").members[0].results == ()
 
 
-def test_dynamic_runtime_identity_controls_cohort_selection(store: LabStore) -> None:
+def test_dynamic_runtime_identity_controls_cohort_selection(store: LabStore, monkeypatch: pytest.MonkeyPatch) -> None:
     source_id = _sample(store, 1)
     algorithm = cohorts.load_registry()[0]
-    algorithm.identity_tools = lambda *, worker_pythonpath: (ToolPin("runtime", "a" * 64),)
+    monkeypatch.setattr(algorithm, "identity_tools", lambda *, worker_pythonpath: (ToolPin("runtime", "a" * 64),), raising=False)
     tools = [tool.identity() for tool in algorithm.identity_tools(worker_pythonpath="test")]
     current_hash = execution_identity(
         algorithm, reference_sha256=_sha(900), tool_identities=tools,
@@ -207,15 +207,15 @@ def test_dynamic_runtime_identity_controls_cohort_selection(store: LabStore) -> 
     add_sample(store, "healthy", source_id)
     selected = build_cohort(store, "healthy").members[0].results
     assert len(selected) == 1 and selected[0].parameters_sha256 == current_hash
-    algorithm.identity_tools = lambda *, worker_pythonpath: (ToolPin("runtime", "b" * 64),)
+    monkeypatch.setattr(algorithm, "identity_tools", lambda *, worker_pythonpath: (ToolPin("runtime", "b" * 64),))
     assert build_cohort(store, "healthy").members[0].results == ()
 
 
-def test_unsupported_platform_skips_asset_hashing_during_cohort_build(store: LabStore) -> None:
+def test_unsupported_platform_skips_asset_hashing_during_cohort_build(store: LabStore, monkeypatch: pytest.MonkeyPatch) -> None:
     source_id = _sample(store, 1)
     algorithm = cohorts.load_registry()[0]
-    algorithm.requires = SimpleNamespace(platforms=frozenset({"illumina"}))
-    algorithm.asset_sha256s = lambda root: pytest.fail("unsupported algorithm must not hash assets")
+    monkeypatch.setattr(algorithm, "requires", SimpleNamespace(platforms=frozenset({"illumina"})), raising=False)
+    monkeypatch.setattr(algorithm, "asset_sha256s", lambda root: pytest.fail("unsupported algorithm must not hash assets"), raising=False)
     add_sample(store, "healthy", source_id)
     assert build_cohort(store, "healthy").members[0].results == ()
 
