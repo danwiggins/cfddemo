@@ -723,9 +723,11 @@ def _catalog(library: Library, order: list[str], algorithms: list[dict[str, Any]
         performance = entry.get("performance") if entry else None
         result = by_id.get(algorithm_id)
         if result is not None:
-            licenses = _result_license_ids(
+            for license_id in _result_license_ids(
                 entry, algorithm_id, result.get("algorithm_version", ""), result["status"],
-            )
+            ):
+                if license_id not in licenses:
+                    licenses.append(license_id)
         rows.append(
             {
                 "algorithm_id": algorithm_id,

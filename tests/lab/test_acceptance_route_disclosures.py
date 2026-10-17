@@ -7,7 +7,7 @@ import re
 import pytest
 
 from tests.lab.test_landing import _dom, _id12, needs_chrome, page_root as _landing_page_root
-from traceback_lab.interpretation.engine import load_library
+from traceback_lab.interpretation.engine import Entry, Library, load_library
 from traceback_lab.registry import load_registry
 from traceback_lab.store import LabStore
 from traceback_lab.web.api import _catalog, _result_license_ids
@@ -61,6 +61,30 @@ def test_stored_modkit_result_keeps_its_license_without_labeling_new_decoder() -
               "status": "ok", "skip_reason": None}],
         )
         assert catalog[0]["license_ids"] == expected
+
+
+def test_catalog_keeps_nonheadline_metric_licenses_when_result_exists() -> None:
+    library = Library(
+        "test",
+        {
+            ("cell-origin", "headline"): Entry(
+                "cell-origin", "headline", {"headline": True, "label": "Cell origin", "tier": "NEWER",
+                                            "license_ids": ["headline-rights"]},
+            ),
+            ("cell-origin", "secondary"): Entry(
+                "cell-origin", "secondary", {"headline": False, "license_ids": ["secondary-rights"]},
+            ),
+        },
+        {"headline-rights": {}, "secondary-rights": {}, "modkit-ont-public": {}},
+    )
+    for version, expected in (("1", {"headline-rights", "secondary-rights", "modkit-ont-public"}),
+                              ("2", {"headline-rights", "secondary-rights"})):
+        catalog = _catalog(
+            library, ["cell-origin"],
+            [{"algorithm_id": "cell-origin", "algorithm_version": version,
+              "status": "ok", "skip_reason": None}],
+        )
+        assert set(catalog[0]["license_ids"]) == expected
 
 
 @pytest.mark.parametrize("route", ROUTES)
