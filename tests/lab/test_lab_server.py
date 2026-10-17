@@ -130,6 +130,33 @@ def test_status_samples_and_sample(server) -> None:
     assert "/Users/" not in text and "chunks" not in text.lower().replace("excluded_chunks", "")
 
 
+def test_sample_api_explains_unavailable_somalier(server, monkeypatch) -> None:
+    from traceback_lab.envelope import ResultEnvelope
+
+    original = api_module.views.load_sample
+
+    def with_identity(store, source_id):
+        sample = original(store, source_id)
+        assert sample is not None
+        provenance = next(iter(sample.full.results.values())).provenance
+        sample.full.results["identity"] = ResultEnvelope(
+            algorithm_id="identity", algorithm_version="1", status="skipped",
+            skip_reason="missing_toolchain", skip_message="Somalier unavailable",
+            provenance=provenance,
+        )
+        return sample
+
+    monkeypatch.setattr(api_module.views, "load_sample", with_identity)
+    monkeypatch.setattr(api_module, "somalier_tool", lambda: None)
+    cookie = _session(server)
+    id12 = json.loads(_get(server, "/api/samples", cookie)[1])["samples"][0]["id12"]
+    response, data = _get(server, f"/api/samples/{id12}", cookie)
+    payload = json.loads(data)
+    assert response.status == 200
+    assert payload["identity_pairs"] == []
+    assert "Somalier is unavailable" in payload["identity_pairs_reason"]
+
+
 def test_sample_api_exposes_read_time_preanalytic_mismatch(server, monkeypatch) -> None:
     comparison = {"state": "mismatch", "reason": None, "declared": "M", "observed": "female"}
     monkeypatch.setattr(api_module.views, "sex_check_view", lambda _sample: comparison)

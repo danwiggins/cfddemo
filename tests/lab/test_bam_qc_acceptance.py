@@ -93,4 +93,3 @@ def test_gc_slope_uses_eligible_positive_bins_and_acgt_fraction(tmp_path: Path) 
     slope, bins = gc_bias_slope(summary, eligible, str(fasta))
     assert bins == 4
     assert slope == pytest.approx(1920 / 409)
-
