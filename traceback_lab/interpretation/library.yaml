@@ -87,7 +87,7 @@ entries:
 
   - algorithm_id: bam-qc
     metric_id: supplementary_fraction
-    label: "Supplementary alignments per mapped read (chimera proxy)"
+    label: "Supplementary alignments per mapped read"
     value_kind: proportion
     tier: NEWER
     origin_tier: NEWER
@@ -96,11 +96,11 @@ entries:
     reference: {kind: none}
     performance: null
     performance_missing_reason: "none published"
-    meaning_high: "Ligation chimeras: two cfDNA molecules joined during library prep, which inflates apparent fragment lengths."
-    meaning_low: "Few chimeras."
-    confounders: ["library prep chemistry", "input mass"]
+    meaning_high: "More supplementary alignments; on ONT this can indicate ligation chimeras, while short-read split alignments have other causes."
+    meaning_low: "Fewer supplementary alignments; this alone does not establish a low chimera rate."
+    confounders: ["sequencing platform and alignment method", "library prep chemistry", "input mass"]
     next_steps:
-      analytical: ["Compare across kit batches", "Check the long-fragment tail"]
+      analytical: ["Compare only within a matched platform and alignment method", "On ONT, check the long-fragment tail"]
       clinical_setting: null
     license_ids: []
     flags: []
@@ -120,11 +120,11 @@ entries:
     reference: {kind: none}
     performance: null
     performance_missing_reason: "QC measure, not a diagnostic"
-    meaning_high: "Accurate basecalls."
-    meaning_low: "Noisy basecalls: methylation calls and end motifs are less reliable."
-    confounders: ["basecaller model", "flow-cell wear"]
+    meaning_high: "Higher reported base quality within the same sequencing platform and quality pipeline."
+    meaning_low: "Lower reported base quality within the same sequencing platform and quality pipeline; ONT methylation calls and end motifs may be less reliable."
+    confounders: ["sequencing platform and quality-score calibration", "basecaller model", "flow-cell wear"]
     next_steps:
-      analytical: ["Confirm the basecall model in the @RG line"]
+      analytical: ["Compare within one platform and quality pipeline", "For ONT, confirm the basecall model"]
       clinical_setting: null
     license_ids: []
     flags: []
@@ -170,7 +170,7 @@ entries:
     performance_missing_reason: "QC measure, not a diagnostic"
     meaning_high: "GC-rich regions over-represented: copy-number calls need GC correction."
     meaning_low: "GC-rich regions under-represented."
-    confounders: ["library amplification", "extraction kit"]
+    confounders: ["library amplification, especially for short-read libraries", "extraction kit", "sequencing platform"]
     next_steps:
       analytical: ["Confirm copy-number GC correction is applied"]
       clinical_setting: null
@@ -208,7 +208,7 @@ entries:
   # ----------------------------------------------------------------- depth
   - algorithm_id: depth
     metric_id: approx_depth_x
-    label: "Approximate depth (eligible reads)"
+    label: "Approximate aligned-base depth (eligible reads)"
     value_kind: positive
     tier: PROVEN
     origin_tier: PROVEN
@@ -216,10 +216,10 @@ entries:
     min_depth_x: null
     reference: {kind: none}
     performance: null
-    performance_missing_reason: "QC measure: sum of eligible spans / genome length"
+    performance_missing_reason: "QC measure: sum of eligible read spans / genome length; duplicate-marked reads are excluded, but overlapping paired mates each contribute"
     meaning_high: "More measurements may clear their depth requirement; platform and other gates still apply."
     meaning_low: "Fewer measurements clear their depth requirement; see the depth curve."
-    confounders: ["flow-cell yield", "input cfDNA mass"]
+    confounders: ["flow-cell yield", "input cfDNA mass", "overlapping paired mates inflate short-read aligned-base depth relative to physical coverage"]
     next_steps:
       analytical: ["Use the depth curve to see what more sequencing would add"]
       clinical_setting: null
@@ -241,9 +241,9 @@ entries:
     reference: {kind: none}
     performance: null
     performance_missing_reason: "QC count"
-    meaning_high: "More reads pass the common eligibility filter; each algorithm still applies its own platform and input gates."
+    meaning_high: "More reads pass the common eligibility filter; duplicate-marked reads are excluded, paired mates each count, and algorithms still apply their own platform and input gates."
     meaning_low: "Few reads pass the common eligibility filter; see platform-specific support requirements."
-    confounders: ["mapping quality", "chimeras"]
+    confounders: ["mapping quality", "chimeras", "paired mates count separately when both are eligible"]
     next_steps:
       analytical: ["Compare with the index count (an upper bound)"]
       clinical_setting: null
