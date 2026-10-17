@@ -220,26 +220,50 @@ ROOT, home, login and chunk names redacted) is ever stored.
 | `frag-x-meth` | descriptive molecule-count matrix of aligned-size bins by per-read 5mC fraction (at least four distinct CpG sites/read); the scalar is long (151–220 bp) mean minus short (100–150 bp) mean, null if either group is empty; no normal range |
 | `breakpoint-motifs` | 4-mer counts at aligned-reference-span start and end−1, stratified by CpG proximity; the scalar is the fraction of ends near a CpG. These are not proven physical cleavage positions, and the methylation link is unavailable without a supported joint input |
 
-**Short-read TLEN slice.** For a prealigned paired-end Illumina BAM against
-the registered hg38 reference, run the separate measurement explicitly:
+**Short-read support.** For a prealigned paired-end Illumina BAM against the
+registered hg38 reference, run the normal Lab command:
 
 ```bash
 traceback lab run YOUR_LOCAL_aligned_illumina.bam \
-  --reference hg38 --only short-read-fragment-size \
-  --no-downsample --no-controls --root R
+  --reference hg38 --root R
 ```
 
-Every BAM read group must declare `PL:ILLUMINA`; a BAM aligned by the Lab's
-ONT minimap2 path is skipped. Each qualifying proper first mate counts one
+Every BAM read group must declare `PL:ILLUMINA`. This declaration is recorded
+in the input manifest and run summary; it describes the BAM header, not
+instrument attestation. A prealigned BAM with missing, mixed, or unrecognized
+platform declarations is refused with TBX-LAB-024. Unaligned input must
+unanimously declare `PL:ONT` to use the Lab's
+`map-ont` alignment path. For short reads, align externally and supply a
+prealigned BAM. Each qualifying proper first mate counts one
 template: it must pass the common primary, mapped, nonduplicate, QC-pass,
-MAPQ ≥ 20 and canonical-contig filter, have a mapped mate on the same contig,
+MAPQ ≥ 20 and canonical nuclear contig filter (names with or without `chr`),
+have a mapped mate on the same contig,
 and carry nonzero TLEN. The reported length is `abs(TLEN)`, even when the
 first mate's TLEN is negative. Downsample and split selections use the same
 read-name predicate as other Lab full-BAM algorithms. The histogram and
 metrics are keyed to `short-read-fragment-size`; `fragment-size` remains the
-ONT aligned-span measurement. No clinical cutoff, short-read healthy range,
-or cross-platform comparison is supplied by this slice. Other Lab algorithms
-are still designed around the ONT run, so use `--only` for this opt-in path.
+ONT aligned-span measurement. The normal Illumina run also reports read
+summary, aligned-base depth, and BAM QC, including downsample and split views.
+ONT-only algorithms skip with reason `platform`; the CNA spike is omitted for
+Illumina. Result and cohort compatibility identities include platform, so an
+Illumina measurement cannot reuse an ONT result or reference range. No clinical
+cutoff, short-read healthy range, or cross-platform comparison is supplied.
+If an Illumina BAM was ingested by the earlier opt-in TLEN path, run it again
+from the original BAM to create its platform-specific input identity. The old
+stored result remains available but does not enter new platform-aware cohorts.
+For a legacy BAM without a platform declaration, verify its instrument
+provenance and regenerate a BAM with the correct `@RG PL` value from the trusted
+source before ingesting it. The Lab does not infer ONT from an absent value.
+Previously stored Lab-aligned inputs without read groups remain readable only
+when their manifest pins the historical `map-ont` alignment recipe; a new
+input still needs an explicit platform declaration.
+Stored prealigned manifests without a platform field still read the BAM's
+unanimous platform declaration. Re-ingest short reads to record an Illumina
+input identity for new results and cohorts. Before rerun, historical ONT-only
+results on such an Illumina input remain stored but appear as platform skips
+in sample views and the local API; rerun records those skips in the store.
+The same read-side mask applies when an old prealigned input cannot verify ONT
+provenance from its BAM.
 
 **PMD asset.** `pmd-score` needs an operator-supplied Zhou 2018 hg38
 common-PMD BED.gz file. The repository does not ship or download it; its
@@ -607,6 +631,18 @@ An operator-supplied `--sex` conflicts with an assertion already recorded for
 the same sample, or the local sex metadata is malformed (exit 3). Reuse the
 recorded assertion or omit the flag. Inspect and restore malformed metadata
 from a known-good local backup before rerunning; no measured result is changed.
+
+### TBX-LAB-024
+
+An input has missing, mixed, or unrecognized platform declarations, an
+unaligned Illumina input would need the ONT-only aligner, or a stored input's
+platform disagrees with its BAM header (exit 3). Use a BAM whose read groups
+unanimously declare `PL:ONT` or `PL:ILLUMINA`; align Illumina reads externally
+before supplying the BAM. For a damaged or mismatched stored input, restore
+that input from a known-good backup or re-ingest the original BAM under a fresh
+ROOT. Reusing the same ROOT does not replace an existing input manifest.
+Rewriting a BAM header changes its source identity; remove an unrecoverable
+member from its cohort before rebuilding that cohort.
 
 ## Adding an algorithm
 
