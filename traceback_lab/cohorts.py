@@ -330,9 +330,6 @@ def _recorded_selection(
                 or not isinstance(plan.get("tools"), list)
                 or not isinstance(plan.get("asset_sha256s"), list)):
             return None
-        if any(plan["parameters"].get(key) != value
-               for key, value in algorithm.parameters.items()):
-            return None
         if current_assets is not None and plan["asset_sha256s"] != current_assets:
             return None
         recorded_identity = execution_identity(
