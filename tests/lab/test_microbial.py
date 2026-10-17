@@ -21,7 +21,7 @@ from traceback_lab.cohort_contracts import CohortGeneration, CohortMember, Cohor
 from traceback_lab.envelope import Metric, ResultEnvelope, provenance
 from traceback_lab.microbial_db import MicrobialDbError, inspect_database, register_database
 from traceback_lab.microbial_view import profile_for_sample
-from traceback_lab.registry import InputContext
+from traceback_lab.registry import InputContext, ToolPin
 from traceback_lab.registry import execution_identity
 from traceback_lab.store import LabStore
 from traceback_lab.views import InputView, SampleView
@@ -107,14 +107,16 @@ def test_production_cohort_snapshot_excludes_unassayable_and_changed_db(tmp_path
     source_id, input_id, reference_sha = "a" * 64, "b" * 64, "c" * 64
     db_digest = ["d" * 64]
     summary = SimpleNamespace(id="read-summary", version="1", upstream=(), parameters={}, tools=[])
+    pins = [ToolPin("kraken2", "f" * 64, "kraken2-mit")]
     microbial = SimpleNamespace(id="microbial", version="3", upstream=("read-summary",),
-                                parameters={}, tools=[], asset_sha256s=lambda root: db_digest)
+                                parameters={}, tools=pins, asset_sha256s=lambda root: db_digest)
     monkeypatch.setattr(cohorts, "load_registry", lambda: (summary, microbial))
     manifest = {"kind": "prealigned", "source_id": source_id, "reference_sha256": reference_sha}
     summary_identity = execution_identity(summary, reference_sha256=reference_sha)
     microbial_identity = execution_identity(
         microbial, reference_sha256=reference_sha, asset_sha256s=db_digest,
         upstream=[{"algorithm_id": "read-summary", "parameters_sha256": summary_identity}],
+        tool_pins=[pin.identity() for pin in pins],
     )
     for item, identity in ((summary, summary_identity), (microbial, microbial_identity)):
         store.publish_result(ResultEnvelope(
@@ -140,6 +142,7 @@ def test_production_cohort_snapshot_excludes_unassayable_and_changed_db(tmp_path
     new_identity = execution_identity(
         microbial, reference_sha256=reference_sha, asset_sha256s=db_digest,
         upstream=[{"algorithm_id": "read-summary", "parameters_sha256": summary_identity}],
+        tool_pins=[pin.identity() for pin in pins],
     )
     store.publish_result(ResultEnvelope(
         algorithm_id="microbial", algorithm_version="3", status="ok",
