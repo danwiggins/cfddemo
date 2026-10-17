@@ -218,15 +218,12 @@ def _split_half_status(view: InputView | None, algorithm_id: str, metric_id: str
     current = _value(envelope, metric_id)
     try:
         current_finite = current is not None and _numeric(current.value) and math.isfinite(current.value)
-        full_finite = _numeric(full_value) and math.isfinite(full_value)
     except OverflowError:
-        current_finite = full_finite = False
+        current_finite = False
     if not current_finite:
         return {"state": "not_interpretable", "reason": "metric value unavailable", "value": None, "deviation": None}
-    if not full_finite:
-        return {"state": "not_interpretable", "reason": "full-depth metric unavailable", "value": None, "deviation": None}
-    difference, _ = deviation(spec, current.value, full_value, 0.5)
-    return {"state": "ok", "reason": None, "value": current.value, "deviation": difference}
+    difference, unit = deviation(spec, current.value, full_value, 0.5)
+    return {"state": "ok", "reason": None, "value": current.value, "deviation": difference, "unit": unit}
 
 
 def cell_state(

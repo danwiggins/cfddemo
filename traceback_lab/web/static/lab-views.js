@@ -533,9 +533,10 @@
       const w = 240, hgt = 140, pad = 28;
       const fracs = [0.1, 0.25, 0.5, 1.0];
       const x = (f) => pad + ((Math.log10(f) - Math.log10(0.08)) / (Math.log10(1.2) - Math.log10(0.08))) * (w - pad - 8);
-      const unit = (panel.points.find((p) => p.unit) || {}).unit || "percent";
+      const unit = (panel.points.find((p) => p.unit && p.unit !== "none") || {}).unit ||
+        [panel.split_status?.A?.unit, panel.split_status?.B?.unit].find((value) => value && value !== "none") || "none";
       const clip = 50;
-      const splitDevs = panel.split ? [panel.split.deviation_a, panel.split.deviation_b].filter(Number.isFinite).map(Math.abs) : [];
+      const splitDevs = [panel.split_status?.A?.deviation, panel.split_status?.B?.deviation].filter(Number.isFinite).map(Math.abs);
       const maxAbs = unit === "unit" ? Math.max(1e-9, ...splitDevs, ...panel.points.map((p) => Math.abs(p.deviation || 0)), ...(panel.points.map((p) => p.band ? Math.max(Math.abs(p.band.lo), Math.abs(p.band.hi)) : 0).filter(Number.isFinite))) : clip;
       const y = (v) => { const c = Math.max(-maxAbs, Math.min(maxAbs, v)); return hgt / 2 - (c / maxAbs) * (hgt / 2 - 12); };
       const marks = [svg("line", { x1: pad, x2: w - 8, y1: y(0), y2: y(0), class: "zero" })];
@@ -574,8 +575,14 @@
         hasSplitHalf && splitVerdict === "no split-half stability verdict" ? h("p", { class: "help" }, `Split halves: ${splitSummary}. No split-half stability verdict.`) : ""));
       for (const p of panel.points) tableRows.push([panel.label, `${p.fraction * 100}%`, p.value, p.deviation, p.state || "—"]);
       if (panel.split) tableRows.push([panel.label, "split A / B", `${fmt(panel.split.a)} / ${fmt(panel.split.b)}`, `${(panel.split.relative_abs_diff * 100).toFixed(1)}% |A−B|`, splitVerdict]);
-      else if (hasSplitHalf) tableRows.push([panel.label, "split A / B", `${fmt(panel.split_status?.A?.value)} / ${fmt(panel.split_status?.B?.value)}`,
-        `${fmt(panel.split_status?.A?.deviation)} / ${fmt(panel.split_status?.B?.deviation)}${unit === "percent" ? "%" : ""}`, splitSummary]);
+      else if (hasSplitHalf) {
+        const halfDeviation = (half) => {
+          const value = panel.split_status?.[half]?.deviation;
+          return Number.isFinite(value) ? `${fmt(value)}${unit === "percent" ? "%" : " metric units"}` : "—";
+        };
+        tableRows.push([panel.label, "split A / B", `${fmt(panel.split_status?.A?.value)} / ${fmt(panel.split_status?.B?.value)}`,
+          `${halfDeviation("A")} / ${halfDeviation("B")} (each vs full)`, splitSummary]);
+      }
     }
     out.push(grid, dataTable("Stability: every point", ["Metric", "Fraction", "Value", "Deviation", "State"], tableRows));
     const shown = new Set(sample.stability.map((p) => p.algorithm_id));

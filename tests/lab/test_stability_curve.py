@@ -251,7 +251,10 @@ def test_split_half_missingness_keeps_each_status_visible() -> None:
     assert status(view, "fragment-size", "mode_bp", 100, spec)["state"] == "not_interpretable"
     view.results["fragment-size"] = SimpleNamespace(status="ok", metrics=[metric(105)])
     assert status(view, "fragment-size", "mode_bp", 100, spec) == {
-        "state": "ok", "reason": None, "value": 105, "deviation": 5.0,
+        "state": "ok", "reason": None, "value": 105, "deviation": 5.0, "unit": "percent",
+    }
+    assert status(view, "fragment-size", "mode_bp", float("nan"), spec) == {
+        "state": "ok", "reason": None, "value": 105, "deviation": None, "unit": "none",
     }
 
 
