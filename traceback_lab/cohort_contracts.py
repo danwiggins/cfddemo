@@ -71,12 +71,15 @@ class CohortPon(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     source_ids: tuple[str, ...] = Field(min_length=10)
+    loo_asset_sha256s: tuple[tuple[str, str], ...] = Field(min_length=10)
     reference_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
     aligner_identity: str = Field(min_length=1, max_length=160)
     grid_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
     counting_parameters_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
     toolchain_lock_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
+    builder_source_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
     builder_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
+    validator_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
     gc_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
     map_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
     centromere_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
@@ -87,6 +90,11 @@ class CohortPon(BaseModel):
             raise ValueError("PoN source identities must be SHA-256 digests")
         if tuple(sorted(set(self.source_ids))) != self.source_ids:
             raise ValueError("PoN source identities must be distinct and sorted")
+        if tuple(source for source, _ in self.loo_asset_sha256s) != self.source_ids:
+            raise ValueError("PoN leave-one-out identities must match sorted sources")
+        digests = tuple(digest for _, digest in self.loo_asset_sha256s)
+        if any(not SHA256_PATTERN.fullmatch(digest) for digest in digests) or len(set(digests)) != len(digests):
+            raise ValueError("PoN leave-one-out assets must have distinct SHA-256 digests")
         return self
 
 
@@ -118,9 +126,12 @@ class CohortGeneration(BaseModel):
             by_source = {member.source_id: member for member in self.members}
             if self.pon_asset_sha256 is None or self.pon_n != len(self.pon_build.source_ids):
                 raise ValueError("full PoN identity and count must match build provenance")
-            if any(source_id not in by_source or by_source[source_id].pon_asset_sha256 is None
+            loo_by_source = dict(self.pon_build.loo_asset_sha256s)
+            if self.pon_asset_sha256 in loo_by_source.values():
+                raise ValueError("full PoN asset cannot be a leave-one-out asset")
+            if any(source_id not in by_source or by_source[source_id].pon_asset_sha256 != loo_by_source[source_id]
                    for source_id in self.pon_build.source_ids):
-                raise ValueError("every PoN source needs its own leave-one-out panel")
+                raise ValueError("every PoN source needs its own verified leave-one-out panel")
             if any(member.pon_asset_sha256 is not None and member.source_id not in self.pon_build.source_ids
                    for member in self.members):
                 raise ValueError("only PoN sources may have leave-one-out panels")

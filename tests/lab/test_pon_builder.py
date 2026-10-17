@@ -75,6 +75,12 @@ def test_full_and_leave_one_out_panels_are_distinct_immutable_assets(tmp_path: P
     expected = tuple(item.source_id for item in _inputs(store))
     assert build.source_ids == expected
     assert build.pon_n == 10
+    assert build.provenance().builder_source_sha256 == pon.BUILDER_SOURCE_SHA256
+    assert build.provenance().builder_sha256 == pon.BUILDER_SHA256
+    assert build.provenance().validator_sha256 == pon.VALIDATOR_SHA256
+    assert build.provenance().loo_asset_sha256s == tuple(build.loo_asset_sha256s.items())
+    with pytest.raises(TypeError):
+        build.loo_asset_sha256s[expected[0]] = _sha(999)
     assert calls[0] == ("full", expected)
     assert len(calls) == 11
     assert {excluded: included for label, included in calls[1:]
@@ -123,6 +129,7 @@ def test_cohort_binding_uses_member_loo_and_full_for_nonmember(tmp_path: Path, m
         cohort_id="healthy", version=1, members=members, pon_n=build.pon_n,
         pon_asset_sha256=build.full_asset_sha256, pon_build=build.provenance(),
     )
+    generation = CohortGeneration.model_validate_json(generation.model_dump_json())
     expected = {
         "reference_sha256": _sha(900), "toolchain_lock_sha256": _sha(800),
         "counting_parameters_sha256": build.counting_parameters_sha256, "grid_sha256": _sha(700),
@@ -132,10 +139,12 @@ def test_cohort_binding_uses_member_loo_and_full_for_nonmember(tmp_path: Path, m
     member_selection = pon.binding_for(store, generation, _sha(1), **expected)
     assert member_selection.pon_sha256 == build.loo_asset_sha256s[_sha(1)]
     assert member_selection.target_excluded
+    assert member_selection.panel_n == 9
     assert _sha(1) not in member_selection.panel_source_ids
     external_selection = pon.binding_for(store, generation, _sha(99), **expected)
     assert external_selection.pon_sha256 == build.full_asset_sha256
     assert not external_selection.target_excluded
+    assert external_selection.panel_n == 10
     assert external_selection.pon_policy == "lab_loo_v1"
     pon.require_grid(member_selection, _sha(700))
     with pytest.raises(LabProblem, match="TBX-LAB-020"):
@@ -146,6 +155,30 @@ def test_cohort_binding_uses_member_loo_and_full_for_nonmember(tmp_path: Path, m
         pon.binding_for(store, generation, _sha(1), **{**expected, "aligner_identity": "other aligner"})
     with pytest.raises(LabProblem, match="TBX-LAB-020"):
         pon.binding_for(store, generation, _sha(1), **{**expected, "gc_sha256": _sha(901)})
+    other_builder = generation.model_copy(update={
+        "pon_build": generation.pon_build.model_copy(update={"builder_sha256": _sha(901)}),
+    })
+    with pytest.raises(LabProblem, match="TBX-LAB-020"):
+        pon.binding_for(store, other_builder, _sha(1), **expected)
+    swapped_member = members[0].model_copy(update={"pon_asset_sha256": build.full_asset_sha256})
+    with pytest.raises(ValidationError, match="leave-one-out"):
+        CohortGeneration(
+            cohort_id="healthy", version=1, members=(swapped_member, *members[1:]),
+            pon_n=build.pon_n, pon_asset_sha256=build.full_asset_sha256,
+            pon_build=build.provenance(),
+        )
+    wrong_mapping = build.provenance().model_copy(update={
+        "loo_asset_sha256s": ((members[0].source_id, build.full_asset_sha256),
+                               *build.provenance().loo_asset_sha256s[1:]),
+    })
+    with pytest.raises(ValidationError, match="full PoN asset"):
+        CohortGeneration(
+            cohort_id="healthy", version=1, members=members, pon_n=build.pon_n,
+            pon_asset_sha256=build.full_asset_sha256, pon_build=wrong_mapping,
+        )
+    forged_generation = generation.model_copy(update={"members": (swapped_member, *members[1:])})
+    with pytest.raises(LabProblem, match="TBX-LAB-020"):
+        pon.binding_for(store, forged_generation, _sha(1), **expected)
     stored = store.lab / "assets" / "pon" / f"{build.full_asset_sha256}.rds"
     stored.write_bytes(b"changed")
     with pytest.raises(LabProblem, match="TBX-LAB-020"):
@@ -172,8 +205,30 @@ def test_explicit_selection_refuses_generation_without_panel(tmp_path: Path) -> 
                         centromere_sha256=_sha(703))
 
 
-def test_vendored_builder_matches_reviewed_upstream_bytes() -> None:
+def test_source_and_adapted_builder_match_pinned_bytes() -> None:
+    assert hashlib.sha256(pon.BUILDER_SOURCE_SCRIPT.read_bytes()).hexdigest() == pon.BUILDER_SOURCE_SHA256
     assert hashlib.sha256(pon.BUILDER_SCRIPT.read_bytes()).hexdigest() == pon.BUILDER_SHA256
+    assert hashlib.sha256(pon.VALIDATOR_SCRIPT.read_bytes()).hexdigest() == pon.VALIDATOR_SHA256
+
+
+def test_tampered_validator_rejected_before_build(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    malicious = tmp_path / "validator.R"
+    malicious.write_text('quit(save="no", status=0)\n')
+    monkeypatch.setattr(pon, "VALIDATOR_SCRIPT", malicious)
+    with pytest.raises(LabProblem, match="TBX-LAB-020"):
+        pon.build_panels(LabStore(tmp_path), _inputs(LabStore(tmp_path)))
+
+
+def test_validator_invocation_uses_fixed_digest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    observed: list[str] = []
+
+    def fake_run(_: object, script: Path, digest: str, args: tuple[str, ...], work: Path) -> None:
+        assert script == pon.VALIDATOR_SCRIPT
+        observed.append(digest)
+
+    monkeypatch.setattr(pon, "_run_r", fake_run)
+    pon._validate_panel(object(), tmp_path / "panel.rds", (_sha(1),), None)
+    assert observed == [pon.VALIDATOR_SHA256]
 
 
 def test_builder_passes_canonical_protocol_arguments(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -193,10 +248,7 @@ def test_builder_passes_canonical_protocol_arguments(tmp_path: Path, monkeypatch
     assert panel.read_bytes() == b"synthetic RDS"
     script, checksum, args = observed[0]
     assert script == pon.BUILDER_SCRIPT and checksum == pon.BUILDER_SHA256
-    assert args[args.index("--chrs") + 1] == "c(1:22)"
-    assert args[args.index("--chrNormalize") + 1] == "c(1:22)"
-    assert args[args.index("--genomeStyle") + 1] == "UCSC"
-    assert args[args.index("--method") + 1] == "median"
+    assert args[::2] == ("--filelist", "--gcWig", "--mapWig", "--centromere", "--outfile")
     assert Path(args[args.index("--filelist") + 1]).read_text() == f"{wig}\n"
 
 
