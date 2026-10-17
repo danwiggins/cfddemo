@@ -14,6 +14,7 @@ from traceback_lab.ingest import resolve_sample
 from traceback_lab.problems import LabProblem
 from traceback_lab.registry import ToolPin, execution_identity
 from traceback_lab.store import LabStore
+from traceback_runner import cli as signed_cli
 
 
 def _sha(index: int) -> str:
@@ -28,7 +29,10 @@ def store(tmp_path, monkeypatch) -> LabStore:
     return lab
 
 
-def _sample(store: LabStore, index: int, *, example: bool = False, value: float = 100.0, stale: bool = False, aligned: bool = True) -> str:
+def _sample(
+    store: LabStore, index: int, *, example: bool = False, value: float = 100.0,
+    stale: bool = False, aligned: bool = True, minimap2: str = "2.28",
+) -> str:
     source_id, input_id = _sha(index), _sha(index + 100)
     parameters = parameters_sha256(
         algorithm_id="fragment-size", algorithm_version="1",
@@ -44,7 +48,7 @@ def _sample(store: LabStore, index: int, *, example: bool = False, value: float 
     (input_dir / "manifest.json").write_text(json.dumps({
         "kind": "aligned" if aligned else "prealigned", "source_id": source_id,
         "input_id": input_id, "reference_sha256": _sha(900),
-        "tools": {"samtools": "1.20", "minimap2": "2.28"} if aligned else None,
+        "tools": {"samtools": "1.20", "minimap2": minimap2} if aligned else None,
         "mmi_sha256": _sha(901) if aligned else None,
         "aligner_argv": ["minimap2", "-ax", "map-ont"] if aligned else None,
     }))
@@ -88,6 +92,25 @@ def test_add_is_idempotent_and_build_publishes_immutable_generations(store: LabS
     assert two.kind == "provisional_external"
     assert (store.lab / "cohorts" / "healthy" / "generations" / "1" / "generation.json").is_file()
     assert read_current(store, "healthy") == two
+
+
+def test_cohort_cli_reports_distinct_aligner_versions(store: LabStore, capsys) -> None:
+    first = _sample(store, 1, minimap2="2.28")
+    second = _sample(store, 2, minimap2="2.99-r9999")
+    for source in (first, second):
+        assert signed_cli.main(["lab", "cohort", "add", source, "--cohort", "healthy", "--root", str(store.root)]) == 0
+        capsys.readouterr()
+    argv = ["lab", "cohort", "build", "--cohort", "healthy", "--root", str(store.root)]
+    assert signed_cli.main(argv) == 0
+    human = capsys.readouterr().out
+    assert "ALIGNER minimap2 2.28; samtools 1.20: 1" in human
+    assert "ALIGNER minimap2 2.99-r9999; samtools 1.20: 1" in human
+    assert signed_cli.main([*argv, "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)["data"]
+    assert data["aligner_counts"] == {
+        "minimap2 2.28; samtools 1.20": 1,
+        "minimap2 2.99-r9999; samtools 1.20": 1,
+    }
 
 
 def test_example_is_rejected_before_roster_write(store: LabStore) -> None:

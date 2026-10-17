@@ -49,11 +49,14 @@ ALGORITHMS: tuple[str, ...] = (
     "instability:INSTABILITY",
     "long_tail:LONG_TAIL",
     "sex_check:SEX_CHECK",
+    "identity:IDENTITY",
     "mtdna:MTDNA",
+    "viral_reads:VIRAL_READS",
     "cell_origin:CELL_ORIGIN",
     "end_motifs:END_MOTIFS",
     "breakpoint_motifs:BREAKPOINT_MOTIFS",
     "delfi_ratio:DELFI_RATIO",
+    "tss_profile:TSS_PROFILE",
     "meth_calls:METH_CALLS",
     "modbase_qc:MODBASE_QC",
     "global_5mc:GLOBAL_5MC",
@@ -184,16 +187,20 @@ def execution_identity(
     asset_sha256s: Iterable[str] = (),
     upstream: Iterable[Mapping[str, str]] = (),
     platform: str | None = None,
+    tool_pins: Iterable[Mapping[str, str]] | None = None,
     tool_identities: Iterable[Mapping[str, str]] | None = None,
 ) -> str:
     """``parameters_sha256`` for one algorithm on one reference (D19)."""
+
+    if tool_pins is not None and tool_identities is not None:
+        raise ValueError("provide only one planned tool-identity list")
+    selected_tools = tool_pins if tool_pins is not None else tool_identities
 
     return parameters_sha256(
         algorithm_id=algorithm.id,
         algorithm_version=algorithm.version,
         parameters=algorithm.parameters,
-        tools=([tool.identity() for tool in algorithm.tools] if tool_identities is None
-               else list(tool_identities)),
+        tools=list(selected_tools) if selected_tools is not None else [tool.identity() for tool in algorithm.tools],
         reference_sha256=reference_sha256,
         asset_sha256s=asset_sha256s,
         upstream=upstream,
