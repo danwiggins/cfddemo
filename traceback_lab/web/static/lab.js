@@ -149,13 +149,33 @@
     );
   }
 
+  function updateNavFade() {
+    const nav = document.getElementById("lenses");
+    const overflow = !nav.hidden && nav.scrollWidth > nav.clientWidth + 1;
+    nav.classList.toggle("more-left", overflow && nav.scrollLeft > 1);
+    nav.classList.toggle("more-right", overflow && nav.scrollLeft + nav.clientWidth < nav.scrollWidth - 1);
+  }
+
+  function revealCurrentNav() {
+    const nav = document.getElementById("lenses");
+    const active = nav.querySelector('[aria-current="page"]');
+    if (active && getComputedStyle(nav).flexWrap === "nowrap") {
+      const navRect = nav.getBoundingClientRect();
+      const activeRect = active.getBoundingClientRect();
+      nav.scrollLeft += activeRect.left - navRect.left - (nav.clientWidth - activeRect.width) / 2;
+    } else if (!nav.hidden) {
+      nav.scrollLeft = 0;
+    }
+    updateNavFade();
+  }
+
   function renderNav() {
     const nav = document.getElementById("lenses");
     const sample = state.sample && state.sample.found ? state.sample : null;
     nav.replaceChildren();
     // Lens tabs belong to a sample's lens routes; the landing page has none (spec layout).
     nav.hidden = !sample || state.route.name !== "lens";
-    if (!sample || nav.hidden) return;
+    if (!sample || nav.hidden) { updateNavFade(); return; }
     const current = state.route.name === "lens" ? state.route.lens : LENSES[0].id;
     for (const lens of LENSES) {
       let label = lens.label;
@@ -166,6 +186,7 @@
       if (lens.count) label += lens.count(sample);
       nav.append(h("a", { href: `#/sample/${sample.id12}/${lens.id}`, "aria-current": lens.id === current ? "page" : null }, label));
     }
+    revealCurrentNav();
   }
 
   function render() {
@@ -632,6 +653,8 @@
   // -- start ----------------------------------------------------------------------------
   async function start() {
     setupKey();
+    document.getElementById("lenses").addEventListener("scroll", updateNavFade, { passive: true });
+    window.addEventListener("resize", revealCurrentNav);
     render();
     try {
       await exchangeBootstrap();

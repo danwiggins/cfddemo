@@ -85,6 +85,105 @@ def test_landing_responsive_clia_and_single_column_geometry(size, tmp_path) -> N
 
 
 @needs_chrome
+@pytest.mark.parametrize("size,columns", [
+    ("1280,800", 4), ("1024,768", 2), ("768,1024", 2), ("360,740", 1),
+])
+def test_stability_columns_and_lens_wrap_at_exact_width(size, columns, tmp_path) -> None:
+    observed = {}
+    width, height = map(int, size.split(","))
+    with _server(tmp_path, _sample()) as server:
+        profile = tmp_path / "browser-profile"
+
+        def inspect(_command, evaluate) -> None:
+            observed.update(evaluate("""(() => {
+              const grid = document.querySelector('#main .multiples');
+              const nav = document.querySelector('#lenses');
+              return {
+                width: innerWidth,
+                panels: grid.children.length,
+                columns: getComputedStyle(grid).gridTemplateColumns.split(' ').length,
+                navLines: new Set([...nav.querySelectorAll('a')]
+                  .map((link) => Math.round(link.getBoundingClientRect().top))).size
+              };
+            })()"""))
+
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", f"--window-size={size}",
+             server.issue_link() + f"&route=/sample/{ID12}/stability"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'class="multiples"' in dom,
+            interact=inspect, viewport=(width, height),
+        )
+    assert observed["width"] == width and observed["panels"] >= 4, observed
+    assert observed["columns"] == columns, (size, observed)
+    if width == 768:
+        assert observed["navLines"] == 2, observed
+
+
+@needs_chrome
+def test_mobile_lens_deep_link_and_route_changes_reveal_current_tab(tmp_path) -> None:
+    observed = {}
+    with _server(tmp_path, _sample()) as server:
+        profile = tmp_path / "browser-profile"
+
+        def inspect(_command, evaluate) -> None:
+            snapshot = """(() => {
+              const nav = document.querySelector('#lenses');
+              const active = nav.querySelector('[aria-current="page"]');
+              const box = nav.getBoundingClientRect();
+              const tab = active.getBoundingClientRect();
+              return {
+                width: innerWidth, current: active.textContent.trim(),
+                scrollLeft: nav.scrollLeft, scrollWidth: nav.scrollWidth,
+                clientWidth: nav.clientWidth, visible: tab.left >= box.left && tab.right <= box.right,
+                hitCurrent: active.contains(document.elementFromPoint(
+                  (tab.left + tab.right) / 2, (tab.top + tab.bottom) / 2)),
+                leftFade: nav.classList.contains('more-left'),
+                rightFade: nav.classList.contains('more-right'),
+                mask: getComputedStyle(nav).maskImage,
+                pageOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1
+              };
+            })()"""
+
+            def route(lens: str) -> dict:
+                evaluate(f"location.hash = '#/sample/{ID12}/{lens}'")
+                for _ in range(100):
+                    if evaluate(f"document.querySelector('#lenses [aria-current=page]')?.getAttribute('href')?.endsWith('/{lens}')"):
+                        break
+                    time.sleep(0.05)
+                return evaluate(snapshot)
+
+            observed["methods"] = evaluate(snapshot)
+            evaluate("document.querySelector('#lenses').scrollLeft = 0")
+            time.sleep(0.05)
+            observed["start"] = evaluate(snapshot)
+            observed["findings"] = route("findings")
+            observed["methods_again"] = route("methods")
+
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", "--window-size=360,740",
+             server.issue_link() + f"&route=/sample/{ID12}/methods"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'aria-current="page">Methods' in dom,
+            interact=inspect, viewport=(360, 740),
+        )
+
+    initial = observed["methods"]
+    assert initial["width"] == 360 and initial["scrollWidth"] > initial["clientWidth"], initial
+    assert initial["current"] == "Methods" and initial["visible"] and initial["hitCurrent"], initial
+    assert initial["scrollLeft"] > 0, initial
+    assert initial["leftFade"] and not initial["rightFade"] and initial["mask"] != "none", initial
+    start = observed["start"]
+    assert not start["leftFade"] and start["rightFade"] and start["mask"] != "none", start
+    findings = observed["findings"]
+    assert findings["current"].startswith("Findings") and findings["visible"] and findings["hitCurrent"], findings
+    assert not findings["leftFade"] and findings["rightFade"], findings
+    again = observed["methods_again"]
+    assert again["current"] == "Methods" and again["visible"] and again["hitCurrent"] and again["leftFade"], again
+    assert all(not state["pageOverflow"] for state in observed.values()), observed
+
+
+@needs_chrome
 @pytest.mark.parametrize("size", ["1280,800", "1024,768", "768,1024", "360,740"])
 def test_all_routes_have_no_page_overflow_and_44px_targets(size, tmp_path) -> None:
     routes = [

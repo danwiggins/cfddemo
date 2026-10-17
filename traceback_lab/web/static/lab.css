@@ -52,6 +52,9 @@ pre.stderr { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; 
 #key-dialog { max-width: min(48rem, calc(100% - 2rem)); }
 @media (max-width: 47.99rem) {
   .lenses { flex-wrap: nowrap; overflow-x: auto; }
+  .lenses.more-left { mask-image: linear-gradient(to right, transparent, #000 1.25rem); }
+  .lenses.more-right { mask-image: linear-gradient(to right, #000 calc(100% - 1.25rem), transparent); }
+  .lenses.more-left.more-right { mask-image: linear-gradient(to right, transparent, #000 1.25rem, #000 calc(100% - 1.25rem), transparent); }
   .switcher { flex-basis: 100%; min-width: 0; }
   .switcher select { flex: 1 1 auto; min-width: 0; }
 }
