@@ -19,8 +19,8 @@ class InventoryError(ValueError):
     """The inventory cannot safely make the requested claim."""
 
 
-def _sha(value: str, label: str) -> str:
-    if not SHA256.fullmatch(value):
+def _sha(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not SHA256.fullmatch(value):
         raise InventoryError(f"{label} must be a lowercase SHA256")
     return value
 
@@ -108,14 +108,14 @@ def account(root: Path, source_id: str, input_id: str | None = None, *,
         recorded_chunk_bytes: int | None = sum(row["size"] for row in chunks)
     else:
         recorded_chunk_bytes = None
-    full_ids = [_sha(row["input_id"], "full input_id") for row in full
+    full_ids = [_sha(row.get("input_id"), "full input_id") for row in full
                 if isinstance(row, dict) and row.get("kind") in {"aligned", "prealigned"}]
     if not full_ids or (input_id is None and len(full_ids) != 1):
         raise InventoryError("select one full input_id from the source record")
     selected = input_id or full_ids[0]
     if selected not in full_ids:
         raise InventoryError("input_id is not a full input of this source")
-    derived_ids = [_sha(row["input_id"], "derived input_id") for row in derived
+    derived_ids = [_sha(row.get("input_id"), "derived input_id") for row in derived
                    if isinstance(row, dict) and row.get("parent_input_id") == selected]
     sample_ids = {selected, *derived_ids}
     bam_bytes = _file_size(lab / "inputs" / selected / "aligned.bam")
@@ -156,6 +156,8 @@ def account(root: Path, source_id: str, input_id: str | None = None, *,
         elif parts[0] == "refs" and name.endswith(".mmi"):
             shared_index += size
     literal_inputs = sample_inputs + shared_input_cache + other_inputs
+    complete_lab = sum(sizes.values())
+    other_lab = complete_lab - literal_inputs - sample_results - other_results - shared_index
     return {
         "schema": "traceback.lab.storage-accounting.v1",
         "source_id": source_id, "full_input_id": selected,
@@ -164,6 +166,8 @@ def account(root: Path, source_id: str, input_id: str | None = None, *,
         "excluded_chunk_bytes": None,
         "aligned_bam_bytes": bam_bytes, "aligned_index_bytes": bai_bytes,
         "aligned_bam_plus_index_bytes": denominator,
+        "ac4_numerator_scope": "all apparent file bytes under lab/inputs",
+        "ac4_denominator_basis": "selected full aligned.bam plus aligned.bam.bai",
         "literal_lab_inputs_bytes": literal_inputs,
         "literal_lab_inputs_ratio": literal_inputs / denominator,
         "literal_ac4_single_sample_applicable": other_inputs == 0,
@@ -176,9 +180,10 @@ def account(root: Path, source_id: str, input_id: str | None = None, *,
         "sample_result_bytes_by_algorithm": dict(sorted(result_algorithms.items())),
         "other_result_bytes": other_results,
         "shared_mmi_bytes": shared_index,
+        "other_lab_bytes": other_lab,
         "staging_bytes": staging, "staging_entry_count": staging_entries,
         "temporary_bytes": temporary,
-        "complete_lab_persistent_bytes": sum(sizes.values()),
+        "complete_lab_persistent_bytes": complete_lab,
         "complete_lab_file_count": len(sizes),
         "inventory_consistency": "best-effort snapshot; stop Lab writers for a stable receipt",
     }
