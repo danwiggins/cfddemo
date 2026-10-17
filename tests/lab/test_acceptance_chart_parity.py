@@ -17,8 +17,8 @@ from tests.lab.test_landing import needs_chrome
 def test_echarts_scatter_values_match_adjacent_table_without_animation(route, expected, tmp_path) -> None:
     sample = _sample()
     sample["synthetic"] = [
-        {"tf_expected": 0.1, "tf_recovered": 0.12, "recovered": True, "status": "recovered"},
-        {"tf_expected": 0.3, "tf_recovered": 0.29, "recovered": True, "status": "recovered"},
+        {"tf_expected": 0.1, "tf_recovered": 0.123456789, "recovered": True, "status": "recovered"},
+        {"tf_expected": 0.3, "tf_recovered": 0.29000000001, "recovered": True, "status": "recovered"},
     ]
     values = {("copy-number", "tumor_fraction"): 0.17,
               ("fragment-size", "mode_bp"): 167.0,
@@ -109,9 +109,10 @@ def test_fragment_density_line_values_match_adjacent_table_without_animation(rou
 @needs_chrome
 def test_genome_copy_number_points_match_unmasked_table_bins_in_genome_order(tmp_path) -> None:
     bins = [
-        {"chr": "chr1", "start": 0, "end": 1000, "log2": 0.25, "mask": None},
+        {"chr": "chr1", "start": 0, "end": 1000, "log2": 0.123456789, "mask": None},
         {"chr": "chr1", "start": 1000, "end": 2000, "log2": None, "mask": "low_mappability"},
-        {"chr": "chr2", "start": 0, "end": 500, "log2": -0.5, "mask": None},
+        {"chr": "chr2", "start": 0, "end": 500, "log2": -1.23456789, "mask": None},
+        {"chr": "chr2", "start": 500, "end": 800, "log2": 0.0000004321, "mask": None},
     ]
     observed = {}
     with _server(tmp_path, _sample()) as server:
@@ -158,4 +159,6 @@ def test_genome_copy_number_points_match_unmasked_table_bins_in_genome_order(tmp
         cursor = max(cursor, offsets[chromosome] + ending)
         if log2 != "—":
             expected.append([(offsets[chromosome] + beginning) / 1_000_000, float(log2)])
-    assert observed["points"] == expected == [[0.0, 0.25], [0.002, -0.5]]
+    assert observed["points"] == expected == [
+        [0.0, 0.123456789], [0.002, -1.23456789], [0.0025, 0.0000004321],
+    ]
