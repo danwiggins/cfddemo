@@ -712,6 +712,19 @@ def test_status_identifies_sample_only_after_run_sample_event(tmp_path, command)
                            "source_id": source_id, "input_id": input_id}
 
 
+@pytest.mark.parametrize("command", ("run", "simulate cna", "simulate split"))
+def test_active_writer_waiting_for_first_log_event_is_not_unavailable(tmp_path, command) -> None:
+    store = LabStore(tmp_path)
+    run_id = "r-20261015-0101-abcd"
+    with store.writer(command, run_id):
+        status = api_module.LabApi(store).status()
+        assert status["active"]["command"] == command
+        assert status["run_log_unavailable"] is None
+        store.runs_dir.mkdir()
+        (store.runs_dir / f"{run_id}.jsonl").touch()
+        assert api_module.LabApi(store).status()["run_log_unavailable"] is None
+
+
 @pytest.mark.parametrize(("damage", "reason"), (
     ("oversized", "unreadable_or_over_1mib"),
     ("too_many_lines", "over_4096_lines"),
