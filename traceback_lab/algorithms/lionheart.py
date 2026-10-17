@@ -13,9 +13,13 @@ import csv
 import hashlib
 import json
 import os
+import re
+import shlex
 import shutil
 import subprocess
+import tarfile
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any
 
 import numpy as np
@@ -67,10 +71,51 @@ def _file_hash(path: Path, algorithm: str = "sha256") -> str:
     return digest.hexdigest()
 
 
-def resource_tree_digest(directory: Path) -> str:
-    """Content identity for every extracted resource, without trusting mtimes."""
+_PACKAGE_PIN_SCRIPT = """\
+import hashlib, importlib.metadata, json
+from pathlib import Path
+dist = importlib.metadata.distribution('lionheart')
+files = sorted((str(p), Path(dist.locate_file(p))) for p in (dist.files or [])
+               if p.parts and p.parts[0] == 'lionheart' and p.suffix in ('.py', '.so', '.pyd'))
+if not files:
+    raise RuntimeError('Lionheart distribution has no recorded package files')
+digest = hashlib.sha256()
+for name, path in files:
+    if not path.is_file() or path.is_symlink():
+        raise RuntimeError('Lionheart package file missing or linked')
+    digest.update(name.encode('utf-8'))
+    with path.open('rb') as stream:
+        while block := stream.read(16 << 20):
+            digest.update(block)
+print(json.dumps({'version': dist.version, 'sha256': digest.hexdigest()}))
+"""
 
-    digest = hashlib.sha256()
+
+def _package_pin(executable: Path) -> tuple[str, str] | None:
+    """Hash the installed package loaded by the CLI's Python environment."""
+
+    try:
+        with executable.open("rb") as stream:
+            shebang = stream.readline(512).decode("utf-8").strip()
+        if not shebang.startswith("#!"):
+            return None
+        parts = shlex.split(shebang[2:])
+        if len(parts) != 1 or not Path(parts[0]).is_file():
+            return None
+        result = subprocess.run([parts[0], "-c", _PACKAGE_PIN_SCRIPT], capture_output=True,
+                                text=True, timeout=15, check=False)
+        if result.returncode != 0:
+            return None
+        reported = json.loads(result.stdout)
+        version, sha256 = reported["version"], reported["sha256"]
+        if not isinstance(version, str) or not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", sha256):
+            return None
+        return version, sha256
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+        return None
+
+
+def _tree_files(directory: Path) -> dict[str, str]:
     if not directory.is_dir() or directory.is_symlink():
         raise ValueError("LIONHEART resource directory is absent or a symlink")
     for relative in REQUIRED_FILES:
@@ -84,15 +129,73 @@ def resource_tree_digest(directory: Path) -> str:
     files = sorted(directory.rglob("*"))
     if not files:
         raise ValueError("LIONHEART resource directory is empty")
+    hashes = {}
     for path in files:
         if path.is_symlink():
             raise ValueError("LIONHEART resources may not contain symlinks")
         if path.is_file():
-            digest.update(path.relative_to(directory).as_posix().encode("utf-8"))
-            digest.update(bytes.fromhex(_file_hash(path)))
+            hashes[path.relative_to(directory).as_posix()] = _file_hash(path)
         elif not path.is_dir():
             raise ValueError("LIONHEART resources contain a non-regular file")
+    return hashes
+
+
+def _manifest_digest(hashes: dict[str, str]) -> str:
+    digest = hashlib.sha256()
+    for name, sha256 in sorted(hashes.items()):
+        digest.update(name.encode("utf-8"))
+        digest.update(bytes.fromhex(sha256))
     return digest.hexdigest()
+
+
+def resource_tree_digest(directory: Path) -> str:
+    """Content identity for every extracted resource, without trusting mtimes."""
+
+    return _manifest_digest(_tree_files(directory))
+
+
+def validated_resource_digest(directory: Path, archive: Path) -> str:
+    """Match every consumed file byte against the published, verified archive."""
+
+    if archive.is_symlink() or _file_hash(archive, "md5") != RESOURCE_ARCHIVE_MD5:
+        raise ValueError("resource archive does not match Zenodo record 15747531")
+    extracted = _tree_files(directory)
+    archived: dict[str, str] = {}
+    with tarfile.open(archive, "r:gz") as bundle:
+        for member in bundle:
+            name = PurePosixPath(member.name)
+            if name.is_absolute() or ".." in name.parts or not name.parts:
+                raise ValueError("LIONHEART archive contains an unsafe path")
+            if member.isdir():
+                continue
+            if not member.isfile():
+                raise ValueError("LIONHEART archive contains a non-regular entry")
+            normalized = name.as_posix()
+            if normalized in archived:
+                raise ValueError("LIONHEART archive contains a duplicate entry")
+            stream = bundle.extractfile(member)
+            if stream is None:
+                raise ValueError("LIONHEART archive member is unreadable")
+            digest = hashlib.sha256()
+            with stream:
+                while block := stream.read(16 << 20):
+                    digest.update(block)
+            archived[normalized] = digest.hexdigest()
+    roots = [name.split("/")[:-1] for name in archived if name.endswith("/ATAC.idx_to_cell_type.csv")]
+    if "ATAC.idx_to_cell_type.csv" in archived:
+        roots.append([])
+    if len(roots) != 1:
+        raise ValueError("LIONHEART archive has no unique resource root")
+    prefix = "/".join(roots[0])
+    prefix = f"{prefix}/" if prefix else ""
+    relative = {}
+    for name, sha256 in archived.items():
+        if not name.startswith(prefix) or not name[len(prefix):]:
+            raise ValueError("LIONHEART archive has files outside its resource root")
+        relative[name[len(prefix):]] = sha256
+    if relative != extracted:
+        raise ValueError("extracted LIONHEART resources differ from the verified archive")
+    return _manifest_digest(extracted)
 
 
 def _labels(directory: Path) -> list[tuple[str, str]]:
@@ -125,9 +228,11 @@ class Lionheart(Base):
     def tools(self) -> tuple[ToolPin, ...]:
         lionheart = _program("TRACEBACK_LIONHEART_BIN", "lionheart")
         mosdepth = _program("TRACEBACK_LIONHEART_MOSDEPTH_BIN", "mosdepth")
+        package = _package_pin(lionheart) if lionheart else None
         return (
-            ToolPin("lionheart", f"{LIONHEART_VERSION}+{_file_hash(lionheart)[:12] if lionheart else 'missing'}"),
-            ToolPin("lionheart-mosdepth", _file_hash(mosdepth)[:12] if mosdepth else "missing"),
+            ToolPin("lionheart-cli", _file_hash(lionheart) if lionheart else "missing"),
+            ToolPin("lionheart-package", f"{package[0]}+{package[1]}" if package else "missing"),
+            ToolPin("lionheart-mosdepth", _file_hash(mosdepth) if mosdepth else "missing"),
         )
 
     @tools.setter
@@ -135,10 +240,10 @@ class Lionheart(Base):
         pass
 
     def asset_sha256s(self, root: Path) -> list[str]:
-        directory, _ = _resources(root)
+        directory, archive = _resources(root)
         try:
-            return [resource_tree_digest(directory)]
-        except (OSError, ValueError):
+            return [validated_resource_digest(directory, archive)]
+        except (OSError, ValueError, tarfile.TarError):
             return []  # preflight supplies the actionable skip reason
 
     def preflight(self, ctx: InputContext) -> Ready | Skip:
@@ -159,6 +264,9 @@ class Lionheart(Base):
         mosdepth = _program("TRACEBACK_LIONHEART_MOSDEPTH_BIN", "mosdepth")
         if executable is None or mosdepth is None:
             return Skip("missing_toolchain", "Install pinned LIONHEART v2.2.0 and its modified mosdepth")
+        package = _package_pin(executable)
+        if package is None or package[0] != LIONHEART_VERSION:
+            return Skip("missing_toolchain", "LIONHEART v2.2.0 installed package files must be available for provenance")
         try:
             version = subprocess.run([str(executable), "--version"], capture_output=True, text=True,
                                      timeout=10, check=False)
@@ -175,11 +283,9 @@ class Lionheart(Base):
             return Skip("missing_toolchain", "modified mosdepth with --single-end-length is required")
         directory, archive = _resources(ctx.root)
         try:
-            if archive.is_symlink() or _file_hash(archive, "md5") != RESOURCE_ARCHIVE_MD5:
-                raise ValueError("resource archive does not match Zenodo record 15747531")
-            resource_tree_digest(directory)
+            validated_resource_digest(directory, archive)
             _labels(directory)
-        except (OSError, ValueError, KeyError, TypeError):
+        except (OSError, ValueError, KeyError, TypeError, tarfile.TarError):
             return Skip("missing_asset", "LIONHEART v003 resources are absent or changed; install the verified Zenodo archive")
         bam = ctx.input_dir / "aligned.bam"
         if not bam.is_file() or bam.is_symlink():
@@ -190,22 +296,34 @@ class Lionheart(Base):
         executable = _program("TRACEBACK_LIONHEART_BIN", "lionheart")
         mosdepth = _program("TRACEBACK_LIONHEART_MOSDEPTH_BIN", "mosdepth")
         directory, archive = _resources(ctx.root)
-        if executable is None or mosdepth is None or _file_hash(archive, "md5") != RESOURCE_ARCHIVE_MD5:
+        if executable is None or mosdepth is None:
             raise RuntimeError("LIONHEART toolchain or resource archive changed since preflight")
+        planned_tools = ctx.extras.get("tool_versions")
+        if not isinstance(planned_tools, dict) or planned_tools != {pin.name: pin.version for pin in self.tools}:
+            raise RuntimeError("LIONHEART toolchain changed since execution planning")
+        expected = ctx.extras.get("asset_sha256s")
+        if not isinstance(expected, list) or len(expected) != 1 or not isinstance(expected[0], str):
+            raise RuntimeError("LIONHEART planned resource identity is missing")
         work = out.parent / "lionheart-extraction"
         work.mkdir()
+        snapshot = work / "resources"
+        shutil.copytree(directory, snapshot)
+        if validated_resource_digest(snapshot, archive) != expected[0]:
+            raise RuntimeError("LIONHEART resources changed since execution planning")
         command = [str(executable), "extract_features", "--bam_file", str(ctx.input_dir / "aligned.bam"),
-                   "--resources_dir", str(directory), "--out_dir", str(work),
+                   "--resources_dir", str(snapshot), "--out_dir", str(work),
                    "--mosdepth_path", str(mosdepth), "--n_jobs", "1", "--single_end_mode"]
         with (out.parent / "lionheart.log").open("wb") as log:
             completed = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=False)
         if completed.returncode != 0:
             raise RuntimeError(f"LIONHEART feature extraction failed (exit {completed.returncode})")
+        if resource_tree_digest(snapshot) != expected[0]:
+            raise RuntimeError("LIONHEART resource snapshot changed during extraction")
         matrix_path = work / "dataset" / "feature_dataset.npy"
         if matrix_path.stat().st_size > 1_000_000:
             raise ValueError("LIONHEART feature matrix is implausibly large")
         matrix = np.load(matrix_path, allow_pickle=False)
-        labels = _labels(directory)
+        labels = _labels(snapshot)
         if matrix.shape != (10, len(labels)) or not np.issubdtype(matrix.dtype, np.floating):
             raise ValueError("LIONHEART feature matrix has an unexpected shape or dtype")
         scores = [float(value) if np.isfinite(value) else None for value in matrix[0]]

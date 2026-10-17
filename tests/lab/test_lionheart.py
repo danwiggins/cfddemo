@@ -4,8 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sys
+import tarfile
+from dataclasses import replace
 from pathlib import Path
+
+import pytest
 
 from traceback_lab.algorithms import lionheart
 from traceback_lab.registry import InputContext, Ready, execution_identity
@@ -36,12 +41,14 @@ def _setup(tmp_path: Path, monkeypatch) -> tuple[InputContext, Path]:
             "idx,cell_type\n" + "".join(f"{index},{assay} type {index}\n" for index in range(449))
         )
     archive = directory.parent / "inference_resources_v003.tar.gz"
-    archive.write_bytes(b"synthetic archive")
+    with tarfile.open(archive, "w:gz") as bundle:
+        bundle.add(directory, arcname="inference_resources_v003")
     monkeypatch.setattr(lionheart, "RESOURCE_ARCHIVE_MD5", hashlib.md5(archive.read_bytes()).hexdigest())
 
     executable = tmp_path / "lionheart"
     executable.write_text(f"""#!{sys.executable}
 import argparse
+import os
 import pathlib
 import sys
 import numpy as np
@@ -61,6 +68,8 @@ assert args.command == 'extract_features' and args.single_end_mode
 assert pathlib.Path(args.bam_file).read_bytes() == b'BAM from selected input'
 assert pathlib.Path(args.resources_dir).is_dir()
 assert pathlib.Path(args.mosdepth_path).is_file()
+if os.environ.get('TRACEBACK_LIONHEART_MUTATE_RESOURCES'):
+    (pathlib.Path(args.resources_dir) / 'gc_contents_bin_edges.npy').write_bytes(b'mutated')
 output = pathlib.Path(args.out_dir) / 'dataset'
 output.mkdir(parents=True)
 matrix = np.zeros((10, 898))
@@ -76,11 +85,16 @@ np.save(output / 'feature_dataset.npy', matrix)
     monkeypatch.setenv("TRACEBACK_LIONHEART_RESOURCES", str(directory))
     monkeypatch.setenv("TRACEBACK_LIONHEART_ARCHIVE", str(archive))
     monkeypatch.setenv("TRACEBACK_LIONHEART_ENABLE_ONT", "1")
+    monkeypatch.setattr(lionheart, "_package_pin", lambda _executable: ("2.2.0", "d" * 64))
     ctx = InputContext(
         root=root, source_id="a" * 64, input_id="b" * 64, reference_id="hg38",
         reference_sha256="c" * 64, input_dir=input_dir,
         eligible_reads=5_000_000, approx_depth_x=1.0,
     )
+    ctx = replace(ctx, extras={
+        "asset_sha256s": lionheart.LIONHEART.asset_sha256s(root),
+        "tool_versions": {pin.name: pin.version for pin in lionheart.LIONHEART.tools},
+    })
     return ctx, directory
 
 
@@ -122,6 +136,63 @@ def test_lionheart_resource_digest_rejects_symlink(tmp_path, monkeypatch) -> Non
     ctx, directory = _setup(tmp_path, monkeypatch)
     (directory / "linked.bin").symlink_to(directory / "gc_contents_bin_edges.npy")
     assert lionheart.LIONHEART.preflight(ctx).reason_code == "missing_asset"
+
+
+def test_good_archive_does_not_authorize_modified_extracted_resources(tmp_path, monkeypatch) -> None:
+    ctx, directory = _setup(tmp_path, monkeypatch)
+    assert isinstance(lionheart.LIONHEART.preflight(ctx), Ready)
+    (directory / "gc_contents_bin_edges.npy").write_bytes(b"modified after archive verification")
+    assert lionheart.LIONHEART.asset_sha256s(ctx.root) == []
+    assert lionheart.LIONHEART.preflight(ctx).reason_code == "missing_asset"
+    out = tmp_path / "scratch" / "artifacts"
+    out.mkdir(parents=True)
+    with pytest.raises(ValueError, match="differ from the verified archive"):
+        lionheart.LIONHEART.run(ctx, out)
+
+
+def test_toolchain_change_after_planning_is_refused(tmp_path, monkeypatch) -> None:
+    ctx, _ = _setup(tmp_path, monkeypatch)
+    executable = Path(os.environ["TRACEBACK_LIONHEART_BIN"])
+    executable.write_bytes(executable.read_bytes() + b"\n# changed after planning\n")
+    out = tmp_path / "scratch" / "artifacts"
+    out.mkdir(parents=True)
+    with pytest.raises(RuntimeError, match="toolchain changed"):
+        lionheart.LIONHEART.run(ctx, out)
+
+
+def test_extractor_mutating_its_resource_snapshot_is_refused(tmp_path, monkeypatch) -> None:
+    ctx, _ = _setup(tmp_path, monkeypatch)
+    monkeypatch.setenv("TRACEBACK_LIONHEART_MUTATE_RESOURCES", "1")
+    out = tmp_path / "scratch" / "artifacts"
+    out.mkdir(parents=True)
+    with pytest.raises(RuntimeError, match="snapshot changed"):
+        lionheart.LIONHEART.run(ctx, out)
+
+
+def test_unrecorded_installed_package_is_not_accepted(tmp_path, monkeypatch) -> None:
+    ctx, _ = _setup(tmp_path, monkeypatch)
+    monkeypatch.setattr(lionheart, "_package_pin", lambda _executable: None)
+    assert lionheart.LIONHEART.preflight(ctx).reason_code == "missing_toolchain"
+
+
+def test_installed_python_package_code_enters_tool_pin(tmp_path, monkeypatch) -> None:
+    package = tmp_path / "lionheart"
+    package.mkdir()
+    source = package / "__init__.py"
+    source.write_text("VERSION = '2.2.0'\n")
+    metadata = tmp_path / "lionheart-2.2.0.dist-info"
+    metadata.mkdir()
+    (metadata / "METADATA").write_text("Metadata-Version: 2.1\nName: lionheart\nVersion: 2.2.0\n")
+    (metadata / "RECORD").write_text("lionheart/__init__.py,,\n")
+    executable = tmp_path / "lionheart-cli"
+    executable.write_text(f"#!{sys.executable}\nprint('lionheart, version 2.2.0')\n")
+    executable.chmod(0o755)
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+    first = lionheart._package_pin(executable)
+    assert first is not None and first[0] == "2.2.0"
+    source.write_text("VERSION = '2.2.0'\nCHANGED = True\n")
+    second = lionheart._package_pin(executable)
+    assert second is not None and second[1] != first[1]
 
 
 @needs_chrome

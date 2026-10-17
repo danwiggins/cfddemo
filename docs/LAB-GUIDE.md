@@ -198,8 +198,12 @@ with `--single-end-length`. Download the 2.3 GB
 approved local process and verify MD5 `7ab368995ad5123ab665042e6ecc4410`.
 Keep both the archive and its extracted `inference_resources_v003` directory
 under `ROOT/lab/assets/lionheart/` (or set the paths below). The archive is
-checked against that published MD5, and every extracted resource byte enters
-the result identity. Neither the pack nor scores are bundled in this repo;
+checked against that published MD5, every extracted file is compared with the
+archive, and the verified resource bytes enter the result identity. Extraction
+uses a separate verified scratch copy, so a changed installed resource cannot
+silently enter a result. The CLI, its installed Python package code, and the
+modified mosdepth binary are hashed into the result identity; the installed
+package must report version 2.2.0. Neither the pack nor scores are bundled in this repo;
 Zenodo says its shared scores and models derive from non-commercial,
 research-purpose-only data.
 
