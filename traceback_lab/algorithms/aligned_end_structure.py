@@ -21,6 +21,7 @@ from ._base import Base, load_summary, metric, ratio
 
 RADIUS = 100
 MIN_DEPTH_X = 10.0
+AUTOSOME_NAMES = frozenset(f"chr{chrom}" for chrom in range(1, 23))
 
 
 def _relative_counts(positions: np.ndarray, centers: np.ndarray) -> np.ndarray:
@@ -108,7 +109,10 @@ class AlignedEndStructure(Base):
         summary, mask = load_summary(ctx)
         names = summary.contigs
         lengths = summary.lengths
-        allowed = set(int(cid) for cid in summary.autosome_ids())
+        allowed = {
+            cid for cid, name in enumerate(names)
+            if (name if name.startswith("chr") else f"chr{name}") in AUTOSOME_NAMES
+        }
         centers_by_id: dict[int, np.ndarray] = {}
         preferred_u_by_id: dict[int, np.ndarray] = {}
         preferred_d_by_id: dict[int, np.ndarray] = {}
