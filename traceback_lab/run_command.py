@@ -281,28 +281,30 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
             raise LabProblem(
                 "TBX-LAB-017",
                 cause="the stored aligned input has no valid reference binding",
-                fix="Rerun with the original chunk paths: `traceback lab run <chunk dir>`",
+                fix="Rerun with the original BAM or chunk paths: `traceback lab run INPUT`",
                 data={"candidates": []},
             )
         data["sample"] = {"id12": id12_for(store, source_id), "input_id": aligned.input_id}
         data["reference_id"] = manifest["reference_id"]
         data["alignment"] = "reused (stored sample)"
+        excluded = record.get("excluded", [])
+        if not isinstance(excluded, list) or not all(
+            isinstance(index, int) and not isinstance(index, bool) and index >= 0
+            for index in excluded
+        ):
+            excluded = None
         chunks = record.get("chunks")
         if isinstance(chunks, list) and chunks and all(
             isinstance(chunk, dict) and isinstance(chunk.get("size"), int)
             and not isinstance(chunk["size"], bool) and chunk["size"] >= 0
             for chunk in chunks
         ):
-            excluded = record.get("excluded", [])
-            if not isinstance(excluded, list) or not all(
-                isinstance(index, int) and not isinstance(index, bool) and index >= 0
-                for index in excluded
-            ):
-                excluded = None
             data["chunks"] = {
                 "count": len(chunks), "bytes": sum(chunk["size"] for chunk in chunks),
                 "excluded": excluded,
             }
+        else:
+            data["chunks"] = {"count": None, "bytes": None, "excluded": excluded}
         data["budget"] = {
             "required_bytes": 0,
             "free_bytes": shutil.disk_usage(store.root).free,
@@ -312,15 +314,14 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
         }
         lines.append(f"SAMPLE    {id12_for(store, source_id)} (stored)")
         lines.append(f"REFERENCE {data['reference_id']}")
-        if "chunks" in data:
-            excluded = data["chunks"]["excluded"]
-            suffix = " · exclusions unknown" if excluded is None else (f" · excluded {excluded}" if excluded else "")
+        suffix = " · exclusions unknown" if excluded is None else (f" · excluded {excluded}" if excluded else "")
+        if data["chunks"]["count"] is not None:
             lines.append(
                 f"INPUT     {data['chunks']['count']} stored chunk(s) · "
                 f"{data['chunks']['bytes'] / GIB:.2f} GB{suffix}"
             )
         else:
-            lines.append("INPUT     unknown (stored chunk record incomplete)")
+            lines.append(f"INPUT     unknown (stored chunk record incomplete){suffix}")
         lines.append("ALIGN     reused (stored sample)")
         lines.append(
             f"DISK      ingest/align needs 0 GB, has {data['budget']['free_bytes'] / GIB:.1f} GB "
@@ -340,7 +341,7 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
                     for row, item in zip(plan_rows, items):
                         minimum = item.algorithm.requires.min_eligible_reads
                         if minimum and eligible < minimum:
-                            row["decision"] = "will skip (below eligible-read minimum)"
+                            row["decision"] = "skip expected below depth minimum (unless cached)"
                             row["eligible_reads"] = eligible
                             row["minimum_eligible_reads"] = minimum
                         elif minimum:

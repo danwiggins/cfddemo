@@ -364,6 +364,15 @@ def test_stored_dry_run_uses_selected_depth_without_writing(
             for path in root.rglob("*") if path.is_file()
         }
 
+    def selected_result_for(value):
+        def selected_result(_store, selected_input_id, algorithm_id, parameters_sha256):
+            assert (selected_input_id, algorithm_id, parameters_sha256) == (
+                input_id, "read-summary", identity,
+            )
+            return value
+
+        return selected_result
+
     with store.writer("other", "r-20261017-1200-aaab"):
         before = snapshot()
         monkeypatch.setattr(run_module.shutil, "disk_usage", lambda _root: SimpleNamespace(free=3 * 1024**3))
@@ -382,13 +391,7 @@ def test_stored_dry_run_uses_selected_depth_without_writing(
         unavailable = []
         for selected in (None, SimpleNamespace(status="failed", metrics=[])):
             with monkeypatch.context() as patch:
-                def selected_result(_store, selected_input_id, algorithm_id, parameters_sha256):
-                    assert (selected_input_id, algorithm_id, parameters_sha256) == (
-                        input_id, "read-summary", identity,
-                    )
-                    return selected
-
-                patch.setattr(LabStore, "read_result", selected_result)
+                patch.setattr(LabStore, "read_result", selected_result_for(selected))
                 missing_code, missing = _json(
                     capsys, "run", "latest", "--root", str(root),
                     "--only", "delfi-ratio", "--dry-run",
@@ -399,7 +402,7 @@ def test_stored_dry_run_uses_selected_depth_without_writing(
             selected = SimpleNamespace(
                 status="ok", metrics=[SimpleNamespace(metric_id="eligible_reads", value=2_000_000)],
             )
-            patch.setattr(LabStore, "read_result", selected_result)
+            patch.setattr(LabStore, "read_result", selected_result_for(selected))
             met_code, met = _json(
                 capsys, "run", "latest", "--root", str(root),
                 "--only", "delfi-ratio", "--dry-run",
@@ -413,8 +416,18 @@ def test_stored_dry_run_uses_selected_depth_without_writing(
                 patch.setattr(run_module, "input_manifest", lambda _store, _input_id: malformed)
                 bad_code, bad = _json(capsys, "run", "latest", "--root", str(root), "--dry-run")
                 assert bad_code == 4 and bad["data"]["code"] == "TBX-LAB-017"
+        with monkeypatch.context() as patch:
+            patch.setattr(run_module, "source_record", lambda _store, _source_id: {
+                **record, "chunks": [{"size": "invalid"}],
+            })
+            incomplete_code, incomplete = _json(
+                capsys, "run", "latest", "--root", str(root), "--dry-run",
+            )
+            incomplete_human_code, incomplete_human, _ = _lab(
+                capsys, "run", "latest", "--root", str(root), "--dry-run",
+            )
         assert snapshot() == before
-    assert code == human_code == forced_code == met_code == 0
+    assert code == human_code == forced_code == met_code == incomplete_code == incomplete_human_code == 0
     data = payload["data"]
     assert data["sample"]["id12"] == first["data"]["sample"]["id12"]
     assert data["sample"]["input_id"] == first["data"]["sample"]["input_id"]
@@ -430,14 +443,14 @@ def test_stored_dry_run_uses_selected_depth_without_writing(
         {"algorithm_id": "read-summary", "upstream": True, "decision": "reused (selected result)"},
         {
             "algorithm_id": "delfi-ratio", "upstream": False,
-            "decision": "will skip (below eligible-read minimum)",
+            "decision": "skip expected below depth minimum (unless cached)",
             "eligible_reads": data["eligible_reads"], "minimum_eligible_reads": 1_000_000,
         },
     ]
     assert "REFERENCE synth" in human
     assert "3 stored chunk(s)" in human
     assert "excluded [4]" in human
-    assert "will skip (below eligible-read minimum)" in human
+    assert "skip expected below depth minimum (unless cached)" in human
     assert "has 3.0 GB (reused; not a sufficiency check)" in human
     assert "ANALYSIS  scratch disk not predicted" in human
     assert "eligible_reads" not in forced["data"]
@@ -446,6 +459,8 @@ def test_stored_dry_run_uses_selected_depth_without_writing(
         assert "eligible_reads" not in missing
         assert all(row["decision"] == "decided at run time" for row in missing["plan"])
     assert met["data"]["plan"][1]["decision"] == "depth minimum met; other checks at run time"
+    assert incomplete["data"]["chunks"] == {"count": None, "bytes": None, "excluded": [4]}
+    assert "INPUT     unknown (stored chunk record incomplete) · excluded [4]" in incomplete_human
 
 
 def test_second_writer_is_refused(lab_world, capsys, monkeypatch) -> None:
