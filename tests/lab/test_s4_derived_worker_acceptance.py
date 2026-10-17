@@ -38,6 +38,8 @@ FETAL_SMALL_BAM = replace(
     FETAL_FRACTION_CHRY,
     requires=replace(FETAL_FRACTION_CHRY.requires, min_eligible_reads=0),
 )
+BACKGROUND_Y_PER_MILLION = 20_000
+FULL_MALE_Y_PER_MILLION = 800_000
 
 
 def _selected(name: str, spec) -> bool:
@@ -86,8 +88,9 @@ def test_derived_worker_uses_selected_depth_and_pinned_parent_calibration(
     if kind == "donor":
         assert DD_CFDNA_CHRY.requires.min_eligible_reads == 0
         path, digest = donor_file(
-            tmp_path, min_depth_x=floor, female_background_y_per_million=0,
-            male_full_donor_y_per_million=1_000_000,
+            tmp_path, min_depth_x=floor,
+            female_background_y_per_million=BACKGROUND_Y_PER_MILLION,
+            male_full_donor_y_per_million=FULL_MALE_Y_PER_MILLION,
         )
         contract = register_donor(store, path, digest)
         algorithm = DD_CFDNA_CHRY
@@ -95,8 +98,9 @@ def test_derived_worker_uses_selected_depth_and_pinned_parent_calibration(
         fraction_metric, count_metric, refusal = "dd_cfdna_fraction", "chry_nonpar_reads", "depth"
     else:
         path, digest = fetal_file(
-            tmp_path, min_depth_x=floor, female_background_y_per_million=0,
-            full_male_y_per_million=1_000_000,
+            tmp_path, min_depth_x=floor,
+            female_background_y_per_million=BACKGROUND_Y_PER_MILLION,
+            full_male_y_per_million=FULL_MALE_Y_PER_MILLION,
             validated_min_fraction=0, validated_max_fraction=1,
         )
         contract = register_fetal(store, path, digest)
@@ -113,8 +117,15 @@ def test_derived_worker_uses_selected_depth_and_pinned_parent_calibration(
     )
     assert full_result.status == "ok"
     full_envelope = store.read_result(INPUT, algorithm.id, full_result.parameters_sha256)
-    assert full_envelope is not None
-    assert next(metric.value for metric in full_envelope.metrics if metric.metric_id == fraction_metric) == pytest.approx(0.2)
+    assert full_envelope is not None and full_envelope.depth is not None
+    assert full_envelope.depth.eligible_reads == full_stamp["eligible_reads"]
+    assert full_envelope.depth.approx_depth_x == full_stamp["approx_depth_x"]
+    full_metrics = {metric.metric_id: metric for metric in full_envelope.metrics}
+    full_fraction = (
+        20 * 1_000_000 / len(reads) - BACKGROUND_Y_PER_MILLION
+    ) / (FULL_MALE_Y_PER_MILLION - BACKGROUND_Y_PER_MILLION)
+    assert full_metrics[fraction_metric].value == pytest.approx(full_fraction)
+    assert full_metrics[fraction_metric].value != pytest.approx(20 / len(reads))
 
     runs = run_derived(
         store, None, log, parent, specs, [PlanItem(algorithm, False)],
@@ -153,7 +164,10 @@ def test_derived_worker_uses_selected_depth_and_pinned_parent_calibration(
                              for read in reads)
             assert metrics[count_metric].value == selected_y
             assert metrics[count_metric].n == stamp["eligible_reads"]
-            assert metrics[fraction_metric].value == pytest.approx(selected_y / stamp["eligible_reads"])
+            expected_fraction = (
+                selected_y * 1_000_000 / stamp["eligible_reads"] - BACKGROUND_Y_PER_MILLION
+            ) / (FULL_MALE_Y_PER_MILLION - BACKGROUND_Y_PER_MILLION)
+            assert metrics[fraction_metric].value == pytest.approx(expected_fraction)
         else:
             assert (result.status, result.skip_reason) == ("skipped", refusal)
             assert saved.metrics == []
