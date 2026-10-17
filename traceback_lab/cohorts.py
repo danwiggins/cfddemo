@@ -342,6 +342,10 @@ def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) 
             pon_policy=str(algorithm.parameters.get("pon_policy", "none")),
             per_sample_asset_keys=("pon_asset_sha256",),
         )
+        if algorithm.id == "microbial":
+            # The registered DB bytes enter execution identity, but not the
+            # generic cohort key. Never pool microbial profiles from two DBs.
+            compat = chosen.provenance.parameters_sha256
         found.append(CohortResult(
             algorithm_id=algorithm.id, parameters_sha256=chosen.provenance.parameters_sha256,
             cohort_compat_key=compat, metrics=metrics,

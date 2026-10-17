@@ -177,6 +177,7 @@ ROOT, home, login and chunk names redacted) is ever stored.
 | `long-tail` | shares of molecules > 300 bp, 1–4 kb (delayed processing) and > 7.5 kb (lysis); a supplementary-split read counts at its read length |
 | `sex-check` | chrY/chrX read density per Mb of non-N, non-PAR reference and a male / female / indeterminate call; needs 500,000 eligible reads |
 | `mtdna` | chrM reads (MAPQ ≥ 20) as a share of all primary reads, and the chrM fragment mode |
+| `microbial` | exploratory Kraken2/Bracken species profile from primary, QC-passing, non-duplicate human-unmapped ONT reads; needs operator-pinned tools and database; no infection diagnosis |
 | `cell-origin` | share of cfDNA from each of 40 Loyfer U250 cell types with bootstrap intervals, through the signed method's own `compute_measurement` (modkit, UXM, NNLS); needs 2.5M eligible reads, `traceback toolchain install modkit` and `traceback method-asset register --from-dir LOYFER_DIR --root R`; minor cell types are not interpretable below 5x. Downsample and split runs read a transient filtered BAM that is deleted after publish |
 | `end-motifs` | reference 4-mers at both ends of each molecule (5′ forward end and the reverse complement of the other end), motif diversity score and CCCA share; needs 500,000 eligible reads and the registered FASTA |
 | `delfi-ratio` | short (100–150 bp) / long (151–220 bp) ratio per 5 Mb bin on chr1–22, median-centred, and its SD; no GC correction, cohort-relative only; needs 1,000,000 eligible reads |
@@ -204,6 +205,41 @@ traceback lab asset inspect pmd --root R
 `pmd-score` with an asset-specific recovery command. Registering a PMD
 asset does not establish redistribution rights or make a skipped result zero.
 
+**Microbial profile.** Install Kraken2 and Bracken through your approved local
+process, build a Kraken2 database and its Bracken read-length distribution, and
+register its exact bytes under the run ROOT. The database remains in its
+operator-owned directory; the Lab stores its path only in a local manifest and
+publishes the bundle SHA-256 and source label. The registration requires
+`hash.k2d`, `opts.k2d`, `taxo.k2d`, and
+`database<READ_LENGTH>mers.kmer_distrib`. The Bracken read length must be
+75–500 bases. An altered or missing file makes the measurement unavailable.
+
+```bash
+traceback lab microbial db add --directory KRAKEN_DB --read-length 75 \
+  --source-label operator-built-kraken-bracken --root R
+traceback lab microbial db inspect --root R
+traceback lab run ID12 --only microbial --root R
+```
+
+Only human-unmapped primary reads that pass QC and are not marked duplicate
+are classified. Reads shorter than the registered Bracken length are counted
+as excluded; longer reads are clipped to that exact length before Kraken2.
+The rate denominator is **all** primary QC-passing non-duplicate reads,
+including aligned and short unmapped reads. Bracken species estimates under
+Bacteria, Archaea, Viruses, and Fungi are shown as estimated reads per million
+denominator reads; human and other non-microbial taxa are excluded. At most
+256 species are displayed, with an omitted-taxon count. Read names and Kraken
+per-read assignments remain transient and are not published.
+
+The profile is speculative and marked **PRIVACY**. A compatible healthy-v1
+cohort of at least ten *other* samples supplies a per-taxon and overall 97.5th
+percentile only when the aligner, exact tool and database identities, analysis
+parameters, and selected inputs match. Build that cohort as below. Missing
+taxon counts are treated as zero only when the cohort profile was complete;
+otherwise they are excluded. An absent or incompatible cohort leaves the
+percentile explicitly unavailable. A high candidate signal can reflect
+contamination, residual human sequence, database content, or misclassification;
+it is not an infection diagnosis or an ONT clinical threshold.
 
 Fragment length is the aligned reference span, the same definition as the
 signed fragment metric; the Lab's 1-bp counter is parity-tested against it.

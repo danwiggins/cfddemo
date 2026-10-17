@@ -21,6 +21,7 @@ from ..cohort_contracts import CohortGeneration, CohortMember, MetricProjection,
 from ..cohorts import list_cohorts, member_from_store, read_current
 from ..identity import resolve_prefix, shortest_unique_prefixes
 from ..ingest import source_ids, source_record
+from ..microbial_view import profile_for_sample
 from ..interpretation.engine import (
     COHORT_MIN,
     LIBRARY_FILE,
@@ -330,6 +331,10 @@ class LabApi:
                 envelope, library, depth_x, source_id, generation, target,
             )
             for row in interpreted:
+                if algorithm_id == "microbial" and row.metric_id.startswith("taxon_"):
+                    # Taxid metrics enter the immutable cohort snapshot; the
+                    # dedicated profile gives them names and 97.5th percentiles.
+                    continue
                 entry = row.entry
                 if entry is None and algorithm_id not in library.hidden_algorithms:
                     no_entry += 1
@@ -401,6 +406,7 @@ class LabApi:
             "cohort_state": cohort_state,
             "cohort_problem": cohort_problem,
             "algorithms": algorithms,
+            "microbial_profile": profile_for_sample(self.store, sample, generation, target, cohort_state),
             "curve": curve,
             "stability": panels,
             "repeatability": views.repeatability(panels),

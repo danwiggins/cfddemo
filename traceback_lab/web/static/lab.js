@@ -326,6 +326,26 @@
       h("p", { class: sex && (sex.state === "mismatch" || sex.reason === "malformed_metadata") ? "problem" : "status-line" }, sexMessage),
       sex && sex.problem ? h("p", { class: "problem" }, `${sex.problem.code}: ${sex.problem.fix}`) : "",
       h("p", { class: "help" }, "This is not a diagnostic sex or gender determination.")));
+    const microbial = sample.microbial_profile;
+    if (microbial) {
+      out.push(h("section", { class: "panel" }, h("h2", {}, "Microbial candidates"),
+        h("p", {}, h("span", { class: "flag-pill" }, "FLAG: PRIVACY — infection status is sensitive health data.")),
+        h("p", { class: "help" }, "Exploratory Kraken2/Bracken assignments from human-unmapped reads. Not an infection diagnosis; residual human DNA and contamination may affect assignments."),
+        microbial.reason ? h("p", { class: "problem" }, microbial.reason) : "",
+        microbial.microbial_rpm_primary !== undefined
+          ? h("p", {}, `Candidate microbial estimate: ${fmt(microbial.microbial_rpm_primary)} per million primary QC-passing reads; ${fmt(microbial.candidate_unmapped_reads)} unmapped reads submitted. Cohort 97.5th percentile: ${microbial.cohort_p975 === null ? "unavailable" : fmt(microbial.cohort_p975)}${microbial.cohort_p975 === null ? "" : ` (n=${microbial.cohort_n}, ${microbial.cohort_version})`}.`)
+          : "",
+        microbial.omitted_taxa ? h("p", { class: "help" }, `${microbial.omitted_taxa} lower-abundance taxa omitted from the bounded display; absent taxa are not assumed zero in cohort comparisons.`) : "",
+        microbial.taxa.length
+          ? h("div", { class: "table-wrap" }, h("table", {},
+            h("thead", {}, h("tr", {}, ...["Candidate taxon", "Group", "Estimate / million", "Cohort 97.5th pct", "Context"].map((label) => h("th", { scope: "col" }, label)))),
+            h("tbody", {}, ...microbial.taxa.map((row) => h("tr", {},
+              h("th", { scope: "row" }, `${row.name} (taxid ${row.taxid})`),
+              h("td", {}, row.category), h("td", {}, fmt(row.rpm_primary)),
+              h("td", {}, row.cohort_p975 === null ? `unavailable (n=${row.cohort_n})` : fmt(row.cohort_p975)),
+              h("td", {}, row.above_cohort_p975 === null ? "no cohort reference" : row.above_cohort_p975 ? "above cohort percentile" : "at or below cohort percentile"))))))
+          : h("p", {}, "No candidate microbial taxa are available in this profile.")));
+    }
     const health = sample.library_health;
     out.push(h("section", { class: "panel" }, h("h2", {}, "Library health"),
       h("p", {}, `no_library_entry: ${health.no_library_entry} · UNVERIFIED citations: ${health.unverified_citations} · interpretation v${health.version} · cohort ${sample.cohort_version || "none yet"} (members = ${sample.cohort_n})`),
