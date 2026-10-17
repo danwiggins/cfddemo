@@ -923,7 +923,7 @@ class LabStore:
             data = json.loads(selector.read_bytes())
             attempt_id = str(data["attempt_id"])
             publication_order = self._publication_order(data)
-        except (OSError, ValueError, KeyError, TypeError):
+        except (OSError, ValueError, KeyError, TypeError, RecursionError):
             return None
         if not re.fullmatch(_ATTEMPT_ID, attempt_id):
             return None
@@ -1006,7 +1006,7 @@ class LabStore:
             if not re.fullmatch(_ATTEMPT_ID, attempt_id):
                 return None
             return self._publication_order(data)
-        except (OSError, ValueError, KeyError, TypeError):
+        except (OSError, ValueError, KeyError, TypeError, RecursionError):
             return None
 
     def read_result(

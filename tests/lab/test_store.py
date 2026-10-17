@@ -264,6 +264,16 @@ def test_malformed_result_directory_cannot_crash_selection(
         assert selected["fragment-size"].metrics[0].value == 1
 
 
+def test_deeply_nested_selector_is_unreadable_not_a_sample_crash(tmp_path: Path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    store.publish_result(_envelope(1), input_id=C)
+    selector = store.result_dir(C, "fragment-size", A) / "selected.json"
+    selector.write_text('{"attempt_id":' + "[" * 1100 + "0" + "]" * 1100 + "}")
+
+    assert selected_results(store, C) == {}
+
+
 def test_higher_publication_order_resolves_tied_older_identities(tmp_path: Path) -> None:
     store = LabStore(tmp_path)
     store.ensure()
