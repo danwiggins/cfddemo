@@ -51,8 +51,10 @@ class Griffin(Base):
         ToolPin("Snakemake", "5.19.2"),
     )
 
-    def identity_tools(self) -> tuple[ToolPin, ...]:
-        return (*self.tools, ToolPin("Griffin runtime", planned_runtime_sha256()))
+    def identity_tools(self, *, worker_pythonpath: str | None = None) -> tuple[ToolPin, ...]:
+        return (*self.tools, ToolPin("Griffin runtime", planned_runtime_sha256(
+            worker_pythonpath=worker_pythonpath,
+        )))
 
     def asset_sha256s(self, root: Path) -> list[str]:
         try:

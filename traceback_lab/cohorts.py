@@ -24,6 +24,7 @@ from .identity import SHA256_PATTERN, cohort_compat_key
 from .ingest import resolve_sample, source_ids
 from .problems import LabProblem
 from .registry import execution_identity, load_registry
+from .runner import _worker_env
 from .store import LabStore, new_run_id, open_regular_no_follow, write_atomic
 
 if TYPE_CHECKING:
@@ -336,11 +337,16 @@ def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) 
         if len(upstream) != len(algorithm.upstream):
             continue
         assets_of = getattr(algorithm, "asset_sha256s", None)
+        identity_tools = getattr(algorithm, "identity_tools", None)
         try:
+            tool_identities = [tool.identity() for tool in
+                               (identity_tools(worker_pythonpath=_worker_env()["PYTHONPATH"])
+                                if callable(identity_tools) else algorithm.tools)]
             identity = execution_identity(
                 algorithm, reference_sha256=manifest["reference_sha256"], upstream=upstream,
                 asset_sha256s=assets_of(store.root) if callable(assets_of) else (),
                 platform=platform if platform != "ont" else None,
+                tool_identities=tool_identities,
             )
         except (OSError, ValueError, KeyError, LabProblem):
             # An unresolved asset cannot make an old result current-compatible.
@@ -358,7 +364,7 @@ def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) 
         }
         compat = cohort_compat_key(
             algorithm_id=algorithm.id, algorithm_version=algorithm.version,
-            parameters=algorithm.parameters, tools=[tool.identity() for tool in algorithm.tools],
+            parameters=algorithm.parameters, tools=tool_identities,
             reference_sha256=manifest["reference_sha256"], aligner_identity=aligner,
             pon_policy=str(algorithm.parameters.get("pon_policy", "none")),
             per_sample_asset_keys=("pon_asset_sha256",),
