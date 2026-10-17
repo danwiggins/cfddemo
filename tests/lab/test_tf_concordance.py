@@ -31,6 +31,10 @@ def _member(index: int) -> CohortMember:
                 algorithm_id="mtdna", parameters_sha256="b" * 64,
                 cohort_compat_key="d" * 64, metrics={"chrm_fraction": 0.02 if index == 1 else 0.01},
             ),
+            CohortResult(
+                algorithm_id="copy-number", parameters_sha256="b" * 64,
+                cohort_compat_key="e" * 64, metrics={"tumor_fraction": 0.2},
+            ),
         ),
     )
 
@@ -106,8 +110,39 @@ def test_missing_methylation_and_stale_target_are_named_unavailable() -> None:
     assert report["pairs"][0]["state"] == "unidentifiable_meth_tf"
     stale = _member(99)
     report = report_tf_concordance(sample, generation, stale)
-    assert report["pairs"][1]["state"] == "no_size_baseline"
-    assert report["pairs"][2]["state"] == "no_mtdna_baseline"
+    assert report["pairs"][0]["state"] == "stale_cn_binding"
+    assert report["pairs"][1]["unavailable_reasons"] == ["stale_cn_binding", "no_size_baseline"]
+    assert report["pairs"][2]["unavailable_reasons"] == ["stale_cn_binding", "no_mtdna_baseline"]
+
+
+def test_stale_copy_number_panel_is_not_paired_with_new_generation_baselines() -> None:
+    members = tuple(_member(index) for index in range(1, 12))
+    target = members[0].model_copy(update={"results": tuple(
+        result.model_copy(update={"parameters_sha256": "f" * 64})
+        if result.algorithm_id == "copy-number" else result
+        for result in members[0].results
+    )})
+    generation = CohortGeneration(cohort_id="synthetic", version=2, members=(target, *members[1:]))
+    report = report_tf_concordance(_sample(target), generation, target)
+
+    pairs = {pair["id"]: pair for pair in report["pairs"]}
+    assert all(pair["state"] == "stale_cn_binding" and pair["x"] is None and pair["y"] is None
+               for pair in pairs.values())
+    assert pairs["cn-size"]["baseline_median"] == 105.5
+    assert pairs["cn-size"]["unavailable_reasons"] == ["stale_cn_binding"]
+
+
+def test_selected_generation_without_a_target_cannot_qualify_copy_number() -> None:
+    generation = CohortGeneration(cohort_id="synthetic", version=2, members=(_member(1),))
+    report = report_tf_concordance(_sample(_member(1)), generation, None)
+    assert all(pair["state"] == "cn_binding_unavailable" and pair["y"] is None
+               for pair in report["pairs"])
+
+
+def test_pon_qualified_copy_number_can_pair_with_methylation_without_a_cohort() -> None:
+    report = report_tf_concordance(_sample(_member(1)))
+    meth_pair = next(pair for pair in report["pairs"] if pair["id"] == "cn-meth")
+    assert (meth_pair["state"], meth_pair["x"], meth_pair["y"]) == ("ok", 0.25, 0.2)
 
 
 def test_same_input_parameter_drift_refuses_only_its_baseline() -> None:

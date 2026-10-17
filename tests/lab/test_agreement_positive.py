@@ -212,3 +212,27 @@ def test_positive_agreement_renders_three_plots_with_flags(tmp_path, monkeypatch
     assert "10 compatible paired cohort sources" in dom
     assert "not independent confirmation" in dom and "whole-genome doubling" in dom
     assert "aggregate score" not in dom.lower()
+
+
+@needs_chrome
+def test_stale_copy_number_binding_is_explained_on_agreement_page(tmp_path, monkeypatch):
+    store, id12 = _published_agreement(tmp_path, monkeypatch)
+    original_target = web_api._cohort_target
+
+    def stale_target(store, generation, source_id):
+        target, problem = original_target(store, generation, source_id)
+        results = tuple(
+            result.model_copy(update={"parameters_sha256": "0" * 64})
+            if result.algorithm_id == "copy-number" else result
+            for result in target.results
+        )
+        return target.model_copy(update={"results": results}), problem
+
+    monkeypatch.setattr(web_api, "_cohort_target", stale_target)
+    with RunningLabServer(store) as server:
+        dom = _dom(server, tmp_path / "stale-browser", route=f"/sample/{id12}/agreement",
+                   want=lambda text: "does not match the selected cohort binding" in text)
+
+    assert "Rerun this sample with the current cohort before comparing." in dom
+    assert "This pair is unavailable." not in dom
+    assert dom.count("Data table") == 2  # raw size and mtDNA views stay visible

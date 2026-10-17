@@ -59,9 +59,22 @@ def report_tf_concordance(
     policy = _metric(sample, "copy-number", "pon_policy")
     cn = _number(_metric(sample, "copy-number", "tumor_fraction"))
     cn_identifiable = _metric(sample, "copy-number", "identifiable") is True
+    cn_binding_reason = None
+    if generation is not None and target is None:
+        cn_binding_reason = "cn_binding_unavailable"
+    elif generation is not None and target is not None:
+        target_cn = next((row for row in target.results if row.algorithm_id == "copy-number"), None)
+        cn_matches_target = (
+            target.input_id == sample.full.input_id and target_cn is not None
+            and cn_envelope is not None
+            and target_cn.parameters_sha256 == cn_envelope.provenance.parameters_sha256
+        )
+        if not cn_matches_target:
+            cn_binding_reason = "stale_cn_binding"
     cn_state = (
         "missing_cn" if cn_envelope is None or cn_envelope.status != "ok" else
         "no_pon" if policy != "lab_loo_v1" else
+        cn_binding_reason if cn_binding_reason is not None else
         "unidentifiable_cn" if not cn_identifiable else
         "missing_cn" if cn is None else "ok"
     )

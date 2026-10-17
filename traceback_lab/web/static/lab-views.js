@@ -1353,6 +1353,8 @@
       const reasons = {
         no_pon: "A verified panel of normals is needed before copy-number tumour fraction can be compared.",
         missing_cn: "Copy-number tumour fraction is unavailable.",
+        cn_binding_unavailable: "The selected cohort cannot verify this sample's copy-number result. Check cohort status and reload.",
+        stale_cn_binding: "This copy-number result does not match the selected cohort binding. Rerun this sample with the current cohort before comparing.",
         unidentifiable_cn: "Copy-number tumour fraction was not identifiable.",
         missing_meth_tf: "Methylation tumour fraction is unavailable; inspect the registered marker reference and method result.",
         unidentifiable_meth_tf: "The observed markers did not identify a methylation tumour fraction.",
