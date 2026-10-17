@@ -201,7 +201,8 @@ def run_plan(
         ]
         assets_of = getattr(algorithm, "asset_sha256s", None)
         planned_assets = list(assets_of(store.root) if callable(assets_of) else ())
-        planned_tools = [tool.identity() for tool in algorithm.tools]
+        tool_pins = tuple(algorithm.tools)
+        planned_tools = [tool.identity() for tool in tool_pins]
         identity = execution_identity(
             algorithm,
             reference_sha256=target.reference_sha256,
@@ -237,6 +238,8 @@ def run_plan(
             for name in algorithm.upstream
             if name in done and done[name].artifacts_dir
         }
+        target.extras["asset_sha256s"] = planned_assets
+        target.extras["tool_versions"] = {pin.name: pin.version for pin in tool_pins}
         target.extras["planned_asset_sha256s"] = planned_assets
         target.extras["planned_tool_pins"] = planned_tools
         ctx = target.context(store.root)
