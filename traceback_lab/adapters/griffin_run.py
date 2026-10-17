@@ -133,6 +133,12 @@ def _write_yaml(path: Path, data: dict) -> None:
     path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
 
+def _write_manifest(path: Path, data: dict) -> None:
+    staging = path.with_name(path.name + ".tmp")
+    staging.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+    os.replace(staging, path)
+
+
 def _load_default(upstream: Path, workflow: str) -> dict:
     path = upstream / "snakemakes" / workflow / "config" / "config.yaml"
     return yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -461,7 +467,7 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
     fingerprints["generated_configs_sha256"] = {
         str(path.relative_to(attempt)): _digest(path) for path in generated_configs
     }
-    (attempt / "provenance.json").write_text(json.dumps({
+    _write_manifest(attempt / "provenance.json", {
         "status": "attempt", "input_id": config.input_id,
         "upstream_commit": commit, "reference_id": config.reference_id,
         "sample": sample, "eligible_autosomal_pairs": config.eligible_autosomal_pairs,
@@ -469,7 +475,7 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
         "eligibility_source": "bam_verified", "eligibility_predicate": D21_PAIR_PREDICATE,
         "snakemake_version": snakemake_version, "runtime": runtime,
         "fingerprints": fingerprints,
-    }, sort_keys=True), encoding="utf-8")
+    })
     for directory, snakefile in (
         (gc_dir, workflows[0] + ".snakefile"),
         (profile_dir, workflows[1] + ".snakefile"),
@@ -497,7 +503,7 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
             != fingerprints["generated_configs_sha256"]):
         raise RuntimeError("Griffin workflow source or generated configuration changed during computation")
     if (_digest(git) != fingerprints["git_sha256"]
-            or _git_run(git, upstream, "rev-parse", "--show-toplevel") != str(upstream)
+            or Path(_git_run(git, upstream, "rev-parse", "--show-toplevel")).resolve() != upstream
             or _git_run(git, upstream, "rev-parse", "HEAD") != commit
             or _git_run(git, upstream, "status", "--porcelain", "--ignored", "--untracked-files=all")):
         raise RuntimeError("pinned Griffin checkout changed during computation")
@@ -531,5 +537,5 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
         "gc_bias_sha256": _digest(gc_bias), "output_sha256": _digest(output),
         "profile_count": len(profiles),
     }
-    (attempt / "provenance.json").write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
+    _write_manifest(attempt / "provenance.json", manifest)
     return profiles

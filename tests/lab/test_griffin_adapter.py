@@ -14,6 +14,16 @@ from traceback_lab.adapters.griffin import GriffinFormatError, read_corrected_pr
 from traceback_lab.adapters.griffin_run import GRIFFIN_COMMIT, GriffinRun, run_upstream
 
 
+@pytest.mark.parametrize("unsafe", ["space name", "dollar$", "semi;colon", "back`tick", "star*", "tilde~", "new\nline"])
+def test_shell_unsafe_upstream_paths_are_rejected(tmp_path: Path, unsafe: str) -> None:
+    from traceback_lab.adapters.griffin_run import _safe_path
+
+    candidate = tmp_path / unsafe
+    candidate.write_bytes(b"fixture")
+    with pytest.raises(ValueError, match="shell-safe"):
+        _safe_path(candidate)
+
+
 def _write(path: Path, *, correction: str = "GC_corrected", sample: str = "S1",
            site_count: int = 1000) -> Path:
     path.write_text(
@@ -135,6 +145,8 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
     from traceback_lab.adapters import griffin_run
 
     upstream = tmp_path / "upstream"
+    git_root_alias = tmp_path / "upstream-alias"
+    git_root_alias.symlink_to(upstream, target_is_directory=True)
     for workflow in (
         "griffin_GC_and_mappability_correction", "griffin_nucleosome_profiling"
     ):
@@ -187,7 +199,7 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
             assert not any(key.startswith("GIT_") and key not in {
                 "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_GLOBAL", "GIT_OPTIONAL_LOCKS",
             } for key in kwargs["env"])
-            answer = (str(upstream) + "\n" if argv[-2:] == ["rev-parse", "--show-toplevel"]
+            answer = (str(git_root_alias) + "\n" if argv[-2:] == ["rev-parse", "--show-toplevel"]
                       else GRIFFIN_COMMIT + "\n" if argv[-2:] == ["rev-parse", "HEAD"] else "")
             return subprocess.CompletedProcess(argv, 0, answer)
         if argv[-1] == "--version":
@@ -237,6 +249,7 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
     assert stat.S_IMODE(attempt.stat().st_mode) == 0o700
     assert len(calls) == 2
     manifest = json.loads((attempt / "provenance.json").read_text(encoding="utf-8"))
+    assert not (attempt / "provenance.json.tmp").exists()
     assert manifest["status"] == "complete"
     assert manifest["input_id"] == input_id
     assert manifest["sample"] == sample
