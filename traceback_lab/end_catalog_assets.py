@@ -30,6 +30,8 @@ class EndCatalogueError(ValueError):
 @dataclass(frozen=True)
 class EndCatalogues:
     identity: str
+    centers_sha256: str
+    preferred_sha256: str
     centers: dict[str, np.ndarray]
     preferred_u: dict[str, np.ndarray]
     preferred_d: dict[str, np.ndarray]
@@ -127,7 +129,9 @@ def _load_catalogues(data: dict) -> EndCatalogues:
     centers = _parse_rows(center_raw, preferred=False)
     preferred_u, preferred_d = _parse_rows(preferred_raw, preferred=True)
     return EndCatalogues(
-        identity=data["identity"], centers=centers, preferred_u=preferred_u, preferred_d=preferred_d,
+        identity=data["identity"], centers_sha256=data["centers_sha256"],
+        preferred_sha256=data["preferred_sha256"], centers=centers,
+        preferred_u=preferred_u, preferred_d=preferred_d,
         center_count=sum(map(len, centers.values())),
         preferred_count=sum(map(len, preferred_u.values())) + sum(map(len, preferred_d.values())),
         source_label=data["source_label"], centers_source=data["centers_source"],

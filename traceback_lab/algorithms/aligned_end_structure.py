@@ -153,6 +153,9 @@ class AlignedEndStructure(Base):
         artifact = {
             "schema": "traceback.lab.aligned-end-structure.v1",
             "catalogue_identity": catalogues.identity,
+            "centers_sha256": catalogues.centers_sha256,
+            "preferred_sha256": catalogues.preferred_sha256,
+            "observed_depth_x": ctx.approx_depth_x,
             "interpretation": "ONT aligned-span proxy; exploratory; no tissue-origin calibration",
             "offset_bp": list(range(-RADIUS, RADIUS + 1)),
             "u_count": u_counts.tolist(), "d_count": d_counts.tolist(),

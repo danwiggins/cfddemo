@@ -79,6 +79,8 @@ def test_exact_ocf_like_sign_and_preferred_end_support(tmp_path: Path) -> None:
     assert artifact["ocf_like_left"] == -1 and artifact["ocf_like_right"] == -1
     assert artifact["valid_molecules"] == 1 and artifact["preferred_u_hits"] == 1
     assert artifact["preferred_d_hits"] == 1
+    assert artifact["observed_depth_x"] == 10.0
+    assert len(artifact["centers_sha256"]) == 64 and len(artifact["preferred_sha256"]) == 64
     assert "no tissue-origin calibration" in artifact["interpretation"]
 
 
