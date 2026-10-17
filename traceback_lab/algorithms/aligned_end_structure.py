@@ -150,12 +150,13 @@ class AlignedEndStructure(Base):
         for cid, name in enumerate(names):
             if cid not in allowed:
                 continue
-            centers = catalogues.centers.get(name, np.empty(0, dtype=np.int64))
+            catalogue_name = name if name.startswith("chr") else f"chr{name}"
+            centers = catalogues.centers.get(catalogue_name, np.empty(0, dtype=np.int64))
             bounded = centers[(centers >= RADIUS) & (centers + RADIUS < lengths[cid])]
             centers_by_id[cid] = bounded
             valid_centers += len(bounded)
-            preferred_u_by_id[cid] = catalogues.preferred_u.get(name, np.empty(0, dtype=np.int64))
-            preferred_d_by_id[cid] = catalogues.preferred_d.get(name, np.empty(0, dtype=np.int64))
+            preferred_u_by_id[cid] = catalogues.preferred_u.get(catalogue_name, np.empty(0, dtype=np.int64))
+            preferred_d_by_id[cid] = catalogues.preferred_d.get(catalogue_name, np.empty(0, dtype=np.int64))
             valid_preferred_sites += int(np.count_nonzero(preferred_u_by_id[cid] < lengths[cid]))
             valid_preferred_sites += int(np.count_nonzero(preferred_d_by_id[cid] < lengths[cid]))
         u_counts = np.zeros(2 * RADIUS + 1, dtype=np.int64)
