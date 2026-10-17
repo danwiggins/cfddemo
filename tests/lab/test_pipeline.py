@@ -140,6 +140,51 @@ def test_rss_sampler_failure_preserves_worker_result(monkeypatch: pytest.MonkeyP
     assert result.sampled_tree_peak_rss_bytes is None
 
 
+def test_sampler_thread_start_failure_preserves_worker_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    original_start = threading.Thread.start
+
+    def reject_sampler(self: threading.Thread) -> None:
+        name = getattr(getattr(self, "_target", None), "__name__", "")
+        if name in {"sample_rss", "sample_disk"}:
+            raise RuntimeError("cannot start another telemetry thread")
+        original_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", reject_sampler)
+    result = run_pipeline(
+        [Stage("ok", [PY, "-c", "print('done')"])], timeout_s=10,
+        disk_usage=lambda: 1,
+    )
+    assert result.ok
+    assert result.peak_rss_bytes is not None and result.peak_rss_bytes > 0
+    assert result.sampled_tree_peak_rss_bytes is None
+    assert result.peak_disk_bytes is None
+
+
+def test_final_disk_thread_start_failure_keeps_earlier_sample(monkeypatch: pytest.MonkeyPatch) -> None:
+    import traceback_lab.pipeline as pipeline
+
+    monkeypatch.setattr(pipeline, "DISK_SAMPLE_S", 1000.0)
+    original_start = threading.Thread.start
+    disk_starts = 0
+
+    def reject_final(self: threading.Thread) -> None:
+        nonlocal disk_starts
+        if getattr(getattr(self, "_target", None), "__name__", "") == "sample_disk":
+            disk_starts += 1
+            if disk_starts == 2:
+                raise RuntimeError("cannot start final disk scan")
+        original_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", reject_final)
+    result = run_pipeline(
+        [Stage("ok", [PY, "-c", "import time; time.sleep(0.2)"])],
+        timeout_s=10, disk_usage=lambda: 7,
+    )
+    assert result.ok
+    assert disk_starts == 2
+    assert result.peak_disk_bytes == 7
+
+
 def test_slow_rss_sampler_does_not_delay_worker_polling(monkeypatch: pytest.MonkeyPatch) -> None:
     import traceback_lab.pipeline as pipeline
 

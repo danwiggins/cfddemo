@@ -420,7 +420,10 @@ def run_pipeline(
                         rss_samples.put(rss)
 
                 rss_thread = threading.Thread(target=sample_rss, daemon=True)
-                rss_thread.start()
+                try:
+                    rss_thread.start()
+                except RuntimeError:
+                    next_rss = time.monotonic() + RSS_SAMPLE_S
             try:
                 while True:
                     size = disk_samples.get_nowait()
@@ -432,7 +435,10 @@ def run_pipeline(
             if ((disk_path is not None or disk_usage is not None) and now >= next_disk
                     and (disk_thread is None or not disk_thread.is_alive())):
                 disk_thread = threading.Thread(target=sample_disk, daemon=True)
-                disk_thread.start()
+                try:
+                    disk_thread.start()
+                except RuntimeError:
+                    next_disk = time.monotonic() + DISK_SAMPLE_S
             now = time.monotonic()
             if on_tick is not None:
                 on_tick(now - started)
@@ -467,8 +473,12 @@ def run_pipeline(
         # A periodic scan may have started before the worker's last write.
         # Only a fresh post-exit scan can serve as the final reading.
         final_disk_thread = threading.Thread(target=sample_disk, daemon=True)
-        final_disk_thread.start()
-        final_disk_thread.join(timeout=FINAL_DISK_SAMPLE_S)
+        try:
+            final_disk_thread.start()
+        except RuntimeError:
+            pass  # optional telemetry must not discard a completed worker
+        else:
+            final_disk_thread.join(timeout=FINAL_DISK_SAMPLE_S)
         try:
             while True:
                 size = disk_samples.get_nowait()
