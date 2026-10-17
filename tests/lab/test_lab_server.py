@@ -388,7 +388,7 @@ def _read_debug_port(path: Path) -> str | None:
     return lines[0]
 
 
-def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90) -> str:
+def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90, action: str | None = None) -> str:
     """Wait for one Chrome page's caller-defined DOM state through DevTools."""
 
     deadline = time.monotonic() + timeout
@@ -457,9 +457,14 @@ def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90) -> str:
 
             command("Runtime.enable")
             command("Log.enable")
+            action_done = False
             def read_state() -> dict:
-                nonlocal dom
+                nonlocal dom, action_done
                 dom = evaluate("document.documentElement?.outerHTML ?? ''")
+                if action and not action_done and 'data-ready="1"' in dom:
+                    evaluate(action)
+                    action_done = True
+                    dom = evaluate("document.documentElement?.outerHTML ?? ''")
                 return {
                     "matched": bool(ok(dom)), "ready": _body_attr(dom, "ready"),
                     "rendered": 'data-rendered="1"' in dom,
@@ -603,13 +608,16 @@ def test_headless_page_renders_a_chart_with_zero_csp_violations(server, tmp_path
         [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
          f"--user-data-dir={tmp_path / 'profile'}", "--window-size=1280,800",
          server.issue_link() + f"&route=/sample/{id12}/trust-qc"], tmp_path / "profile",
-        ok=lambda page: 'data-ready="1"' in page and 'class="echart"' in page and 'data-rendered="1"' in page,
+        ok=lambda page: 'data-ready="1"' in page and 'class="echart"' in page and 'data-rendered="1"' in page
+            and "step_end read-summary status=ok" in page,
+        action="[...document.querySelectorAll('#main a')].find(a => a.textContent === 'Run log line →')?.click()",
     )
     assert 'data-ready="1"' in dom, dom[:500]
     assert 'data-csp-violations="0"' in dom
     assert 'data-rendered="1"' in dom  # the ECharts density panel drew under the CSP
     assert "Data table" in dom
     assert "Run log line →" in dom
+    assert "step_end read-summary status=ok" in dom
     assert "Research use only. Not CLIA-validated. Not a diagnosis." in dom
     assert "FLAG: PII" in dom
     assert "No operator sex assertion was supplied; no comparison was made." in dom
