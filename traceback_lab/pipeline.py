@@ -26,6 +26,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from queue import Empty, SimpleQueue
 from typing import IO, Any
 
 from traceback_runner.toolchain import kill_process_group
@@ -35,6 +36,8 @@ from .scrub import BoundedStderr, Scrubber
 GRACE_S = 5.0
 POLL_S = 0.02
 DISK_SAMPLE_S = 2.0
+RSS_SAMPLE_S = 0.5
+FINAL_DISK_SAMPLE_S = 1.0
 
 
 @dataclass(frozen=True)
@@ -65,6 +68,7 @@ class PipelineResult:
     peak_disk_bytes: int | None
     timed_out: bool = False
     interrupted: bool = False
+    sampled_tree_peak_rss_bytes: int | None = None
 
     @property
     def ok(self) -> bool:
@@ -142,6 +146,95 @@ def directory_bytes(path: Path) -> int:
         except OSError:
             continue
     return total
+
+
+def _tree_members(root_pid: int, processes: Mapping[int, tuple[int, int]]) -> set[int]:
+    """Include descendants in new sessions and children still in the group."""
+
+    # Seed from observed members of the worker's process group, then include
+    # their descendants even if a descendant starts a new session.
+    included = {pid for pid, (_ppid, pgid) in processes.items() if pgid == root_pid}
+    while True:
+        children = {pid for pid, (ppid, _pgid) in processes.items() if ppid in included}
+        expanded = included | children
+        if expanded == included:
+            break
+        included = expanded
+    return included
+
+
+def _proc_tree_rss_bytes(root_pid: int) -> int | None:
+    proc = Path("/proc")
+    if not proc.is_dir():
+        raise OSError("/proc unavailable")
+    processes: dict[int, tuple[int, int]] = {}
+    try:
+        for entry in proc.iterdir():
+            if not entry.name.isdecimal():
+                continue
+            try:
+                stat = (entry / "stat").read_text()
+                fields = stat[stat.rfind(")") + 2 :].split()
+                processes[int(entry.name)] = (int(fields[1]), int(fields[2]))
+            except (OSError, ValueError, IndexError):
+                continue
+    except OSError as exc:
+        raise OSError("/proc enumeration unavailable") from exc
+    if not processes:
+        return None
+    resident_pages = 0
+    measured = False
+    for pid in _tree_members(root_pid, processes):
+        try:
+            resident_pages += int((proc / str(pid) / "statm").read_text().split()[1])
+            measured = True
+        except (OSError, ValueError, IndexError):
+            continue
+    if not measured or resident_pages == 0:
+        return None
+    return resident_pages * os.sysconf("SC_PAGE_SIZE")
+
+
+def _ps_tree_rss_bytes(root_pid: int) -> int | None:
+    """macOS fallback: ps RSS is KiB; cap command time and parsed output."""
+
+    try:
+        listing = subprocess.run(
+            ["/bin/ps", "-A", "-o", "pid=,ppid=,pgid=,rss="],
+            capture_output=True, text=True, timeout=2, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if listing.returncode != 0 or len(listing.stdout) > 4_000_000:
+        return None
+    processes: dict[int, tuple[int, int]] = {}
+    rss_kib: dict[int, int] = {}
+    for line in listing.stdout.splitlines():
+        fields = line.split()
+        if len(fields) != 4:
+            continue
+        try:
+            pid, ppid, pgid, rss = map(int, fields)
+        except ValueError:
+            continue
+        processes[pid] = (ppid, pgid)
+        rss_kib[pid] = rss
+    total = sum(rss_kib.get(pid, 0) for pid in _tree_members(root_pid, processes))
+    return total * 1024 if total > 0 else None
+
+
+def _process_tree_rss_bytes(root_pid: int) -> int | None:
+    """Sample the worker and native descendants, including new sessions.
+
+    The caller separately records each direct child's wait4 maximum, which
+    may include descendants that child waited for. Linux uses /proc resident
+    pages; macOS uses ps RSS (KiB). A sampler failure leaves wait4 intact.
+    """
+
+    try:
+        return _proc_tree_rss_bytes(root_pid)
+    except OSError:
+        return _ps_tree_rss_bytes(root_pid)
 
 
 def _pump(stream: IO[bytes], buffer: BoundedStderr, echo: Callable[[str], None] | None) -> None:
@@ -224,6 +317,7 @@ def run_pipeline(
     stdout_path: Path | None = None,
     echo: Callable[[str], None] | None = None,
     disk_path: Path | None = None,
+    disk_usage: Callable[[], int] | None = None,
     on_tick: Callable[[float], None] | None = None,
 ) -> PipelineResult:
     """Run ``stages`` as one pipeline in one process group.
@@ -244,8 +338,25 @@ def run_pipeline(
     timed_out = False
     interrupted = False
     peak_disk: int | None = None
+    peak_tree_rss: int | None = None
+    rss_samples: SimpleQueue[int | None] = SimpleQueue()
+    rss_thread: threading.Thread | None = None
+    rss_active = threading.Event()
+    rss_active.set()
+    disk_samples: SimpleQueue[int | None] = SimpleQueue()
+    disk_thread: threading.Thread | None = None
     sink: IO[bytes] | None = None
     leader: subprocess.Popen[bytes] | None = None
+
+    def sample_disk() -> None:
+        try:
+            size = disk_usage() if disk_usage is not None else (
+                directory_bytes(disk_path) if disk_path is not None else None
+            )
+        except Exception:  # noqa: BLE001 - optional telemetry cannot fail the worker
+            size = None
+        disk_samples.put(size)
+
     try:
         if stdout_path is not None:
             if not stdout_path.is_absolute():
@@ -279,8 +390,10 @@ def run_pipeline(
             thread.start()
             threads.append(thread)
         assert leader is not None
+        leader_pid = leader.pid
         deadline = started + timeout_s
         next_disk = 0.0
+        next_rss = 0.0
         while any(process.returncode is None for process in processes):
             failed = False
             for position in range(len(processes)):
@@ -291,10 +404,44 @@ def run_pipeline(
                 _terminate(leader, processes, outcomes)
                 break
             now = time.monotonic()
-            if disk_path is not None and now >= next_disk:
-                size = directory_bytes(disk_path)
-                peak_disk = size if peak_disk is None else max(peak_disk, size)
-                next_disk = now + DISK_SAMPLE_S
+            try:
+                while True:
+                    rss = rss_samples.get_nowait()
+                    if rss is not None:
+                        peak_tree_rss = rss if peak_tree_rss is None else max(peak_tree_rss, rss)
+                    next_rss = time.monotonic() + RSS_SAMPLE_S
+            except Empty:
+                pass
+            if now >= next_rss and (rss_thread is None or not rss_thread.is_alive()):
+                def sample_rss() -> None:
+                    try:
+                        rss = _process_tree_rss_bytes(leader_pid) if rss_active.is_set() else None
+                    except Exception:  # noqa: BLE001 - optional telemetry cannot fail the worker
+                        rss = None
+                    if rss_active.is_set():
+                        rss_samples.put(rss)
+
+                rss_thread = threading.Thread(target=sample_rss, daemon=True)
+                try:
+                    rss_thread.start()
+                except RuntimeError:
+                    next_rss = time.monotonic() + RSS_SAMPLE_S
+            try:
+                while True:
+                    size = disk_samples.get_nowait()
+                    if size is not None:
+                        peak_disk = size if peak_disk is None else max(peak_disk, size)
+                    next_disk = time.monotonic() + DISK_SAMPLE_S
+            except Empty:
+                pass
+            if ((disk_path is not None or disk_usage is not None) and now >= next_disk
+                    and (disk_thread is None or not disk_thread.is_alive())):
+                disk_thread = threading.Thread(target=sample_disk, daemon=True)
+                try:
+                    disk_thread.start()
+                except RuntimeError:
+                    next_disk = time.monotonic() + DISK_SAMPLE_S
+            now = time.monotonic()
             if on_tick is not None:
                 on_tick(now - started)
             if any(process.returncode is None for process in processes) and now > deadline:
@@ -306,10 +453,14 @@ def run_pipeline(
         interrupted = True
         raise
     finally:
+        # A process-group number may be reused after its last member exits.
+        # Discard any sample still being enumerated as the group is reaped.
+        rss_active.clear()
         if leader is not None and any(process.returncode is None for process in processes):
             _terminate(leader, processes, outcomes)
         for position, process in enumerate(processes):
             _reap(process, outcomes[position], block=True)
+        worker_ended = time.monotonic()
         if leader is not None:
             # Every direct child is reaped; end the group so no grandchild
             # outlives the step (toolchain.kill_process_group: SIGKILL + reap).
@@ -321,13 +472,35 @@ def run_pipeline(
             thread.join(timeout=5)
         if sink is not None:
             sink.close()
-    if disk_path is not None:
-        size = directory_bytes(disk_path)
-        peak_disk = size if peak_disk is None else max(peak_disk, size)
+    if disk_path is not None or disk_usage is not None:
+        # A periodic scan may have started before the worker's last write.
+        # Only a fresh post-exit scan can serve as the final reading.
+        final_disk_thread = threading.Thread(target=sample_disk, daemon=True)
+        try:
+            final_disk_thread.start()
+        except RuntimeError:
+            pass  # optional telemetry must not discard a completed worker
+        else:
+            final_disk_thread.join(timeout=FINAL_DISK_SAMPLE_S)
+        try:
+            while True:
+                size = disk_samples.get_nowait()
+                if size is not None:
+                    peak_disk = size if peak_disk is None else max(peak_disk, size)
+        except Empty:
+            pass
+    try:
+        while True:
+            rss = rss_samples.get_nowait()
+            if rss is not None:
+                peak_tree_rss = rss if peak_tree_rss is None else max(peak_tree_rss, rss)
+    except Empty:
+        pass
     return PipelineResult(
         stages=outcomes,
-        duration_s=time.monotonic() - started,
+        duration_s=worker_ended - started,
         peak_disk_bytes=peak_disk,
+        sampled_tree_peak_rss_bytes=peak_tree_rss,
         timed_out=timed_out,
         interrupted=interrupted,
     )

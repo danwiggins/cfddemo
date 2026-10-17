@@ -11,15 +11,19 @@ import hashlib
 import math
 import os
 import stat
+import sys
 from importlib import metadata
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 from traceback_runner.contained_process import run_contained
 
 from .methylbert_bundle import Bundle
+from .methylbert_gpu_probe import NUMERICAL_PACKAGES as NUMERICAL_PACKAGES
+from .methylbert_gpu_probe import package_versions, probe_cuda
 
 
 PINNED_UPSTREAM_COMMIT = "f82f83b0bc20e2af1441795536ec9f338fbbb3e7"
@@ -30,10 +34,72 @@ MAX_AGGREGATE_BYTES = 16 * 1024
 MAX_CODE_FILE_BYTES = 8 * 1024 * 1024
 MAX_CODE_TOTAL_BYTES = 64 * 1024 * 1024
 AGGREGATE_SCHEMA = "traceback.methylbert-aggregate.v1"
+CHILD_ENV_KEYS = frozenset({
+    "PATH", "SYSTEMROOT", "LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER",
+    "HOME", "TMPDIR", "TMP", "TEMP", "HF_HOME", "HF_HUB_OFFLINE",
+    "HF_DATASETS_OFFLINE", "TRANSFORMERS_OFFLINE", "TOKENIZERS_PARALLELISM", "NO_PROXY",
+})
+def numerical_runtime_identity(*, probe_gpu: bool, isolated_gpu: bool) -> dict[str, Any]:
+    """Key numerical dependencies without importing Torch for an absent model."""
+
+    cuda: dict[str, Any] | None = None
+    if probe_gpu:
+        if isolated_gpu:
+            probe_env = {name: os.environ[name] for name in (
+                "PATH", "SYSTEMROOT", "LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER",
+            ) if name in os.environ}
+            probe_env.update({"HF_HUB_OFFLINE": "1", "HF_DATASETS_OFFLINE": "1",
+                              "TRANSFORMERS_OFFLINE": "1", "TOKENIZERS_PARALLELISM": "false",
+                              "NO_PROXY": "*"})
+            result = run_contained(
+                [sys.executable, "-I", str(Path(__file__).with_name("methylbert_gpu_probe.py"))],
+                env=probe_env, cwd=Path(__file__).resolve().parent,
+                timeout_seconds=30, log_limit_bytes=8 * 1024,
+            )
+            try:
+                identity = json.loads(result.stdout) if result.succeeded and not result.stdout_truncated else None
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                identity = None
+            if (not isinstance(identity, dict) or set(identity) != {"python", "packages", "cuda"}
+                    or not isinstance(identity["packages"], dict) or not isinstance(identity["cuda"], dict)):
+                raise RuntimeRefusal("MethylBERT isolated numerical runtime probe failed")
+            return identity
+        else:
+            cuda = probe_cuda()
+    return {"python": sys.version.split()[0], "packages": package_versions(), "cuda": cuda}
 
 
 class RuntimeRefusal(ValueError):
     """Model, input, environment, or aggregate result violates the contract."""
+
+
+def apply_precision_flags(expected: object) -> None:
+    """Restore selected Torch precision settings after model-package imports."""
+
+    cuda = expected.get("cuda") if isinstance(expected, dict) else None
+    if not isinstance(cuda, dict):
+        raise RuntimeRefusal("MethylBERT selected precision settings are missing")
+    booleans = ("matmul_allow_tf32", "cudnn_allow_tf32", "cudnn_benchmark")
+    if any(type(cuda.get(key)) is not bool for key in booleans):
+        raise RuntimeRefusal("MethylBERT selected precision settings are invalid")
+    precision = cuda.get("float32_matmul_precision")
+    if precision not in {"highest", "high", "medium"}:
+        raise RuntimeRefusal("MethylBERT selected matmul precision is invalid")
+    import torch
+
+    torch.set_float32_matmul_precision(precision)
+    torch.backends.cuda.matmul.allow_tf32 = cuda["matmul_allow_tf32"]
+    torch.backends.cudnn.allow_tf32 = cuda["cudnn_allow_tf32"]
+    torch.backends.cudnn.benchmark = cuda["cudnn_benchmark"]
+
+
+def require_numerical_runtime(expected: object) -> dict[str, Any]:
+    """Refuse package or CUDA drift before loading a trusted checkpoint."""
+
+    actual = numerical_runtime_identity(probe_gpu=True, isolated_gpu=False)
+    if not isinstance(expected, dict) or actual != expected:
+        raise RuntimeRefusal("MethylBERT numerical runtime differs from the selected execution identity")
+    return actual
 
 
 @dataclass(frozen=True)
@@ -178,9 +244,33 @@ def read_aggregate(path: Path, *, model_id: str, eligible_reads: int) -> Aggrega
     return Aggregate(model_id, float(fractions[0]), float(fractions[1]), count)
 
 
+def _support_refusal(path: Path, minimum: int, eligible: int) -> str | None:
+    """Accept only the private child's bounded, count-only refusal record."""
+
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        with os.fdopen(descriptor, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > 256:
+                return None
+            raw = json.loads(stream.read(257))
+    except (OSError, ValueError, UnicodeError):
+        return None
+    if (not isinstance(raw, dict)
+            or set(raw) != {"reason", "classified_reads", "min_classified_reads"}
+            or raw["reason"] != "below_floor"
+            or type(raw["classified_reads"]) is not int
+            or type(raw["min_classified_reads"]) is not int
+            or raw["min_classified_reads"] != minimum
+            or not 0 <= raw["classified_reads"] < minimum <= eligible):
+        return None
+    return f"MethylBERT classified-read support {raw['classified_reads']} is below qualified floor {minimum}"
+
+
 def run_worker(
     argv: Sequence[str], *, scratch: Path, env: Mapping[str, str],
     aggregate_path: Path, model_id: str, eligible_reads: int,
+    min_classified_reads: int | None = None,
     should_abort: Callable[[], bool] | None = None,
 ) -> Aggregate:
     """Run a supplied command with bounded time, logs, and aggregate output.
@@ -190,6 +280,10 @@ def run_worker(
 
     if not argv or not os.path.isabs(argv[0]):
         raise RuntimeRefusal("MethylBERT worker executable must be absolute")
+    if set(env) - CHILD_ENV_KEYS:
+        raise RuntimeRefusal("MethylBERT child environment contains an unapproved variable")
+    if any(env.get(key) != "1" for key in ("HF_HUB_OFFLINE", "HF_DATASETS_OFFLINE", "TRANSFORMERS_OFFLINE")):
+        raise RuntimeRefusal("MethylBERT child model hubs must be offline")
     if type(eligible_reads) is not int or eligible_reads < MIN_ELIGIBLE_READS:
         raise RuntimeRefusal("MethylBERT needs at least 2,500,000 eligible ONT reads")
     if not scratch.is_absolute() or not aggregate_path.is_absolute():
@@ -206,6 +300,10 @@ def run_worker(
         log_limit_bytes=MAX_LOG_BYTES, should_abort=should_abort,
     )
     if not result.succeeded:
+        if result.outcome == "exited" and min_classified_reads is not None:
+            diagnostic = _support_refusal(scratch / "support-refusal.json", min_classified_reads, eligible_reads)
+            if diagnostic is not None:
+                raise RuntimeRefusal(diagnostic)
         raise RuntimeRefusal("MethylBERT worker failed, timed out, or was aborted")
     try:
         if not aggregate_path.parent.resolve(strict=True).is_relative_to(scratch_root):
