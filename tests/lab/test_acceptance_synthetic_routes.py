@@ -533,13 +533,19 @@ def test_empty_copy_and_complete_example_commands(tmp_path) -> None:
         server.app.api.samples = lambda: {"samples": [], "root_has_runs": False}
         server.app.api.sample = lambda _id12: {"found": False, "candidates": []}
         dom = _dom(server, tmp_path / "home", route="/",
-                   want=lambda page: "FLAG: LEGAL — verify" in page)
+                   want=lambda page: page.count("FLAG: LEGAL — verify") == 4)
         unknown = _dom(server, tmp_path / "unknown", route=f"/sample/{ID12}/findings",
                        want=lambda page: "Unknown sample" in page)
         about = _dom(server, tmp_path / "clia", route="/about/clia",
                      want=lambda page: "What CLIA is." in page)
     assert '<section class="clia-panel"' in dom
-    assert "What CLIA means for this demo" in dom and dom.count("FLAG: LEGAL — verify") == 2
+    short = re.search(r'<div class="clia-short">(.*?)</div>', dom, re.DOTALL)
+    full = re.search(r'<div class="clia-full"[^>]*>(.*?)</div>', dom, re.DOTALL)
+    assert short is not None and full is not None
+    assert short.group(1).count("FLAG: LEGAL — verify") == 2
+    assert full.group(1).count("FLAG: LEGAL — verify") == 2
+    assert "Loading…" not in short.group(1) and "Loading…" not in full.group(1)
+    assert "What CLIA means for this demo" in dom
     assert "No Lab runs under this server's ROOT" in dom
     assert "traceback lab doctor" in dom and "traceback lab run --example" in dom
     assert "traceback lab run &lt;chunk dir&gt;" in dom
