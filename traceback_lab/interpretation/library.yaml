@@ -2627,7 +2627,7 @@ entries:
     headline: true
     stability: {kind: unvalidated}
     citations: ["doi:10.1101/gr.242719.118"]
-    citation_checked: {by: "Lab S5 evidence audit", date: "2026-10-17", note: "Sun 2019 Genome Research (PMID 30808726) defines D−U at −60 bp and U−D at +60 bp in 20-bp windows around tissue-specific open chromatin. This Lab proxy includes both endpoints of −70..−50 and +50..+70 (21 integer positions each), uses ONT aligned-span ends and operator-pinned hg38 regions, and does not reproduce short-read tissue calibration."}
+    citation_checked: {by: "Lab S5 evidence audit", date: "2026-10-17", note: "Sun 2019 Genome Research (PMID 30808726) displays D−U summed from −60−10 to −60+10 and U−D from +60−10 to +60+10, while calling these 20-bp windows. This Lab measurement follows the displayed inclusive integer bounds (21 positions each); the paper does not resolve the counting convention. It uses ONT aligned-span ends and operator-pinned hg38 regions, and does not reproduce short-read tissue calibration."}
 
   - algorithm_id: aligned-end-structure
     metric_id: preferred_end_support_fraction
