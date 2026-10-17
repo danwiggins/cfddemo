@@ -87,6 +87,8 @@ def _inventory(lab: Path, max_entries: int) -> tuple[dict[str, int], int, set[st
                         staging_entries += 1
                     if _is_reparse(info):
                         raise InventoryError("inventory contains a link or special file")
+                    if directory == lab / "inputs" and entry.name == "index.json" and not stat.S_ISREG(info.st_mode):
+                        raise InventoryError("shared input hash cache is not a regular file")
                     if stat.S_ISDIR(info.st_mode):
                         pending.append(Path(entry.path))
                     elif stat.S_ISREG(info.st_mode):

@@ -81,6 +81,60 @@ def test_ratio_over_limit_is_reported_false(tmp_path):
     assert report["literal_ac4_at_most_1_2"] is False
 
 
+@pytest.mark.parametrize("nonempty", [False, True])
+def test_reserved_hash_cache_directory_refuses_single_sample_claim(tmp_path, nonempty):
+    source, _ = _fixture(tmp_path)
+    cache = tmp_path / "lab" / "inputs" / "index.json"
+    cache.unlink()
+    cache.mkdir()
+    if nonempty:
+        (cache / "part").write_bytes(b"x")
+    with pytest.raises(InventoryError, match="hash cache is not a regular file"):
+        account(tmp_path, source)
+
+
+def test_staging_and_temporary_bytes_are_reported_without_double_counting(tmp_path):
+    source, full = _fixture(tmp_path)
+    staging = tmp_path / "lab" / "inputs" / full / ".staging-retry"
+    staging.mkdir()
+    _write(tmp_path, "tmp/scratch", 5)
+    report = account(tmp_path, source)
+    assert report["staging_entry_count"] == 1
+    assert report["staging_bytes"] == 0
+    assert report["temporary_bytes"] == 5
+    (staging / "part").write_bytes(b"x" * 7)
+    report = account(tmp_path, source)
+    assert report["staging_entry_count"] == 1
+    assert report["staging_bytes"] == 7
+    assert report["temporary_bytes"] == 5
+    assert report["complete_lab_persistent_bytes"] == sum(report[key] for key in (
+        "literal_lab_inputs_bytes", "sample_result_bytes", "other_result_bytes",
+        "shared_mmi_bytes", "other_lab_bytes",
+    ))
+
+
+def test_multi_full_input_selection_withholds_ratio_until_isolated(tmp_path):
+    source, full = _fixture(tmp_path)
+    second = "d" * 64
+    record_path = tmp_path / "lab" / "sources" / f"{source}.json"
+    record = json.loads(record_path.read_text())
+    record["inputs"].append({"input_id": second, "kind": "aligned"})
+    record_path.write_text(json.dumps(record))
+    _write(tmp_path, f"inputs/{second}/aligned.bam", 50)
+    _write(tmp_path, f"inputs/{second}/aligned.bam.bai", 5)
+    with pytest.raises(InventoryError, match="select one full input_id"):
+        account(tmp_path, source)
+    first_report = account(tmp_path, source, input_id=full)
+    assert first_report["aligned_bam_plus_index_bytes"] == 110
+    assert first_report["literal_ac4_single_sample_applicable"] is False
+    assert first_report["literal_ac4_at_most_1_2"] is None
+    second_report = account(tmp_path, source, input_id=second)
+    assert second_report["aligned_bam_plus_index_bytes"] == 55
+    assert second_report["literal_ac4_single_sample_applicable"] is False
+    with pytest.raises(InventoryError, match="not a full input"):
+        account(tmp_path, source, input_id="e" * 64)
+
+
 def test_refuses_incomplete_or_unsafe_inventory(tmp_path):
     source, full = _fixture(tmp_path)
     with pytest.raises(InventoryError, match="entry limit"):
