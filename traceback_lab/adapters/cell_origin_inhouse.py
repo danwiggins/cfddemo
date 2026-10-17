@@ -26,6 +26,10 @@ from traceback_runner.cell_origin_method import CellOriginParametersV1
 from .mmml_extract import Extraction, extract_cpg_calls
 
 
+class InsufficientCellOriginEvidence(ValueError):
+    """Marker evidence is too sparse for a composition estimate."""
+
+
 @dataclass(frozen=True)
 class InhouseMeasurement:
     fit: object
@@ -77,14 +81,14 @@ def compute_inhouse(
     region_index = read_bed_regions(regions)
     prefilter = write_prefiltered_bam(bam, filtered, region_index, min_mapq=parameters.min_mapq)
     if prefilter.written == 0:
-        raise ValueError("no alignment passed the marker-region prefilter")
+        raise InsufficientCellOriginEvidence("no alignment passed the marker-region prefilter")
     extraction = extract_cpg_calls(
         filtered, fasta, maximum_calls=parameters.caps.maximum_calls,
         filter_threshold=parameters.modkit_filter_threshold,
         include_regions=region_index,
     )
     if not extraction.calls:
-        raise ValueError("no known, confident CpG calls overlap marker regions")
+        raise InsufficientCellOriginEvidence("no known, confident CpG calls overlap marker regions")
     classified = _partitioned_classification(
         extraction.calls, resources.markers,
         maximum_groups=parameters.caps.maximum_groups,
@@ -97,7 +101,7 @@ def compute_inhouse(
     classified_fragments = sum(row.u_count + row.m_count for row in rows)
     if (not rows or classified_fragments < parameters.min_classified_fragments
             or len(rows) < parameters.min_observed_markers):
-        raise ValueError("cell-origin classified fragment and marker floors are not met")
+        raise InsufficientCellOriginEvidence("cell-origin classified fragment and marker floors are not met")
     atlas_rows = _filtered_atlas(resources.atlas, tuple(row.marker_id for row in rows))
     fit = deconvolve_uxm_v2(
         rows, atlas_rows, row_scale=NnlsRowScale(parameters.nnls_row_scale),
@@ -128,4 +132,4 @@ def compute_inhouse(
     )
 
 
-__all__ = ["InhouseMeasurement", "compute_inhouse"]
+__all__ = ["InhouseMeasurement", "InsufficientCellOriginEvidence", "compute_inhouse"]

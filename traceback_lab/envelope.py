@@ -34,6 +34,7 @@ SKIP_REASONS: tuple[str, ...] = (
     "missing_asset",
     "invalid_asset",
     "missing_channel",
+    "low_support",
     "missing_tags",
     "example_reference",
     "platform",

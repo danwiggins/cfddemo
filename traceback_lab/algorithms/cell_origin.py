@@ -147,10 +147,10 @@ class CellOrigin(Base):
             return Skip("missing_tags", "the BAM's @RG lines declare no single modified-base model")
         return super().preflight(ctx)
 
-    def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
+    def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput | Skip:
         import tempfile
 
-        from ..adapters.cell_origin_inhouse import compute_inhouse
+        from ..adapters.cell_origin_inhouse import InsufficientCellOriginEvidence, compute_inhouse
         from traceback_runner.cell_origin_method import default_parameters
 
         fasta = Path(ctx.extras["reference_fasta"])
@@ -178,15 +178,18 @@ class CellOrigin(Base):
             if ctx.derived:
                 bam = work / "derived.bam"  # transient: gone when this directory goes
                 write_transient_bam(ctx.input_dir / "aligned.bam", bam, dict(ctx.derived))
-            measurement = compute_inhouse(
-                parameters=parameters,
-                bam=bam,
-                fasta=fasta,
-                atlas=copies["loyfer-atlas"],
-                markers=copies["loyfer-markers"],
-                regions=copies["loyfer-regions"],
-                scratch=work,
-            )
+            try:
+                measurement = compute_inhouse(
+                    parameters=parameters,
+                    bam=bam,
+                    fasta=fasta,
+                    atlas=copies["loyfer-atlas"],
+                    markers=copies["loyfer-markers"],
+                    regions=copies["loyfer-regions"],
+                    scratch=work,
+                )
+            except InsufficientCellOriginEvidence as exc:
+                return Skip("low_support", str(exc))
         level = float(parameters.bootstrap_confidence_level)
         classified = measurement.classified_fragments
         metrics = []

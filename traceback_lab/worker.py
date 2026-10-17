@@ -19,7 +19,7 @@ from pathlib import Path
 
 from traceback_runner.serialization import canonical_json_bytes
 
-from .registry import AlgorithmOutput, context_from_json, load_entry
+from .registry import AlgorithmOutput, Skip, context_from_json, load_entry
 
 
 def _descendants(root_pid: int) -> list[tuple[int, int]]:
@@ -78,8 +78,13 @@ def main(argv: list[str]) -> int:
     artifacts = out / "artifacts"
     artifacts.mkdir(parents=True, exist_ok=True)
     output = algorithm.run(context, artifacts)
+    if isinstance(output, Skip):
+        (out / "output.json").write_bytes(canonical_json_bytes({
+            "skip": {"reason_code": output.reason_code, "message": output.message},
+        }))
+        return 0
     if not isinstance(output, AlgorithmOutput):
-        raise TypeError(f"{algorithm.id}.run must return AlgorithmOutput")
+        raise TypeError(f"{algorithm.id}.run must return AlgorithmOutput or Skip")
     for relative, content in output.artifacts.items():
         target = artifacts / relative
         target.parent.mkdir(parents=True, exist_ok=True)

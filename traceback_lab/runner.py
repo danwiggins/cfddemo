@@ -358,23 +358,39 @@ def run_plan(
             if outcome.ok:
                 try:
                     produced = json.loads((scratch / "output.json").read_bytes())
+                    if not isinstance(produced, dict):
+                        raise ValueError("worker output is not an object")
                     artifacts = {
                         str(path.relative_to(scratch))
                         for path in sorted((scratch / "artifacts").rglob("*"))
                         if path.is_file() and not path.is_symlink()
                     }
-                    envelope = _envelope(
-                        algorithm,
-                        target,
-                        identity,
-                        status="ok",
-                        metrics=produced.get("metrics", []),
-                        panels=produced.get("panels", []),
-                        duration_s=outcome.duration_s,
-                    )
-                    missing = [p.data_ref for p in envelope.panels if p.data_ref not in artifacts]
-                    if missing:
-                        raise ValueError(f"panel data_ref not produced: {missing[0]}")
+                    run_skip = None
+                    if "skip" in produced:
+                        skip_data = produced["skip"]
+                        if (set(produced) != {"skip"} or not isinstance(skip_data, dict)
+                                or set(skip_data) != {"reason_code", "message"}
+                                or not all(isinstance(value, str) for value in skip_data.values())
+                                or artifacts):
+                            raise ValueError("skipped worker output must contain only a reason and no artifacts")
+                        run_skip = Skip(
+                            skip_data["reason_code"],
+                            scrubber.line(skip_data["message"].replace("\r", " ").replace("\n", " ")),
+                        )
+                        envelope = _envelope(
+                            algorithm, target, identity, status="skipped", skip=run_skip,
+                            duration_s=outcome.duration_s,
+                        )
+                    else:
+                        envelope = _envelope(
+                            algorithm, target, identity, status="ok",
+                            metrics=produced.get("metrics", []),
+                            panels=produced.get("panels", []),
+                            duration_s=outcome.duration_s,
+                        )
+                        missing = [p.data_ref for p in envelope.panels if p.data_ref not in artifacts]
+                        if missing:
+                            raise ValueError(f"panel data_ref not produced: {missing[0]}")
                 except (OSError, ValueError) as exc:
                     result = _publish_failure(
                         store, algorithm, target, identity, item, log, step,
@@ -388,14 +404,15 @@ def run_plan(
                     attempt_id = store.publish_result(
                         envelope,
                         input_id=target.input_id,
-                        artifacts_dir=scratch / "artifacts",
+                        artifacts_dir=scratch / "artifacts" if run_skip is None else None,
                         upstream_selections=consumed,
                         execution_plan=execution_plan,
                     )
                     log.append(
                         "step_end",
                         step=step,
-                        status="ok",
+                        status=envelope.status,
+                        skip_reason=run_skip.reason_code if run_skip else None,
                         duration_s=round(outcome.duration_s, 3),
                         peak_rss_bytes=outcome.peak_rss_bytes,
                         peak_tree_rss_bytes=outcome.sampled_tree_peak_rss_bytes,
@@ -407,9 +424,11 @@ def run_plan(
                     )
                     result = StepResult(
                         algorithm.id,
-                        "ok",
+                        envelope.status,
                         item.upstream_only,
                         identity,
+                        skip_reason=run_skip.reason_code if run_skip else None,
+                        skip_message=run_skip.message if run_skip else None,
                         duration_s=outcome.duration_s,
                         peak_rss_bytes=outcome.peak_rss_bytes,
                         peak_tree_rss_bytes=outcome.sampled_tree_peak_rss_bytes,
@@ -418,7 +437,8 @@ def run_plan(
                         input_id=target.input_id,
                         attempt_id=attempt_id,
                     )
-                    _after_ok(store, target, algorithm, identity, result, envelope)
+                    if run_skip is None:
+                        _after_ok(store, target, algorithm, identity, result, envelope)
             else:
                 stage = outcome.stages[0]
                 tail = stage.stderr.scrubbed(scrubber, last=50)
@@ -439,6 +459,8 @@ def run_plan(
         if progress:
             if result.status == "ok":
                 progress(f"{step:<24} ok ({result.duration_s or 0:.1f}s)")
+            elif result.status == "skipped":
+                progress(f"{step:<24} skipped ({result.skip_reason}): {result.skip_message}")
             else:
                 progress(f"{step:<24} failed: {result.first_line}")
     shutil.rmtree(scratch_root, ignore_errors=True)
