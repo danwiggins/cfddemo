@@ -145,6 +145,10 @@ def bind_target(
     has_copy_number = any(item.algorithm.id == "copy-number" for item in items)
     if not has_copy_number and cohort_id is None:
         return list(items)
+    if cohort_id is None and (target.platform != "ont" or target.example):
+        # The implicit ONT kit panel does not apply to short-read or EXAMPLE
+        # inputs. Explicit --cohort still validates or refuses its selection.
+        return list(items)
     from .cohorts import _aligner
 
     aligner_label, _ = _aligner(manifest, target.input_id)

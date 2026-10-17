@@ -372,9 +372,12 @@ reads on the target input. Copy-number also enforces the signed 1M counted-read
 floor after filtering, with or without a panel.
 
 `lab run` and `lab simulate` use a built `healthy-v1` cohort by default when
-one exists. Pass `--cohort ID` to pin another built cohort; an explicit cohort
+one exists for a real ONT input. Illumina and EXAMPLE inputs do not select
+that implicit ONT panel. Pass `--cohort ID` to pin another built cohort; an explicit cohort
 with no compatible verified panel fails rather than falling back. If the
 implicit `healthy-v1` is unbuilt, copy-number keeps its no-PoN baseline.
+If that implicit panel is built but later becomes unverifiable, a real ONT run
+stops before executing rather than silently substituting no-PoN copy number.
 An explicit `--cohort` is checked even when `--only` omits copy-number.
 
 If a selected cohort cannot be verified, **Compare** lists it as unavailable

@@ -288,6 +288,26 @@ def test_target_binding_carries_same_selection_into_derived_runs(tmp_path: Path,
         pon_consumer.selection_from_payload(target.extras["pon_selection"], tmp_path, "0" * 64)
 
 
+@pytest.mark.parametrize("platform,example", [("illumina", False), ("ont", True)])
+def test_implicit_ont_panel_does_not_block_other_input_kinds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str, example: bool,
+) -> None:
+    monkeypatch.setattr(
+        pon_consumer, "selection_for_target",
+        lambda *_, **__: pytest.fail("implicit ONT panel must not be consulted"),
+    )
+    target = RunTarget(
+        input_id="4" * 64, source_id="5" * 64, input_dir=tmp_path,
+        reference_id="hg38", reference_sha256="b" * 64,
+        platform=platform, example=example,
+    )
+    items = plan(load_registry(), only=["instability"])
+    assert pon_consumer.bind_target(
+        LabStore(tmp_path), items, target, {}, cohort_id=None,
+    ) == list(items)
+    assert "pon_selection" not in target.extras
+
+
 def test_member_recompute_runs_pinned_loo_chain_and_requires_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
