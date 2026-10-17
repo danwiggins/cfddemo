@@ -491,8 +491,7 @@ def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90,
                 nonlocal dom, action_done
                 dom = evaluate("document.documentElement?.outerHTML ?? ''")
                 if action and not action_done and 'data-ready="1"' in dom:
-                    evaluate(action)
-                    action_done = True
+                    action_done = evaluate(action) is True
                     dom = evaluate("document.documentElement?.outerHTML ?? ''")
                 return {
                     "matched": bool(ok(dom)), "ready": _body_attr(dom, "ready"),
@@ -642,7 +641,7 @@ def test_headless_page_renders_a_chart_with_zero_csp_violations(server, tmp_path
          server.issue_link() + f"&route=/sample/{id12}/trust-qc"], tmp_path / "profile",
         ok=lambda page: 'data-ready="1"' in page and 'class="echart"' in page and 'data-rendered="1"' in page
             and "step_end read-summary status=ok" in page,
-        action="[...document.querySelectorAll('#main a')].find(a => a.textContent === 'Run log line →')?.click()",
+        action="(() => { const link = [...document.querySelectorAll('#main a')].find(a => a.textContent === 'Run log line →'); if (!link) return false; link.click(); return true; })()",
     )
     assert 'data-ready="1"' in dom, dom[:500]
     assert 'data-csp-violations="0"' in dom
@@ -942,7 +941,7 @@ def test_trust_qc_run_note_is_scoped_without_replacing_result_status(tmp_path, k
             "library_health": {"no_library_entry": 0, "unverified_citations": 0,
                                "version": "fixture", "error": None},
         }
-    marker = {"run_id": "r-20261015-0101-abcd", "step": "bam-qc",
+    marker = {"run_id": "r-20261015-0101-abcd", "command": "run", "step": "bam-qc",
               "source_id": source_a, "input_id": input_a}
     if kind == "active-pending":
         marker["step"] = "read-summary"
@@ -958,7 +957,7 @@ def test_trust_qc_run_note_is_scoped_without_replacing_result_status(tmp_path, k
         running.app.api.status = lambda: {
             "generation": 1, "active": {**shown_marker, "started_utc": "2026-10-16T00:00:00Z"} if kind.startswith("active") else None,
             "interrupted": shown_marker if kind == "interrupted" else (
-                {"run_id": prior_run_id, "step": "read-summary"}
+                {"run_id": prior_run_id, "step": "read-summary", "source_id": source_a, "input_id": input_a}
                 if kind == "active-unlogged-prior-interrupted" else None),
             "run_log_unavailable": {"run_id": prior_run_id, "reason": "malformed_or_empty"}
             if kind == "active-unlogged-prior-badlog" else None,
@@ -992,6 +991,7 @@ def test_trust_qc_run_note_is_scoped_without_replacing_result_status(tmp_path, k
         assert "Run log status unavailable" not in dom
     if kind == "active-unlogged-prior-interrupted":
         assert f"Earlier run ({prior_run_id}) stopped during read-summary" in dom
+        assert ("Earlier run interrupted during read-summary; no result was published for this step." in dom) == (selected == "a")
 
 
 @pytest.mark.skipif(_chrome() is None, reason="no Chrome/Chromium for the headless Trust/QC check")
