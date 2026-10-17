@@ -23,6 +23,25 @@ def test_read_group_platform(lines: list[str], expected: str) -> None:
     assert from_rg_lines(lines) == expected
 
 
+def test_each_unaligned_chunk_must_declare_the_platform() -> None:
+    from traceback_lab.ingest import Chunk, ChunkSet, _refuse_mixed_models
+    from traceback_lab.problems import LabProblem
+    from traceback_lab.run_command import _declared_platform
+
+    declared = Chunk(Path("declared.bam"), "declared.bam", 1, 1,
+                     rg_lines=("@RG\tID:one\tPL:ONT",))
+    missing = Chunk(Path("missing.bam"), "missing.bam", 2, 1)
+    # Neither header declares a basecall model, so the older model check
+    # cannot substitute for per-chunk platform verification.
+    _refuse_mixed_models((declared, missing))
+    with pytest.raises(LabProblem, match="TBX-LAB-024"):
+        _declared_platform(ChunkSet([declared, missing]))
+
+    second = Chunk(Path("second.bam"), "second.bam", 2, 1,
+                   rg_lines=("@RG\tID:two\tPL:OXFORD_NANOPORE",))
+    assert _declared_platform(ChunkSet([declared, second])) == "ont"
+
+
 def test_stored_platform_must_match_bam_header(tmp_path: Path) -> None:
     bam_path = tmp_path / "aligned.bam"
     header = {"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 1000}],

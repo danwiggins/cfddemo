@@ -219,12 +219,13 @@ def _stored_platform(aligned: AlignedInput) -> str:
 
 
 def _declared_platform(chunkset: ChunkSet) -> str:
-    platform = from_rg_lines(chunkset.rg_lines)
-    if platform == "unknown":
+    declared = {from_rg_lines(chunk.rg_lines) for chunk in chunkset.chunks}
+    if len(declared) != 1 or "unknown" in declared:
         raise LabProblem(
             "TBX-LAB-024", cause="BAM read groups have no unanimous supported platform declaration",
             fix="Use input whose read groups all declare PL:ONT or PL:ILLUMINA",
         )
+    platform = next(iter(declared))
     if not chunkset.aligned and platform != "ont":
         raise LabProblem(
             "TBX-LAB-024", cause="unaligned Illumina input cannot use the ONT alignment path",
