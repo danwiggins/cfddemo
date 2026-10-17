@@ -316,10 +316,14 @@ def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) 
         if len(upstream) != len(algorithm.upstream):
             continue
         assets_of = getattr(algorithm, "asset_sha256s", None)
+        scoped_assets_of = getattr(algorithm, "asset_sha256s_for_input", None)
         try:
+            assets = scoped_assets_of(store.root, input_id) if callable(scoped_assets_of) else (
+                assets_of(store.root) if callable(assets_of) else ()
+            )
             identity = execution_identity(
                 algorithm, reference_sha256=manifest["reference_sha256"], upstream=upstream,
-                asset_sha256s=assets_of(store.root) if callable(assets_of) else (),
+                asset_sha256s=assets, tool_pins=[tool.identity() for tool in algorithm.tools],
             )
         except (OSError, ValueError, KeyError, LabProblem):
             # An unresolved asset cannot make an old result current-compatible.
