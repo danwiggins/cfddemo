@@ -359,7 +359,7 @@
     const rows = [
       ["Tier", "PROVEN (solid) · NEWER (outline) · SPECULATIVE (dashed outline)"],
       ["State", "in range ● · above typical ▲ · markedly above ▲▲ · below typical ▼ · markedly below ▼▼ · not interpretable ▨ · no reference ○"],
-      ["Curve cell", "● usable · ◐ unstable · ▨ not interpretable · ○ skipped · ✕ failed · ◇ literature, not measured"],
+      ["Curve cell", "● usable · ? stability not validated · ◐ unstable · ▨ not interpretable · ○ skipped · ✕ failed · ◇ literature, not measured"],
       ["FLAG pill", "FLAG: TYPE — a regulatory, legal or privacy touchpoint, marked not designed around"],
       ["License", "Full callout with a red-orange border; later references are pills linking to it"],
       ["Citation", "UNVERIFIED citation: the numbers were not checked against the source"],

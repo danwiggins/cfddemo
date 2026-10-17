@@ -18,7 +18,7 @@
   };
   const CELL = {
     ok_usable: ["●", "usable"],
-    ok_unvalidated: ["◇", "stability not validated"],
+    ok_unvalidated: ["?", "stability not validated"],
     ok_unstable: ["◐", "unstable"],
     not_interpretable: ["▨", "not interpretable"],
     skipped: ["○", "skipped"],
@@ -175,7 +175,7 @@
     const run = curve.run_depth_x;
     const section = h("section", { class: "panel curve", "aria-labelledby": "curve-title" });
     const heading = h("div", { class: "curve-heading" }, h("h3", { id: "curve-title" }, "Depth → utility"),
-      h("span", { class: "legend", "aria-hidden": "true" }, "● usable ◇ stability not validated ◐ unstable ▨ not interpretable ○ skipped ✕ failed ◇ literature"));
+      h("span", { class: "legend", "aria-hidden": "true" }, "● usable ? stability not validated ◐ unstable ▨ not interpretable ○ skipped ✕ failed ◇ literature"));
     section.append(heading);
     if (!curve.downsampled) {
       section.append(h("p", { class: "empty" }, h("span", {}, "This run used "), h("code", {}, "--no-downsample"), `. Run `, h("code", {}, `traceback lab run ${sample.id12}`), " to draw the curve."));
