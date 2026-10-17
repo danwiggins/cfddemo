@@ -81,7 +81,7 @@ def _safe_path(path: Path) -> Path:
     # Griffin's own Snakemake shell rules interpolate config paths without
     # quoting. Reject paths its shell cannot consume safely.
     if not _SAFE_TOKEN.fullmatch(str(resolved)):
-        raise ValueError(f"Griffin upstream requires shell-safe POSIX paths: {resolved}")
+        raise ValueError("Griffin upstream requires shell-safe POSIX paths")
     return resolved
 
 
@@ -426,7 +426,7 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
     ).stdout.strip()
     if snakemake_version != SNAKEMAKE_VERSION:
         raise ValueError(f"Griffin requires pinned Snakemake {SNAKEMAKE_VERSION}")
-    attempt.mkdir()
+    attempt.mkdir(mode=0o700)
     launcher_dir = attempt / "bin"
     launcher_dir.mkdir()
     python = launcher_dir / "python"

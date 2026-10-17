@@ -42,7 +42,7 @@ sizes; the attempt records input row counts, while Griffin may retain fewer
 sites after its own filtering. A complete status never implies zero site
 attrition or adequate fragment support at each site.
 It requires the 5M D21 gate, a clean upstream checkout at the pinned commit,
-and a fresh per-input attempt directory. The adapter's `eligible_autosomal_pairs`
+and a fresh per-input attempt directory with owner-only permissions. The adapter's `eligible_autosomal_pairs`
 input is a count of eligible autosomal **pairs**. The adapter independently
 recounts first mates of proper, primary, mapped, same-contig, nonduplicate,
 non-QC-failed autosomal pairs at MAPQ ≥ 20. This is the paired subset of the

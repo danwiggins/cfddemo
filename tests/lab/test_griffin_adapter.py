@@ -4,6 +4,7 @@ from pathlib import Path
 import hashlib
 import json
 import os
+import stat
 import subprocess
 import sys
 
@@ -226,6 +227,7 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
         site_lists={"CTCF": sites}, attempt_dir=attempt,
     ))
     assert result[0].site_name == "CTCF"
+    assert stat.S_IMODE(attempt.stat().st_mode) == 0o700
     assert len(calls) == 2
     manifest = json.loads((attempt / "provenance.json").read_text(encoding="utf-8"))
     assert manifest["status"] == "complete"
