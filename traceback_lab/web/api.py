@@ -196,7 +196,7 @@ def _run_events(store: LabStore, run_id: str) -> tuple[list[tuple[int, dict[str,
     for number, line in enumerate(lines, 1):
         try:
             event = json.loads(line)
-        except (ValueError, UnicodeDecodeError):
+        except (ValueError, UnicodeDecodeError, RecursionError):
             # One crash-torn append can leave an unterminated final fragment.
             # Keep its validated prefix, but never skip a complete or middle line.
             if number == len(lines) and not complete_tail:
@@ -249,7 +249,7 @@ def _latest_analysis_run(store: LabStore) -> tuple[str | None, bool]:
         return None, True
     try:
         pointer = json.loads(raw)
-    except ValueError:
+    except (ValueError, RecursionError):
         return None, True
     if not isinstance(pointer, dict):
         return None, True
@@ -314,6 +314,10 @@ class LabApi:
             status["active"] = {**status["active"], **_run_sample_identity(events),
                                 "run_id": None if reason == "invalid_run_id" else run_id}
         else:
+            if status["active"] is not None:
+                active_id = status["active"].get("run_id")
+                if not isinstance(active_id, str) or not re.fullmatch(r"r-\d{8}-\d{4}-[0-9a-f]{4,8}", active_id):
+                    status["active"] = {**status["active"], "run_id": None}
             # Bounded (D22): one pointer file and that one run's log, never a scan.
             last, pointer_unavailable = _latest_analysis_run(self.store)
             if pointer_unavailable:
