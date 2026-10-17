@@ -335,6 +335,12 @@ def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) 
             for metric in chosen.metrics
             if metric.value is None or (isinstance(metric.value, (int, float)) and not isinstance(metric.value, bool))
         }
+        if (algorithm.id == "microbial"
+                and (isinstance(metrics.get("primary_reads"), bool)
+                     or not isinstance(metrics.get("primary_reads"), (int, float))
+                     or metrics["primary_reads"] <= 0)):
+            # No denominator means no measurement, even in older snapshots.
+            continue
         compat = cohort_compat_key(
             algorithm_id=algorithm.id, algorithm_version=algorithm.version,
             parameters=algorithm.parameters, tools=[tool.identity() for tool in algorithm.tools],

@@ -25,6 +25,7 @@ import pysam
 
 from traceback_runner.serialization import canonical_json_bytes
 
+from ..assets import AssetError, _check_contained
 from ..microbial_db import MicrobialDbError, inspect_database
 from ..registry import AlgorithmOutput, InputContext, Ready, Skip, ToolPin
 from ..store import LabStore
@@ -161,6 +162,7 @@ def _write_candidates(bam: Path, fasta: Path, read_length: int) -> tuple[int, in
 
 @dataclass
 class Microbial(Base):
+    version: str = "2"
     family: str = "non-human"
     consumes: str = "full_bam"
     cost: str = "slow"
@@ -207,8 +209,23 @@ class Microbial(Base):
         if kraken is None or bracken is None:
             raise RuntimeError("microbial tools changed after preflight")
         database = inspect_database(LabStore(ctx.root))
+        planned_assets = ctx.extras.get("planned_asset_sha256s")
+        planned_tools = ctx.extras.get("planned_tool_pins")
+        current_tools = [tool.identity() for tool in self.tools]
+        if planned_assets is not None and planned_assets != [database.sha256]:
+            raise RuntimeError("microbial database changed after execution planning")
+        if planned_tools is not None and planned_tools != current_tools:
+            raise RuntimeError("microbial toolchain changed after execution planning")
         tmp_root = Path(ctx.root) / "lab" / "tmp"
+        try:
+            _check_contained(LabStore(ctx.root), tmp_root)
+        except AssetError as exc:
+            raise RuntimeError("microbial temporary directory is unsafe") from exc
         tmp_root.mkdir(parents=True, exist_ok=True)
+        try:
+            _check_contained(LabStore(ctx.root), tmp_root)
+        except AssetError as exc:
+            raise RuntimeError("microbial temporary directory is unsafe") from exc
         with tempfile.TemporaryDirectory(prefix="microbial-", dir=tmp_root) as temporary:
             work = Path(temporary)
             bam = ctx.input_dir / "aligned.bam"
@@ -241,10 +258,11 @@ class Microbial(Base):
                     if bracken_run.returncode != 0:
                         raise RuntimeError("Bracken abundance estimation failed")
                     taxa, microbial_estimate, omitted = _bracken_species(abundance, lineages, denominator)
-            inspect_database(LabStore(ctx.root))
+            if inspect_database(LabStore(ctx.root)).sha256 != database.sha256:
+                raise RuntimeError("microbial database changed during classification")
             if _tool("kraken2") != kraken or _tool("bracken") != bracken:
                 raise RuntimeError("microbial toolchain changed during classification")
-        rpm = microbial_estimate * 1_000_000 / denominator if denominator else 0.0
+        rpm = microbial_estimate * 1_000_000 / denominator if denominator else None
         measurements = [
             metric("primary_reads", denominator, unit="reads"),
             metric("candidate_unmapped_reads", candidates, unit="reads", n=denominator),

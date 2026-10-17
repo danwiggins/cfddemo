@@ -230,6 +230,8 @@ Bacteria, Archaea, Viruses, and Fungi are shown as estimated reads per million
 denominator reads; human and other non-microbial taxa are excluded. At most
 256 species are displayed, with an omitted-taxon count. Read names and Kraken
 per-read assignments remain transient and are not published.
+An input with no primary QC-passing non-duplicate reads has no microbial rate
+or cohort comparison; it is never treated as a measured zero.
 
 The profile is speculative and marked **PRIVACY**. A compatible healthy-v1
 cohort of at least ten *other* samples supplies a per-taxon and overall 97.5th

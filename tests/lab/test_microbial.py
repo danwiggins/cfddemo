@@ -179,6 +179,49 @@ def test_all_unclassified_candidates_yield_zero_without_bracken(tmp_path, monkey
     assert b"private-name" not in output.artifacts["microbial_profile.json"]
 
 
+def test_run_refuses_changed_planned_database_or_tool(tmp_path, monkeypatch) -> None:
+    store, _ = _database(tmp_path)
+    monkeypatch.setattr(algorithm, "_tool", lambda name: (name, "a" * 64))
+    database = inspect_database(store)
+    tools = [tool.identity() for tool in algorithm.MICROBIAL.tools]
+    common = (store.root, "a" * 64, "b" * 64, "ref", "c" * 64, tmp_path / "input")
+    with pytest.raises(RuntimeError, match="database changed after execution planning"):
+        algorithm.MICROBIAL.run(InputContext(*common, extras={
+            "planned_asset_sha256s": ["0" * 64], "planned_tool_pins": tools,
+        }), tmp_path / "out")
+    with pytest.raises(RuntimeError, match="toolchain changed after execution planning"):
+        algorithm.MICROBIAL.run(InputContext(*common, extras={
+            "planned_asset_sha256s": [database.sha256],
+            "planned_tool_pins": [{"name": "kraken2", "version": "0" * 64}, tools[1]],
+        }), tmp_path / "out")
+
+
+def test_zero_primary_reads_are_unavailable_not_a_measured_zero(tmp_path, monkeypatch) -> None:
+    store, _ = _database(tmp_path)
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    with pysam.AlignmentFile(input_dir / "aligned.bam", "wb", header={"HD": {"VN": "1.6"}}):
+        pass
+    monkeypatch.setattr(algorithm, "_tool", lambda name: (name, "a" * 64))
+    ctx = InputContext(store.root, "a" * 64, "b" * 64, "ref", "c" * 64, input_dir)
+    output = algorithm.MICROBIAL.run(ctx, tmp_path / "out")
+    metrics = {row["metric_id"]: row["value"] for row in output.metrics}
+    assert metrics["primary_reads"] == 0
+    assert metrics["microbial_rpm_primary"] is None
+
+
+def test_run_refuses_symlinked_lab_temporary_directory(tmp_path, monkeypatch) -> None:
+    store, _ = _database(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (store.lab / "tmp").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr(algorithm, "_tool", lambda name: (name, "a" * 64))
+    ctx = InputContext(store.root, "a" * 64, "b" * 64, "ref", "c" * 64, tmp_path / "input")
+    with pytest.raises(RuntimeError, match="temporary directory is unsafe"):
+        algorithm.MICROBIAL.run(ctx, tmp_path / "out")
+    assert list(outside.iterdir()) == []
+
+
 def test_cohort_975_zero_fills_complete_absent_taxa_and_refuses_missing_reference(tmp_path, monkeypatch) -> None:
     from traceback_lab import microbial_view as view
 
@@ -214,16 +257,24 @@ def test_cohort_975_zero_fills_complete_absent_taxa_and_refuses_missing_referenc
     for index in range(10):
         result = CohortResult(
             algorithm_id="microbial", parameters_sha256=identity, cohort_compat_key=identity,
-            metrics={"microbial_rpm_primary": 5.0, "omitted_taxa": 0,
+            metrics={"primary_reads": 100, "microbial_rpm_primary": 5.0, "omitted_taxa": 0,
                      **({"taxon_123_rpm": 5.0} if index == 9 else {})},
         )
         members.append(CohortMember(source_id=f"{index + 1:064x}", input_id=f"{index + 101:064x}",
                                     aligner_identity="same aligner", results=(result,)))
+    members.append(CohortMember(
+        source_id="e" * 64, input_id="f" * 64, aligner_identity="same aligner",
+        results=(CohortResult(algorithm_id="microbial", parameters_sha256=identity,
+                              cohort_compat_key=identity,
+                              metrics={"primary_reads": 0, "microbial_rpm_primary": 0.0,
+                                       "omitted_taxa": 0}),),
+    ))
     generation = CohortGeneration(cohort_id="healthy-v1", version=1, members=tuple(members))
     target = CohortMember(source_id=source, input_id=input_id, aligner_identity="same aligner", results=())
     projected = profile_for_sample(store, sample, generation, target, "ready")
     assert projected["state"] == "ready"
     assert projected["taxa"][0]["cohort_n"] == 10
+    assert projected["cohort_n"] == 10
     assert projected["taxa"][0]["cohort_p975"] == pytest.approx(3.875)
     assert projected["taxa"][0]["above_cohort_p975"] is True
     unavailable = profile_for_sample(store, sample, None, None, "not_built")
@@ -232,3 +283,8 @@ def test_cohort_975_zero_fills_complete_absent_taxa_and_refuses_missing_referenc
     bad_profile["denominator"] = -1
     (artifacts / "microbial_profile.json").write_text(json.dumps(bad_profile))
     assert profile_for_sample(store, sample, generation, target, "ready")["state"] == "stored_profile_unavailable"
+    bad_profile["denominator"] = 0
+    bad_profile["candidate_unmapped_reads"] = 0
+    (artifacts / "microbial_profile.json").write_text(json.dumps(bad_profile))
+    absent = profile_for_sample(store, sample, generation, target, "ready")
+    assert absent["state"] == "measurement_unavailable" and absent["taxa"] == []

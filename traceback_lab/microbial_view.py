@@ -76,7 +76,15 @@ def _cohort_results(generation: CohortGeneration | None, target: CohortMember | 
     return [result for member in generation.members
             if member.source_id != source_id and member.aligner_identity == target.aligner_identity
             for result in member.results
-            if result.algorithm_id == "microbial" and result.parameters_sha256 == identity]
+            if (result.algorithm_id == "microbial" and result.parameters_sha256 == identity
+                and isinstance(result.metrics.get("primary_reads"), (int, float))
+                and not isinstance(result.metrics["primary_reads"], bool)
+                and math.isfinite(result.metrics["primary_reads"])
+                and result.metrics["primary_reads"] > 0
+                and isinstance(result.metrics.get("microbial_rpm_primary"), (int, float))
+                and not isinstance(result.metrics["microbial_rpm_primary"], bool)
+                and math.isfinite(result.metrics["microbial_rpm_primary"])
+                and result.metrics["microbial_rpm_primary"] >= 0)]
 
 
 def profile_for_sample(store: LabStore, sample: SampleView, generation: CohortGeneration | None,
@@ -115,6 +123,10 @@ def profile_for_sample(store: LabStore, sample: SampleView, generation: CohortGe
         return {"state": "stored_profile_unavailable", "reason": "Selected microbial profile is incomplete",
                 "taxa": []}
     static = {metric.metric_id: metric.value for metric in envelope.metrics}
+    if profile["denominator"] == 0:
+        return {"state": "measurement_unavailable",
+                "reason": "No primary QC-passing non-duplicate reads; microbial rate and cohort comparison are unavailable",
+                "taxa": []}
     rate = static.get("microbial_rpm_primary")
     if (isinstance(rate, bool) or not isinstance(rate, (int, float))
             or not math.isfinite(rate) or rate < 0):
