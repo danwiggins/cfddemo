@@ -19,7 +19,6 @@ import numpy as np
 
 from ..assets import AssetError, TSS_KIND, TSS_SHA256, inspect_asset, open_verified_asset
 from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip
-from ..store import LabStore
 from ._base import Base, load_summary, metric
 
 HG38_CHR1_LENGTH = 248_956_422
@@ -127,12 +126,16 @@ class TssProfile(Base):
     })
 
     def asset_sha256s(self, root: Path) -> list[str]:
+        from ..store import LabStore
+
         try:
             return [inspect_asset(LabStore(root), TSS_KIND, expected_sha256=TSS_SHA256).sha256]
         except AssetError:
             return []
 
     def preflight(self, ctx: InputContext) -> Ready | Skip:
+        from ..store import LabStore
+
         summary, mask = load_summary(ctx)
         if dict(zip(summary.contigs, summary.lengths)).get("chr1") != HG38_CHR1_LENGTH:
             return Skip("reference", "TSS annotation requires hg38 chr1 coordinates")
@@ -149,6 +152,8 @@ class TssProfile(Base):
         return Ready()
 
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
+        from ..store import LabStore
+
         summary, mask = load_summary(ctx)
         if dict(zip(summary.contigs, summary.lengths)).get("chr1") != HG38_CHR1_LENGTH:
             raise ValueError("TSS annotation requires hg38 chr1 coordinates")
