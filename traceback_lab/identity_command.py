@@ -89,6 +89,8 @@ def _compare(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, 
     metrics = pair["metrics"]
     lines = [f"ROOT  {store.root}", f"PAIR  {pair['pair_id'][:12]}",
              f"RELATEDNESS  {metrics['relatedness']:.3f}",
+             f"CONCORDANCE  {metrics['concordance']:.3f}",
+             f"SITES COMPARED  {metrics['n']}",
              "FLAG: PRIVACY — this comparison can reveal family relationships.",
              "Research use only; no ONT duplicate or kinship cutoff is claimed."]
     return EXIT_OK, _with_human(payload, lines, replace_data=True)

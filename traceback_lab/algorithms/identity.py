@@ -22,7 +22,6 @@ from typing import Any
 from ..identity_sites import IdentitySitesError, inspect_sites
 from ..file_access import open_regular_no_follow
 from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip, ToolPin
-from ..store import LabStore
 from ._base import Base, metric
 
 MIN_ELIGIBLE = 10_000_000
@@ -90,12 +89,16 @@ class Identity(Base):
         pass
 
     def asset_sha256s(self, root: Path) -> list[str]:
+        from ..store import LabStore
+
         try:
             return [inspect_sites(LabStore(root)).sha256]
         except IdentitySitesError:
             return []
 
     def preflight(self, ctx: InputContext) -> Ready | Skip:
+        from ..store import LabStore
+
         decision = super().preflight(ctx)
         if isinstance(decision, Skip):
             return decision
@@ -114,6 +117,8 @@ class Identity(Base):
         return Ready()
 
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
+        from ..store import LabStore
+
         tool = somalier_tool()
         if tool is None:
             raise RuntimeError("Somalier changed after preflight")

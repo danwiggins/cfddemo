@@ -12,12 +12,15 @@ import stat
 import zlib
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from traceback_runner.serialization import canonical_json_bytes
 
 from .assets import AssetError, _check_contained, _regular_source
 from .file_access import open_regular_no_follow
-from .store import LabStore
+
+if TYPE_CHECKING:
+    from .store import LabStore
 
 SITES_SCHEMA = "traceback.lab.identity-sites.v1"
 SITES_NAME = "sites.hg38.vcf.gz"

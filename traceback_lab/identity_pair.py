@@ -30,6 +30,7 @@ from . import views
 
 PAIR_SCHEMA = "traceback.lab.identity-pair.v1"
 MAX_PAIRS_SHOWN = 64
+MAX_PAIR_DIRECTORIES_SCANNED = 4096
 _PAIR_HEADER = {"sample_a", "sample_b", "relatedness", "ibs0", "ibs2", "concordance", "n"}
 
 
@@ -319,37 +320,50 @@ def pairs_for_sample(store: LabStore, source_id: str) -> list[dict[str, Any]]:
     if not root.is_dir() or root.is_symlink():
         return []
     rows: list[dict[str, Any]] = []
+    def status_notice(reason: str) -> dict[str, Any]:
+        return {"pair_id": "0" * 64, "peer_id12": "unavailable", "state": "unavailable", "reason": reason}
+
     try:
         sites = inspect_sites(store)
     except IdentitySitesError:
-        return []
+        return [status_notice("Registered Somalier sites are unavailable; restore the pinned sites to view comparisons")]
     anchor_identity: dict[str, str] | None = None
-    peer_identities: dict[str, dict[str, str]] = {}
+    anchor_checked = False
+    peer_identities: dict[str, dict[str, str] | None] = {}
 
-    def current_identity(participant_source: str) -> dict[str, str]:
-        nonlocal anchor_identity
+    def current_identity(participant_source: str) -> dict[str, str] | None:
+        nonlocal anchor_identity, anchor_checked
         if participant_source == source_id:
-            if anchor_identity is None:
-                anchor_identity = _selected_sketch(store, source_id, sites_sha256=sites.sha256).identity()
+            if not anchor_checked:
+                anchor_checked = True
+                try:
+                    anchor_identity = _selected_sketch(store, source_id, sites_sha256=sites.sha256).identity()
+                except IdentityPairError:
+                    anchor_identity = None
             return anchor_identity
         if participant_source not in peer_identities:
-            if len(peer_identities) == MAX_PAIRS_SHOWN:
-                peer_identities.pop(next(iter(peer_identities)))
-            peer_identities[participant_source] = _selected_sketch(
-                store, participant_source, sites_sha256=sites.sha256,
-            ).identity()
+            try:
+                peer_identities[participant_source] = _selected_sketch(
+                    store, participant_source, sites_sha256=sites.sha256,
+                ).identity()
+            except IdentityPairError:
+                peer_identities[participant_source] = None
         return peer_identities[participant_source]
     try:
         with os.scandir(root) as entries:
-            for entry in entries:
+            for scanned, entry in enumerate(entries, start=1):
+                if scanned > MAX_PAIR_DIRECTORIES_SCANNED:
+                    rows.append(status_notice("Comparison list was truncated after scanning its directory limit"))
+                    break
                 if not re.fullmatch(r"[0-9a-f]{64}", entry.name) or not entry.is_dir(follow_symlinks=False):
                     continue
                 summary = _selected_pair(store, entry.name)
                 if summary is None:
-                    notice = _unreadable_pair_notice(store, entry.name, source_id)
-                    if notice is not None:
-                        rows.append(notice)
-                        if len(rows) == MAX_PAIRS_SHOWN:
+                    unreadable_notice = _unreadable_pair_notice(store, entry.name, source_id)
+                    if unreadable_notice is not None:
+                        rows.append(unreadable_notice)
+                        if len(rows) == MAX_PAIRS_SHOWN - 1:
+                            rows.append(status_notice("Comparison list is limited; additional pairs may exist"))
                             break
                     continue
                 if not isinstance(summary.get("participants"), list):
@@ -359,16 +373,22 @@ def pairs_for_sample(store: LabStore, source_id: str) -> list[dict[str, Any]]:
                         or source_id not in [row.get("source_id") for row in participants]):
                     continue
                 try:
+                    anchor = current_identity(source_id)
+                    if anchor is None:
+                        continue
                     current = [current_identity(row["source_id"]) for row in participants]
                 except (IdentityPairError, KeyError, TypeError):
+                    continue
+                if any(identity is None for identity in current):
                     continue
                 if current != participants or sites.sha256 != summary.get("sites_sha256"):
                     continue
                 other = next(row["source_id"] for row in participants if row["source_id"] != source_id)
                 rows.append({"peer_id12": id12_for(store, other), "metrics": summary.get("metrics"),
                              "pair_id": summary["pair_id"], "interpretation": summary.get("interpretation")})
-                if len(rows) == MAX_PAIRS_SHOWN:
+                if len(rows) == MAX_PAIRS_SHOWN - 1:
+                    rows.append(status_notice("Comparison list is limited; additional pairs may exist"))
                     break
     except OSError:
-        return []
+        return [status_notice("Comparison list is unavailable; restore its storage and retry")]
     return sorted(rows, key=lambda row: row["pair_id"])

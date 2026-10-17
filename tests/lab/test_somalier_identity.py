@@ -386,6 +386,60 @@ def test_pair_list_limits_matching_pairs_after_filtering_unrelated_directories(t
     assert selected_calls.count(source) == 1
 
 
+def test_pair_list_reports_missing_sites_and_bounds_directory_scan(tmp_path, monkeypatch) -> None:
+    from traceback_lab import identity_pair as pair
+
+    store = LabStore(tmp_path / "root")
+    pair_root = store.lab / "identity-pairs"
+    pair_root.mkdir(parents=True)
+    source = "a" * 64
+    (pair_root / ("b" * 64)).mkdir()
+    monkeypatch.setattr(pair, "inspect_sites", lambda _store: (_ for _ in ()).throw(
+        pair.IdentitySitesError("missing")))
+    unavailable = pairs_for_sample(store, source)
+    assert len(unavailable) == 1 and unavailable[0]["state"] == "unavailable"
+    assert "sites" in unavailable[0]["reason"]
+
+    monkeypatch.setattr(pair, "inspect_sites", lambda _store: SimpleNamespace(sha256="f" * 64))
+    monkeypatch.setattr(pair, "MAX_PAIR_DIRECTORIES_SCANNED", 1)
+    (pair_root / ("c" * 64)).mkdir()
+    monkeypatch.setattr(pair, "_selected_pair", lambda *_args: None)
+    monkeypatch.setattr(pair, "_unreadable_pair_notice", lambda *_args: None)
+    truncated = pairs_for_sample(store, source)
+    assert len(truncated) == 1 and "truncated" in truncated[0]["reason"]
+
+
+def test_pair_list_caches_failed_anchor_lookup(tmp_path, monkeypatch) -> None:
+    from traceback_lab import identity_pair as pair
+
+    store = LabStore(tmp_path / "root")
+    pair_root = store.lab / "identity-pairs"
+    pair_root.mkdir(parents=True)
+    source, peer = "a" * 64, "b" * 64
+    sketches = [
+        SelectedSketch(source, "c" * 64, "a-20261016T000000000000-aaaaaaaa", "e" * 64,
+                       hashlib.sha256(b"a").hexdigest(), b"a"),
+        SelectedSketch(peer, "d" * 64, "a-20261016T000000000000-bbbbbbbb", "e" * 64,
+                       hashlib.sha256(b"b").hexdigest(), b"b"),
+    ]
+    for index in range(2):
+        (pair_root / f"{index + 1:064x}").mkdir()
+    monkeypatch.setattr(pair, "inspect_sites", lambda _store: SimpleNamespace(sha256="f" * 64))
+    monkeypatch.setattr(pair, "_selected_pair", lambda _store, pair_id: {
+        "pair_id": pair_id, "participants": [row.identity() for row in sketches],
+        "sites_sha256": "f" * 64, "metrics": {"relatedness": 0.5, "concordance": 0.9, "n": 10},
+    })
+    calls = []
+
+    def missing_anchor(_store, participant, **_kwargs):
+        calls.append(participant)
+        raise pair.IdentityPairError("fingerprint unavailable")
+
+    monkeypatch.setattr(pair, "_selected_sketch", missing_anchor)
+    assert pairs_for_sample(store, source) == []
+    assert calls == [source]
+
+
 def test_malformed_stored_pair_is_ignored_by_sample_read(tmp_path, monkeypatch) -> None:
     from traceback_lab import identity_pair as pair
 
