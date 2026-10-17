@@ -20,6 +20,7 @@ from traceback_lab.algorithms import viral_reads
 from traceback_lab.algorithms.viral_reads import VIRAL_READS, _count_hits, _derived_keep, _write_queries
 from traceback_lab.registry import InputContext, Ready, Skip
 from traceback_lab.read_summary import DS_SALT, SPLIT_SALT, downsample_mask, h64, split_mask
+from traceback_lab.pipeline import Stage, run_pipeline
 from traceback_lab.store import LabStore
 from traceback_lab.tools import MIN_MINIMAP2, find_minimap2
 from traceback_lab.viral_assets import add_viral_reference, inspect_viral_reference
@@ -109,6 +110,14 @@ def test_invalid_reference_does_not_publish(
     assert not (store.lab / "assets" / "viral-fasta").exists()
 
 
+def test_reference_accepts_blank_fasta_separators(tmp_path: Path) -> None:
+    store = LabStore(tmp_path / "root")
+    fasta, targets, _ = _sources(tmp_path)
+    fasta.write_text(fasta.read_text().replace("\n>", "\n\n>") + "\n")
+    _add(store, fasta, targets)
+    assert len(inspect_viral_reference(store).targets) == 3
+
+
 def test_absent_reference_is_explicitly_unavailable(tmp_path: Path) -> None:
     status = VIRAL_READS.preflight(_context(tmp_path, tmp_path))
     assert isinstance(status, Skip)
@@ -186,6 +195,23 @@ def test_preflight_rejects_invalid_derived_transform(tmp_path: Path) -> None:
         assert status.reason_code == "unsupported_transform"
 
 
+def test_query_staging_anonymizes_names_without_aligner(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    with pysam.AlignmentFile(str(input_dir / "aligned.bam"), "wb", header={
+        "HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 10000}],
+    }) as bam:
+        record = pysam.AlignedSegment()
+        record.query_name = "private-donor-read"
+        record.flag = 4
+        record.query_sequence = "ACGT" * 20
+        bam.write(record)
+    staged = tmp_path / "queries.fasta"
+    assert _write_queries(_context(tmp_path, input_dir), staged) == (1, 1, True)
+    assert staged.read_text() == ">q1\n" + "ACGT" * 20 + "\n"
+    assert "private-donor-read" not in staged.read_text()
+
+
 def test_real_minimap2_side_alignment_on_synthetic_bam(tmp_path: Path) -> None:
     tool = find_minimap2()
     if tool.path is None or tool.numeric is None or tool.numeric < MIN_MINIMAP2:
@@ -235,6 +261,7 @@ def test_real_minimap2_side_alignment_on_synthetic_bam(tmp_path: Path) -> None:
     assert summary["hits"] == {"EBV": 2, "HPV": 1, "HBV": 1}
     assert summary["missing_sequences"] == 0
     assert summary["availability_reason"] is None
+    assert not list(tmp_path.glob("viral-*"))
 
 
 def test_real_minimap2_excludes_reported_cross_group_secondary(tmp_path: Path) -> None:
@@ -262,6 +289,7 @@ def test_real_minimap2_excludes_reported_cross_group_secondary(tmp_path: Path) -
     result = VIRAL_READS.run(_context(store.root, input_dir), output)
     assert all(item["value"] == 0 and item["n"] == 1 for item in result.metrics)
     assert json.loads(result.artifacts["viral_reads.json"])["hits"] == {"EBV": 0, "HPV": 0, "HBV": 0}
+    assert not list(tmp_path.glob("viral-*"))
 
 
 @pytest.mark.parametrize("sequences,expected_reason,expected_value", [
@@ -271,11 +299,14 @@ def test_real_minimap2_excludes_reported_cross_group_secondary(tmp_path: Path) -
     (["N" * 1200], None, 0.0),
 ])
 def test_missing_sequence_never_looks_like_a_negative_result(
-    tmp_path: Path, sequences: list[str | None], expected_reason: str | None, expected_value: float | None,
+    tmp_path: Path, monkeypatch, sequences: list[str | None],
+    expected_reason: str | None, expected_value: float | None,
 ) -> None:
     tool = find_minimap2()
     if tool.path is None or tool.numeric is None or tool.numeric < MIN_MINIMAP2:
-        pytest.skip("minimap2 >= 2.28 unavailable")
+        if any(sequence is not None for sequence in sequences):
+            pytest.skip("minimap2 >= 2.28 unavailable")
+        monkeypatch.setattr(viral_reads, "_minimap2", lambda: (sys.executable, "2.28", (2, 28)))
     store = LabStore(tmp_path / "root")
     fasta, targets, viruses = _sources(tmp_path)
     _add(store, fasta, targets)
@@ -298,6 +329,7 @@ def test_missing_sequence_never_looks_like_a_negative_result(
     assert summary["missing_sequences"] == sequences.count(None)
     assert summary["availability_reason"] == expected_reason
     assert summary["hits"] == ({"EBV": 0, "HPV": 0, "HBV": 0} if expected_reason is None else None)
+    assert not list(tmp_path.glob("viral-*"))
 
 
 def test_query_budget_returns_unavailable_without_running_aligner(tmp_path: Path, monkeypatch) -> None:
@@ -325,6 +357,7 @@ def test_query_budget_returns_unavailable_without_running_aligner(tmp_path: Path
     assert summary["availability_reason"] == "query_budget_exceeded"
     assert summary["queries_with_sequence"] == 2
     assert summary["hits"] is None
+    assert not list(tmp_path.glob("viral-*"))
 
 
 def test_aligner_failure_and_paf_budget_return_unavailable(tmp_path: Path, monkeypatch) -> None:
@@ -354,6 +387,7 @@ def test_aligner_failure_and_paf_budget_return_unavailable(tmp_path: Path, monke
     assert summary["availability_reason"] == "alignment_timeout"
     assert summary["hits"] is None
     assert all(item["value"] is None for item in result.metrics)
+    assert not list(tmp_path.glob("viral-*"))
 
     def oversized(*args, **kwargs):
         kwargs["stdout_path"].write_bytes(b"x" * 2)
@@ -366,3 +400,19 @@ def test_aligner_failure_and_paf_budget_return_unavailable(tmp_path: Path, monke
     summary = json.loads(result.artifacts["viral_reads.json"])
     assert summary["availability_reason"] == "alignment_budget_exceeded"
     assert summary["hits"] is None
+    assert not list(tmp_path.glob("viral-*"))
+
+
+def test_real_pipeline_aborts_on_paf_budget_tick(tmp_path: Path) -> None:
+    paf = tmp_path / "hits.paf"
+
+    def budget_tick(_elapsed: float) -> None:
+        if paf.exists() and paf.stat().st_size > 1024:
+            raise viral_reads.ViralBudgetExceeded("PAF budget exceeded")
+
+    with pytest.raises(viral_reads.ViralBudgetExceeded, match="PAF budget"):
+        run_pipeline(
+            [Stage("emit", [sys.executable, "-c", "import sys, time\nwhile True:\n print('x' * 4096, flush=True)\n time.sleep(0.01)"])],
+            timeout_s=10, stdout_path=paf, on_tick=budget_tick,
+        )
+    assert paf.stat().st_size > 1024

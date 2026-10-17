@@ -10,10 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import re
-import shutil
 import sqlite3
-import subprocess
 import tempfile
 from contextlib import closing
 from dataclasses import dataclass, field
@@ -26,13 +23,14 @@ from ..file_access import open_regular_no_follow
 from ..identity import validate_fraction
 from ..pipeline import Stage, run_pipeline
 from ..registry import AlgorithmOutput, InputContext, Ready, Skip, ToolPin
+from ..tools import MIN_MINIMAP2, find_minimap2
 from ..viral_assets import TARGETS_NAME, VIRUSES, ViralReference, inspect_viral_reference
 from ._base import Base, metric
 
 UNIT = "reads / 1M unmapped primaries"
-MIN_MINIMAP2 = (2, 28)
 MAX_QUERY_FASTA_BYTES = 512 << 20
 MAX_PAF_BYTES = 1 << 30
+MAX_ALIGNMENT_SECONDS = 3600
 
 
 class ViralBudgetExceeded(RuntimeError):
@@ -40,19 +38,10 @@ class ViralBudgetExceeded(RuntimeError):
 
 
 def _minimap2() -> tuple[str | None, str | None, tuple[int, int] | None]:
-    """Discover the aligner without importing the signed CLI into a worker."""
+    """Use the Lab's single minimap2 discovery and minimum-version contract."""
 
-    path = shutil.which("minimap2")
-    if path is None:
-        return None, None, None
-    try:
-        result = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=20, check=False)
-    except (OSError, subprocess.SubprocessError):
-        return path, None, None
-    match = re.match(r"(\d+)\.(\d+)([^\s]*)", result.stdout + result.stderr) if result.returncode == 0 else None
-    if match is None:
-        return path, None, None
-    return path, match.group(0), (int(match.group(1)), int(match.group(2)))
+    tool = find_minimap2()
+    return tool.path, tool.version, tool.numeric
 
 
 def _derived_keep(ctx: InputContext, name: str) -> bool:
@@ -156,8 +145,12 @@ class ViralReads(Base):
     parameters: dict[str, Any] = field(default_factory=lambda: {
         "side_alignment": "minimap2 -x map-ont --secondary=yes -N 100 -p 0.8 -t 1",
         "input": "human_unmapped_primary_sequences",
-        "denominator": "human_unmapped_primary_reads",
+        "denominator": "human_unmapped_primaries_including_duplicates_and_qcfail",
         "assignment": "one_virus_group_per_query",
+        "query_fasta_budget_bytes": MAX_QUERY_FASTA_BYTES,
+        "paf_budget_bytes": MAX_PAF_BYTES,
+        "side_alignment_timeout_seconds": MAX_ALIGNMENT_SECONDS,
+        "alignment_filter": "none",
     })
 
     @property  # type: ignore[override]
@@ -234,7 +227,8 @@ class ViralReads(Base):
                             path, "-x", "map-ont", "--secondary=yes", "-N", "100", "-p", "0.8", "-t", "1",
                             str(staged_fasta), str(reads),
                         ))],
-                        timeout_s=3600, env=os.environ, cwd=work, stdout_path=paf, disk_path=work,
+                        timeout_s=MAX_ALIGNMENT_SECONDS, env={"LC_ALL": "C"}, cwd=work,
+                        stdout_path=paf, disk_path=work,
                         on_tick=check_paf_budget,
                     )
                     if result.ok:

@@ -234,7 +234,9 @@ traceback lab asset inspect pmd --root R
 asset does not establish redistribution rights or make a skipped result zero.
 
 **Viral reference.** `viral-reads` leaves the registered hg38 human reference
-unchanged. It takes human-unmapped primary reads from the aligned BAM, runs
+unchanged. It takes human-unmapped primary reads from the aligned BAM, including
+duplicate-flagged and QC-fail primaries but excluding secondary and
+supplementary records, then runs
 minimap2 separately against an operator-supplied viral FASTA, and reports
 EBV/HPV/HBV aligned reads per million human-unmapped primaries. The count is
 null if that denominator is zero. A read with reported primary or secondary
@@ -243,15 +245,18 @@ primary alignments within one group count once. The side alignment explicitly
 retains up to 100 secondary alignments per read at minimap2's 0.8 score ratio;
 bundles with many near-identical contigs can still hide cross-group alternatives.
 If any human-unmapped primary lacks stored sequence, the anonymized query
-FASTA exceeds its 512 MiB staging budget, or the side alignment fails or
-exceeds its time/output budget, all three RPM values are null; the aggregate
+FASTA exceeds its 512 MiB staging budget, or the side-alignment process exits
+nonzero or exceeds its 3600-second or 1 GiB PAF budget, all three RPM values
+are null; the aggregate
 artifact records the reason and read counts, with `hits: null` when no complete
 alignment was counted. Donor sequences are staged in private temporary FASTA
 and removed after the step; an abrupt host failure may leave that scratch for
 operator cleanup. There is no MAPQ or aligned-length threshold, so
 weak or short matches can contribute. No detection threshold or clinical
 interpretation is established for this ONT cfDNA measurement; inspect the
-denominator `n` before using an exploratory RPM value.
+denominator `n` before using an exploratory RPM value. Malformed PAF or an
+unexpected query/contig is an integrity failure and stops the algorithm rather
+than publishing a possibly wrong count.
 
 The FASTA must contain at least one nonempty IUPAC sequence for each group.
 Provide a TSV with exactly `contig`, `virus`, `accession` columns, one row per

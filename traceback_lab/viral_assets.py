@@ -101,6 +101,8 @@ def _fasta_contigs(raw: bytes) -> tuple[str, ...]:
     names: list[str] = []
     bases = 0
     for line in lines:
+        if not line:
+            continue
         if line.startswith(">"):
             if names and bases == 0:
                 raise AssetError("viral FASTA contains an empty sequence")
