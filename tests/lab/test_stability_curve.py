@@ -322,6 +322,15 @@ def test_missing_downsample_does_not_claim_instability() -> None:
     assert {half: item["state"] for half, item in panel["split_status"].items()} == {
         "A": "not_recorded", "B": "not_recorded",
     }
+    down.results["fragment-size"] = SimpleNamespace(
+        status="ok", metrics=[SimpleNamespace(metric_id="mode_bp", value=190.0,
+                                               n=None, ci=None, ci_level=None)],
+        depth=SimpleNamespace(approx_depth_x=0.5),
+    )
+    panel = next(panel for panel in views.stability_panels(sample)
+                 if panel["algorithm_id"] == "fragment-size" and panel["metric_id"] == "mode_bp")
+    assert panel["points"][0]["state"] == "ok_unstable"
+    assert panel["verdict"] == "unstable below full depth"
 
 
 def test_repeatability_preserves_raw_splits_without_inventing_a_verdict() -> None:
