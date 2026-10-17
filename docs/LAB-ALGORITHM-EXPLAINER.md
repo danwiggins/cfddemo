@@ -48,7 +48,7 @@ Published cfDNA research has explored age-related methylation and tissue
 composition, which makes those questions worth testing. It does not validate
 our three-site implementation. [cfDNA methylation and aging study](https://pubmed.ncbi.nlm.nih.gov/38869474/)
 
-**The immediate limitation is precision and mapping.** Our adapter needs a
+**The immediate limitation is site coverage and mapping.** Our adapter needs a
 verified hg38 assay-site map, including the correct PDE4C site upstream of
 `cg17861230`; that array probe itself is not a substitute. It requires at least
 five million eligible reads and five usable calls at each site. Five calls is
@@ -251,8 +251,9 @@ matching genome/model metadata and sufficient marker support are required.
 
 ### 24. MethylBERT (`methylbert`)
 
-**Measures:** a trained model's read-level methylation classifications and
-aggregate tumour-related output. **What we learn:** whether a more complex
+**Measures:** uses private read-level methylation classifications to produce
+aggregate tumour/normal fractions and a classified-read count. Per-read
+predictions are not published. **What we learn:** whether a more complex
 pattern model captures information beyond simple summaries. It needs a trusted,
 compatible fine-tuned checkpoint, GPU/runtime and adequate data. A missing
 model cannot be replaced with invented weights, and output does not establish
@@ -326,8 +327,8 @@ biological-age or longevity measurement; see the expanded discussion above.
 **Measures:** exploratory NIPTeR-based chromosome 13/18/21 dosage statistics
 against registered controls. **What we learn:** whether chromosome
 representation differs from a compatible control set. The registry name is
-broader than the implemented output: those z-scores are not a general,
-sex-independent fetal-fraction estimate. ONT calibration and suitable controls
+broader than the implemented output: the fetal-fraction metric is always null;
+this adapter supplies chromosome dosage statistics instead. ONT calibration and suitable controls
 remain required; this is not a clinical prenatal screening result.
 
 ### 34. Male-fetus fraction (`fetal-fraction-chry`)
@@ -370,8 +371,9 @@ of all organisms in the person.
 ## What combining the results adds
 
 **Arm z-scores** compare arm summaries with protocol-compatible controls.
-They can highlight arms worth investigating, but require enough independent
-controls and do not carry a validated abnormality cutoff.
+They can highlight arms worth investigating, but require at least ten
+source-excluded, protocol-compatible controls and do not carry a validated
+abnormality cutoff. Distinct sources do not prove independent donors.
 
 **TF concordance and Agreement** compare copy-number, methylation, fragment-size
 and mitochondrial observations. They help reveal agreement, disagreement and
