@@ -120,6 +120,8 @@ pre.stderr { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; 
 .strip-break { fill: var(--chart-hatch); font-size: 14px; }
 .composition-svg { width: 100%; max-width: 40rem; height: auto; }
 .composition-svg .ci { stroke: var(--chart-hatch); stroke-width: 2; }
+.composition-svg .cohort-band { stroke: var(--chart-b); stroke-width: 5; opacity: .55; }
+.composition-svg .cohort-mean { fill: var(--chart-b); font-size: 11px; }
 .composition-svg .pt { fill: var(--chart-a); font-size: 12px; }
 .composition-svg .axis { fill: var(--ink); font-size: 11px; }
 .evidence-columns { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .75rem; }
