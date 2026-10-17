@@ -248,7 +248,7 @@ def build_panels(store: LabStore, inputs: tuple[PonInput, ...]) -> PonBuild:
         if (not SHA256_PATTERN.fullmatch(item.source_id)
                 or not SHA256_PATTERN.fullmatch(item.input_id)
                 or not SHA256_PATTERN.fullmatch(item.reference_sha256)
-                or not item.aligner_identity):
+                or not 1 <= len(item.aligner_identity) <= 160):
             raise _problem("the PoN input identity is invalid", "Restore the intact Lab input manifest")
         if item.bam_path != store.inputs_dir / item.input_id / "aligned.bam":
             raise _problem("the PoN input path is outside its stored full input", "Use the admitted Lab full input")
