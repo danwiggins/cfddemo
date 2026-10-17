@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import hashlib
 import json
 
 import numpy as np
@@ -36,10 +37,14 @@ def test_genome_track_is_chunk_invariant_and_filters_size_and_bounds() -> None:
     starts = np.asarray([100, 250, 500, 900, -5, 1020], dtype=np.int64)
     ends = np.asarray([220, 410, 680, 1019, 125, 1201], dtype=np.int64)
     expected = np.asarray(_naive(starts[:3], ends[:3], HALF, 1200 - HALF + 1))
-    mean, counts = chromosome_track(starts, ends, 1200, bin_bp=100, chunk_bp=137)
+    exact: list[tuple[int, np.ndarray]] = []
+    mean, counts = chromosome_track(starts, ends, 1200, bin_bp=100, chunk_bp=137,
+                                    emit=lambda start, score: exact.append((start, score.copy())))
     other, other_counts = chromosome_track(starts, ends, 1200, bin_bp=100, chunk_bp=400)
     assert np.array_equal(mean, other)
     assert np.array_equal(counts, other_counts)
+    assert [start for start, _ in exact] == list(range(HALF, 1200 - HALF + 1, 137))
+    assert np.concatenate([score for _, score in exact]).tolist() == expected.tolist()
     for index in range(len(mean)):
         positions = np.arange(HALF, 1200 - HALF + 1)
         selected = positions // 100 == index
@@ -83,6 +88,9 @@ def test_wps_registry_and_algorithm_output(tmp_path, monkeypatch, valid_fragment
             return self.data[name]
 
     monkeypatch.setattr(wps, "load_summary", lambda ctx: (Summary(), None))
+    original_track = wps.chromosome_track
+    monkeypatch.setattr(wps, "chromosome_track",
+                        lambda *args, **kwargs: original_track(*args, chunk_bp=137, **kwargs))
     ctx = InputContext(root=tmp_path, source_id="a" * 64, input_id="b" * 64,
                        reference_id="hg38", reference_sha256="c" * 64,
                        input_dir=tmp_path, approx_depth_x=10.0)
@@ -95,5 +103,19 @@ def test_wps_registry_and_algorithm_output(tmp_path, monkeypatch, valid_fragment
     assert panel["qualifying_fragments"] == (3 if valid_fragments else 0)
     assert (result.metrics[0]["value"] is not None) == valid_fragments
     assert (result.metrics[1]["value"] is not None) == valid_fragments
+    index = json.loads(result.artifacts["wps_exact_index.json"])
+    chunks = index["chunks"]
+    assert chunks[0]["start"] == HALF
+    assert chunks[-1]["stop"] == 1200 - HALF + 1
+    exact = []
+    for chunk in chunks:
+        target = tmp_path / chunk["path"]
+        assert hashlib.sha256(target.read_bytes()).hexdigest() == chunk["sha256"]
+        with np.load(target) as data:
+            assert len(data["score"]) == chunk["stop"] - chunk["start"]
+            exact.extend(data["score"].tolist())
+    source_starts = Summary.data["start"] if valid_fragments else np.asarray([], dtype=np.int64)
+    source_ends = Summary.data["end"] if valid_fragments else np.asarray([], dtype=np.int64)
+    assert exact == _naive(source_starts, source_ends, HALF, 1200 - HALF + 1)
     assert any(algorithm.id == "wps" for algorithm in load_registry())
     assert load_library().entry("wps", "mean_wps") is not None
