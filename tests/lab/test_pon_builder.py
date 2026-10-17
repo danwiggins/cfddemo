@@ -126,6 +126,8 @@ def test_cohort_binding_uses_member_loo_and_full_for_nonmember(tmp_path: Path, m
     expected = {
         "reference_sha256": _sha(900), "toolchain_lock_sha256": _sha(800),
         "counting_parameters_sha256": build.counting_parameters_sha256, "grid_sha256": _sha(700),
+        "aligner_identity": build.aligner_identity, "gc_sha256": build.gc_sha256,
+        "map_sha256": build.map_sha256, "centromere_sha256": build.centromere_sha256,
     }
     member_selection = pon.binding_for(store, generation, _sha(1), **expected)
     assert member_selection.pon_sha256 == build.loo_asset_sha256s[_sha(1)]
@@ -140,6 +142,10 @@ def test_cohort_binding_uses_member_loo_and_full_for_nonmember(tmp_path: Path, m
         pon.require_grid(member_selection, _sha(701))
     with pytest.raises(LabProblem, match="TBX-LAB-020"):
         pon.binding_for(store, generation, _sha(1), **{**expected, "reference_sha256": _sha(901)})
+    with pytest.raises(LabProblem, match="TBX-LAB-020"):
+        pon.binding_for(store, generation, _sha(1), **{**expected, "aligner_identity": "other aligner"})
+    with pytest.raises(LabProblem, match="TBX-LAB-020"):
+        pon.binding_for(store, generation, _sha(1), **{**expected, "gc_sha256": _sha(901)})
     stored = store.lab / "assets" / "pon" / f"{build.full_asset_sha256}.rds"
     stored.write_bytes(b"changed")
     with pytest.raises(LabProblem, match="TBX-LAB-020"):
@@ -161,7 +167,9 @@ def test_explicit_selection_refuses_generation_without_panel(tmp_path: Path) -> 
     generation = CohortGeneration(cohort_id="healthy", version=1, members=())
     with pytest.raises(LabProblem, match="TBX-LAB-020"):
         pon.binding_for(LabStore(tmp_path), generation, _sha(1), reference_sha256=_sha(900),
-                        toolchain_lock_sha256=_sha(800), counting_parameters_sha256=_sha(700))
+                        aligner_identity="minimap2 2.28; samtools 1.20", toolchain_lock_sha256=_sha(800),
+                        counting_parameters_sha256=_sha(700), gc_sha256=_sha(701), map_sha256=_sha(702),
+                        centromere_sha256=_sha(703))
 
 
 def test_vendored_builder_matches_reviewed_upstream_bytes() -> None:
