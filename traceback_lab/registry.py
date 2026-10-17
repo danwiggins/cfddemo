@@ -66,6 +66,7 @@ ALGORITHMS: tuple[str, ...] = (
     "hypometh_reads:HYPOMETH_READS",
     "frag_x_meth:FRAG_X_METH",
     "griffin:GRIFFIN",
+    "epi_clock:EPI_CLOCK",
 )
 
 
