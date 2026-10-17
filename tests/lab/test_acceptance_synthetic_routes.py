@@ -400,7 +400,10 @@ def test_synthetic_state_copy_on_surface(state, route, copy_text, tmp_path) -> N
     path = None if route == "home" else f"/sample/{target}/{route}"
     with _server(tmp_path, sample) as server:
         if state == "chart-failed":
-            density = json.dumps({"span_bp": [49, 50, 167, 700, 701], "count": [1, 2, 3, 4, 5]}).encode()
+            counts = [0] * 1000
+            for span, count in zip((49, 50, 167, 700, 701), (1, 2, 3, 4, 5), strict=True):
+                counts[span - 1] = count
+            density = json.dumps({"span_bp": list(range(1, 1001)), "count": counts}).encode()
             server.app.api.artifact = lambda id12, label, algorithm_id, panel_id: (
                 density if (id12, label, algorithm_id, panel_id) ==
                 (ID12, "full", "fragment-size", "size-density") else None
