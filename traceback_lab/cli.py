@@ -100,6 +100,9 @@ def build_parser() -> argparse.ArgumentParser:
     from .arm_zscore_command import add_arm_zscore_parser
 
     add_arm_zscore_parser(commands, _common)
+    from .identity_command import add_identity_parser
+
+    add_identity_parser(commands, _common)
 
     runs = commands.add_parser("runs", help="list Lab runs, or one run's steps")
     runs.add_argument("run_id", nargs="?", metavar="RUN_ID")
