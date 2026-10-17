@@ -21,7 +21,7 @@ from traceback_lab.dd_contract import register_contract as register_donor
 from traceback_lab.derived import downsample, split
 from traceback_lab.fetal_chry_contract import register_contract as register_fetal
 from traceback_lab.read_summary import DS_SALT, SPLIT_SALT, ReadSummary, depth_stamp, derived_mask, h64
-from traceback_lab.registry import PlanItem, Requirements
+from traceback_lab.registry import InputContext, PlanItem, Ready
 from traceback_lab.runner import RunTarget, run_plan
 from traceback_lab.scrub import Scrubber
 from traceback_lab.store import LabStore, new_run_id
@@ -34,7 +34,10 @@ from .test_fetal_chry import _file as fetal_file
 # The child worker imports this module-level algorithm. The only test seam is
 # the fetal method's 2M-read entry floor; registered calibration and worker
 # counting/depth checks remain production code.
-FETAL_SMALL_BAM = replace(FETAL_FRACTION_CHRY, requires=Requirements(min_eligible_reads=0))
+FETAL_SMALL_BAM = replace(
+    FETAL_FRACTION_CHRY,
+    requires=replace(FETAL_FRACTION_CHRY.requires, min_eligible_reads=0),
+)
 
 
 def _selected(name: str, spec) -> bool:
@@ -126,6 +129,19 @@ def test_derived_worker_uses_selected_depth_and_pinned_parent_calibration(
         assert saved.depth.eligible_reads == stamp["eligible_reads"]
         assert saved.depth.approx_depth_x == stamp["approx_depth_x"]
         assert saved.provenance.input_id == run.derived.input_id
+        # The fetal adapter uses missing_asset for both an invalid contract
+        # and a low calibrated depth. At the parent's depth the exact same
+        # derived input and planned digest must pass preflight, leaving subset
+        # depth as the reason for its published refusal below.
+        at_parent_depth = InputContext(
+            root=store.root, source_id=SOURCE, input_id=run.derived.input_id,
+            reference_id="hg38", reference_sha256=REFERENCE, input_dir=fixture.input_dir,
+            eligible_reads=stamp["eligible_reads"], approx_depth_x=full_stamp["approx_depth_x"],
+            derived=run.derived.spec.mask_spec(),
+            extras={"upstream": {"read-summary": summary_result.artifacts_dir},
+                    "planned_asset_sha256s": [contract.manifest_sha256]},
+        )
+        assert isinstance(algorithm.preflight(at_parent_depth), Ready)
         if run.derived.spec == specs[0]:
             assert result.status == "ok"
             metrics = {metric.metric_id: metric for metric in saved.metrics}
