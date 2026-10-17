@@ -797,6 +797,7 @@ def align(
             "input_id": input_id,
             "source_id": source_id,
             "kind": "aligned",
+            "platform": "ont",
             "reference_id": reference.reference_id,
             "reference_sha256": reference.sha256,
             "mmi_sha256": mmi_sha256,
@@ -837,7 +838,15 @@ def ingest_prealigned(
     chunk = chunkset.chunks[0]
     check_sq(chunk, reference)
     source_id = chunkset.source_id
-    input_id = prealigned_input_id(source_id=source_id, reference_sha256=reference.sha256)
+    from .platforms import from_rg_lines
+
+    platform = from_rg_lines(chunkset.rg_lines)
+    if platform == "unknown":
+        raise LabProblem(
+            "TBX-LAB-024", cause="prealigned BAM has no unanimous supported platform declaration",
+            fix="Use a BAM whose read groups all declare PL:ONT or PL:ILLUMINA",
+        )
+    input_id = prealigned_input_id(source_id=source_id, reference_sha256=reference.sha256, platform=platform)
     existing = input_manifest(store, input_id)
     if existing is not None:
         return AlignedInput(input_id, source_id, store.inputs_dir / input_id, existing, reused=True)
@@ -862,6 +871,7 @@ def ingest_prealigned(
             "input_id": input_id,
             "source_id": source_id,
             "kind": "prealigned",
+            "platform": platform,
             "reference_id": reference.reference_id,
             "reference_sha256": reference.sha256,
             "basecall_model": chunkset.basecall_model,
@@ -900,6 +910,8 @@ def write_source(
 ) -> dict[str, Any]:
     """Hashes only, never paths: chunk list, exclusions and inputs by aligner."""
 
+    from .platforms import from_rg_lines
+
     stored = source_record(store, aligned.source_id) or {}
     previous = with_sex_assertion(stored, declared_sex)
     assertion_added = previous is not stored
@@ -908,6 +920,8 @@ def write_source(
         {
             "input_id": aligned.input_id,
             "kind": aligned.manifest.get("kind"),
+            "platform": (from_rg_lines(chunkset.rg_lines)
+                         if aligned.manifest.get("kind") == "prealigned" else "ont"),
             "tools": aligned.manifest.get("tools"),
             "reference_id": aligned.manifest.get("reference_id"),
             "used_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

@@ -108,6 +108,7 @@ class InputContext:
     reference_id: str
     reference_sha256: str
     input_dir: Path
+    platform: str = "ont"
     eligible_reads: int | None = None
     approx_depth_x: float | None = None
     derived: Mapping[str, Any] | None = None
@@ -123,6 +124,7 @@ def context_to_json(ctx: InputContext) -> dict[str, Any]:
         "reference_id": ctx.reference_id,
         "reference_sha256": ctx.reference_sha256,
         "input_dir": str(ctx.input_dir),
+        "platform": ctx.platform,
         "eligible_reads": ctx.eligible_reads,
         "approx_depth_x": ctx.approx_depth_x,
         "derived": dict(ctx.derived) if ctx.derived is not None else None,
@@ -139,6 +141,7 @@ def context_from_json(data: Mapping[str, Any]) -> InputContext:
         reference_id=data["reference_id"],
         reference_sha256=data["reference_sha256"],
         input_dir=Path(data["input_dir"]),
+        platform=str(data.get("platform", "ont")),
         eligible_reads=data.get("eligible_reads"),
         approx_depth_x=data.get("approx_depth_x"),
         derived=data.get("derived"),
@@ -179,6 +182,7 @@ def execution_identity(
     reference_sha256: str,
     asset_sha256s: Iterable[str] = (),
     upstream: Iterable[Mapping[str, str]] = (),
+    platform: str | None = None,
 ) -> str:
     """``parameters_sha256`` for one algorithm on one reference (D19)."""
 
@@ -190,6 +194,7 @@ def execution_identity(
         reference_sha256=reference_sha256,
         asset_sha256s=asset_sha256s,
         upstream=upstream,
+        platform=platform,
     )
 
 
@@ -210,6 +215,8 @@ def validate_algorithm(algorithm: Any) -> Algorithm:
         raise ValueError(f"{algorithm.id}: cost must be fast or slow")
     if algorithm.requires.min_eligible_reads < 0:
         raise ValueError(f"{algorithm.id}: min_eligible_reads must be >= 0")
+    if not algorithm.requires.platforms or not algorithm.requires.platforms <= {"ont", "illumina"}:
+        raise ValueError(f"{algorithm.id}: unsupported platform requirement")
     return algorithm
 
 

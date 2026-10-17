@@ -115,7 +115,7 @@ def test_tlen_is_absolute_one_template_per_pair_and_not_ont_span(tmp_path: Path)
 
 
 @pytest.mark.parametrize("kind,platforms,reason", [
-    ("aligned", ("ILLUMINA",), "input_kind"),
+    ("aligned", ("ILLUMINA",), "platform"),
     ("prealigned", ("ONT",), "platform"),
     ("prealigned", ("ILLUMINA", "ONT"), "platform"),
     ("prealigned", (), "platform"),
@@ -158,6 +158,22 @@ def test_unprefixed_nuclear_contigs_exclude_mt_and_decoy(tmp_path: Path) -> None
     ctx = _context(input_dir)
     assert isinstance(SHORT_READ_FRAGMENT_SIZE.preflight(ctx), Ready)
     assert _tlen_counts(ctx) == {180: 1}
+
+
+def test_all_filtered_pairs_have_null_metrics_and_fixed_empty_histogram(tmp_path: Path) -> None:
+    input_dir = tmp_path / "input"
+    proper = 0x1 | 0x2
+    _write_bam(input_dir, pairs=(("low-mapq", 180, proper, 19),
+                                 ("duplicate", 180, proper | 0x400, 60),
+                                 ("zero-tlen", 0, proper, 60)))
+    ctx = _context(input_dir)
+    assert isinstance(SHORT_READ_FRAGMENT_SIZE.preflight(ctx), Ready)
+    assert _tlen_counts(ctx) == {}
+    output = SHORT_READ_FRAGMENT_SIZE.run(ctx, tmp_path)
+    assert all(item["value"] is None and item["n"] == 0 for item in output.metrics)
+    histogram = json.loads(output.artifacts["tlen_hist.json"])
+    assert len(histogram["tlen_bp"]) == len(histogram["count"]) == 1000
+    assert sum(histogram["count"]) == 0
 
 
 def test_no_canonical_nuclear_contigs_skips_explicitly(tmp_path: Path) -> None:
@@ -204,3 +220,77 @@ def test_opt_in_lab_run_accepts_synthetic_prealigned_illumina_bam(tmp_path: Path
     assert code == 0, payload
     assert payload["data"]["counts"]["ok"] == 1
     assert payload["data"]["steps"][0]["algorithm_id"] == "short-read-fragment-size"
+
+
+def test_normal_lab_run_dispatches_illumina_without_ont_results(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    from traceback_runner import cli as signed_cli
+    from traceback_runner.references import register_reference
+
+    reference = tmp_path / "reference.fa"
+    reference.write_text(">chr1\n" + "A" * 10000 + "\n>chr2\n" + "A" * 10000 + "\n")
+    pysam.faidx(str(reference))
+    root = tmp_path / "root"
+    register_reference(root, reference, "hg38")
+    source_dir = tmp_path / "source"
+    _write_bam(source_dir, pairs=(("template-a", 180, 0x1 | 0x2, 60),))
+    sorted_bam = tmp_path / "illumina_aligned.bam"
+    pysam.sort("-o", str(sorted_bam), str(source_dir / "aligned.bam"))
+    code = signed_cli.main([
+        "lab", "run", str(sorted_bam), "--root", str(root), "--reference", "hg38",
+        "--downsample", "0.5", "--json",
+    ])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0, payload
+    assert payload["data"]["sample"]["platform"] == "illumina"
+    steps = {step["algorithm_id"]: step for step in payload["data"]["steps"]}
+    for algorithm_id in ("read-summary", "depth", "bam-qc", "short-read-fragment-size"):
+        assert steps[algorithm_id]["status"] == "ok", steps[algorithm_id]
+    for algorithm_id in ("fragment-size", "copy-number", "cell-origin", "long-tail", "meth-calls"):
+        assert steps[algorithm_id]["status"] == "skipped"
+        assert steps[algorithm_id]["skip_reason"] == "platform"
+    from traceback_lab.store import LabStore
+    from traceback_lab.views import depth_curve, load_sample
+
+    sample = load_sample(LabStore(root), payload["data"]["sample"]["source_id"])
+    assert sample is not None
+    assert sample.full.results["cell-origin"].skip_reason == "platform"
+    fragment_row = next(row for row in depth_curve(sample)["rows"]
+                        if row["algorithm_id"] == "fragment-size")
+    assert all(cell["state"] == "skipped" and cell["reason"] == "platform"
+               for cell in fragment_row["cells"])
+    assert payload["data"]["counts"]["failed"] == 0
+    assert payload["data"]["controls"]["cna_skipped"] == "platform"
+    assert payload["data"]["controls"]["split"] is True
+    assert any(step["algorithm_id"] == "short-read-fragment-size" and
+               step["input"] != "full" and step["status"] == "ok"
+               for step in payload["data"]["steps"])
+
+
+def test_normal_lab_run_dispatches_ont_without_tlen_result(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    from traceback_runner import cli as signed_cli
+    from traceback_runner.references import register_reference
+
+    reference = tmp_path / "reference.fa"
+    reference.write_text(">chr1\n" + "A" * 10000 + "\n>chr2\n" + "A" * 10000 + "\n")
+    pysam.faidx(str(reference))
+    root = tmp_path / "root"
+    register_reference(root, reference, "hg38")
+    source_dir = tmp_path / "source"
+    _write_bam(source_dir, platforms=("ONT",), pairs=(("template-a", 180, 0x1 | 0x2, 60),))
+    sorted_bam = tmp_path / "ont_aligned.bam"
+    pysam.sort("-o", str(sorted_bam), str(source_dir / "aligned.bam"))
+    code = signed_cli.main([
+        "lab", "run", str(sorted_bam), "--root", str(root), "--reference", "hg38",
+        "--no-downsample", "--no-controls", "--json",
+    ])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0, payload
+    assert payload["data"]["sample"]["platform"] == "ont"
+    steps = {step["algorithm_id"]: step for step in payload["data"]["steps"]}
+    assert steps["fragment-size"]["status"] == "ok"
+    assert steps["short-read-fragment-size"]["status"] == "skipped"
+    assert steps["short-read-fragment-size"]["skip_reason"] == "platform"
