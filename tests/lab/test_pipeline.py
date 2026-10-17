@@ -349,7 +349,7 @@ def test_process_group_seed_includes_orphan_descendants() -> None:
     assert _tree_members(1, {1: (0, 1), 2: (0, 1), 3: (2, 3)}) == {1, 2, 3}
 
 
-def test_reused_leader_pid_does_not_seed_an_unrelated_tree() -> None:
+def test_process_group_seed_excludes_unrelated_pid() -> None:
     from traceback_lab.pipeline import _tree_members
 
     assert _tree_members(1, {1: (0, 9), 2: (0, 1), 3: (1, 9)}) == {2}

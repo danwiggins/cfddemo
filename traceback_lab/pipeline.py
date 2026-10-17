@@ -151,8 +151,8 @@ def directory_bytes(path: Path) -> int:
 def _tree_members(root_pid: int, processes: Mapping[int, tuple[int, int]]) -> set[int]:
     """Include descendants in new sessions and children still in the group."""
 
-    # A reaped leader PID may be reused while another stage keeps the group
-    # alive. Only the still-reserved process-group id is an authoritative seed.
+    # Seed from observed members of the worker's process group, then include
+    # their descendants even if a descendant starts a new session.
     included = {pid for pid, (_ppid, pgid) in processes.items() if pgid == root_pid}
     while True:
         children = {pid for pid, (ppid, _pgid) in processes.items() if ppid in included}
