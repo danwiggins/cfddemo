@@ -6,12 +6,16 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
+
 from traceback_lab.algorithms._base import Base
 from traceback_lab.algorithms.instability import INSTABILITY
+from traceback_lab.envelope import ResultEnvelope, provenance
 from traceback_lab.registry import AlgorithmOutput, InputContext, PlanItem, Ready, Skip
 from traceback_lab.runner import RunTarget, StepResult, run_plan
 from traceback_lab.scrub import Scrubber
-from traceback_lab.store import LabStore, new_run_id
+from traceback_lab.store import LabStore, MAX_UPSTREAM_SELECTIONS_BYTES, new_run_id
+from traceback_runner.serialization import canonical_json_bytes
 
 
 @dataclass
@@ -90,6 +94,41 @@ def _tmad(store: LabStore, target: RunTarget, result: StepResult) -> float | Non
     envelope = store.read_result(target.input_id, "instability", result.parameters_sha256)
     assert envelope is not None
     return next(metric.value for metric in envelope.metrics if metric.metric_id == "tmad")
+
+
+def test_upstream_attempt_metadata_write_matches_read_limit(tmp_path: Path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    input_id = "a" * 64
+    parameters_sha256 = "b" * 64
+    envelope = ResultEnvelope.model_validate({
+        "algorithm_id": "synthetic-dependent", "algorithm_version": "1", "status": "ok",
+        "provenance": provenance(
+            tool="traceback_lab.test", parameters_sha256=parameters_sha256,
+            source_id="c" * 64, input_id=input_id, reference_id="synthetic",
+        ),
+        "metrics": [],
+    })
+
+    def selections(width: int) -> list[dict[str, str]]:
+        return [{
+            "algorithm_id": "x" * (width - 2) + f"{index:02d}",
+            "input_id": input_id, "parameters_sha256": parameters_sha256,
+            "attempt_id": "a-20261016T010203040506-12345678",
+        } for index in range(64)]
+
+    at_limit = selections(22)
+    encoded = canonical_json_bytes({
+        "schema": "traceback.lab.upstream-selections.v1", "selections": at_limit,
+    })
+    assert len(encoded) == MAX_UPSTREAM_SELECTIONS_BYTES
+    store.publish_result(envelope, input_id=input_id, upstream_selections=at_limit)
+    assert store.selected_upstream_selections(input_id, envelope.algorithm_id, parameters_sha256) == tuple(at_limit)
+
+    over_limit = selections(23)
+    with pytest.raises(ValueError, match="readable metadata limit"):
+        store.publish_result(envelope, input_id=input_id, upstream_selections=over_limit)
+    assert store.selected_upstream_selections(input_id, envelope.algorithm_id, parameters_sha256) == tuple(at_limit)
 
 
 def test_forced_same_identity_cn_attempt_invalidates_dependent_cache(tmp_path: Path) -> None:

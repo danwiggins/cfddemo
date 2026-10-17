@@ -150,6 +150,8 @@ remain cacheable. New attempts record artifact file sizes; older attempts
 remain readable, with known upstream layouts checked against their metadata.
 Missing or truncated required artifacts are recomputed. A completed failed
 forced rerun is shown as failed; the prior successful attempt remains on disk.
+If the current upstream step fails or skips, its dependent step also skips;
+an older successful dependent result is not reused for that run.
 Artifact sizes check completeness, not byte-level integrity.
 
 **Dry run.** `--dry-run` writes nothing and takes no lock. It prints the
