@@ -230,6 +230,12 @@ def test_split_half_missingness_keeps_each_status_visible() -> None:
     assert status(None, "fragment-size", "mode_bp", 100, spec)["state"] == "not_recorded"
     assert status(None, "fragment-size", "mode_bp", 100, spec, other_half_recorded=True)["state"] == "unavailable"
     assert status(view, "fragment-size", "mode_bp", 100, spec)["state"] == "unavailable"
+    view.unreadable = {"fragment-size"}
+    assert status(view, "fragment-size", "mode_bp", 100, spec)["reason"] == "result unreadable"
+    view.unreadable = set()
+    view.ambiguous = {"fragment-size"}
+    assert status(view, "fragment-size", "mode_bp", 100, spec)["reason"] == "result selection ambiguous"
+    view.ambiguous = set()
 
     view.results["fragment-size"] = SimpleNamespace(status="skipped", skip_reason="depth")
     assert status(view, "fragment-size", "mode_bp", 100, spec) == {
