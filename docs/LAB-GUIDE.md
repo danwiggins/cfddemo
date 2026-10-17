@@ -218,6 +218,7 @@ new measurement.
 | `bam-qc` | primaries, mapped and MAPQ ≥ 20 shares, supplementary share, mean read Q, share of sampled genome covered ≥ 1x, GC-bias slope, duplicate share (only when marked); supplementary share as a chimera proxy and mean read Q interpretation are ONT-specific |
 | `depth` | eligible reads (primary, MAPQ ≥ 20, chr1–22/X/Y), mean aligned span per eligible read, approximate aligned-base depth; the index count is shown only as an upper bound, and Illumina aligned span is not template length (`abs(TLEN)`) |
 | `fragment-size` | 1-bp aligned-span histogram, mode, short (< 150 bp) share, mono/di peaks, 10 bp periodicity |
+| `lionheart` | opt-in upstream LIONHEART v2.2.0 extraction of 898 raw sample-standardized chromatin-accessibility correlation scores from the selected hg38 BAM; needs ≥5M eligible reads, the modified mosdepth and Zenodo v003 resources; ONT single-end mode is experimental, and no cancer prediction is run |
 | `short-read-fragment-size` | separate exploratory paired-end Illumina histogram and size summaries from absolute BAM TLEN; requires a prealigned BAM with every `@RG PL:ILLUMINA` |
 | `copy-number` | tumour fraction, ploidy, genome log2 track and segments through the installed ichorCNA toolchain (no panel of normals yet, so read as not interpretable); needs 2M eligible reads, `traceback toolchain install ichor` and `traceback method-asset register --from-toolchain copy-number --root R` |
 | `instability` | bin-weighted median absolute deviation of the selected copy-number result's segment log2 values (`tmad`), with used-bin and null-estimate coverage counts; needs 2M eligible reads and a successful copy-number result for the same input; exploratory and cohort-relative, with no ONT cutoff |
@@ -236,6 +237,49 @@ new measurement.
 | `hypometh-reads` | among reads with ≥ 4 CpG calls, the share under 25% methylated, and U/X/M counts (≤ 25% / between / ≥ 75%); needs 500,000 eligible reads |
 | `frag-x-meth` | descriptive molecule-count matrix of aligned-size bins by per-read 5mC fraction (at least four distinct CpG sites/read); the scalar is long (151–220 bp) mean minus short (100–150 bp) mean, null if either group is empty; no normal range |
 | `breakpoint-motifs` | 4-mer counts at aligned-reference-span start and end−1, stratified by CpG proximity; the scalar is the fraction of ends near a CpG. These are not proven physical cleavage positions, and the methylation link is unavailable without a supported joint input |
+
+**Experimental LIONHEART scores.** The [upstream v2.2.0 source](https://github.com/BesenbacherLab/lionheart/tree/v2.2.0)
+is pinned at commit `f49de07ce0d9a72ee3c883429085cfacfc54c1d2` (MIT code).
+Its `extract_features` command needs the
+[modified mosdepth fork](https://github.com/LudvigOlsen/mosdepth/tree/f61263176b62677dc0b7ad4692c53b8ca2b8365c)
+with `--single-end-length`. Download the 2.3 GB
+[v003 resource archive](https://zenodo.org/records/15747531) through an
+approved local process and verify MD5 `7ab368995ad5123ab665042e6ecc4410`.
+Keep both the archive and its extracted `inference_resources_v003` directory
+under `ROOT/lab/assets/lionheart/` (or set the paths below). The archive is
+checked against that published MD5, every extracted file is compared with the
+archive, and the verified resource bytes enter the result identity. Extraction
+uses a separate verified scratch copy, so a changed installed resource cannot
+silently enter a result. The CLI, its installed Python package code, and the
+modified mosdepth binary are hashed into the result identity; the installed
+package must report version 2.2.0. The selected mosdepth library directory
+must contain `libhts.so`; its loaded bytes and the `samtools` and `unpigz`
+executables are also pinned. Neither the pack nor scores are bundled in this repo;
+Zenodo says its shared scores and models derive from non-commercial,
+research-purpose-only data.
+
+```bash
+export TRACEBACK_LIONHEART_BIN=/path/to/pinned-lionheart-2.2.0/bin/lionheart
+export TRACEBACK_LIONHEART_MOSDEPTH_BIN=/path/to/modified-mosdepth
+export TRACEBACK_LIONHEART_LD_LIBRARY_PATH=/path/to/mosdepth-library-directory
+export TRACEBACK_LIONHEART_ARCHIVE=ROOT/lab/assets/lionheart/inference_resources_v003.tar.gz
+export TRACEBACK_LIONHEART_RESOURCES=ROOT/lab/assets/lionheart/inference_resources_v003
+export TRACEBACK_LIONHEART_ENABLE_ONT=1
+traceback lab run SAMPLE_ID12 --only lionheart --timeout-s 7200 --root ROOT
+```
+
+The binary's `--version` must report Lionheart 2.2.0; the modified mosdepth must expose
+`--single-end-length`. Install `samtools` and `unpigz` on `PATH` for upstream's
+BAM validation and coverage decompression. The library-directory setting supplies
+upstream's required `--ld_library_path` argument; it defaults to the mosdepth
+binary's directory when unset.
+Set it to the directory containing mosdepth's shared libraries when needed.
+Without the explicit ONT opt-in, or when a dependency,
+resource or hg38 input is missing, this algorithm skips with a reason and
+leaves other Lab results available. Signals shows the 898 raw scores with
+their ATAC/DNase labels and a research-only callout. The upstream single-end
+mode is experimental and its paired-end-trained cancer model is **not** run;
+these values are neither cell fractions nor a validated diagnostic.
 
 **Short-read support.** For a prealigned paired-end Illumina BAM against the
 registered hg38 reference, run the normal Lab command:
@@ -273,12 +317,14 @@ cutoff, short-read healthy range, or cross-platform comparison is supplied.
 If an Illumina BAM was ingested by the earlier opt-in TLEN path, run it again
 from the original BAM to create its platform-specific input identity. The old
 stored result remains available but does not enter new platform-aware cohorts.
-For a legacy BAM without a platform declaration, verify its instrument
-provenance and regenerate a BAM with the correct `@RG PL` value from the trusted
-source before ingesting it. The Lab does not infer ONT from an absent value.
-Previously stored Lab-aligned inputs without read groups remain readable only
-when their manifest pins the historical `map-ont` alignment recipe; a new
-input still needs an explicit platform declaration.
+For a legacy prealigned BAM without a platform declaration, verify its
+instrument provenance and regenerate a BAM with the correct `@RG PL` value
+from the trusted source before ingesting it. The Lab does not infer ONT from
+an absent value. Previously stored Lab-aligned inputs with absent or
+unrecognized platform tags remain readable only when their manifest exactly
+pins the historical `map-ont` recipe for the BAM's read groups and no read
+group explicitly declares Illumina. A new input still needs an explicit
+platform declaration.
 Stored prealigned manifests without a platform field still read the BAM's
 unanimous platform declaration. Re-ingest short reads to record an Illumina
 input identity for new results and cohorts. Before rerun, historical ONT-only
@@ -369,6 +415,10 @@ progress", then "New results are available. [Reload]" (it never swaps
 content under you). The page is strict: same-origin scripts only, no inline
 script or style, no outside requests.
 
+The run-status banner follows the latest Lab writer; a later cohort update or
+other writer can supersede an earlier interrupted-run banner. It does not
+serve as a history of every interrupted run.
+
 ## What the page shows
 
 - **Landing (`#/`)**: the CLIA explainer (short version, "Read the full
@@ -396,7 +446,17 @@ script or style, no outside requests.
   generation is labelled as such. Missing or failed metrics are never zero.
   The synthetic EXAMPLE cannot be scored against a real kit cohort.
 - **Trust/QC**: depth against each algorithm's minimum, the run table with
-  scrubbed stderr for failures, provisional QC bands, library health.
+  scrubbed stderr for failures and a link to a matching numbered run-log line,
+  provisional QC bands, library health. The link searches up to 64 recently updated
+  runs and reveals only allowlisted status fields. A line must name the selected
+  immutable result attempt; legacy logs without that ID, older runs, or cached
+  steps may have no matching line. A latest-run in-progress or interrupted note
+  appears only when that run names the same source and full input; the selected
+  result status remains visible beside it. If the step published no result yet,
+  a sample-scoped run notice appears instead of a result row. If the latest
+  analysis or simulation run log is unreadable, unsafe, malformed, or outside
+  the 1 MiB / 4,096-line limit, the status banner reports an unavailable
+  status without inferring whether the run ended normally or was interrupted.
 - **Stability**: one small multiple per metric: deviation from full depth at
   each fraction, the stability band, and split halves A/B at 50%.
 
