@@ -579,7 +579,9 @@
       flagPill("LEGAL", "FLAG: LEGAL — research-only licenses; atlas terms unknown."));
     const a = sample.algorithms.find((x) => x.algorithm_id === "cell-origin");
     if (!a || a.status !== "ok") {
-      section.append(h("p", { class: "empty" }, a ? `cell-origin ${a.status}${a.skip_reason ? ` (${a.skip_reason})` : ""}: no composition at this depth.` : "cell-origin has no result for this sample."));
+      section.append(!a && unreadableArtifact(sample, "cell-origin")
+        ? absent(a, "cell-origin", sample)
+        : h("p", { class: "empty" }, a ? `cell-origin ${a.status}${a.skip_reason ? ` (${a.skip_reason})` : ""}: no composition at this depth.` : "cell-origin has no result for this sample."));
       return section;
     }
     const slot = h("div", {}, h("p", {}, "Loading…"));
@@ -823,7 +825,13 @@
     return out;
   }
 
-  function absent(a, what) {
+  function unreadableArtifact(sample, id) {
+    return (sample.unreadable_results || []).includes(id);
+  }
+  function absent(a, what, sample) {
+    if (!a && sample && unreadableArtifact(sample, what)) {
+      return h("p", { class: "problem" }, "Chart could not be drawn (selected result unavailable).");
+    }
     return h("p", { class: "empty" }, !a ? `${what}: not computed for this sample.` : `${what}: ${a.status}${a.skip_reason ? ` (${a.skip_reason.replace(/_/g, " ")})` : ""}.`);
   }
 
@@ -843,17 +851,17 @@
     };
     families.forEach(([, label], i) => tabs.append(h("button", { type: "button", class: "control subtab", "aria-pressed": "false", onclick: () => show(i) }, label)));
     out.push(tabs, body);
-    const initial = ["fragment-size", "end-motifs", "delfi-ratio", "finaletoolkit-xcheck", "tss-profile", "long-tail", "mtdna", "breakpoint-motifs", "griffin", "aligned-end-structure", "lionheart"].some((id) => algo(sample, id))
-      ? 0 : algo(sample, "copy-number") ? 1 : 2;
+    const initial = ["fragment-size", "end-motifs", "delfi-ratio", "finaletoolkit-xcheck", "tss-profile", "long-tail", "mtdna", "breakpoint-motifs", "griffin", "aligned-end-structure", "lionheart"].some((id) => algo(sample, id) || (id !== "long-tail" && id !== "mtdna" && unreadableArtifact(sample, id)))
+      ? 0 : algo(sample, "copy-number") || unreadableArtifact(sample, "copy-number") ? 1 : 2;
     show(initial);
     return out;
   }
 
   function breakpointMotifSignals(sample, seen) {
     const a = algo(sample, "breakpoint-motifs");
-    if (!a) return [];
+    if (!a && !unreadableArtifact(sample, "breakpoint-motifs")) return [];
     const section = h("section", { class: "panel" }, h("h2", {}, "CpG-proximal aligned ends"), flagPill("LEGAL"));
-    if (a.status !== "ok") return [section, absent(a, "breakpoint-motifs")];
+    if (!a || a.status !== "ok") return [section, absent(a, "breakpoint-motifs", sample)];
     section.append(
       h("p", {}, "These are aligned-reference-span start and end−1 contexts; physical cleavage sites are not established by this BAM. Near and far 4-mer counts exclude invalid or off-contig contexts."),
       ...context(sample, "breakpoint-motifs", seen),
@@ -885,9 +893,9 @@
 
   function alignedEndSignals(sample, seen) {
     const a = algo(sample, "aligned-end-structure");
-    if (!a) return [];
+    if (!a && !unreadableArtifact(sample, "aligned-end-structure")) return [];
     const section = h("section", { class: "panel" }, h("h2", {}, "Open-chromatin aligned ends"), flagPill("LEGAL"));
-    if (a.status !== "ok") return [section, absent(a, "aligned-end-structure")];
+    if (!a || a.status !== "ok") return [section, absent(a, "aligned-end-structure", sample)];
     section.append(h("p", { class: "help" },
       "Exploratory ONT aligned-span proxies, not physical cleavage validation, tissue-origin inference, or a clinical cutoff. The catalogues are pinned to hg38; published OCF and preferred-end studies used paired-end short reads."));
     const slot = h("div", {}, h("p", {}, "Loading pinned end counts…"));
@@ -921,11 +929,11 @@
 
   function lionheartSignals(sample, seen) {
     const a = algo(sample, "lionheart");
-    if (!a) return [];
+    if (!a && !unreadableArtifact(sample, "lionheart")) return [];
     const section = h("section", { class: "panel" }, h("h2", {}, "LIONHEART cell-type scores"), flagPill("LEGAL"),
       h("p", {}, "Experimental ONT single-end extraction. Scores are sample-standardized correlations, not cell fractions or cancer predictions."),
       ...context(sample, "lionheart", seen));
-    if (a.status !== "ok") return [section, absent(a, "lionheart")];
+    if (!a || a.status !== "ok") return [section, absent(a, "lionheart", sample)];
     const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading raw cell-type scores…"));
     section.append(slot);
     artifact(sample, "lionheart", "cell-type-scores").then((data) => {
@@ -951,7 +959,7 @@
     const seen = new Set();
     const section = h("section", { class: "panel" }, h("h2", {}, "Size density"));
     if (!a || a.status !== "ok") {
-      section.append(absent(a, "fragment-size"), ...(a ? context(sample, "fragment-size", seen) : []));
+      section.append(absent(a, "fragment-size", sample), ...(a ? context(sample, "fragment-size", seen) : []));
     } else {
       const slot = h("div", {}, h("p", {}, "Loading…"));
       const short = a.metrics.find((m) => m.metric_id === "short_fraction_lt150");
@@ -1000,11 +1008,12 @@
     const more = [];
     for (const id of ["end-motifs", "delfi-ratio", "long-tail", "mtdna"]) {
       const other = algo(sample, id);
-      if (!other) continue;
+      const hasChart = id === "end-motifs" || id === "delfi-ratio";
+      if (!other && !(hasChart && unreadableArtifact(sample, id))) continue;
       const panel = h("section", { class: "panel" }, h("h2", {}, id),
         id === "end-motifs" || id === "delfi-ratio" ? flagPill("LEGAL") : "");
-      if (other.status !== "ok") {
-        panel.append(absent(other, id), ...context(sample, id, seen));
+      if (!other || other.status !== "ok") {
+        panel.append(absent(other, id, hasChart ? sample : null), ...(other ? context(sample, id, seen) : []));
       } else {
         panel.append(...context(sample, id, seen), h("table", { class: "data-table" },
           h("tbody", {}, ...other.metrics.filter((m) => m.value === null || typeof m.value !== "object")
@@ -1068,10 +1077,10 @@
 
   function griffinSignals(sample, seen) {
     const a = algo(sample, "griffin");
-    if (!a) return [];
+    if (!a && !unreadableArtifact(sample, "griffin")) return [];
     const section = h("section", { class: "panel" },
       h("div", { class: "findings-head" }, h("h2", {}, "Griffin TF-site profile"), flagPill("LEGAL")));
-    if (a.status !== "ok") return [section, absent(a, "griffin")];
+    if (!a || a.status !== "ok") return [section, absent(a, "griffin", sample)];
     section.append(h("p", { class: "help" }, "GC-corrected nucleosome protection from the pinned Griffin workflow on a compatible paired-end WGS BAM. The primary TF list is an operator-registered choice; this is not a TF expression call."));
     const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading Griffin profile…"));
     section.append(...context(sample, "griffin", seen), slot);
@@ -1101,9 +1110,9 @@
 
   function finaletoolkitSignals(sample, seen) {
     const a = algo(sample, "finaletoolkit-xcheck");
-    if (!a) return [];
+    if (!a && !unreadableArtifact(sample, "finaletoolkit-xcheck")) return [];
     const section = h("section", { class: "panel" }, h("h2", {}, "FinaleToolkit paired-end cross-check"), flagPill("LEGAL"));
-    if (a.status !== "ok") return [section, absent(a, "finaletoolkit-xcheck")];
+    if (!a || a.status !== "ok") return [section, absent(a, "finaletoolkit-xcheck", sample)];
     section.append(h("p", { class: "help" }, "Engineering parity on a verified paired-end Illumina BAM. Neither the single-end ONT results nor the published GC-corrected DELFI classifier are compared here."),
       ...context(sample, "finaletoolkit-xcheck", seen));
     const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading paired-end cross-check…"));
@@ -1134,9 +1143,9 @@
 
   function tssProfileSignals(sample, seen) {
     const a = algo(sample, "tss-profile");
-    if (!a) return [];
+    if (!a && !unreadableArtifact(sample, "tss-profile")) return [];
     const section = h("section", { class: "panel" }, h("h2", {}, "TSS coverage profile"));
-    if (a.status !== "ok") return [section, absent(a, "tss-profile")];
+    if (!a || a.status !== "ok") return [section, absent(a, "tss-profile", sample)];
     const ratio = a.metrics.find((m) => m.metric_id === "central_flank_ratio");
     const flags = ratio && ratio.entry ? ratio.entry.flags || [] : [];
     section.append(h("p", { class: "help" }, "GENCODE v46 protein-coding gene TSSs; 50 bp strand-oriented bins across ±1 kb, plotted at bin centres. Central −150 to +50 bp coverage divided by outer-flank coverage. Descriptive gene-set profile only; no expression call or clinical cutoff."),
@@ -1174,7 +1183,7 @@
     const counted = value(sample, "copy-number", "counted_reads");
     const pon = value(sample, "copy-number", "pon_policy");
     const section = h("section", { class: "panel" }, h("div", { class: "findings-head" }, h("h2", {}, "Genome log2 track"), flagPill("FDA")));
-    if (!a || a.status !== "ok") return [section, absent(a, "copy-number")];
+    if (!a || a.status !== "ok") return [section, absent(a, "copy-number", sample)];
     section.append(h("p", {}, `Tumour fraction ${fmt(tf)} · LoD 3% established at 0.1x Illumina with PoN; this run: ${pon === "none" ? "no PoN" : "PoN"}, ${fmt(counted)} reads. Not interpretable without a protocol-matched panel of normals.`));
     const slot = h("div", {}, h("p", {}, "Loading…"));
     section.append(...context(sample, "copy-number", new Set()), slot);
@@ -1195,7 +1204,8 @@
   function fragXMethSignals(sample) {
     const a = algo(sample, "frag-x-meth");
     const section = h("section", { class: "panel" }, h("h2", {}, "Fragment size × methylation"));
-    if (!a || a.status !== "ok") return a ? [section, absent(a, "frag-x-meth")] : [];
+    if (!a || a.status !== "ok") return a || unreadableArtifact(sample, "frag-x-meth")
+      ? [section, absent(a, "frag-x-meth", sample)] : [];
     const delta = value(sample, "frag-x-meth", "short_fragment_hypomethylation_delta");
     section.append(
       h("p", {}, "Each molecule contributes once after at least four distinct CpG calls. The matrix is descriptive; no normal range is claimed."),
@@ -1254,7 +1264,7 @@
     const out = [h("p", { class: "breadcrumb" }, `Lab › ${sample.id12} › Body map`),
       h("div", { class: "findings-head" }, h("h1", { class: "view-title" }, "Body map"), flagPill("LEGAL", "FLAG: LEGAL — research-only licenses; atlas terms unknown."))];
     const a = algo(sample, "cell-origin");
-    if (!a || a.status !== "ok") { out.push(absent(a, "cell-origin")); return out; }
+    if (!a || a.status !== "ok") { out.push(absent(a, "cell-origin", sample)); return out; }
     out.push(h("p", { class: "help" }, `Reference cohort ${sample.cohort_version || "not built"} (${sample.cohort_n} members)${sample.cohort_kind === "provisional_external" ? "; protocol-mismatched external reference" : ""}. Tissue references use eligible comparable samples after leave-one-out: 10–29 show observed min–max; 30+ show the 90% bootstrap interval of the 95th-percentile cutoff. The diamond marks the eligible mean, which need not lie inside a cutoff interval. Minor tissues are not interpretable below 5x; their estimate and interval stay visible.`));
     out.push(...context(sample, "cell-origin", new Set()));
     const rows = a.metrics.filter((m) => m.metric_id.startsWith("fraction_"));

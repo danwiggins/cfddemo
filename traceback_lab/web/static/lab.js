@@ -273,7 +273,15 @@
   function sizeDensity(sample) {
     const section = h("section", { class: "panel", "aria-labelledby": "size-density-title" }, h("h2", { id: "size-density-title" }, "Fragment-size density"));
     const algorithm = sample.algorithms.find((a) => a.algorithm_id === "fragment-size");
-    if (!algorithm || algorithm.status !== "ok") { section.append(h("p", { class: "empty" }, "fragment-size has no result for this sample.")); return section; }
+    if (!algorithm || algorithm.status !== "ok") {
+      const unreadable = !algorithm && (sample.unreadable_results || []).includes("fragment-size");
+      section.append(h("p", { class: unreadable ? "problem" : "empty" }, unreadable
+        ? "Chart could not be drawn (selected result unavailable)."
+        : algorithm
+          ? `fragment-size: ${algorithm.status}${algorithm.skip_reason ? ` (${algorithm.skip_reason.replace(/_/g, " ")})` : ""}.`
+          : "fragment-size has no result for this sample."));
+      return section;
+    }
     const slot = h("div", {}, h("p", {}, "Loading…"));
     section.append(slot);
     fetchArtifact(sample, "full", "fragment-size", "size-density").then((data) => {
