@@ -189,6 +189,8 @@ def _run_events(store: LabStore, run_id: str) -> tuple[list[tuple[int, dict[str,
             event = json.loads(line)
         except (ValueError, UnicodeDecodeError):
             if number == len(lines) and not complete_tail:
+                if not events:
+                    return [], "pending_first_event"
                 break  # an interrupted append can leave only the final line torn
             return [], "malformed_or_empty"
         if not isinstance(event, dict):
@@ -266,6 +268,8 @@ class LabApi:
         if status["active"] is not None and status["active"].get("command") in _LOGGED_SAMPLE_COMMANDS:
             run_id = status["active"]["run_id"]
             events, reason = _run_events(self.store, run_id)
+            if reason == "pending_first_event":
+                reason = None  # the first append is still in progress
             if reason in ("unreadable_or_over_1mib", "malformed_or_empty"):
                 # A writer publishes its heartbeat before appending run_start.
                 # An absent or empty log in that short window is pending, not damaged.
@@ -290,6 +294,8 @@ class LabApi:
             last = _latest_analysis_run(self.store)
             if last is not None:
                 events, reason = _run_events(self.store, last)
+                if reason == "pending_first_event":
+                    reason = "malformed_or_empty"  # no active writer can finish it
                 if not reason and events[0][1]["event"] != "run_start":
                     reason = "malformed_or_empty"
                     events = []
