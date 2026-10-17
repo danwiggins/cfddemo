@@ -3,7 +3,9 @@
 The coefficient table is methylclockData's coefWeidner.rda (Zenodo record
 22069904, SHA-256 below). This module does not redistribute that R asset;
 the four published numeric coefficients are fixed in the algorithm. The
-operator supplies only the probe-to-hg38 mapping, never model weights.
+operator supplies only the assay-site-to-hg38 mapping, never model weights.
+The paper's third coefficient measures the PDE4C CpG upstream of the
+cg17861230 array probe, although the coefficient asset labels it cg17861230.
 """
 
 from __future__ import annotations
@@ -23,10 +25,10 @@ from .file_access import open_regular_no_follow
 if TYPE_CHECKING:
     from .store import LabStore
 
-SCHEMA = "traceback.lab.epi-clock-map.v1"
+SCHEMA = "traceback.lab.epi-clock-map.v2"
 MODEL_ID = "Weidner-3"
 COEFFICIENTS_SHA256 = "9a3feb7d0c500f9ccdb61ffe243775587fa21b082536142bb1260c566cd39645"
-WEIDNER_SITES = ("cg02228185", "cg25809905", "cg17861230")
+WEIDNER_SITES = ("cg02228185", "cg25809905", "pde4c_upstream_of_cg17861230")
 WEIDNER_WEIGHTS = (-26.4, -23.7, 164.7)
 WEIDNER_INTERCEPT = 38.0
 _SHA = re.compile(r"[0-9a-f]{64}\Z")
@@ -65,14 +67,14 @@ def _parse(raw: bytes, digest: str) -> ClockMap:
                 or not isinstance(row["chrom"], str) or not _CHROM.fullmatch(row["chrom"])
                 or not isinstance(row["pos0"], int) or isinstance(row["pos0"], bool)
                 or row["pos0"] < 0 or row["pos0"] >= 250_000_000):
-            raise ClockModelError("clock map has an invalid probe or hg38 C coordinate")
+            raise ClockModelError("clock map has an invalid assay site or hg38 C coordinate")
         key = (row["chrom"], row["pos0"])
         if row["cpg_id"] in by_id or key in positions:
-            raise ClockModelError("clock map repeats a probe or position")
+            raise ClockModelError("clock map repeats an assay site or position")
         by_id[row["cpg_id"]] = (row["cpg_id"], *key)
         positions.add(key)
     if set(by_id) != set(WEIDNER_SITES):
-        raise ClockModelError("clock map must contain the three published Weidner probe IDs")
+        raise ClockModelError("clock map must contain the three published Weidner assay sites")
     return ClockMap(digest, data["source_label"], tuple(by_id[site] for site in WEIDNER_SITES))
 
 

@@ -39,7 +39,7 @@ def test_clock_identity_pins_literal_coefficients() -> None:
 
 def _map_bytes() -> bytes:
     return json.dumps({
-        "schema": "traceback.lab.epi-clock-map.v1", "model_id": "Weidner-3",
+        "schema": "traceback.lab.epi-clock-map.v2", "model_id": "Weidner-3",
         "genome_build": "hg38", "source_label": "test fixture only",
         "sites": [{"cpg_id": name, "chrom": "chr1", "pos0": 100 + 10 * index}
                   for index, name in enumerate(WEIDNER_SITES)],
@@ -49,8 +49,15 @@ def _map_bytes() -> bytes:
 def test_documented_map_template_cannot_be_registered() -> None:
     docs = (Path(__file__).parents[2] / "docs" / "epi-clock.md").read_text()
     template = docs.split("```json\n", 1)[1].split("\n```", 1)[0]
-    with pytest.raises(ClockModelError, match="invalid probe or hg38 C coordinate"):
+    with pytest.raises(ClockModelError, match="invalid assay site or hg38 C coordinate"):
         _parse(template.encode(), "0" * 64)
+
+
+def test_array_probe_coordinate_cannot_substitute_for_paper_upstream_site() -> None:
+    data = json.loads(_map_bytes())
+    data["sites"][2]["cpg_id"] = "cg17861230"
+    with pytest.raises(ClockModelError, match="invalid assay site"):
+        _parse(json.dumps(data).encode(), "0" * 64)
 
 
 def test_clock_map_requires_exact_model_and_immutable_sha(tmp_path: Path) -> None:

@@ -35,13 +35,13 @@ def add_asset_parser(commands: Any, common: Callable[[argparse.ArgumentParser], 
     common(inspect)
     inspect.set_defaults(handler=_inspect)
 
-    clock = actions.add_parser("register-clock-map", help="register a SHA-pinned hg38 Weidner probe map")
+    clock = actions.add_parser("register-clock-map", help="register a SHA-pinned hg38 Weidner assay-site map")
     clock.add_argument("--file", type=Path, required=True)
     clock.add_argument("--sha256", required=True, help="expected exact-byte SHA-256")
     common(clock)
     clock.set_defaults(handler=_register_clock_map)
 
-    clock_inspect = actions.add_parser("inspect-clock-map", help="verify the registered Weidner probe map")
+    clock_inspect = actions.add_parser("inspect-clock-map", help="verify the registered Weidner assay-site map")
     common(clock_inspect)
     clock_inspect.set_defaults(handler=_inspect_clock_map)
 

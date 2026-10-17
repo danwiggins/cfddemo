@@ -50,13 +50,13 @@ class EpiClock(MethBase):
         summary, _ = load_summary(ctx)
         lengths = dict(zip(summary.contigs, summary.lengths))
         if lengths.get("chr1") != HG38_CHR1_LENGTH:
-            return Skip("reference", "Weidner probe coordinates require hg38")
+            return Skip("reference", "Weidner assay-site coordinates require hg38")
         from ..store import LabStore
 
         try:
             model = inspect_map(LabStore(ctx.root))
             if any(chrom not in lengths for _, chrom, _ in model.sites):
-                return Skip("reference", "Weidner probe chromosome is absent from the aligned input")
+                return Skip("reference", "Weidner assay-site chromosome is absent from the aligned input")
             if model.sha256 not in ctx.extras.get("planned_asset_sha256s", ()):
                 return Skip("missing_asset", "Weidner map changed after execution identity was planned")
             reference = ctx.extras.get("reference_fasta")

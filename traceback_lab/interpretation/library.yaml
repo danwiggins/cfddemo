@@ -2733,7 +2733,7 @@ entries:
     value_kind: signed
     tier: SPECULATIVE
     origin_tier: PROVEN
-    origin_platform: "whole-blood Illumina methylation array"
+    origin_platform: "whole-blood Illumina discovery and bisulfite pyrosequencing model fit"
     min_depth_x: null
     reference: {kind: none}
     performance: null
@@ -2778,8 +2778,8 @@ entries:
     citations: []
 
   - algorithm_id: epi-clock
-    metric_id: cg17861230_modified_fraction
-    label: "cg17861230 5mC+5hmC fraction"
+    metric_id: pde4c_upstream_of_cg17861230_modified_fraction
+    label: "Weidner PDE4C upstream CpG 5mC+5hmC fraction"
     value_kind: proportion
     tier: SPECULATIVE
     reference: {kind: none}
