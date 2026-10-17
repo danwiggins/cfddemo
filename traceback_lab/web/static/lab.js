@@ -27,6 +27,7 @@
     lastOk: null,
     route: { name: "home" },
     loading: true,
+    runLogLines: new Map(),
   };
   window.TracebackLab = { state, LENSES, h, render, chart, dataTable, fmt };
 
@@ -102,6 +103,7 @@
   async function loadSample(id12) {
     if (!id12) { state.sample = null; return; }
     if (state.sample && state.sample.id12 === id12) return;
+    state.runLogLines.clear();
     const payload = await api(`/api/samples/${id12}`);
     state.sample = payload.found ? payload : { found: false, id12, candidates: payload.candidates || [] };
   }
@@ -310,17 +312,23 @@
         h("td", { class: a.status === "failed" ? "problem" : null }, status,
           runNote ? h("span", { class: "state-chip run-note" }, runNote) : ""),
         h("td", { class: "num" }, a.duration_s !== null && a.duration_s !== undefined ? `${a.duration_s.toFixed(1)} s` : "—")];
-      const logLine = h("span", { class: "help", "aria-live": "polite" });
+      const logKey = `${sample.id12}:${a.algorithm_id}:${a.provenance.input_id}`;
+      const logLine = h("span", { class: "help", "aria-live": "polite" }, state.runLogLines.get(logKey) || "");
+      const showLogLine = (message) => {
+        state.runLogLines.set(logKey, message);
+        if (logLine.isConnected) logLine.replaceChildren(message);
+        else if (state.route.name === "lens" && state.sample && state.sample.id12 === sample.id12) render();
+      };
       const logLink = h("a", { href: `#/sample/${sample.id12}/trust-qc`, onclick: async (event) => {
         event.preventDefault();
-        logLine.replaceChildren("Loading run log line…");
+        showLogLine("Loading run log line…");
         try {
           const line = await api(`/api/samples/${sample.id12}/run-log/${a.algorithm_id}`);
-          logLine.replaceChildren(line.found
+          showLogLine(line.found
             ? `${line.run_id} · line ${line.line} · ${line.utc || "time unavailable"} · step_end ${line.step} status=${line.status}${line.skip_reason ? ` (${line.skip_reason})` : ""}${line.duration_s !== null ? ` · ${line.duration_s} s` : ""}`
             : "Run log line unavailable (searched up to 64 recently updated runs; logs over 1 MiB or 4,096 lines are not shown).");
         } catch (error) {
-          logLine.replaceChildren(error.session ? "Session expired; reopen Lab." : "Run log line unavailable.");
+          showLogLine(error.session ? "Session expired; reopen Lab." : "Run log line unavailable.");
         }
       } }, "Run log line →");
       cells.push(h("td", {}, logLink, " ", logLine));
@@ -409,7 +417,7 @@
         const minutes = Math.max(0, Math.round((Date.now() - Date.parse(status.active.started_utc)) / 60000));
         const priorInterrupted = status.interrupted && status.interrupted.run_id !== status.active.run_id
           ? ` Earlier run (${status.interrupted.run_id}) stopped during ${status.interrupted.step || "a step"}.` : "";
-        const logNotice = logIssue ? ` Run log for ${logIssue.run_id} is unavailable (${logReason}).` : "";
+        const logNotice = logIssue ? ` ${logIssue.run_id ? `Run log for ${logIssue.run_id}` : "Run status"} is unavailable (${logReason}).` : "";
         setStatus(`A Lab run is in progress (step: ${status.active.step || "starting"}, ${minutes} min). Results below are from completed steps.${priorInterrupted}${logNotice}`);
       } else if (status.interrupted) {
         // A run that died (stale heartbeat, open log) is "interrupted", even
