@@ -281,6 +281,26 @@ def test_inhouse_extraction_matches_the_signed_synthetic_fixture_counts(world) -
     )
 
 
+@pytest.mark.parametrize("floor,value", [
+    ("min_classified_fragments", 301),
+    ("min_observed_markers", 4),
+])
+def test_low_marker_support_refuses_an_estimate(world, monkeypatch, floor, value) -> None:
+    """E10: insufficient marker evidence never becomes a composition result."""
+    from tests.test_cell_origin_stage import _test_parameters
+
+    register_loyfer_directory(world["root"], world["inputs"].loyfer_dir)
+    monkeypatch.setattr(
+        method_module, "default_parameters", _test_parameters(**{floor: value}),
+    )
+    out = world["tmp"] / "low-support" / "artifacts"
+    out.mkdir(parents=True)
+    with pytest.raises(ValueError, match="classified fragment and marker floors are not met"):
+        co.CELL_ORIGIN.run(world["ctx"], out)
+    assert not list(out.iterdir())
+    assert not list(out.parent.glob("co-*"))
+
+
 def test_pinned_modkit_and_inhouse_marker_classes_match(world) -> None:
     binary = os.environ.get("LAB_MODKIT_PARITY_BINARY")
     if not binary:
