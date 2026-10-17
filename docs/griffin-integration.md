@@ -13,7 +13,8 @@ name/count, smoothing and CNA-normalization state. It rejects uncorrected,
 non-finite, malformed, or wrong-sample files. The parser was checked against
 the vendored upstream `Healthy_demo.GC_corrected.coverage.tsv` fixture (one CTCF list, 132
 15-bp bins) from upstream commit
-`b624c7a2ea7b8758b6eebd424066c815bfeece61`.
+`b624c7a2ea7b8758b6eebd424066c815bfeece61`; its exact-byte SHA-256 is
+`4e7b430bc98d67d704e506ee41d2650b76bad3cc0a55be919f7884d0137ecc88`.
 
 `traceback_lab.adapters.griffin_run.run_upstream` drives that pinned upstream
 checkout, rather than approximating the measurement. It runs Griffin's GC
@@ -41,10 +42,11 @@ BAM, BAM index, reference, reference index, site lists and reference assets.
 It copies the pinned scripts and two Snakefiles into the attempt without
 cached outputs or Python bytecode, records their digests and the upstream
 default-config digests, disables bytecode writes during execution, and hashes
-all five generated workflow YAML files. It requires Snakemake 5.19.2, records
+all seven generated workflow YAML files, including capped cluster settings.
+It requires Snakemake 5.19.2, records
 the resolved Snakemake, Python, samtools, and bedtools executable digests and
 the numerical Python package versions, and checks the runtime again after
-execution. The attempt contains a `bin/python` link to the recorded Lab interpreter
+execution. The attempt contains a `bin/python` launcher for the recorded Lab interpreter
 and a hashed compatibility shim for Snakemake 5.19.2 on Python 3.11+. The
 adapter invokes Snakemake through that interpreter; PATH and PYTHONPATH make
 upstream scripts' `#!/usr/bin/env python` resolve to it too. The generated config sets the pinned
@@ -58,8 +60,11 @@ characters. The runner is POSIX-only, matching upstream's environment.
 The current Lab does **not** register or display Griffin as an available
 algorithm. The adapter is an invocation boundary. A toy paired-end run through
 both pinned upstream Snakemake workflows completed on a 30 kb synthetic
-reference; it tested upstream orchestration, not `run_upstream`, the biological
-signal, or production resource needs. The commands, fixture generators, and output digest are in
+reference. A second bounded run completed through `run_upstream` itself, using
+its generated configuration and corrected-TSV parser. It lowered only the
+five-million-pair input gate to 500 for this proof and used a chr1-only toy
+reference. Neither run validates biological signal or production resource
+needs. The commands, fixture generators, and output digests are in
 [`docs/proofs/griffin/README.md`](proofs/griffin/README.md). No real-sample
 end-to-end run has been completed. Native ONT
 input is incompatible with the exact upstream code. There is no
