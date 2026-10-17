@@ -190,9 +190,12 @@ def test_real_summary_counts_nonpar_y_and_calibrates_only_within_bounds(tmp_path
     ctx = replace(ctx, source_id=SOURCE, input_id=INPUT, reference_sha256=REFERENCE,
                   approx_depth_x=0.01,
                   extras={**ctx.extras, "planned_asset_sha256s": [contract.manifest_sha256]})
+    summary, _ = fetal.load_summary(ctx)
+    assert fetal._counts(summary)[1] == int(summary.eligible().sum())
     assert fetal.FETAL_FRACTION_CHRY.preflight(ctx).reason_code == "depth"
     algorithm = replace(fetal.FETAL_FRACTION_CHRY, requires=Requirements(min_eligible_reads=0))
     assert not isinstance(algorithm.preflight(ctx), Skip)
+    assert algorithm.preflight(replace(ctx, approx_depth_x=0.0005)).reason_code == "missing_asset"
     measured = {item["metric_id"]: item["value"] for item in algorithm.run(ctx, tmp_path).metrics}
     assert measured == {"fetal_fraction": pytest.approx(0.5),
                         "fetal_chry_nonpar_reads": 2,

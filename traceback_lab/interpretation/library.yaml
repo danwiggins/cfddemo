@@ -2771,6 +2771,7 @@ entries:
     metric_id: fetal_chry_nonpar_reads
     label: "Male-fetus chrY non-PAR reads"
     value_kind: count
+    missing_value_caption: "Not measured because the chrY method was gated."
     meaning_high: "More eligible chrY starts outside pseudoautosomal regions."
     meaning_low: "Fewer eligible chrY starts; the calibrated fraction may be unavailable."
     headline: false
@@ -2780,6 +2781,7 @@ entries:
     metric_id: fetal_chry_reads_per_million
     label: "Male-fetus chrY non-PAR reads per million eligible"
     value_kind: positive
+    missing_value_caption: "Not measured because the chrY method was gated."
     meaning_high: "Higher observed chrY rate before calibration."
     meaning_low: "Lower observed chrY rate before calibration."
     headline: false

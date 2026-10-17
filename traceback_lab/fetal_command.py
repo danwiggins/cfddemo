@@ -34,7 +34,7 @@ def add_fetal_parser(commands: Any, common: Callable[[argparse.ArgumentParser], 
     chry_add.add_argument("--file", type=Path, required=True)
     chry_add.add_argument("--sha256", required=True)
     chry_add.add_argument("--allow-synthetic", action="store_true",
-                           help="reserve the immutable input slot for mechanics-only calibration")
+                           help="register mechanics-only calibration in its separate namespace")
     common(chry_add)
     chry_add.set_defaults(handler=_register_chry)
     chry_inspect = actions.add_parser("chry-inspect", help="verify a male-fetus chrY calibration")
