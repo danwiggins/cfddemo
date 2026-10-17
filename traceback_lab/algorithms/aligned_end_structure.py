@@ -132,7 +132,9 @@ class AlignedEndStructure(Base):
         summary, mask = load_summary(ctx)
         selection = _selection(ctx.derived) if ctx.derived is not None else None
         observed_depth_x = depth_stamp(summary, mask)["approx_depth_x"] if selection is not None else ctx.approx_depth_x
-        if selection is not None and observed_depth_x < MIN_DEPTH_X:
+        if selection is not None and (
+            observed_depth_x is None or not np.isfinite(observed_depth_x) or observed_depth_x < MIN_DEPTH_X
+        ):
             raise RuntimeError("derived aligned-end depth fell below 10x after preflight")
         names = summary.contigs
         lengths = summary.lengths
