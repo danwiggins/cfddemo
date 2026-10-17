@@ -12,7 +12,9 @@ import pytest
 
 from traceback_lab import assets
 from traceback_lab.algorithms import tss_profile
+from traceback_lab.interpretation.engine import load_library
 from traceback_lab.registry import InputContext, Ready, Skip, execution_identity
+from traceback_lab.stability import Side, stable
 from traceback_lab.store import LabStore
 
 
@@ -75,7 +77,8 @@ def test_partial_bin_overlap_counts_bases_not_read_starts() -> None:
     assert sum(profile["coverage_x"]) == pytest.approx(0.4)
 
 
-def test_pinned_registration_gate_and_output(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("zero_flank", [False, True])
+def test_pinned_registration_gate_and_output(tmp_path, monkeypatch, zero_flank: bool) -> None:
     content = _gtf()
     digest = hashlib.sha256(content).hexdigest()
     monkeypatch.setattr(assets, "TSS_SHA256", digest)
@@ -97,8 +100,8 @@ def test_pinned_registration_gate_and_output(tmp_path, monkeypatch) -> None:
         lengths = [tss_profile.HG38_CHR1_LENGTH]
         data = {
             "contig": np.zeros(3, dtype=np.int16),
-            "start": np.asarray([1000, 1900, 2500]),
-            "end": np.asarray([1500, 2100, 3000]),
+            "start": np.asarray([1900, 1950, 2000] if zero_flank else [1000, 1900, 2500]),
+            "end": np.asarray([1950, 2000, 2050] if zero_flank else [1500, 2100, 3000]),
         }
 
         def autosome_ids(self):
@@ -124,6 +127,12 @@ def test_pinned_registration_gate_and_output(tmp_path, monkeypatch) -> None:
     result = algorithm.run(ctx, tmp_path)
     panel = json.loads(result.artifacts["tss_profile.json"])
     assert result.metrics[0]["value"] == panel["central_flank_ratio"]
+    if zero_flank:
+        assert result.metrics[0]["value"] is None
+        assert panel["flank_depth_x"] == 0
+        entry = load_library().entry("tss-profile", "central_flank_ratio")
+        assert entry.stability == {"kind": "relative", "tolerance": 0.20}
+        assert stable(entry.stability, Side(result.metrics[0]["value"]), Side(1.0)) is None
     assert panel["annotation_sha256"] == digest
     assert panel["eligible_autosomal_reads"] == 3
     assert panel["gene_n"] == 2

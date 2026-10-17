@@ -13,7 +13,8 @@ from traceback_lab.web.server import RunningLabServer
 
 
 @pytest.mark.skipif(_chrome() is None, reason="no Chrome/Chromium for TSS DOM check")
-def test_tss_profile_chart_and_table(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize(("ratio", "rendered"), [(0.75, "0.750"), (None, "—")])
+def test_tss_profile_chart_and_table(tmp_path, monkeypatch, ratio, rendered) -> None:
     source_id = "a" * 64
     sample = {
         "found": True, "id12": source_id[:12], "source_id": source_id,
@@ -28,7 +29,7 @@ def test_tss_profile_chart_and_table(tmp_path, monkeypatch) -> None:
         "algorithms": [{
             "algorithm_id": "tss-profile", "status": "ok", "hidden": False,
             "metrics": [{"metric_id": "central_flank_ratio", "label": "TSS central-to-flank coverage ratio",
-                         "value": 0.75, "unit": "ratio", "state": "no_reference",
+                         "value": ratio, "unit": "ratio", "state": "no_reference",
                          "caption": "No reference interval is published.", "entry": {"flags": ["LEGAL"]}}],
             "provenance": {},
         }],
@@ -53,7 +54,7 @@ def test_tss_profile_chart_and_table(tmp_path, monkeypatch) -> None:
         ], profile, ok=lambda page: 'data-ready="1"' in page and "19,130 complete protein-coding gene windows" in page,
             timeout=60)
     assert "TSS coverage profile" in html
-    assert "Central/flank ratio: 0.750" in html
+    assert f"Central/flank ratio: {rendered}" in html
     assert "5,000,000 eligible autosomal reads" in html
     assert "TSS coverage in 50 bp bins" in html and "[-1000, -950)" in html
     assert "plotted at bin centres" in html
