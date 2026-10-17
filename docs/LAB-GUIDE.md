@@ -284,7 +284,8 @@ mode is experimental and its paired-end-trained cancer model is **not** run;
 these values are neither cell fractions nor a validated diagnostic.
 
 **Short-read TLEN slice.** For a prealigned paired-end Illumina BAM against
-the registered hg38 reference, run the separate measurement explicitly:
+the registered hg38 reference, run the normal Lab command to include its
+separate TLEN measurement:
 
 ```bash
 traceback lab run YOUR_LOCAL_aligned_illumina.bam \
@@ -319,12 +320,14 @@ cutoff, short-read healthy range, or cross-platform comparison is supplied.
 If an Illumina BAM was ingested by the earlier opt-in TLEN path, run it again
 from the original BAM to create its platform-specific input identity. The old
 stored result remains available but does not enter new platform-aware cohorts.
-For a legacy BAM without a platform declaration, verify its instrument
-provenance and regenerate a BAM with the correct `@RG PL` value from the trusted
-source before ingesting it. The Lab does not infer ONT from an absent value.
-Previously stored Lab-aligned inputs without read groups remain readable only
-when their manifest pins the historical `map-ont` alignment recipe; a new
-input still needs an explicit platform declaration.
+For a legacy prealigned BAM without a platform declaration, verify its
+instrument provenance and regenerate a BAM with the correct `@RG PL` value
+from the trusted source before ingesting it. The Lab does not infer ONT from
+an absent value. Previously stored Lab-aligned inputs with absent or
+unrecognized platform tags remain readable only when their manifest exactly
+pins the historical `map-ont` recipe for the BAM's read groups and no read
+group explicitly declares Illumina. A new input still needs an explicit
+platform declaration.
 Stored prealigned manifests without a platform field still read the BAM's
 unanimous platform declaration. Re-ingest short reads to record an Illumina
 input identity for new results and cohorts. Before rerun, historical ONT-only
