@@ -7,6 +7,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import numpy as np
+import pysam
 import pytest
 
 from tests.lab.test_landing import _dom, needs_chrome
@@ -29,8 +30,25 @@ def _published_agreement(tmp_path, monkeypatch):
     }))
     input_dir = store.inputs_dir / input_id
     input_dir.mkdir(parents=True)
+    aligned_bam = input_dir / "aligned.bam"
+    header = {
+        "HD": {"VN": "1.6", "SO": "coordinate"},
+        "SQ": [{"SN": "chr1", "LN": 100}],
+        "RG": [{"ID": "ont-rg", "PL": "ONT", "DS": "basecall_model=synthetic modbase_models=model"}],
+    }
+    with pysam.AlignmentFile(str(aligned_bam), "wb", header=header) as bam:
+        read = pysam.AlignedSegment(bam.header)
+        read.query_name = "synthetic-ont"
+        read.query_sequence = "ACGT"
+        read.reference_id = 0
+        read.reference_start = 1
+        read.mapping_quality = 60
+        read.cigartuples = [(0, 4)]
+        read.query_qualities = pysam.qualitystring_to_array("5555")
+        read.set_tag("RG", "ont-rg")
+        bam.write(read)
     (input_dir / "manifest.json").write_text(json.dumps({
-        "kind": "aligned", "source_id": source_id, "input_id": input_id,
+        "kind": "aligned", "platform": "ont", "source_id": source_id, "input_id": input_id,
         "reference_id": "synthetic", "reference_sha256": "9" * 64,
         "tools": {"samtools": "1.20", "minimap2": "2.28"},
         "mmi_sha256": "8" * 64, "aligner_argv": ["minimap2", "-ax", "map-ont"],
@@ -42,11 +60,10 @@ def _published_agreement(tmp_path, monkeypatch):
     ctx = InputContext(
         root=root, source_id=source_id, input_id=input_id,
         reference_id="synthetic", reference_sha256="9" * 64, input_dir=input_dir,
-        extras={"counting_bam": str(tmp_path / "counting.bam"), "counted_reads": 3_000_000,
+        extras={"counting_bam": str(aligned_bam), "counted_reads": 3_000_000,
                 "upstream": {"read-summary": str(tmp_path / "summary")},
                 "planned_asset_sha256s": ["c" * 64]},
     )
-    (tmp_path / "counting.bam").touch()
 
     parameters = replace(copy_number.ichor.default_parameters(), pon_policy="lab_loo_v1", pon_sha256="d" * 64)
     monkeypatch.setattr(copy_number.ichor, "default_parameters", lambda **kwargs: parameters)
@@ -69,7 +86,9 @@ def _published_agreement(tmp_path, monkeypatch):
     from traceback_lab.algorithms import cell_origin
 
     monkeypatch.setattr(cell_origin, "header_model", lambda path: "model")
-    monkeypatch.setattr(meth_tf.ReadSummary, "open", lambda path: SimpleNamespace(contigs=["chr1"], lengths=[100]))
+    monkeypatch.setattr(meth_tf, "ReadSummary", SimpleNamespace(
+        open=lambda path: SimpleNamespace(contigs=["chr1"], lengths=[100]),
+    ))
     monkeypatch.setattr(meth_tf, "load_calls", lambda ctx: (object(), None))
     monkeypatch.setattr(meth_tf, "tally_markers", lambda *args: (np.array([2, 8]), np.array([10, 10])))
     meth = meth_tf.METH_TF.run(ctx, tmp_path / "meth-out")
