@@ -194,7 +194,8 @@ the registered hg38 reference, run the separate measurement explicitly:
 
 ```bash
 traceback lab run YOUR_LOCAL_aligned_illumina.bam \
-  --only short-read-fragment-size --no-downsample --no-controls --root R
+  --reference hg38 --only short-read-fragment-size \
+  --no-downsample --no-controls --root R
 ```
 
 Every BAM read group must declare `PL:ILLUMINA`; a BAM aligned by the Lab's
