@@ -358,7 +358,8 @@ It recomputes each member's copy-number and instability results against that
 member's panel before publishing the generation. `pon_n` counts all panel
 sources; a selected member panel uses `pon_n - 1` sources. A nonmember uses
 the full panel. Both copy-number and instability still require 2M eligible
-reads on the target input.
+reads on the target input. Copy-number also enforces the signed 1M counted-read
+floor after filtering, with or without a panel.
 
 `lab run` and `lab simulate` use a built `healthy-v1` cohort by default when
 one exists. Pass `--cohort ID` to pin another built cohort; an explicit cohort
@@ -375,7 +376,7 @@ older generation. A cohort with members but no published generation needs
 
 ## Positive controls
 
-`traceback lab simulate cna <id12|latest>` builds a synthetic copy-number
+`traceback lab simulate cna <id12|latest>` requires an ONT sample and builds a synthetic copy-number
 spike from the healthy aligned input, with no external data: one-copy gains
 on 1q and 8q and losses on 13q and 17p at tumour fraction TF (default 0.03,
 0.10 and 0.30). Each read in a gain arm is duplicated with probability TF/2

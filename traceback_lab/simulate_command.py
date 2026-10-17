@@ -21,7 +21,7 @@ from .controls import DEFAULT_TFS, TF_TOLERANCE, cna_specs, run_derived, split_s
 from .identity import validate_fraction
 from .ingest import id12_for, resolve_sample
 from .problems import EXIT_OK, EXIT_PARTIAL, LabProblem
-from .run_command import _interrupted_handler, _progress, _stored_input, _target_from_input
+from .run_command import _interrupted_handler, _progress, _stored_input, _stored_platform, _target_from_input
 from .runner import DEFAULT_TIMEOUT_S, run_plan
 from .scrub import Scrubber
 from .store import LabStore, new_run_id
@@ -77,6 +77,14 @@ def simulate_command(args: argparse.Namespace, store: LabStore) -> tuple[int, di
     progress = _progress(args.as_json)
     source_id = resolve_sample(store, args.sample)
     aligned, record = _stored_input(store, source_id)
+    if kind == "cna":
+        platform = _stored_platform(aligned)
+        if platform != "ont":
+            raise LabProblem(
+                "TBX-LAB-024", cause="synthetic CNA spike requires an ONT input",
+                fix="Use an ONT sample for CNA spike, or use simulate split for this Illumina sample",
+                data={"input_id": aligned.input_id, "platform": platform},
+            )
     entries = registry.registry_entries()
     by_id = {alg.id: entry for entry, alg in entries}
     items = registry.plan([alg for _, alg in entries])
