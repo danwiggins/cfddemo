@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import os
+import sys
 import tarfile
 from pathlib import Path
 
@@ -137,6 +138,7 @@ def test_pax_extension_is_rejected_before_tarfile_parsing(tmp_path, monkeypatch)
         verify_bundle(archive)
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows does not permit replacing an open TAR")
 def test_private_copy_uses_verified_open_archive_when_path_is_replaced(tmp_path, monkeypatch):
     archive = tmp_path / "model.tar"
     replacement = tmp_path / "replacement.tar"
