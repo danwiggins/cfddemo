@@ -14,7 +14,7 @@ from .cohort_contracts import CohortGeneration, CohortMember, CohortResult
 from .file_access import open_regular_no_follow
 from .ingest import resolve_reference
 from .interpretation.engine import COHORT_MIN
-from .microbial_db import MicrobialDbError, inspect_database
+from .microbial_db import MicrobialDbError, MicrobialDbReceiptChanged, RECEIPT_RECOVERY, inspect_database
 from .problems import LabProblem
 from .registry import ToolPin, execution_identity
 from .store import LabStore
@@ -168,6 +168,8 @@ def profile_for_sample(store: LabStore, sample: SampleView, generation: CohortGe
             tool_pins=[ToolPin("kraken2", kraken[1], "kraken2-mit").identity(),
                        ToolPin("bracken", bracken[1], "bracken-gpl3").identity()],
         )
+    except MicrobialDbReceiptChanged:
+        return {"state": "asset_unavailable", "reason": RECEIPT_RECOVERY, "taxa": []}
     except (MicrobialDbError, LabProblem, OSError, ValueError):
         return {"state": "asset_unavailable", "reason": "Pinned microbial database or reference is unavailable",
                 "taxa": []}
