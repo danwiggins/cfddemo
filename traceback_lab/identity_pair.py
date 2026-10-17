@@ -238,28 +238,33 @@ def pairs_for_sample(store: LabStore, source_id: str) -> list[dict[str, Any]]:
         return []
     rows: list[dict[str, Any]] = []
     try:
-        with os.scandir(root) as scan:
-            entries = sorted((entry for entry in scan if re.fullmatch(r"[0-9a-f]{64}", entry.name)),
-                             key=lambda entry: entry.name)[:MAX_PAIRS_SHOWN]
+        sites = inspect_sites(store)
+    except IdentitySitesError:
+        return []
+    try:
+        with os.scandir(root) as entries:
+            for entry in entries:
+                if not re.fullmatch(r"[0-9a-f]{64}", entry.name) or not entry.is_dir(follow_symlinks=False):
+                    continue
+                summary = _selected_pair(store, entry.name)
+                if summary is None or not isinstance(summary.get("participants"), list):
+                    continue
+                participants = summary["participants"]
+                if (len(participants) != 2 or not all(isinstance(row, dict) for row in participants)
+                        or source_id not in [row.get("source_id") for row in participants]):
+                    continue
+                try:
+                    current = [_selected_sketch(store, row["source_id"], sites_sha256=sites.sha256)
+                               for row in participants]
+                except (IdentityPairError, KeyError, TypeError):
+                    continue
+                if [sketch.identity() for sketch in current] != participants or sites.sha256 != summary.get("sites_sha256"):
+                    continue
+                other = next(row["source_id"] for row in participants if row["source_id"] != source_id)
+                rows.append({"peer_id12": id12_for(store, other), "metrics": summary.get("metrics"),
+                             "pair_id": summary["pair_id"], "interpretation": summary.get("interpretation")})
+                if len(rows) == MAX_PAIRS_SHOWN:
+                    break
     except OSError:
         return []
-    for entry in entries:
-        if not entry.is_dir(follow_symlinks=False):
-            continue
-        summary = _selected_pair(store, entry.name)
-        if summary is None or not isinstance(summary.get("participants"), list):
-            continue
-        participants = summary["participants"]
-        if len(participants) != 2 or source_id not in [row.get("source_id") for row in participants if isinstance(row, dict)]:
-            continue
-        try:
-            sites = inspect_sites(store)
-            current = [_selected_sketch(store, row["source_id"], sites_sha256=sites.sha256) for row in participants]
-        except (IdentitySitesError, IdentityPairError, KeyError, TypeError):
-            continue
-        if [sketch.identity() for sketch in current] != participants or sites.sha256 != summary.get("sites_sha256"):
-            continue
-        other = next(row["source_id"] for row in participants if row["source_id"] != source_id)
-        rows.append({"peer_id12": id12_for(store, other), "metrics": summary.get("metrics"),
-                     "pair_id": summary["pair_id"], "interpretation": summary.get("interpretation")})
-    return rows
+    return sorted(rows, key=lambda row: row["pair_id"])

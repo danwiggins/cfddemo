@@ -16,6 +16,7 @@ from traceback_lab.identity_pair import (
     _selected_sketch,
     compare_pair,
     parse_pair_tsv,
+    pairs_for_sample,
 )
 from traceback_lab.identity_sites import IdentitySitesError, inspect_sites, register_sites
 from traceback_lab.registry import InputContext, Skip
@@ -173,3 +174,35 @@ def test_pair_attempt_binds_both_selected_fingerprints_and_caches(tmp_path, monk
     assert len(calls) == 2
     assert first["participants"][0]["source_id"] == a
     assert first["interpretation"].startswith("exploratory")
+
+
+def test_pair_list_limits_matching_pairs_after_filtering_unrelated_directories(tmp_path, monkeypatch) -> None:
+    from traceback_lab import identity_pair as pair
+
+    store = LabStore(tmp_path / "root")
+    pair_root = store.lab / "identity-pairs"
+    pair_root.mkdir(parents=True)
+    for index in range(65):
+        (pair_root / f"{index:064x}").mkdir()
+    target = "f" * 64
+    (pair_root / target).mkdir()
+    source, peer = "a" * 64, "b" * 64
+    sketches = {
+        source: SelectedSketch(source, "c" * 64, "a-20261016T000000000000-aaaaaaaa", "e" * 64,
+                               hashlib.sha256(b"a").hexdigest(), b"a"),
+        peer: SelectedSketch(peer, "d" * 64, "a-20261016T000000000000-bbbbbbbb", "e" * 64,
+                             hashlib.sha256(b"b").hexdigest(), b"b"),
+    }
+    summary = {"pair_id": target, "sites_sha256": "f" * 64,
+               "participants": [sketch.identity() for sketch in sketches.values()],
+               "metrics": {"relatedness": 0.5, "concordance": 0.9, "n": 10},
+               "interpretation": "exploratory"}
+    monkeypatch.setattr(pair, "_selected_pair", lambda _store, pair_id: summary if pair_id == target else None)
+    monkeypatch.setattr(pair, "inspect_sites", lambda _store: SimpleNamespace(sha256="f" * 64))
+    monkeypatch.setattr(pair, "_selected_sketch", lambda _store, source_id, **_kwargs: sketches[source_id])
+    monkeypatch.setattr(pair, "id12_for", lambda _store, source_id: source_id[:12])
+
+    assert pairs_for_sample(store, source) == [{
+        "peer_id12": peer[:12], "metrics": summary["metrics"], "pair_id": target,
+        "interpretation": "exploratory",
+    }]
