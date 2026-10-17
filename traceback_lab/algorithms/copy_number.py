@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 import tempfile
+from collections.abc import Callable
+from dataclasses import replace
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -80,9 +82,38 @@ class CopyNumber(Base):
         return super().preflight(ctx)
 
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
+        parameters = ichor.default_parameters()
+        if "min_counted_reads" in ctx.extras:
+            requested = ctx.extras["min_counted_reads"]
+            if type(requested) is not int or requested != parameters.signed.min_counted_reads:
+                raise ichor.CopyNumberError("counted-read floor override is not part of this execution identity")
+        selected = ctx.extras.get("pon_selection")
+        if selected is not None:
+            from ..pon import require_grid
+            from ..pon_consumer import selection_from_payload
+
+            selection = selection_from_payload(selected, ctx.root, ctx.reference_sha256)
+            parameters = replace(parameters, pon_policy="lab_loo_v1", pon_sha256=selection.pon_sha256)
+            return self.run_configured(
+                ctx, out, parameters=parameters, pon=selection.path,
+                validate_grid=lambda actual: require_grid(selection, actual),
+            )
+        return self.run_configured(ctx, out, parameters=parameters)
+
+    def run_configured(
+        self, ctx: InputContext, out: Path, *,
+        parameters: ichor.LabCopyNumberParameters,
+        pon: Path | None = None,
+        validate_grid: Callable[[str], None] | None = None,
+    ) -> AlgorithmOutput:
+        """Execute one pinned Lab CN contract; the caller selects any PoN."""
+
+        if (pon is None) != (parameters.pon_policy == "none"):
+            raise ichor.CopyNumberError("a PoN is required exactly for the PoN policy")
+        if pon is not None and validate_grid is None:
+            raise ichor.CopyNumberError("a selected PoN requires grid verification")
         toolchain = _toolchain()
         assets = ichor.resolve_assets(ctx.root, toolchain)
-        parameters = ichor.default_parameters(min_counted_reads=int(ctx.extras.get("min_counted_reads", 1)))
         with tempfile.TemporaryDirectory(prefix="cn-", dir=out.parent) as scratch:
             work = Path(scratch)
             given = ctx.extras.get("counting_bam")
@@ -94,7 +125,8 @@ class CopyNumber(Base):
                 counting = work / "counting.bam"
                 scanned, _, counted = ichor.write_counting(ctx.input_dir / "aligned.bam", counting, parameters)
             result = ichor.measure(
-                counting, counted, scanned, work, toolchain=toolchain, assets=assets, parameters=parameters
+                counting, counted, scanned, work, toolchain=toolchain, assets=assets, parameters=parameters,
+                pon=pon, validate_grid=validate_grid,
             )
         track = {"bins": result.bins}
         segments = {"segments": result.segments}
@@ -120,6 +152,7 @@ class CopyNumber(Base):
 
 COPY_NUMBER = CopyNumber(
     "copy-number",
+    version="2",  # v1 could execute below its identity's signed counted-read floor.
     family="copy-number",
     consumes="counting_bam",
     cost="slow",

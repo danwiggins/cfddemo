@@ -56,6 +56,7 @@ STAGING_PREFIX = ".staging-"
 ARTIFACT_INDEX_SCHEMA = "traceback.lab.artifact-index.v1"
 UPSTREAM_SELECTIONS_SCHEMA = "traceback.lab.upstream-selections.v1"
 MAX_UPSTREAM_SELECTIONS_BYTES = 16 * 1024
+MAX_RESULT_SELECTION_BYTES = 4 * 1024
 _RUN_ID = r"^r-\d{8}-\d{4}-[0-9a-f]{4,8}$"
 _ATTEMPT_ID = r"^a-\d{8}T\d{12}-[0-9a-f]{8}$"
 
@@ -987,26 +988,28 @@ class LabStore:
         selected = self._selected_result(input_id, algorithm_id, parameters_sha256)
         return (selected[0].name, selected[1], selected[2]) if selected is not None else None
 
-    def selected_order_from_selector(
+    def selection_order_hint(
         self, input_id: str, algorithm_id: str, parameters_sha256: str
     ) -> int | None:
-        """Read an intact selector's order even when its result payload is damaged.
-
-        An unsafe, invalid, or legacy selector has no trustworthy cross-identity
-        order and must still block fallback to another selected result.
-        """
+        """Read a selector's order without treating its attempt as a valid result."""
 
         try:
-            directory = self.result_dir(input_id, algorithm_id, parameters_sha256)
-            selector = directory / "selected.json"
-            if directory.parent.is_symlink() or directory.is_symlink() or selector.is_symlink():
-                return None
-            data = json.loads(selector.read_bytes())
-            attempt_id = str(data["attempt_id"])
-            if not re.fullmatch(_ATTEMPT_ID, attempt_id):
+            selector = self.result_dir(input_id, algorithm_id, parameters_sha256) / "selected.json"
+            descriptor = open_regular_no_follow(selector)
+            with os.fdopen(descriptor, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                        or info.st_size > MAX_RESULT_SELECTION_BYTES):
+                    return None
+                raw = stream.read(MAX_RESULT_SELECTION_BYTES + 1)
+                if len(raw) > MAX_RESULT_SELECTION_BYTES:
+                    return None
+                data = json.loads(raw)
+            if (not isinstance(data, dict) or not isinstance(data.get("attempt_id"), str)
+                    or not re.fullmatch(_ATTEMPT_ID, data["attempt_id"])):
                 return None
             return self._publication_order(data)
-        except (OSError, ValueError, KeyError, TypeError, RecursionError):
+        except (OSError, ValueError, TypeError, RecursionError):
             return None
 
     def read_result(
