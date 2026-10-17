@@ -209,8 +209,9 @@ def _stored_platform(aligned: AlignedInput) -> str:
         ) from exc
     if platform == "unknown":
         raise LabProblem(
-            "TBX-LAB-024", cause="prealigned BAM has no unanimous supported platform declaration",
-            fix="Use a BAM whose read groups all declare PL:ONT or PL:ILLUMINA",
+            "TBX-LAB-024", cause=f"stored input {aligned.input_id[:12]} has no verifiable platform declaration",
+            fix="Verify instrument provenance and re-ingest a BAM with PL:ONT or PL:ILLUMINA under a fresh ROOT",
+            data={"input_id": aligned.input_id},
         )
     return platform
 

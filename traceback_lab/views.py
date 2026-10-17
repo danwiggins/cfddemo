@@ -203,6 +203,10 @@ def cell_state(
 ) -> dict[str, Any]:
     envelope = view.results.get(algorithm_id)
     if envelope is None:
+        if view is not full:
+            parent = full.results.get(algorithm_id)
+            if parent is not None and parent.status == "skipped" and parent.skip_reason == "platform":
+                return {"state": "skipped", "reason": "platform"}
         return {"state": None}
     if envelope.status == "failed":
         return {"state": "failed", "reason": envelope.failure.first_line if envelope.failure else None}
