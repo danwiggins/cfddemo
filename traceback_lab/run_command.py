@@ -32,6 +32,7 @@ from .ingest import (
     require_budget,
     resolve_reference,
     resolve_sample,
+    record_source_sex,
     source_record,
     write_source,
     aligner_argv_identity,
@@ -40,9 +41,12 @@ from .ingest import (
     EXAMPLE_REFERENCE_ID,
 )
 from .identity import aligned_input_id, prealigned_input_id
-from .problems import EXIT_OK, EXIT_PARTIAL, EXIT_USAGE, LabProblem, docs_anchor
+from .problems import (
+    EXIT_OK, EXIT_PARTIAL, EXIT_USAGE, LabProblem, problem_lines, problem_payload,
+)
 from .runner import DEFAULT_TIMEOUT_S, RunTarget, StepResult, run_plan
 from .scrub import Scrubber
+from .sample_metadata import with_sex_assertion
 from .store import LabStore, new_run_id
 from .tools import find_minimap2, find_samtools, require_aligner_tools
 
@@ -71,6 +75,7 @@ def add_run_parser(commands: Any, common: Callable[[argparse.ArgumentParser], No
     run.add_argument("--no-controls", dest="controls", action="store_false", help="skip the CNA spike and split halves")
     run.add_argument("--tf", default="0.03,0.10,0.30", metavar="TF,TF", help="synthetic CNA spike tumour fractions")
     run.add_argument("--skip-bad-chunks", action="store_true", help="exclude truncated chunks (provisional)")
+    run.add_argument("--sex", choices=("M", "F"), help="operator-declared sample sex for a read-time pre-analytic check")
     run.add_argument("--force", action="store_true", help="recompute every result")
     run.add_argument("--timeout-s", type=float, default=DEFAULT_TIMEOUT_S, metavar="S")
     run.add_argument("--threads", type=_threads, metavar="N", help="alignment threads (default min(8, cores-2))")
@@ -161,6 +166,7 @@ def _flags(args: argparse.Namespace) -> dict[str, Any]:
         "sort_mem": args.sort_mem,
         "mmi_override": args.mmi is not None,
         "reference_id": args.reference_id,
+        "declared_sex": args.sex,
         "stored_sample": len(args.inputs) == 1 and _is_stored(args.inputs[0]),
     }
 
@@ -221,6 +227,33 @@ def _aligner_change(store: LabStore, source_id: str, tools: dict[str, str | None
     return {"old": last.get("tools"), "new": tools}
 
 
+def _aligner_warning(change: dict[str, Any], low: float, high: float) -> dict[str, Any]:
+    old = change["old"] if isinstance(change["old"], dict) else {}
+    new = change["new"] if isinstance(change["new"], dict) else {}
+    versions = ", ".join(
+        f"{tool} {old.get(tool) or 'unknown'} -> {new.get(tool) or 'unknown'}"
+        for tool in sorted(set(old) | set(new))
+    )
+    problem = LabProblem(
+        "TBX-LAB-019",
+        cause=(
+            f"aligner versions changed: {versions}; "
+            f"estimated realignment {low:.0f}-{high:.0f} min"
+        ),
+        fix=(
+            "No action is required for this run. Use --dry-run before future runs "
+            "and pin aligner versions to keep cohorts comparable."
+        ),
+    )
+    return {
+        "summary": problem.summary,
+        **problem_payload("lab run", problem)["data"],
+        "old": change["old"],
+        "new": change["new"],
+        "estimate_min": [round(low, 1), round(high, 1)],
+    }
+
+
 def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str], None]) -> tuple[int, dict[str, Any]]:
     store.check_version()
     entries = registry.registry_entries()
@@ -233,6 +266,7 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
     lines = [f"ROOT      {store.root}"]
     if len(args.inputs) == 1 and _is_stored(args.inputs[0]):
         source_id = resolve_sample(store, args.inputs[0])
+        with_sex_assertion(source_record(store, source_id) or {}, args.sex)
         aligned, _ = _stored_input(store, source_id)
         data["sample"] = {"id12": id12_for(store, source_id), "input_id": aligned.input_id}
         data["alignment"] = "reused (stored sample)"
@@ -241,6 +275,7 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
     else:
         paths = collect_paths(args.inputs)
         chunkset = inspect_chunks(paths, store, skip_bad_chunks=args.skip_bad_chunks, write_cache=False)
+        with_sex_assertion(source_record(store, chunkset.source_id) or {}, args.sex)
         reference = resolve_reference(store.root, args.reference_id)
         data["reference_id"] = reference.reference_id
         data["chunks"] = {"count": len(chunkset.chunks), "bytes": chunkset.total_bytes, "excluded": chunkset.excluded_indexes}
@@ -349,6 +384,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                 if stored:
                     source_id = resolve_sample(store, args.inputs[0])
                     aligned, record = _stored_input(store, source_id)
+                    record = record_source_sex(store, source_id, args.sex)
                     example = bool(record.get("example"))
                     reference_id = aligned.manifest["reference_id"]
                     reference_sha256 = aligned.manifest["reference_sha256"]
@@ -366,6 +402,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     chunkset = inspect_chunks(
                         paths, store, skip_bad_chunks=args.skip_bad_chunks, progress=progress
                     )
+                    with_sex_assertion(source_record(store, chunkset.source_id) or {}, args.sex)
                     reference = resolve_reference(store.root, args.reference_id, example=args.example)
                     reference_id, reference_sha256 = reference.reference_id, reference.sha256
                     example = bool(args.example)
@@ -430,14 +467,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                         )
                         if change is not None and not reusable:
                             low, high = estimate_align_minutes(chunkset.total_bytes)
-                            warning = {
-                                "code": "TBX-LAB-019",
-                                "old": change["old"],
-                                "new": change["new"],
-                                "estimate_min": [round(low, 1), round(high, 1)],
-                                "docs": docs_anchor("TBX-LAB-019"),
-                            }
-                            warnings.append(warning)
+                            warnings.append(_aligner_warning(change, low, high))
                             progress(
                                 f"WARN TBX-LAB-019 aligner identity changed {change['old']} -> {change['new']}; "
                                 f"realigning (~{low:.0f}-{high:.0f} min)"
@@ -457,7 +487,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                             echo=_echo(args.verbose),
                             progress=progress,
                         )
-                    write_source(store, chunkset, aligned, example=example)
+                    write_source(store, chunkset, aligned, example=example, declared_sex=args.sex)
                     align_info = aligned.manifest.get("align", {})
                     log.append(
                         "step_end",
@@ -730,6 +760,22 @@ def _summary(
     for result in failed:
         lines.append(f"FAILED  {result.algorithm_id}: {result.first_line}")
         lines.append(f"        details: traceback lab runs {run_id} --step {result.algorithm_id}")
+    for warning in warnings:
+        lines.append(f"WARN    {warning['summary']}")
+        lines.extend(problem_lines(LabProblem(
+            warning["code"], cause=warning["cause"], fix=warning["fix"],
+        )))
+    partial_problem = None
+    if failed:
+        partial_problem = LabProblem(
+            "TBX-LAB-016",
+            cause=f"{len(failed)} algorithm(s) failed: " + ", ".join(r.algorithm_id for r in failed),
+            fix=(
+                f"`traceback lab runs {run_id} --step {failed[0].algorithm_id}`; "
+                "rerun recomputes only failed results"
+            ),
+        )
+        lines.extend(problem_lines(partial_problem))
     for remedy in remedies:
         lines.append(
             f"SKIP    {remedy['algorithm_id']} skipped ({remedy['reason']}): "
@@ -738,17 +784,9 @@ def _summary(
     for argv in next_argv:
         lines.append(f"NEXT    {' '.join(argv)}")
     summary = f"run {run_id}: {ok} ok, {sum(skipped.values())} skipped, {len(failed)} failed"
-    if failed:
+    if partial_problem is not None:
+        data.update(problem_payload("lab run", partial_problem)["data"])
         payload = _local_envelope(_result("lab run", "partial_failure", summary, data=data))
-        payload["data"].update(
-            {
-                "code": "TBX-LAB-016",
-                "cause": f"{len(failed)} algorithm(s) failed: " + ", ".join(r.algorithm_id for r in failed),
-                "fix": f"`traceback lab runs {run_id} --step ALG`; rerun recomputes only failed results",
-                "retryable": False,
-                "docs": docs_anchor("TBX-LAB-016"),
-            }
-        )
         return EXIT_PARTIAL, _bare(_with_human(payload, lines, replace_data=True))
     payload = _local_envelope(_result("lab run", "ok", summary, data=data))
     return EXIT_OK, _bare(_with_human(payload, lines, replace_data=True))
