@@ -13,8 +13,8 @@ from tests.lab.test_landing import needs_chrome
 from tests.web.longitudinal_env import _contrast
 
 ROOT = Path(__file__).resolve().parents[2]
-BASE = (ROOT / "traceback_runner/web/static/styles.css").read_text()
-LAB = (ROOT / "traceback_lab/web/static/lab.css").read_text()
+BASE = (ROOT / "traceback_runner/web/static/styles.css").read_text(encoding="utf-8")
+LAB = (ROOT / "traceback_lab/web/static/lab.css").read_text(encoding="utf-8")
 
 
 def _token(name: str, css: str = BASE) -> str:

@@ -74,6 +74,13 @@ def test_all_routes_have_no_page_overflow_and_44px_targets(size, tmp_path) -> No
                 failures.push(`${route}: CSP violations ${document.body.dataset.cspViolations} (${document.body.dataset.cspLast || 'unknown'})`);
               if (document.documentElement.scrollWidth > document.documentElement.clientWidth + 1)
                 failures.push(`${route}: page scroll ${document.documentElement.scrollWidth}/${document.documentElement.clientWidth}`);
+              for (const table of document.querySelectorAll('#main table')) {
+                const header = [...table.querySelectorAll('thead th')].map((cell) => cell.textContent.trim()).join('|');
+                if (header !== 'Algorithm|Status|Duration|Run log|Detail') continue;
+                for (const row of table.querySelectorAll('tbody tr'))
+                  if (row.cells.length !== 5)
+                    failures.push(`${route}: Run row has ${row.cells.length} cells under 5 headers`);
+              }
               for (const el of document.querySelectorAll('a[href], button, select, summary, input')) {
                 if (!visible(el)) continue;
                 const rect = el.getBoundingClientRect();
