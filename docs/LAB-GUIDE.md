@@ -201,8 +201,8 @@ traceback lab run YOUR_LOCAL_aligned_illumina.bam \
 Every BAM read group must declare `PL:ILLUMINA`. This declaration is recorded
 in the input manifest and run summary; it describes the BAM header, not
 instrument attestation. A prealigned BAM with missing, mixed, or unrecognized
-platform declarations is reported as unknown and platform-specific algorithms
-skip. Unaligned input must unanimously declare `PL:ONT` to use the Lab's
+platform declarations is refused with TBX-LAB-024. Unaligned input must
+unanimously declare `PL:ONT` to use the Lab's
 `map-ont` alignment path. For short reads, align externally and supply a
 prealigned BAM. Each qualifying proper first mate counts one
 template: it must pass the common primary, mapped, nonduplicate, QC-pass,
@@ -469,9 +469,12 @@ from a known-good local backup before rerunning; no measured result is changed.
 
 ### TBX-LAB-024
 
-An unaligned input does not unanimously declare `@RG PL:ONT` (exit 3). The
-Lab's alignment path uses the ONT preset. Use an ONT input with declared read
-groups, or align short reads externally and rerun with the prealigned BAM.
+An input has missing, mixed, or unrecognized platform declarations, an
+unaligned Illumina input would need the ONT-only aligner, or a stored input's
+platform disagrees with its BAM header (exit 3). Use a BAM whose read groups
+unanimously declare `PL:ONT` or `PL:ILLUMINA`; align Illumina reads externally
+before supplying the BAM. Inspect a mismatched stored input and rerun from its
+original BAM.
 
 ## Adding an algorithm
 
