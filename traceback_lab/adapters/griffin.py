@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import csv
 import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -69,8 +70,13 @@ def read_corrected_profiles(path: Path, *, expected_sample: str | None = None) -
         fields = reader.fieldnames
         if fields is None or len(fields) != len(set(fields)) or not _FIELDS.issubset(fields):
             raise GriffinFormatError("missing or duplicate Griffin output columns")
+        if any(field.lstrip("+-").isdigit() and not re.fullmatch(r"[+-]?[0-9]+", field) for field in fields):
+            raise GriffinFormatError("coverage coordinates must use canonical ASCII integers")
+        if any(re.fullmatch(r"[+-]?[0-9]+", field) and not re.fullmatch(r"(?:0|-[1-9][0-9]*|[1-9][0-9]*)", field)
+               for field in fields):
+            raise GriffinFormatError("coverage coordinates must use canonical integer spelling")
         try:
-            offsets = tuple(int(field) for field in fields if field.lstrip("-").isdigit())
+            offsets = tuple(int(field) for field in fields if re.fullmatch(r"(?:0|-[1-9][0-9]*|[1-9][0-9]*)", field))
         except ValueError as exc:
             raise GriffinFormatError("invalid coverage coordinate") from exc
         if len(offsets) < 3 or sorted(offsets) != list(offsets):
@@ -80,6 +86,7 @@ def read_corrected_profiles(path: Path, *, expected_sample: str | None = None) -
             raise GriffinFormatError("coverage coordinates must form a regular grid")
         profiles: list[GriffinProfile] = []
         names: set[str] = set()
+        file_sample: str | None = None
         for row in reader:
             if None in row or any(value is None for value in row.values()):
                 raise GriffinFormatError("ragged Griffin output row")
@@ -89,6 +96,10 @@ def read_corrected_profiles(path: Path, *, expected_sample: str | None = None) -
             site_name = row["site_name"].strip()
             if not sample or not site_name or (expected_sample is not None and sample != expected_sample):
                 raise GriffinFormatError("sample or site-list name does not match")
+            if file_sample is None:
+                file_sample = sample
+            elif sample != file_sample:
+                raise GriffinFormatError("mixed sample identities in Griffin output")
             if site_name in names:
                 raise GriffinFormatError("duplicate site-list name")
             names.add(site_name)

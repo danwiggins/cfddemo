@@ -23,24 +23,38 @@ reads with positive template length in both GC counting and coverage. The
 adapter requires every BAM read group to declare `PL:ILLUMINA` and scans the
 full BAM for paired and usable records before creating an attempt. It does
 not infer library type from an early coordinate-sorted slice. Native ONT
-single-end BAMs are rejected. A scientifically reviewed ONT fragment
+single-end BAMs are rejected. It compares the BAM's `@SQ` names and lengths
+and the workflow chromosome sizes with the registered FASTA index; this checks
+coordinate-space compatibility, not exact sequence identity. A scientifically reviewed ONT fragment
 adapter remains necessary for the Lab's primary input. The caller supplies
 the registered hg38 FASTA and its SHA-256, Griffin's
 reference assets (including mappability BigWig, exclusion BEDs and all
 15–500 bp genome GC-frequency tables), and high-mappability TF-site lists.
 It requires the 5M D21 gate, a clean upstream checkout at the pinned commit,
-and a fresh per-input attempt directory. The attempt stores hashes for BAM,
-reference, site lists and reference assets, and only marks its manifest
-complete after Griffin returns a valid corrected TSV. Partial outputs remain
+and a fresh per-input attempt directory. The adapter's `eligible_autosomal_pairs`
+input is a count of eligible autosomal **pairs**. The adapter independently
+recounts first mates of proper, primary, nonduplicate autosomal pairs at
+MAPQ ≥ 20 and refuses a mismatch before creating an attempt. The attempt
+records the verified count, sample ID, gate, and hashes for
+BAM, BAM index, reference, reference index, site lists and reference assets.
+It copies the pinned scripts and two Snakefiles into the attempt without
+cached outputs or Python bytecode, records their digests and the upstream
+default-config digests, disables bytecode writes during execution, and hashes
+all five generated workflow YAML files. It requires Snakemake 5.19.2 and records
+the adapter's Python, pysam and PyYAML versions and core count. The generated config keeps the pinned
+upstream default `mappability_correction: false`, so the accepted output is
+GC-corrected only. The attempt only marks its manifest complete after Griffin returns
+a valid corrected TSV with exactly the requested site-list names. Partial outputs remain
 inspectable after failure. Griffin's upstream shell rules interpolate paths
 without quoting, so the adapter refuses paths containing shell-special
 characters. The runner is POSIX-only, matching upstream's environment.
 
 The current Lab does **not** register or display Griffin as an available
-algorithm. The adapter is an invocation boundary, and an end-to-end run has
-not been completed: this environment lacks the upstream Snakemake and
-pyBigWig dependencies and the required mappability BigWig. Native ONT input
-is incompatible with the exact upstream code. There is no
+algorithm. The adapter is an invocation boundary. A toy paired-end run through
+both pinned upstream Snakemake workflows completed on a 30 kb synthetic
+reference; this checks orchestration, not the biological signal or production
+resource needs. No real-sample end-to-end run has been completed. Native ONT
+input is incompatible with the exact upstream code. There is no
 registered TF-site set yet. Before publication, the Lab must bind the
 per-input attempt manifest, verified corrected TSV, asset digests and
 upstream commit to its execution identity and result cache. Runner identity
