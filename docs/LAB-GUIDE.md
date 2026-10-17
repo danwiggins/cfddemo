@@ -348,6 +348,7 @@ idempotent; rerunning an analysis does not create a new member.
 
 ```bash
 traceback lab cohort add ID12 --cohort healthy --root R
+traceback lab cohort remove ID12 --cohort healthy --root R
 traceback lab cohort build --cohort healthy --root R
 traceback lab serve --root R --open
 ```
@@ -355,7 +356,11 @@ traceback lab serve --root R --open
 `build` publishes an immutable generation and changes the current pointer
 atomically. Open **Compare** and choose that cohort; the page names the exact
 generation used for the whole response. Build again after a member or its
-results change. Different aligners or incompatible algorithm parameters are
+results change. `cohort remove` removes one member from the pending roster by
+ID12 or full source ID, even if its stored source record is damaged. It does
+not delete that sample's input or results, or change the published generation;
+run `cohort build` to publish the revised membership. Different aligners or
+incompatible algorithm parameters are
 excluded per metric, with counts shown. Pre-aligned inputs whose processing
 provenance is unknown are isolated by their input identity; they are not
 pooled as protocol-matched references. Distinct source IDs are not proof of
@@ -482,7 +487,7 @@ The volume filled up during a step (exit 3, retryable). The staging directory wa
 ### TBX-LAB-012
 
 Another Lab writer is running (exit 3, retryable). Only one writer (`lab run`,
-`lab simulate`, `lab cohort add`, `lab cohort build`) may hold `ROOT/lab/.lock`
+`lab simulate`, `lab cohort add`, `lab cohort remove`, `lab cohort build`) may hold `ROOT/lab/.lock`
 at a time. The cause names the holder's command, run id, pid, step and start
 time. Wait for it (`traceback lab runs`), or stop that process.
 
@@ -505,8 +510,10 @@ The run completed and one or more algorithms failed (exit 8). The summary's `FAI
 ### TBX-LAB-017
 
 A run id, sample `id12` or `latest` was not found, or a prefix is ambiguous
-(exit 4). `traceback lab runs` lists runs. Pass the same `--root` (or
-`TRACEBACK_ROOT`) you ran with.
+(exit 4). For `cohort remove`, use a unique member ID12 or full source ID from
+the pending roster; damaged source records do not prevent removal.
+`traceback lab runs` lists runs. Pass the same `--root` (or `TRACEBACK_ROOT`)
+you ran with.
 
 ### TBX-LAB-018
 
@@ -560,8 +567,9 @@ unanimously declare `PL:ONT` or `PL:ILLUMINA`; align Illumina reads externally
 before supplying the BAM. For a damaged or mismatched stored input, restore
 that input from a known-good backup or re-ingest the original BAM under a fresh
 ROOT. Reusing the same ROOT does not replace an existing input manifest.
-Rewriting a BAM header changes its source identity; remove an unrecoverable
-member from its cohort before rebuilding that cohort.
+Rewriting a BAM header changes its source identity. Use
+`traceback lab cohort remove ID12 --cohort ID --root R` for an unrecoverable member, then rebuild
+that cohort; the old published generation stays selected until the rebuild.
 
 ## Adding an algorithm
 

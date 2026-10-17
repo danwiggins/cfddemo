@@ -7,7 +7,7 @@ import pytest
 import pysam
 
 from traceback_lab import cohorts
-from traceback_lab.cohorts import add_sample, build_cohort, project_current_metric, project_sample_metric, read_current, read_roster
+from traceback_lab.cohorts import add_sample, build_cohort, project_current_metric, project_sample_metric, read_current, read_roster, remove_sample
 from traceback_lab.envelope import Metric, ResultEnvelope, provenance
 from traceback_lab.identity import parameters_sha256
 from traceback_lab.ingest import resolve_sample
@@ -110,6 +110,53 @@ def test_cohort_cli_reports_distinct_aligner_versions(store: LabStore, capsys) -
         "minimap2 2.28; samtools 1.20": 1,
         "minimap2 2.99-r9999; samtools 1.20": 1,
     }
+
+
+def test_remove_unrecoverable_member_preserves_published_generation_until_rebuild(
+    store: LabStore, capsys,
+) -> None:
+    first = _sample(store, 1)
+    damaged = _sample(store, 2)
+    add_sample(store, "healthy", first)
+    add_sample(store, "healthy", damaged)
+    published = build_cohort(store, "healthy")
+    (store.sources_dir / f"{damaged}.json").unlink()
+    with pytest.raises(LabProblem):
+        build_cohort(store, "healthy")
+    assert read_current(store, "healthy") == published
+
+    code = signed_cli.main([
+        "lab", "cohort", "remove", damaged, "--cohort", "healthy",
+        "--root", str(store.root), "--json",
+    ])
+    assert code == 0
+    assert json.loads(capsys.readouterr().out)["data"]["source_id"] == damaged
+    assert read_roster(store, "healthy") == (first,)
+    assert read_current(store, "healthy") == published
+    assert (store.inputs_dir / _sha(102) / "aligned.bam").is_file()
+    assert (store.results_dir / _sha(102)).is_dir()
+
+    rebuilt = build_cohort(store, "healthy")
+    assert rebuilt.version_id == "healthy:2"
+    assert tuple(member.source_id for member in rebuilt.members) == (first,)
+    assert read_current(store, "healthy") == rebuilt
+
+
+def test_remove_requires_unique_roster_member_without_mutation(store: LabStore) -> None:
+    first = _sample(store, 1)
+    second = _sample(store, 2)
+    add_sample(store, "healthy", first)
+    add_sample(store, "healthy", second)
+    before = read_roster(store, "healthy")
+    with pytest.raises(LabProblem) as ambiguous:
+        remove_sample(store, "healthy", first[:12])
+    assert ambiguous.value.code == "TBX-LAB-017"
+    assert "matches several" in ambiguous.value.cause
+    with pytest.raises(LabProblem) as missing:
+        remove_sample(store, "healthy", "f" * 12)
+    assert missing.value.code == "TBX-LAB-017"
+    assert "not in this cohort" in missing.value.cause
+    assert read_roster(store, "healthy") == before
 
 
 def test_example_is_rejected_before_roster_write(store: LabStore) -> None:
@@ -221,7 +268,7 @@ def test_symlinked_cohort_directory_is_refused(store: LabStore, tmp_path) -> Non
         read_current(store, "healthy")
 
 
-def test_parser_hook_exposes_add_and_build_without_cli_edit() -> None:
+def test_parser_hook_exposes_add_remove_and_build_without_cli_edit() -> None:
     import argparse
     from traceback_lab.cohort_command import add_cohort_parser
 
@@ -229,8 +276,10 @@ def test_parser_hook_exposes_add_and_build_without_cli_edit() -> None:
     commands = parser.add_subparsers(dest="command", required=True)
     add_cohort_parser(commands, lambda child: None)
     add = parser.parse_args(["cohort", "add", "abc", "--cohort", "healthy"])
+    remove = parser.parse_args(["cohort", "remove", "abc", "--cohort", "healthy"])
     build = parser.parse_args(["cohort", "build", "--cohort", "healthy"])
     assert add.cohort_action == "add" and callable(add.handler)
+    assert remove.cohort_action == "remove" and callable(remove.handler)
     assert build.cohort_action == "build" and callable(build.handler)
     with pytest.raises(SystemExit):
         parser.parse_args(["cohort", "build", "--cohort", "../escape"])

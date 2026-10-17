@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from .pon import PonInput
 
 _COHORT_ID = re.compile(r"^[a-z][a-z0-9-]{0,39}$")
+_SOURCE_REF = re.compile(r"^[0-9a-f]{12,64}$")
 _ROSTER_SCHEMA = "traceback.lab.cohort-roster.v1"
 _VERSION_NAME = re.compile(r"^[1-9][0-9]*$")
 
@@ -222,6 +223,44 @@ def add_sample(store: LabStore, cohort_id: str, sample_ref: str) -> bool:
         }))
         store.bump_generation()
         return True
+
+
+def remove_sample(store: LabStore, cohort_id: str, source_ref: str) -> str:
+    """Remove one pending member without changing any published generation or sample data.
+
+    Resolve the ID against the roster itself: an unrecoverable source record must
+    not prevent the operator from removing that member before rebuilding.
+    """
+
+    if not _SOURCE_REF.fullmatch(source_ref):
+        raise LabProblem(
+            "TBX-LAB-017", cause="cohort removal needs a lowercase source ID or ID12",
+            fix="Use the member's printed ID12 or full source ID",
+            data={"cohort_id": cohort_id, "field": "source ID"},
+        )
+    with store.writer("cohort remove", new_run_id()):
+        directory = _cohort_dir(store, cohort_id)
+        roster_path = directory / "members.json"
+        if not roster_path.is_file() or roster_path.is_symlink():
+            raise _storage_problem(cohort_id, "members.json")
+        if (directory / "current.json").exists() or (directory / "current.json").is_symlink():
+            read_current(store, cohort_id)
+        roster = read_roster(store, cohort_id)
+        matches = [source_id for source_id in roster if source_id.startswith(source_ref)]
+        if len(matches) != 1:
+            cause = ("source prefix matches several cohort members" if matches
+                     else "source is not in this cohort's pending roster")
+            raise LabProblem(
+                "TBX-LAB-017", cause=cause,
+                fix="Use one member's unique ID12 or full source ID from the roster",
+                data={"cohort_id": cohort_id, "field": "source ID"},
+            )
+        source_id = matches[0]
+        write_atomic(roster_path, canonical_json_bytes({
+            "schema": _ROSTER_SCHEMA, "source_ids": [item for item in roster if item != source_id],
+        }))
+        store.bump_generation()
+        return source_id
 
 
 def _invalid_input(input_id: str, field: str) -> LabProblem:
@@ -624,5 +663,5 @@ def project_sample_metric(
 
 __all__ = [
     "CohortListing", "add_sample", "build_cohort", "list_cohorts", "member_for_generation", "member_from_store", "pon_inputs_for_members",
-    "project_current_metric", "project_sample_metric", "read_current", "read_roster",
+    "project_current_metric", "project_sample_metric", "read_current", "read_roster", "remove_sample",
 ]
