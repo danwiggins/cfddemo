@@ -218,11 +218,13 @@ def test_cohort_reads_recorded_effective_identity_without_runtime_probe(
     add_sample(store, "healthy", source_id)
     generation = build_cohort(store, "healthy")
     assert [result.parameters_sha256 for result in generation.members[0].results] == [identity]
-    if name == "methylbert":
-        attempt = store.selected_attempt(input_id, name, identity)
-        assert attempt is not None
-        (attempt / "execution_plan.json").write_bytes(b"[" * 1500 + b"0" + b"]" * 1500)
-        assert build_cohort(store, "healthy").members[0].results == ()
+    attempt = store.selected_attempt(input_id, name, identity)
+    assert attempt is not None
+    plan_path = attempt / "execution_plan.json"
+    plan_path.write_text(json.dumps({**plan, "platform": "illumina"}))
+    assert build_cohort(store, "healthy").members[0].results == ()
+    plan_path.write_bytes(b"[" * 1500 + b"0" + b"]" * 1500)
+    assert build_cohort(store, "healthy").members[0].results == ()
 
 
 def test_cohort_omits_dependent_after_same_identity_upstream_reselection(
