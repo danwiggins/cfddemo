@@ -368,7 +368,10 @@ def run_plan(
                                 or not all(isinstance(value, str) for value in skip_data.values())
                                 or artifacts):
                             raise ValueError("skipped worker output must contain only a reason and no artifacts")
-                        run_skip = Skip(skip_data["reason_code"], skip_data["message"])
+                        run_skip = Skip(
+                            skip_data["reason_code"],
+                            scrubber.line(skip_data["message"].replace("\r", " ").replace("\n", " ")),
+                        )
                         envelope = _envelope(
                             algorithm, target, identity, status="skipped", skip=run_skip,
                             duration_s=outcome.duration_s,

@@ -280,7 +280,7 @@ def test_low_marker_support_publishes_a_skip_without_a_composition(
     )
     monkeypatch.setattr(co.CELL_ORIGIN, "preflight", lambda _ctx: Ready())
     monkeypatch.setattr(co.CELL_ORIGIN, "run", lambda _ctx, _out: Skip(
-        "low_support", "cell-origin classified fragment and marker floors are not met",
+        "low_support", f"cell-origin classified fragment and marker floors are not met at {tmp_path}/donor.tsv",
     ))
     monkeypatch.setattr(lab_worker, "load_entry", lambda _entry: co.CELL_ORIGIN)
     monkeypatch.setattr(lab_worker.signal, "signal", lambda *_args: None)
@@ -320,6 +320,8 @@ def test_low_marker_support_publishes_a_skip_without_a_composition(
         return
     assert result.status == "skipped" and result.skip_reason == "low_support"
     assert "skipped (low_support):" in progress[-1]
+    assert str(tmp_path) not in result.skip_message
+    assert "<ROOT>/donor.tsv" in result.skip_message
     assert result.parameters_sha256 == expected_hash
     assert result.attempt_id is not None
     envelope = store.read_result(input_id, "cell-origin", expected_hash)
