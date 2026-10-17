@@ -1016,7 +1016,7 @@ def test_recent_run_candidates_are_bounded_and_do_not_use_unbounded_run_ids(tmp_
 
 
 @pytest.mark.skipif(_chrome() is None, reason="no Chrome/Chromium for the headless Trust/QC check")
-@pytest.mark.parametrize("kind", ("active", "active-pending", "active-before-sample", "interrupted",
+@pytest.mark.parametrize("kind", ("active", "active-pending", "active-derived", "active-before-sample", "interrupted",
                                   "active-unlogged-prior-badlog", "active-unlogged-prior-interrupted"))
 @pytest.mark.parametrize("selected", ("a", "c"))
 def test_trust_qc_run_note_is_scoped_without_replacing_result_status(tmp_path, kind, selected) -> None:
@@ -1041,6 +1041,8 @@ def test_trust_qc_run_note_is_scoped_without_replacing_result_status(tmp_path, k
               "source_id": source_a, "input_id": input_a}
     if kind == "active-pending":
         marker["step"] = "read-summary"
+    if kind == "active-derived":
+        marker["step"] = "bam-qc@split-A"
     shown_marker = {key: value for key, value in marker.items()
                     if kind not in ("active-before-sample", "active-unlogged-prior-badlog",
                                     "active-unlogged-prior-interrupted") or key not in ("source_id", "input_id")}
@@ -1075,6 +1077,9 @@ def test_trust_qc_run_note_is_scoped_without_replacing_result_status(tmp_path, k
     assert re.search(r'<th scope="row">bam-qc</th><td[^>]*>ok(?:\s|<)', run_table)
     if kind == "active-pending":
         assert ("Latest run in progress during read-summary; no result was published for this step." in dom) == (selected == "a")
+    if kind == "active-derived":
+        assert "step: bam-qc@split-A" in dom
+        assert "no result was published for this step" not in run_table
     note = "latest run " + ("interrupted" if kind == "interrupted" else "in progress")
     assert (note in run_table) == (selected == "a" and kind in ("active", "interrupted"))
     if kind == "active-before-sample":

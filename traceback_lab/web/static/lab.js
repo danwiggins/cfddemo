@@ -134,9 +134,9 @@
     if (action) {
       if (!reload) {
         reload = h("button", { type: "button", class: "control reload", onclick: () => location.reload() }, action);
-        status.append(" ", reload);
+        status.append(h("span", { "data-reload-action": "" }, " ", reload));
       } else reload.textContent = action;
-    } else if (reload) reload.remove();
+    } else if (reload) reload.closest("[data-reload-action]").remove();
   }
 
   function renderSwitcher() {
@@ -319,7 +319,7 @@
     const interruptedLabel = active && interrupted && active.run_id !== interrupted.run_id
       ? "earlier run interrupted" : "latest run interrupted";
     const unavailable = new Set([...(sample.unreadable_results || []), ...(sample.ambiguous_results || [])]);
-    const pending = [active, interrupted].find((run) => run && run.step && run.source_id === sample.source_id &&
+    const pending = [active, interrupted].find((run) => run && run.step && !run.step.includes("@") && run.source_id === sample.source_id &&
       run.input_id === sample.full_input_id && !unavailable.has(run.step) &&
       !sample.algorithms.some((a) => a.algorithm_id === run.step));
     const runRows = sample.algorithms.map((a) => {
@@ -486,7 +486,7 @@
         ? `${base} (selected result)` : base;
     }
     const unavailable = new Set([...(sample.unreadable_results || []), ...(sample.ambiguous_results || [])]);
-    const pending = [active, interrupted].find((run) => run && run.step && run.source_id === sample.source_id &&
+    const pending = [active, interrupted].find((run) => run && run.step && !run.step.includes("@") && run.source_id === sample.source_id &&
       run.input_id === sample.full_input_id && !unavailable.has(run.step) &&
       !sample.algorithms.some((algorithm) => algorithm.algorithm_id === run.step));
     const pendingLine = document.querySelector("#main [data-run-pending]");
