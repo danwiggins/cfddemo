@@ -52,10 +52,34 @@ def test_route_license_references_resolve_to_one_full_callout(route, route_page_
     id12 = _id12(route_page_root)
     path = None if route == "home" else f"/sample/{id12}/{route}"
     with RunningLabServer(LabStore(route_page_root)) as server:
-        dom = _dom(server, tmp_path / route, route=path)
+        kind, source = server.app.assets["/assets/lab.js"]
+        server.app.assets["/assets/lab.js"] = (kind, source + b"""
+          (() => {
+            const timer = setInterval(() => {
+              if (document.body.dataset.ready !== '1') return;
+              const blocks = [...document.querySelectorAll('.license-callout')];
+              const bad = blocks.filter((block) => {
+                const heading = block.querySelector('h3');
+                const body = block.querySelector('p');
+                if (!heading || !body) return true;
+                return [heading, body].some((node) => {
+                  const style = getComputedStyle(node);
+                  return parseFloat(style.fontSize) < 20 || parseInt(style.fontWeight, 10) < 700;
+                });
+              });
+              document.body.dataset.routeLicenseCount = String(blocks.length);
+              document.body.dataset.routeLicenseFailures = bad.map((block) => block.id).join(',');
+              clearInterval(timer);
+            }, 25);
+          })();
+        """)
+        dom = _dom(server, tmp_path / route, route=path,
+                   want=lambda page: 'data-route-license-count' in page)
     callouts = re.findall(r'class="license-callout" id="license-([a-z-]+)"', dom)
     refs = re.findall(r'class="license-pill" aria-describedby="license-([a-z-]+)"', dom)
     assert len(callouts) == len(set(callouts)), route
+    assert f'data-route-license-count="{len(callouts)}"' in dom
+    assert 'data-route-license-failures=""' in dom
     assert set(refs) <= set(callouts), (route, set(refs) - set(callouts))
     if route == "home":
         assert "License callouts" in dom
