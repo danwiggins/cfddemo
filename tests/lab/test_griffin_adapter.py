@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 
 import pytest
 
@@ -200,6 +201,12 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
     assert manifest["eligibility_source"] == "bam_verified"
     assert manifest["snakemake_version"] == "5.19.2"
     assert manifest["runtime"]["packages"]["pysam"]
+    assert (attempt / "bin" / "python").is_symlink()
+    assert (attempt / "bin" / "python").resolve() == Path(sys.executable).resolve()
+    assert manifest["runtime"]["compat_shim"]["sha256"] == hashlib.sha256(
+        (attempt / "compat" / "sitecustomize.py").read_bytes()
+    ).hexdigest()
+    assert manifest["runtime"]["environment"]["PYTHONPATH"].startswith(str(attempt / "compat"))
     for name in ("snakemake", "samtools", "bedtools"):
         assert manifest["runtime"]["executables"][name]["sha256"] == hashlib.sha256(name.encode()).hexdigest()
     assert manifest["runtime"]["packages"]["numpy"]
