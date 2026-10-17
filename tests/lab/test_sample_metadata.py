@@ -127,7 +127,10 @@ def test_first_ingest_records_assertion_without_changing_source_or_input_id(tmp_
     store = LabStore(tmp_path / "root")
     store.ensure()
     source_id, input_id = "a" * 64, "b" * 64
-    chunks = SimpleNamespace(chunks=[], excluded_indexes=[], basecall_model=None)
+    chunks = SimpleNamespace(
+        chunks=[], excluded_indexes=[], basecall_model=None,
+        rg_lines=["@RG\tID:fixture\tPL:ONT"],
+    )
     aligned = SimpleNamespace(
         source_id=source_id, input_id=input_id,
         manifest={"kind": "prealigned", "tools": None, "reference_id": "synth"},
