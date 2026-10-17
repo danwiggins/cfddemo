@@ -12,8 +12,6 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 
-from .problems import LabProblem
-
 MIN_SAMTOOLS = (1, 20)
 MIN_MINIMAP2 = (2, 28)
 _VERSION = re.compile(r"(\d+)\.(\d+)")
@@ -71,6 +69,8 @@ def require_aligner_tools(samtools: Tool | None = None, minimap2: Tool | None = 
             found = tool.version or ("missing" if tool.path is None else "unreadable version")
             problems.append(f"{tool.name} {found} (needs >= {minimum[0]}.{minimum[1]})")
     if problems:
+        from .problems import LabProblem
+
         missing = [tool.name for tool in (samtools, minimap2) if tool.path is None]
         fix = (
             f"brew install {' '.join(missing)}" if missing else "brew upgrade samtools minimap2"
