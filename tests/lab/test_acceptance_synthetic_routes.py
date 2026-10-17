@@ -21,6 +21,7 @@ from traceback_lab.web.server import RunningLabServer
 
 ID12 = "3f9a1c2b7e04"
 LIBRARY = load_library()
+ALGORITHM_VERSIONS = {item.id: item.version for item in load_registry()}
 REGISTRY = [item.id for item in load_registry() if item.id not in LIBRARY.hidden_algorithms]
 LICENSE_IDS = {
     license_id
@@ -31,7 +32,7 @@ LICENSE_IDS = {
 DISCLOSURE_ROUTES = ("home", "findings", "stability", "evidence", "methods")
 CONTEXT_LICENSE_ROUTES = (
     ("signals", {"gpl-copyleft"}),
-    ("body-map", {"loyfer-atlas-terms-unknown", "modkit-ont-public", "yissum-uxm"}),
+    ("body-map", {"loyfer-atlas-terms-unknown", "yissum-uxm"}),
     ("agreement", {"gpl-copyleft"}),
 )
 SAMPLE_ROUTES = (
@@ -103,6 +104,7 @@ def _sample() -> dict:
             })
         algorithms.append({
             "algorithm_id": algorithm_id,
+            "algorithm_version": ALGORITHM_VERSIONS[algorithm_id],
             "hidden": False,
             "status": "ok",
             "skip_reason": None,

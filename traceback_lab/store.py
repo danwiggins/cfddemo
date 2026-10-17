@@ -57,6 +57,8 @@ ARTIFACT_INDEX_SCHEMA = "traceback.lab.artifact-index.v1"
 UPSTREAM_SELECTIONS_SCHEMA = "traceback.lab.upstream-selections.v1"
 MAX_UPSTREAM_SELECTIONS_BYTES = 16 * 1024
 MAX_RESULT_SELECTION_BYTES = 4 * 1024
+
+MAX_EXECUTION_PLAN_BYTES = 64 * 1024
 _RUN_ID = r"^r-\d{8}-\d{4}-[0-9a-f]{4,8}$"
 _ATTEMPT_ID = r"^a-\d{8}T\d{12}-[0-9a-f]{8}$"
 
@@ -661,6 +663,7 @@ class LabStore:
         artifacts_dir: Path | None = None,
         attempt_id: str | None = None,
         upstream_selections: Sequence[Mapping[str, str]] | None = None,
+        execution_plan: Mapping[str, Any] | None = None,
     ) -> str:
         """Publish one immutable attempt, then select it (callers hold the lock).
 
@@ -689,6 +692,9 @@ class LabStore:
             })
             if len(upstream_bytes) > MAX_UPSTREAM_SELECTIONS_BYTES:
                 raise ValueError("upstream selections exceed the readable metadata limit")
+        plan_bytes = canonical_json_bytes(execution_plan) if execution_plan is not None else None
+        if plan_bytes is not None and len(plan_bytes) > MAX_EXECUTION_PLAN_BYTES:
+            raise ValueError("execution plan exceeds the readable metadata limit")
         for relative in files:
             parts = Path(relative).parts
             if Path(relative).is_absolute() or ".." in parts or not parts:
@@ -698,6 +704,8 @@ class LabStore:
             (staging / "result.json").write_bytes(envelope.to_bytes())
             if upstream_bytes is not None:
                 (staging / "upstream_selections.json").write_bytes(upstream_bytes)
+            if plan_bytes is not None:
+                (staging / "execution_plan.json").write_bytes(plan_bytes)
             if artifacts_dir is not None:
                 for path in artifacts_dir.rglob("*"):
                     if path.is_symlink():
@@ -821,6 +829,12 @@ class LabStore:
         attempt = self.selected_attempt(input_id, algorithm_id, parameters_sha256)
         if attempt is None:
             return None
+        return self.upstream_selections_at(attempt)
+
+    @staticmethod
+    def upstream_selections_at(attempt: Path) -> tuple[dict[str, str], ...] | None:
+        """Read consumed upstream attempts from a validated attempt snapshot."""
+
         path = attempt / "upstream_selections.json"
         try:
             descriptor = open_regular_no_follow(path)
@@ -832,7 +846,7 @@ class LabStore:
                 if len(raw) > MAX_UPSTREAM_SELECTIONS_BYTES:
                     return None
                 data = json.loads(raw)
-        except (OSError, ValueError, TypeError):
+        except (OSError, ValueError, TypeError, RecursionError):
             return None
         if not isinstance(data, dict) or data.get("schema") != UPSTREAM_SELECTIONS_SCHEMA:
             return None
@@ -1011,6 +1025,13 @@ class LabStore:
             return self._publication_order(data)
         except (OSError, ValueError, TypeError, RecursionError):
             return None
+
+    def selected_result_snapshot(
+        self, input_id: str, algorithm_id: str, parameters_sha256: str
+    ) -> tuple[Path, ResultEnvelope, int | None] | None:
+        """Return one validated attempt path, envelope and publication order."""
+
+        return self._selected_result(input_id, algorithm_id, parameters_sha256)
 
     def read_result(
         self, input_id: str, algorithm_id: str, parameters_sha256: str

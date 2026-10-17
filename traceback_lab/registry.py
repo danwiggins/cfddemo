@@ -182,7 +182,7 @@ class Algorithm(Protocol):
 
     def preflight(self, ctx: InputContext) -> Ready | Skip: ...
 
-    def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput: ...
+    def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput | Skip: ...
 
 
 def execution_identity(
@@ -193,13 +193,14 @@ def execution_identity(
     upstream: Iterable[Mapping[str, str]] = (),
     platform: str | None = None,
     tool_pins: Iterable[Mapping[str, str]] | None = None,
+    parameters: Mapping[str, Any] | None = None,
 ) -> str:
     """``parameters_sha256`` for one algorithm on one reference (D19)."""
 
     return parameters_sha256(
         algorithm_id=algorithm.id,
         algorithm_version=algorithm.version,
-        parameters=algorithm.parameters,
+        parameters=parameters if parameters is not None else algorithm.parameters,
         tools=list(tool_pins) if tool_pins is not None else [tool.identity() for tool in algorithm.tools],
         reference_sha256=reference_sha256,
         asset_sha256s=asset_sha256s,

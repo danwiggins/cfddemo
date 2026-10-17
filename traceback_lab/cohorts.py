@@ -25,7 +25,9 @@ from .identity import SHA256_PATTERN, cohort_compat_key
 from .ingest import resolve_sample, source_ids
 from .problems import LabProblem
 from .registry import execution_identity, load_registry
-from .store import LabStore, _fsync_dir, new_run_id, open_regular_no_follow, write_atomic
+from .store import (MAX_EXECUTION_PLAN_BYTES, LabStore, _fsync_dir, new_run_id,
+                    open_regular_no_follow, write_atomic)
+from .views import selected_result_snapshots
 
 if TYPE_CHECKING:
     from .pon import PonInput
@@ -341,6 +343,79 @@ def _aligner(manifest: dict[str, Any], input_id: str) -> tuple[str, dict[str, An
     }
 
 
+def _recorded_selection(
+    store: LabStore, input_id: str, algorithm: Any, attempt: Path, latest: Any,
+    manifest: dict[str, Any],
+    upstream: list[dict[str, str]], current_assets: list[str] | None,
+    platform: str,
+) -> tuple[str, Any, dict[str, Any]] | None:
+    """Select a result by its recorded effective identity, without live probes."""
+    identity = latest.provenance.parameters_sha256
+    try:
+        with os.fdopen(open_regular_no_follow(attempt / "execution_plan.json"), "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                    or info.st_size > MAX_EXECUTION_PLAN_BYTES):
+                return None
+            plan = json.loads(stream.read(MAX_EXECUTION_PLAN_BYTES + 1))
+        if (not isinstance(plan, dict)
+                or plan.get("schema") != "traceback.lab.execution-plan.v1"
+                or plan.get("algorithm_id") != algorithm.id
+                or plan.get("algorithm_version") != algorithm.version
+                or plan.get("input_id") != input_id
+                or plan.get("reference_sha256") != manifest["reference_sha256"]
+                or plan.get("platform") != platform
+                or plan.get("upstream") != upstream
+                or not isinstance(plan.get("parameters"), dict)
+                or not isinstance(plan.get("tools"), list)
+                or not isinstance(plan.get("asset_sha256s"), list)):
+            return None
+        if current_assets is not None and plan["asset_sha256s"] != current_assets:
+            return None
+        # Historical producer parameters remain authoritative, but an explicit
+        # panel request must never be replaced by a self-consistent old plan.
+        if algorithm.id == "copy-number" and (
+            plan["parameters"].get("pon_policy") != algorithm.parameters.get("pon_policy")
+            or plan["parameters"].get("pon_sha256") != algorithm.parameters.get("pon_sha256")
+        ):
+            return None
+        recorded_identity = execution_identity(
+            algorithm, reference_sha256=manifest["reference_sha256"],
+            upstream=plan["upstream"], asset_sha256s=plan["asset_sha256s"],
+            platform=platform if platform != "ont" else None,
+            tool_pins=plan["tools"], parameters=plan["parameters"],
+        )
+    except (OSError, ValueError, TypeError, AttributeError, KeyError, RecursionError):
+        return None
+    if recorded_identity != identity:
+        return None
+    return identity, latest, plan
+
+
+def _consumed_attempts_current(
+    store: LabStore, attempt: Path, upstream: list[dict[str, str]],
+    snapshots: dict[str, tuple[Path, Any]], input_id: str,
+) -> bool:
+    recorded = store.upstream_selections_at(attempt)
+    if recorded is None or [
+        {"algorithm_id": row["algorithm_id"], "parameters_sha256": row["parameters_sha256"]}
+        for row in recorded
+    ] != sorted(upstream, key=lambda row: row["algorithm_id"]):
+        return False
+    for row in recorded:
+        if row["input_id"] == input_id:
+            selected = snapshots.get(row["algorithm_id"])
+            if (selected is None or selected[0].name != row["attempt_id"]
+                    or selected[1].provenance.parameters_sha256 != row["parameters_sha256"]):
+                return False
+        else:
+            selected = store.selected_attempt(row["input_id"], row["algorithm_id"],
+                                              row["parameters_sha256"])
+            if selected is None or selected.name != row["attempt_id"]:
+                return False
+    return True
+
+
 def _selected_results(
     store: LabStore, input_id: str, manifest: dict[str, Any], *, pon_selection: Any | None = None,
 ) -> tuple[CohortResult, ...]:
@@ -367,11 +442,19 @@ def _selected_results(
         )
     found: list[CohortResult] = []
     identities: dict[str, str] = {}
+    latest_results = selected_result_snapshots(store, input_id)
     for algorithm in load_registry():
         if algorithm.id == "copy-number" and pon_selection is not None:
             from .pon_consumer import bind_copy_number_algorithm
 
             algorithm = bind_copy_number_algorithm(algorithm, pon_selection)
+        snapshot = latest_results.get(algorithm.id)
+        if snapshot is None or snapshot[1].status != "ok":
+            continue
+        attempt, latest = snapshot
+        supported = getattr(getattr(algorithm, "requires", None), "platforms", frozenset({"ont"}))
+        if platform not in supported:
+            continue
         upstream = [
             {"algorithm_id": name, "parameters_sha256": identities[name]}
             for name in algorithm.upstream if name in identities
@@ -379,18 +462,50 @@ def _selected_results(
         if len(upstream) != len(algorithm.upstream):
             continue
         assets_of = getattr(algorithm, "asset_sha256s", None)
+        identity_assets = getattr(algorithm, "identity_assets", None)
+        identity_tools = getattr(algorithm, "identity_tools", None)
         try:
-            asset_digests = assets_of(store.root) if callable(assets_of) else ()
-            identity = execution_identity(
-                algorithm, reference_sha256=manifest["reference_sha256"], upstream=upstream,
-                asset_sha256s=asset_digests,
-                platform=platform if platform != "ont" else None,
-            )
+            assets = (None if callable(identity_assets) else
+                      list(assets_of(store.root) if callable(assets_of) else ()))
+            stored = _recorded_selection(store, input_id, algorithm, attempt, latest, manifest,
+                                         upstream, assets, platform)
+            if stored is not None:
+                identity, chosen, plan = stored
+                tool_identities = plan["tools"]
+                effective_parameters = plan["parameters"]
+            else:
+                # A present but invalid producer plan must not be reinterpreted
+                # as a legacy result using today's algorithm definition.
+                try:
+                    (attempt / "execution_plan.json").lstat()
+                except FileNotFoundError:
+                    pass
+                else:
+                    continue
+                if (callable(identity_tools) or callable(identity_assets)
+                        or callable(getattr(algorithm, "identity_parameters", None))):
+                    # Dynamic identities need a producer-recorded plan. A
+                    # reader's GPU, packages or PATH cannot reconstruct one.
+                    continue
+                tool_identities = [tool.identity() for tool in algorithm.tools]
+                identity = execution_identity(
+                    algorithm, reference_sha256=manifest["reference_sha256"], upstream=upstream,
+                    asset_sha256s=assets or (),
+                    platform=platform if platform != "ont" else None,
+                    tool_pins=tool_identities,
+                )
+                if identity != latest.provenance.parameters_sha256:
+                    continue
+                chosen = latest
+                effective_parameters = algorithm.parameters
         except (OSError, ValueError, KeyError, LabProblem):
             # An unresolved asset cannot make an old result current-compatible.
             continue
-        chosen = store.read_result(input_id, algorithm.id, identity)
         if chosen is None or chosen.status != "ok":
+            continue
+        if algorithm.upstream and not _consumed_attempts_current(
+            store, attempt, upstream, latest_results, input_id,
+        ):
             continue
         if chosen.algorithm_version != algorithm.version or chosen.provenance.source_id != manifest["source_id"]:
             continue
@@ -400,18 +515,19 @@ def _selected_results(
             for metric in chosen.metrics
             if metric.value is None or (isinstance(metric.value, (int, float)) and not isinstance(metric.value, bool))
         }
-        compat_tools = [tool.identity() for tool in algorithm.tools]
+        compat_tools = list(tool_identities)
         if algorithm.id == "arm-summary":
             # Unlike member-specific PoNs, the arm-definition bytes are shared
             # by controls and must participate in cohort compatibility.
-            compat_tools.extend({"name": "arm-centromere-sha256", "version": digest} for digest in asset_digests)
+            compat_tools.extend({"name": "arm-centromere-sha256", "version": digest} for digest in (assets or ()))
         compat = cohort_compat_key(
             algorithm_id=algorithm.id, algorithm_version=algorithm.version,
-            parameters=algorithm.parameters, tools=compat_tools,
+            parameters=effective_parameters, tools=compat_tools,
             reference_sha256=manifest["reference_sha256"], aligner_identity=aligner,
             pon_policy=("lab_loo_v1" if pon_selection is not None
-                        and algorithm.id in ("copy-number", "instability", "arm-summary") else "none"),
-            per_sample_asset_keys=("pon_sha256",) if algorithm.parameters.get("pon_policy") == "lab_loo_v1" else (),
+                        and algorithm.id in ("copy-number", "instability", "arm-summary")
+                        else str(effective_parameters.get("pon_policy", "none"))),
+            per_sample_asset_keys=("pon_sha256",) if effective_parameters.get("pon_policy") == "lab_loo_v1" else (),
             platform=platform if platform != "ont" else None,
         )
         found.append(CohortResult(

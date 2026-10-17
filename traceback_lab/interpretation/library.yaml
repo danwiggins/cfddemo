@@ -1259,7 +1259,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1288,7 +1288,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1317,7 +1317,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1346,7 +1346,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: true
     stability: {kind: proportion}
@@ -1375,7 +1375,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1404,7 +1404,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1433,7 +1433,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1462,7 +1462,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1491,7 +1491,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1520,7 +1520,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1549,7 +1549,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1578,7 +1578,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1607,7 +1607,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1636,7 +1636,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1665,7 +1665,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1694,7 +1694,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1723,7 +1723,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1752,7 +1752,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1781,7 +1781,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1810,7 +1810,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1839,7 +1839,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1868,7 +1868,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1897,7 +1897,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1926,7 +1926,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1955,7 +1955,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1984,7 +1984,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -2013,7 +2013,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -2042,7 +2042,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -2071,7 +2071,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -2100,7 +2100,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -2129,7 +2129,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -2158,7 +2158,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -2187,7 +2187,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -2216,7 +2216,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -2245,7 +2245,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -2274,7 +2274,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -2303,7 +2303,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -2332,7 +2332,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -2361,7 +2361,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -2390,7 +2390,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}

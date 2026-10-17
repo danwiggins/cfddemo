@@ -28,10 +28,18 @@ def test_holds_an_assertion_tied_to_this_process_and_releases_it(
     monkeypatch.setattr(awake.sys, "platform", "darwin")
     with awake.stay_awake() as holder:
         assert holder is not None and holder.poll() is None
+        expected = ["-i", "-s", "-w", str(os.getpid())]
+        observed: list[str] = []
         deadline = time.monotonic() + 10
-        while not argv.exists() and time.monotonic() < deadline:
+        while time.monotonic() < deadline:
+            if argv.exists():
+                observed = argv.read_text().split()
+                if observed == expected:
+                    break
             time.sleep(0.01)
-        assert argv.read_text().split() == ["-i", "-s", "-w", str(os.getpid())]
+        if observed != expected and argv.exists():
+            observed = argv.read_text().split()
+        assert observed == expected, f"caffeinate argv exists={argv.exists()}; observed={observed!r}"
     assert holder.poll() is not None
 
 

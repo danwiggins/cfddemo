@@ -19,6 +19,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from .envelope import ResultEnvelope
@@ -42,6 +43,22 @@ def selected_results(
     """Return only validated selected results; never fall back past an invalid selection."""
 
     return _selected_results_with_unreadable(store, input_id, identities)[0]
+
+
+def selected_result_snapshots(
+    store: LabStore, input_id: str, identities: Mapping[str, str] | None = None,
+) -> dict[str, tuple[Path, ResultEnvelope]]:
+    """Return the envelope and immutable attempt from the same selector read."""
+
+    selected, _, _, attempts = _selected_results_with_unreadable(store, input_id, identities)
+    return {
+        algorithm_id: (
+            store.result_dir(input_id, algorithm_id, envelope.provenance.parameters_sha256)
+            / "attempts" / attempts[algorithm_id],
+            envelope,
+        )
+        for algorithm_id, envelope in selected.items()
+    }
 
 
 def _selected_results_with_unreadable(

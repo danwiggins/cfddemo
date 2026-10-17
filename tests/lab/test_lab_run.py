@@ -116,6 +116,11 @@ def test_run_aligns_publishes_and_reruns_from_cache(lab_world, capsys, monkeypat
         assert record.has_tag("MM") and record.has_tag("ML") and record.has_tag("MN")
         assert record.get_tag("RG") == header["RG"][0]["ID"]
     assert (input_dir / "aligned.bam.bai").is_file()
+    plans = [json.loads(path.read_bytes()) for path in store.results_dir.rglob("execution_plan.json")]
+    assert len(plans) == 2
+    assert {plan["algorithm_id"] for plan in plans} == {"read-summary", "fragment-size"}
+    assert all(plan["schema"] == "traceback.lab.execution-plan.v1" and
+               plan["input_id"] == input_dir.name for plan in plans)
     mmi = next((root / "lab" / "refs").glob("*.mmi"))
     built = mmi.stat().st_mtime_ns
     assert _no_staging(root)

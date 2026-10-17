@@ -816,7 +816,7 @@ def _skip_remedy(algorithm_id: str, reason: str, root: Path) -> dict[str, Any] |
     argv: list[str]
     asset: str
     if reason == "missing_toolchain":
-        tool = {"copy-number": "ichor", "cell-origin": "modkit"}.get(algorithm_id)
+        tool = {"copy-number": "ichor"}.get(algorithm_id)
         if tool is None:
             return None
         asset, argv = tool, ["traceback", "toolchain", "install", tool]

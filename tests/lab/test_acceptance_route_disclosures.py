@@ -8,10 +8,10 @@ import pytest
 
 from tests.lab.test_acceptance_synthetic_routes import ID12, LICENSE_IDS, _license_nodes, _sample, _server
 from tests.lab.test_landing import _dom, _id12, needs_chrome, page_root as _landing_page_root
-from traceback_lab.interpretation.engine import load_library
+from traceback_lab.interpretation.engine import Entry, Library, load_library
 from traceback_lab.registry import load_registry
 from traceback_lab.store import LabStore
-from traceback_lab.web.api import _catalog
+from traceback_lab.web.api import _catalog, _result_license_ids
 from traceback_lab.web.server import RunningLabServer
 
 
@@ -43,6 +43,51 @@ def test_every_registered_algorithm_has_catalog_disclosures(algorithm_id: str) -
     }
     assert set(row["license_ids"]) == expected
     assert expected <= LIBRARY.licenses.keys()
+
+
+def test_stored_modkit_result_keeps_its_license_without_labeling_new_decoder() -> None:
+    entry = LIBRARY.headline("cell-origin")
+    assert entry is not None
+    old = _result_license_ids(entry, "cell-origin", "1", "ok")
+    new = _result_license_ids(entry, "cell-origin", "2", "ok")
+    skipped = _result_license_ids(entry, "cell-origin", "1", "skipped")
+    assert "modkit-ont-public" in old
+    assert "modkit-ont-public" not in new
+    assert "modkit-ont-public" not in _result_license_ids(entry, "cell-origin", "3", "ok")
+    assert "modkit-ont-public" not in skipped
+    assert "modkit-ont-public" in _result_license_ids(entry, "cell-origin", "", "ok")
+    assert "modkit-ont-public" in LIBRARY.licenses
+    for version, expected in (("1", old), ("2", new)):
+        catalog = _catalog(
+            LIBRARY, ["cell-origin"],
+            [{"algorithm_id": "cell-origin", "algorithm_version": version,
+              "status": "ok", "skip_reason": None}],
+        )
+        assert catalog[0]["license_ids"] == expected
+
+
+def test_catalog_keeps_nonheadline_metric_licenses_when_result_exists() -> None:
+    library = Library(
+        "test",
+        {
+            ("cell-origin", "headline"): Entry(
+                "cell-origin", "headline", {"headline": True, "label": "Cell origin", "tier": "NEWER",
+                                            "license_ids": ["headline-rights"]},
+            ),
+            ("cell-origin", "secondary"): Entry(
+                "cell-origin", "secondary", {"headline": False, "license_ids": ["secondary-rights"]},
+            ),
+        },
+        {"headline-rights": {}, "secondary-rights": {}, "modkit-ont-public": {}},
+    )
+    for version, expected in (("1", {"headline-rights", "secondary-rights", "modkit-ont-public"}),
+                              ("2", {"headline-rights", "secondary-rights"})):
+        catalog = _catalog(
+            library, ["cell-origin"],
+            [{"algorithm_id": "cell-origin", "algorithm_version": version,
+              "status": "ok", "skip_reason": None}],
+        )
+        assert set(catalog[0]["license_ids"]) == expected
 
 
 @pytest.mark.parametrize("route,subtab", [(route, None) for route in ROUTES] + [

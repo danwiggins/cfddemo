@@ -291,6 +291,33 @@ def test_normal_lab_run_dispatches_illumina_without_ont_results(
     assert any(step["algorithm_id"] == "short-read-fragment-size" and
                step["input"] != "full" and step["status"] == "ok"
                for step in payload["data"]["steps"])
+    assert any(step["algorithm_id"] == "fragment-size" and
+               step["input"] != "full" and step["status"] == "skipped" and
+               step["skip_reason"] == "platform"
+               for step in payload["data"]["steps"])
+
+    from traceback_lab.cohorts import add_sample, build_cohort
+
+    store = LabStore(root)
+    source_id = payload["data"]["sample"]["source_id"]
+    input_id = payload["data"]["sample"]["input_id"]
+    result = sample.full.results["short-read-fragment-size"]
+    attempt = store.selected_attempt(input_id, result.algorithm_id, result.provenance.parameters_sha256)
+    assert attempt is not None
+    plan_path = attempt / "execution_plan.json"
+    plan = json.loads(plan_path.read_bytes())
+    assert plan["platform"] == "illumina"
+    assert add_sample(store, "illumina", source_id)
+    generation = build_cohort(store, "illumina")
+    assert "short-read-fragment-size" in {
+        row.algorithm_id for row in generation.members[0].results
+    }
+
+    plan_path.write_text(json.dumps({**plan, "platform": "ont"}))
+    tampered = build_cohort(store, "illumina")
+    assert "short-read-fragment-size" not in {
+        row.algorithm_id for row in tampered.members[0].results
+    }
 
 
 def test_normal_lab_run_dispatches_ont_without_tlen_result(

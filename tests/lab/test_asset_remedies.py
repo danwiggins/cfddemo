@@ -18,7 +18,6 @@ def test_missing_dependencies_name_the_algorithm_and_asset(tmp_path: Path) -> No
         ("copy-number", "missing_asset"): ("ichorCNA", "method-asset register --from-toolchain copy-number"),
         ("cell-origin", "missing_asset"): ("Loyfer", "method-asset register --from-dir LOYFER_DIR"),
         ("copy-number", "missing_toolchain"): ("ichor", "toolchain install ichor"),
-        ("cell-origin", "missing_toolchain"): ("modkit", "toolchain install modkit"),
     }
     for (algorithm, reason), (asset, command) in expected.items():
         remedy = _skip_remedy(algorithm, reason, root)
@@ -26,6 +25,7 @@ def test_missing_dependencies_name_the_algorithm_and_asset(tmp_path: Path) -> No
         assert asset in remedy["asset"]
         assert command in remedy["command"]
     assert _skip_remedy("unknown", "missing_asset", root) is None
+    assert _skip_remedy("cell-origin", "missing_toolchain", root) is None
 
 
 def test_human_and_json_remediation_agree_and_deduplicate(tmp_path: Path) -> None:
@@ -38,7 +38,7 @@ def test_human_and_json_remediation_agree_and_deduplicate(tmp_path: Path) -> Non
     skipped = [
         StepResult("pmd-score", "skipped", False, "c" * 64, skip_reason="missing_asset"),
         StepResult("copy-number", "skipped", False, "d" * 64, skip_reason="missing_asset"),
-        StepResult("cell-origin", "skipped", False, "e" * 64, skip_reason="missing_toolchain"),
+        StepResult("cell-origin", "skipped", False, "e" * 64, skip_reason="missing_asset"),
     ]
     code, payload = _summary(
         store, "r-20261016-1200-0000", aligned, "a" * 12,

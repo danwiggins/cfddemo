@@ -335,34 +335,39 @@ def test_bound_panel_changes_execution_but_not_cohort_compatibility() -> None:
 
 
 def test_instability_compatibility_distinguishes_pon_protocol(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from traceback_lab import platforms
-
-    monkeypatch.setattr(platforms, "for_input", lambda manifest, bam_path: "ont")
-    source_id = "a" * 64
-    copy = SimpleNamespace(id="copy-number", version="1", parameters={}, tools=[], upstream=())
-    instability = SimpleNamespace(id="instability", version="1", parameters={"measure": "tmad"},
-                                  tools=[], upstream=("copy-number",))
-    monkeypatch.setattr(cohorts, "load_registry", lambda: (copy, instability))
-    monkeypatch.setattr(cohorts, "execution_identity", lambda algorithm, **_: algorithm.id)
-    monkeypatch.setattr(pon_consumer, "bind_copy_number_algorithm", lambda algorithm, selection: SimpleNamespace(
-        id=algorithm.id, version=algorithm.version, tools=algorithm.tools, upstream=algorithm.upstream,
-        parameters={"pon_policy": "lab_loo_v1", "pon_sha256": selection.pon_sha256},
-    ))
     store = LabStore(tmp_path)
-    monkeypatch.setattr(store, "read_result", lambda _input, algorithm_id, _identity: SimpleNamespace(
-        status="ok", algorithm_version="1",
-        provenance=SimpleNamespace(source_id=source_id, parameters_sha256="f" * 64), metrics=[],
-    ) if algorithm_id in ("copy-number", "instability") else None)
-    manifest = {
-        "kind": "aligned", "source_id": source_id, "reference_sha256": "b" * 64,
-        "tools": {"minimap2": "2.28", "samtools": "1.20"},
-        "mmi_sha256": "c" * 64, "aligner_argv": ["minimap2", "-ax", "map-ont"],
-    }
-    baseline = cohorts._selected_results(store, "d" * 64, manifest)
-    selected = cohorts._selected_results(
-        store, "d" * 64, manifest,
-        pon_selection=SimpleNamespace(pon_policy="lab_loo_v1", pon_sha256="e" * 64),
-    )
+    source_id = _sample(store, 1)
+    input_id = f"{101:064x}"
+    manifest = json.loads((store.inputs_dir / input_id / "manifest.json").read_bytes())
+    copy = replace(cn_module.COPY_NUMBER, upstream=(), tools=())
+    instability = SimpleNamespace(id="instability", version="1", parameters={"measure": "tmad"},
+                                  tools=(), upstream=("copy-number",))
+    monkeypatch.setattr(type(copy), "asset_sha256s", lambda self, root: [])
+    monkeypatch.setattr(cohorts, "load_registry", lambda: (copy, instability))
+
+    def publish_chain(producer):
+        cn_identity = execution_identity(producer, reference_sha256=manifest["reference_sha256"])
+        def envelope(algorithm, identity):
+            return ResultEnvelope(
+                algorithm_id=algorithm.id, algorithm_version=algorithm.version, status="ok",
+                provenance=provenance(tool="fixture", parameters_sha256=identity,
+                                      source_id=source_id, input_id=input_id, reference_id="synthetic"),
+            )
+        attempt = store.publish_result(envelope(producer, cn_identity), input_id=input_id)
+        upstream = [{"algorithm_id": copy.id, "parameters_sha256": cn_identity}]
+        identity = execution_identity(instability, reference_sha256=manifest["reference_sha256"], upstream=upstream)
+        store.publish_result(envelope(instability, identity), input_id=input_id, upstream_selections=[{
+            "algorithm_id": copy.id, "parameters_sha256": cn_identity,
+            "input_id": input_id, "attempt_id": attempt,
+        }])
+
+    publish_chain(copy)
+    baseline = cohorts._selected_results(store, input_id, manifest)
+    selection = SimpleNamespace(pon_policy="lab_loo_v1", pon_sha256="e" * 64)
+    publish_chain(pon_consumer.bind_copy_number_algorithm(copy, selection))
+    selected = cohorts._selected_results(store, input_id, manifest, pon_selection=selection)
+    assert [row.algorithm_id for row in baseline] == ["copy-number", "instability"]
+    assert [row.algorithm_id for row in selected] == ["copy-number", "instability"]
     assert baseline[1].cohort_compat_key != selected[1].cohort_compat_key
 
 
@@ -954,3 +959,47 @@ def test_failed_generation_publish_restores_member_selections(
         attempts = store.result_dir(member.input_id, "arm-summary", identity) / "attempts"
         assert any((path / "result.json").is_file() for path in attempts.iterdir())
     assert len(list((store.result_dir(first.input_id, "arm-summary", old_arm_identity) / "attempts").iterdir())) >= 2
+
+
+@pytest.mark.parametrize("selected_panel", [None, "a" * 64, "b" * 64])
+def test_recorded_cn_plan_cannot_override_requested_panel(tmp_path, monkeypatch, selected_panel) -> None:
+    """A valid historical identity cannot replace the panel requested now."""
+    store = LabStore(tmp_path)
+    source_id = _sample(store, 1)
+    input_id = f"{101:064x}"
+    manifest = json.loads((store.inputs_dir / input_id / "manifest.json").read_bytes())
+    algorithm = replace(cn_module.COPY_NUMBER, upstream=())
+    monkeypatch.setattr(type(algorithm), "asset_sha256s", lambda self, root: [])
+    monkeypatch.setattr(cohorts, "load_registry", lambda: [algorithm])
+    requested = SimpleNamespace(pon_policy="lab_loo_v1", pon_sha256="a" * 64)
+
+    def publish(panel):
+        producer = (pon_consumer.bind_copy_number_algorithm(
+            algorithm, SimpleNamespace(pon_policy="lab_loo_v1", pon_sha256=panel),
+        ) if panel is not None else algorithm)
+        identity = execution_identity(producer, reference_sha256=manifest["reference_sha256"])
+        store.publish_result(ResultEnvelope(
+            algorithm_id=producer.id, algorithm_version=producer.version, status="ok",
+            provenance=provenance(tool="fixture", parameters_sha256=identity,
+                                  source_id=source_id, input_id=input_id, reference_id="synthetic"),
+        ), input_id=input_id, execution_plan={
+            "schema": "traceback.lab.execution-plan.v1", "algorithm_id": producer.id,
+            "algorithm_version": producer.version, "input_id": input_id,
+            "reference_sha256": manifest["reference_sha256"], "platform": "ont",
+            "parameters": producer.parameters, "tools": [tool.identity() for tool in producer.tools],
+            "asset_sha256s": [], "upstream": [],
+        })
+        return identity
+
+    old_identity = publish("a" * 64)
+    current_identity = publish(selected_panel)
+    selected = cohorts._selected_results(store, input_id, manifest, pon_selection=requested)
+    assert [row.parameters_sha256 for row in selected] == (
+        [current_identity] if selected_panel == requested.pon_sha256 else []
+    )
+    # Rejected latest identities never fall back to the older valid PoN attempt.
+    assert store.selected_attempt(input_id, algorithm.id, old_identity) is not None
+    independent = cohorts._selected_results(store, input_id, manifest)
+    assert [row.parameters_sha256 for row in independent] == (
+        [current_identity] if selected_panel is None else []
+    )

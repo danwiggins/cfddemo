@@ -1,0 +1,181 @@
+"""Lab-owned, bounded MM/ML CpG extraction for unsigned cell-origin runs.
+
+Only explicit MM/ML probabilities and canonical calls licensed by MM skip
+mode ``.`` enter this stream. A ``?`` omission, absent ML, or invalid MN is
+unknown, never an unmethylated observation. Read names are salted in memory.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+import pysam
+
+from evidence_inspector.cell_origin_models import CpgCallState, ModkitCpgCall, Strand
+from evidence_inspector.cell_origin_prefilter import RegionIndex
+
+from ..modbase import InvalidMM, mm_skip_modes, mm_tag, mn_ok
+
+EXTRACTOR_VERSION = "lab-mmml-cpg-v2"
+
+
+@dataclass(frozen=True)
+class Extraction:
+    calls: tuple[ModkitCpgCall, ...]
+    records_scanned: int
+    records_with_mm: int
+    invalid_mm: int
+    dropped_unaligned: int
+    non_reference_cpg: int
+    outside_regions: int
+    low_confidence: int
+    unsupported_modification: int
+
+
+def _reference_sites(record: pysam.AlignedSegment) -> tuple[list[tuple[int, int, dict[str, int]]], int]:
+    """Map cytosine MM/ML channels to reference-forward CG candidates.
+
+    Modkit's ``--cpg`` selects the reference motif. The neighboring query base
+    need not align (for example at a read end or across a deletion).
+    """
+
+    if not mn_ok(record):
+        raise InvalidMM("MN differs from stored sequence length")
+    try:
+        parsed = record.modified_bases
+    except (ValueError, KeyError, IndexError) as exc:
+        raise InvalidMM("MM/ML do not parse") from exc
+    if parsed is None:
+        raise InvalidMM("MM/ML do not parse")
+    sequence = record.query_sequence or ""
+    sites: dict[tuple[int, int], dict[str, int]] = {}
+    for (base, strand, code), entries in parsed.items():
+        if base not in {"C", "G"}:
+            continue
+        if any(quality < 0 for _, quality in entries):
+            raise InvalidMM("MM call without ML")
+        for position, quality in entries:
+            sites.setdefault((position, strand), {})[str(code)] = int(quality)
+    for code, mode in mm_skip_modes(mm_tag(record) or "").items():
+        if code[0] not in {"C", "G"} or mode != ".":
+            continue
+        strand = int(record.is_reverse) ^ int(code[1] == "-")
+        target_base = code[0] if not record.is_reverse else ("G" if code[0] == "C" else "C")
+        for position, base in enumerate(sequence):
+            if base != target_base:
+                continue
+            sites.setdefault((position, strand), {}).setdefault(code[2:], 0)
+    if any(sum(channels.values()) > 255 for channels in sites.values()):
+        raise InvalidMM("MM/ML channel probabilities exceed one")
+    cigar = record.cigartuples or []
+    if len(cigar) == 1 and cigar[0][0] in {0, 7, 8} and not record.is_unmapped:
+        start, span = record.reference_start, cigar[0][1]
+
+        def reference_of(position: int) -> int | None:
+            return start + position if 0 <= position < span else None
+
+    else:
+        reference_of = dict(record.get_aligned_pairs(matches_only=True)).get
+    mapped: list[tuple[int, int, dict[str, int]]] = []
+    dropped = 0
+    for (query_position, strand), channels in sorted(sites.items()):
+        mod_position = reference_of(query_position)
+        if mod_position is None:
+            dropped += 1
+            continue
+        mapped.append((mod_position - strand, strand, channels))
+    return mapped, dropped
+
+
+def extract_cpg_calls(
+    bam_path: Path,
+    reference_fasta: Path,
+    *,
+    maximum_calls: int,
+    filter_threshold: float,
+    include_regions: RegionIndex | None = None,
+) -> Extraction:
+    """Stream a prefiltered BAM, refusing the locked call cap while reading.
+
+    ``maximum_calls`` counts reference-CpG candidate rows before confidence
+    and unsupported-code filtering, like the signed modkit output-row cap.
+    Materialized UXM calls cannot exceed it. The caller owns any prefilter
+    BAM and removes it with its worker scratch directory.
+    """
+
+    if maximum_calls < 1 or not 0 < filter_threshold < 1:
+        raise ValueError("cell-origin extraction needs positive cap and threshold in (0, 1)")
+    salt = os.urandom(32)
+    calls: list[ModkitCpgCall] = []
+    scanned = tagged = invalid = unaligned = non_reference = outside = low_confidence = unsupported = candidates = 0
+    with pysam.AlignmentFile(str(bam_path), "rb") as bam, pysam.FastaFile(str(reference_fasta)) as fasta:
+        for record in bam.fetch(until_eof=True):
+            scanned += 1
+            if (record.is_unmapped or record.is_secondary or record.is_supplementary
+                    or record.is_duplicate or record.is_qcfail):
+                continue
+            if mm_tag(record) is None:
+                continue
+            tagged += 1
+            if not record.query_name:
+                invalid += 1
+                continue
+            try:
+                sites, dropped = _reference_sites(record)
+            except InvalidMM:
+                invalid += 1
+                continue
+            unaligned += dropped
+            fragment_digest = hashlib.sha256(
+                salt + b"\0" + record.query_name.encode("utf-8")
+            ).hexdigest()
+            chromosome = record.reference_name
+            for position0, reverse, channels in sites:
+                if position0 < 0 or position0 + 1 >= fasta.get_reference_length(chromosome):
+                    non_reference += 1
+                    continue
+                if include_regions is not None and not include_regions.overlaps(
+                    chromosome, position0 + reverse, position0 + reverse + 1
+                ):
+                    outside += 1
+                    continue
+                if fasta.fetch(chromosome, position0, position0 + 2).upper() != "CG":
+                    non_reference += 1
+                    continue
+                candidates += 1
+                if candidates > maximum_calls:
+                    raise ValueError("cell-origin MM/ML calls exceed the locked cap")
+                # Each ML channel is the midpoint of a 1/256 bin. Canonical
+                # is the remaining mass across every declared channel.
+                probabilities = {code: (value + 0.5) / 256.0
+                                 for code, value in channels.items()}
+                p_c = max(0.0, 1.0 - sum(probabilities.values()))
+                confidence = max((p_c, *probabilities.values()))
+                if confidence < filter_threshold:
+                    low_confidence += 1
+                    continue
+                winner = ("-" if p_c > max(probabilities.values()) else
+                          max(enumerate(probabilities),
+                              key=lambda item: (probabilities[item[1]], item[0]))[1])
+                if winner not in {"-", "m", "h"}:
+                    unsupported += 1
+                    continue
+                calls.append(ModkitCpgCall(
+                    fragment_digest=fragment_digest,
+                    chromosome=chromosome,
+                    position0=position0,
+                    strand=Strand.MINUS if reverse else Strand.PLUS,
+                    modification_code="m",
+                    modified_probability=confidence,
+                    state=(CpgCallState.UNMETHYLATED if winner == "-"
+                           else CpgCallState.METHYLATED),
+                ))
+    return Extraction(
+        tuple(calls), scanned, tagged, invalid, unaligned, non_reference, outside, low_confidence, unsupported,
+    )
+
+
+__all__ = ["EXTRACTOR_VERSION", "Extraction", "extract_cpg_calls"]

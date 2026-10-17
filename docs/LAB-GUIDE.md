@@ -168,6 +168,11 @@ intermediates they need, labelled "(upstream)".
 A result is reused only when its selected attempt matches the input, algorithm,
 and execution identity. Dependents also record the exact upstream attempts
 they consumed, including a parent-input summary reused by a derived control.
+Successful attempts record the effective execution-identity inputs in internal
+metadata. Cohort reads verify this record against the selected result, input,
+reference, upstream identities and consumed upstream attempts, then compare
+using the producer's recorded tools and parameters. They do not probe the
+reader's numerical runtime to reconstruct a historical result.
 An older dependent attempt without that record is recomputed once; leaf results
 remain cacheable. New attempts record artifact file sizes; older attempts
 remain readable, with known upstream layouts checked against their metadata.
@@ -232,7 +237,7 @@ new measurement.
 | `sex-check` | chrY/chrX read density per Mb of non-N, non-PAR reference and a male / female / indeterminate call; needs 500,000 eligible reads |
 | `mtdna` | chrM reads (MAPQ ≥ 20) as a share of all primary reads, and the chrM fragment mode |
 | `viral-reads` | EBV, HPV and HBV reads per million human-unmapped primary reads from a separate minimap2 ≥ 2.28 alignment; needs an operator-registered viral FASTA and is exploratory for ONT cfDNA |
-| `cell-origin` | share of cfDNA from each of 40 Loyfer U250 cell types with bootstrap intervals, through the signed method's own `compute_measurement` (modkit, UXM, NNLS); needs 2.5M eligible reads, `traceback toolchain install modkit` and `traceback method-asset register --from-dir LOYFER_DIR --root R`; minor cell types are not interpretable below 5x. Downsample and split runs read a transient filtered BAM that is deleted after publish |
+| `cell-origin` | share of cfDNA from each of 40 Loyfer U250 cell types with bootstrap intervals; the Lab decodes MM/ML CpG calls in-house and uses the registered Loyfer atlas with UXM and NNLS. It needs 2.5M eligible reads and `traceback method-asset register --from-dir LOYFER_DIR --root R`; minor cell types are not interpretable below 5x. Missing or uncertain calls stay unknown; confident 5hmC and 5mC both enter the UXM methylated (M) state. Every run writes a private prefiltered BAM in worker scratch; downsample and split runs first select their reads into a second transient BAM. Both are deleted after normal run completion, and neither is published. The signed cell-origin method retains its separate modkit path |
 | `end-motifs` | reference 4-mers at both ends of each molecule (5′ forward end and the reverse complement of the other end), motif diversity score and CCCA share; needs 500,000 eligible reads and the registered FASTA |
 | `delfi-ratio` | short (100–150 bp) / long (151–220 bp) ratio per 5 Mb bin on chr1–22, median-centred, and its SD; no GC correction, cohort-relative only; needs 1,000,000 eligible reads |
 | `meth-calls` | intermediate: decodes MM/ML once into site-level CpG call chunks (read row, forward-strand C position, strand, 5mC/5hmC/canonical ML); derived inputs reuse it through their row mask |
@@ -243,6 +248,16 @@ new measurement.
 | `hypometh-reads` | among reads with ≥ 4 CpG calls, the share under 25% methylated, and U/X/M counts (≤ 25% / between / ≥ 75%); needs 500,000 eligible reads |
 | `frag-x-meth` | descriptive molecule-count matrix of aligned-size bins by per-read 5mC fraction (at least four distinct CpG sites/read); the scalar is long (151–220 bp) mean minus short (100–150 bp) mean, null if either group is empty; no normal range |
 | `breakpoint-motifs` | 4-mer counts at aligned-reference-span start and end−1, stratified by CpG proximity; the scalar is the fraction of ends near a CpG. These are not proven physical cleavage positions, and the methylation link is unavailable without a supported joint input |
+
+The Lab's cell-origin v2 execution identity pins normalized source digests of
+its MM/ML decoder and reused UXM, NNLS, bootstrap, model, and prefilter code,
+along with the NumPy, pysam, and htslib versions. A changed implementation
+therefore needs a new result rather than reusing a prior cached estimate.
+After a ready cell-origin worker examines the marker regions, too few passing
+alignments, confident CpG calls, classified fragments, or observed markers
+publish a `skipped/low_support` result with no composition metrics or artifact.
+Parser errors, resource caps, non-convergence, and validation failures still
+publish failed attempts for investigation.
 
 **Exploratory epi-clock.** Verify the three hg38 assay-site coordinates, then
 follow the [epi-clock map instructions](epi-clock.md) to prepare the JSON map and
