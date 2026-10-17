@@ -6,6 +6,7 @@
 (function () {
   // Record CSP violations first, so the headless CSP test can read them.
   const violations = [];
+  document.body.dataset.cspViolations = "0";
   document.addEventListener("securitypolicyviolation", (event) => {
     violations.push(`${event.violatedDirective} ${event.blockedURI || ""}`.trim());
     document.body.dataset.cspViolations = String(violations.length);
