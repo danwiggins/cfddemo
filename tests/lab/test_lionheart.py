@@ -15,8 +15,9 @@ import pytest
 
 from tests.lab.test_landing import _dom, needs_chrome
 from traceback_lab.algorithms import lionheart
+from traceback_lab.algorithms.read_summary import READ_SUMMARY
 from traceback_lab.interpretation.engine import load_library
-from traceback_lab.registry import InputContext, Ready, execution_identity
+from traceback_lab.registry import InputContext, Ready, execution_identity, plan, validate_algorithm
 from traceback_lab.store import LabStore
 from traceback_lab.web.server import RunningLabServer
 
@@ -152,6 +153,20 @@ def test_lionheart_opt_out_does_not_read_resource_archive(tmp_path, monkeypatch)
                         lambda *_args: pytest.fail("disabled Lionheart must not read the resource archive"))
     assert lionheart.LIONHEART.asset_sha256s(ctx.root) == []
     assert lionheart.LIONHEART.preflight(ctx).reason_code == "platform_unverified"
+
+
+def test_lionheart_opt_out_does_not_discover_or_hash_tools(tmp_path, monkeypatch) -> None:
+    ctx, _ = _setup(tmp_path, monkeypatch)
+    monkeypatch.delenv("TRACEBACK_LIONHEART_ENABLE_ONT")
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("disabled Lionheart must not discover or hash installed tools")
+    for name in ("_program", "_package_pin", "_file_hash"):
+        monkeypatch.setattr(lionheart, name, unexpected)
+    algorithm = validate_algorithm(lionheart.LIONHEART)
+    assert algorithm.tools == ()
+    assert plan((READ_SUMMARY, algorithm), only=(algorithm.id,))[-1].algorithm is algorithm
+    assert execution_identity(algorithm, reference_sha256=ctx.reference_sha256)
+    assert algorithm.preflight(ctx).reason_code == "platform_unverified"
 
 
 def test_lionheart_preflight_requires_parquet_reader_in_cli_environment(tmp_path, monkeypatch) -> None:

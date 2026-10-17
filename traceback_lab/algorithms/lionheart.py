@@ -261,6 +261,8 @@ def _labels(directory: Path) -> list[tuple[str, str]]:
 class Lionheart(Base):
     @property  # type: ignore[override]
     def tools(self) -> tuple[ToolPin, ...]:
+        if os.environ.get("TRACEBACK_LIONHEART_ENABLE_ONT") != "1":
+            return ()  # disabled runs have no tool dependency to discover or hash
         lionheart = _program("TRACEBACK_LIONHEART_BIN", "lionheart")
         mosdepth = _program("TRACEBACK_LIONHEART_MOSDEPTH_BIN", "mosdepth")
         samtools = _program(None, "samtools")
