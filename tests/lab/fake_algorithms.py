@@ -110,6 +110,22 @@ class BadPanel(_Base):
         return AlgorithmOutput(panels=[{"panel_id": "p", "kind": "table", "data_ref": "artifacts/missing.json"}])
 
 
+@dataclass
+class AssetProbe(_Base):
+    """Records the planned asset and tool identity received by a real worker."""
+
+    def asset_sha256s(self, root: Path) -> list[str]:
+        return ["a" * 64]
+
+    def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
+        return AlgorithmOutput(artifacts={
+            "worker_identity.json": json.dumps({
+                "assets": ctx.extras.get("asset_sha256s"),
+                "tools": ctx.extras.get("tool_versions"),
+            }).encode(),
+        })
+
+
 SUMMARY = Counter("read-summary")
 COUNTER = Counter("fragment-size", upstream=("read-summary",))
 SECOND = Counter("bam-qc", upstream=("read-summary",))
@@ -118,5 +134,6 @@ HANGS = Hangs("cell-origin", cost="slow")
 WAITS = Waits("cell-origin", cost="slow")
 SKIPS = SkipsDepth("instability", cost="slow")
 BAD_PANEL = BadPanel("mtdna")
+ASSET_PROBE = AssetProbe("asset-probe", tools=(ToolPin("probe", "2.2.0"),))
 DEPENDS_ON_FAILURE = Counter("tf-concordance", family="composite", upstream=("copy-number",))
 SESSION_HANGS = SessionHangs("cell-origin", cost="slow")
