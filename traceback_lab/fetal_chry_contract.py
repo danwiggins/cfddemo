@@ -89,9 +89,22 @@ def _label(value: object) -> bool:
             and all(ord(char) >= 32 and char not in "/\\" for char in value))
 
 
+def _unique_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate calibration field")
+        result[key] = value
+    return result
+
+
+def _reject_constant(_value: str) -> None:
+    raise ValueError("non-standard calibration number")
+
+
 def _parse(raw: bytes) -> FetalChrYContract:
     try:
-        data = json.loads(raw)
+        data = json.loads(raw, object_pairs_hook=_unique_fields, parse_constant=_reject_constant)
     except (UnicodeError, ValueError) as exc:
         raise FetalChrYContractError("fetal calibration is invalid JSON") from exc
     if not isinstance(data, dict) or set(data) != _FIELDS or data.get("schema") != SCHEMA:
@@ -129,14 +142,15 @@ def _parse(raw: bytes) -> FetalChrYContract:
                              hashlib.sha256(raw).hexdigest())
 
 
-def _directory(store: LabStore, input_id: str) -> Path:
+def _directory(store: LabStore, input_id: str, *, synthetic: bool = False) -> Path:
     if not _SHA.fullmatch(input_id):
         raise FetalChrYContractError("input_id must be a full SHA-256")
-    return store.lab / "assets" / "fetal-fraction-chry" / input_id
+    kind = "fetal-fraction-chry-synthetic" if synthetic else "fetal-fraction-chry"
+    return store.lab / "assets" / kind / input_id
 
 
-def inspect_contract(store: LabStore, input_id: str) -> FetalChrYContract:
-    directory = _directory(store, input_id)
+def inspect_contract(store: LabStore, input_id: str, *, synthetic: bool = False) -> FetalChrYContract:
+    directory = _directory(store, input_id, synthetic=synthetic)
     try:
         _check_contained(store, directory)
         contract = _parse(_read(directory / "contract.json"))
@@ -156,21 +170,23 @@ def register_contract(store: LabStore, source: Path, expected_sha256: str, *,
         raise FetalChrYContractError("expected calibration SHA-256 must be lowercase hex")
     try:
         raw = _read(_regular_source(source))
-    except AssetError as exc:
+    except (AssetError, OSError) as exc:
         raise FetalChrYContractError("fetal calibration source is unsafe") from exc
     contract = _parse(raw)
     if contract.manifest_sha256 != expected_sha256:
         raise FetalChrYContractError("fetal calibration differs from expected SHA-256")
     if contract.calibration_status == "synthetic" and not allow_synthetic:
         raise FetalChrYContractError("synthetic calibration requires explicit --allow-synthetic opt-in")
-    directory = _directory(store, contract.input_id)
+    synthetic = contract.calibration_status == "synthetic"
+    directory = _directory(store, contract.input_id, synthetic=synthetic)
     try:
         _check_contained(store, directory)
-    except AssetError as exc:
+        exists = directory.exists() or directory.is_symlink()
+    except (AssetError, OSError) as exc:
         raise FetalChrYContractError("fetal calibration destination is unsafe") from exc
-    if directory.exists() or directory.is_symlink():
+    if exists:
         try:
-            current = inspect_contract(store, contract.input_id)
+            current = inspect_contract(store, contract.input_id, synthetic=synthetic)
         except FetalChrYContractError as exc:
             raise FetalChrYContractError(
                 "existing immutable calibration is damaged; restore its exact original bytes from backup"
@@ -190,4 +206,4 @@ def register_contract(store: LabStore, source: Path, expected_sha256: str, *,
         store.publish_directory(directory.parent, directory.name, build)
     except OSError as exc:
         raise FetalChrYContractError("fetal calibration could not be published") from exc
-    return inspect_contract(store, contract.input_id)
+    return inspect_contract(store, contract.input_id, synthetic=synthetic)

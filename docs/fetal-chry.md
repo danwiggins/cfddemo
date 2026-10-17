@@ -5,7 +5,8 @@ It estimates a fetal fraction only for an asserted pregnancy with a male fetus
 and female maternal background, using an operator-supplied, protocol-matched
 chrY calibration. NIPTeR itself does not calculate fetal fraction. Neither
 method makes an aneuploidy call, sets a clinical cutoff, or claims ONT assay
-validation. The chrY method is **SPECULATIVE** and **PRIVACY** flagged.
+validation. The chrY method is **SPECULATIVE** with **PRIVACY**, **FDA**, and
+**LEGAL** flags.
 
 The operator must have female-background controls and known male-DNA mixture
 samples prepared with the same cfDNA extraction, ONT sequencing, hg38 alignment,
@@ -15,6 +16,8 @@ source/input/reference identity. These values and the `operator_verified` status
 are operator assertions; the Lab cannot verify the calibration study. The
 operator must keep patient identifiers out of free-text labels, which stay in
 the private contract and are not echoed by the CLI.
+The registration directory itself reveals that a male-fetus pregnancy
+calibration was supplied. Protect the whole Lab root as sensitive storage.
 
 Save a JSON file with these exact fields, calculate its SHA-256, and run
 `traceback lab fetal chry-register --file CALIBRATION.json --sha256 HEX --root R`.
@@ -58,10 +61,13 @@ It requires a full input with at least two million eligible reads, canonical
 hg38 chromosome layout, and the calibration's minimum depth.
 
 The software will not run a `synthetic` calibration. `--allow-synthetic` must
-be supplied to register one for mechanics testing, and doing so permanently
-reserves that input's immutable calibration slot. A damaged registration needs
-the exact original bytes restored from backup; a different calibration requires
-a new input identity. No registered calibration is silently overwritten.
+be supplied to register one for mechanics testing. Synthetic registrations use
+a separate namespace and cannot consume the real calibration slot. Inspect one
+with `traceback lab fetal chry-inspect INPUT_ID --synthetic --root R`. A damaged
+registration needs the exact original bytes restored from backup; a different
+real calibration requires a new input identity. No registered calibration is
+silently overwritten. The raw chrY count and rate remain visible as exploratory,
+sex-informative measurements even when the calibrated fraction is null.
 
 The numeric result still requires an independent ONT-matched accuracy,
 precision, and detection-limit study before biological or clinical use. Male

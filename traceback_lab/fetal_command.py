@@ -39,6 +39,8 @@ def add_fetal_parser(commands: Any, common: Callable[[argparse.ArgumentParser], 
     chry_add.set_defaults(handler=_register_chry)
     chry_inspect = actions.add_parser("chry-inspect", help="verify a male-fetus chrY calibration")
     chry_inspect.add_argument("input_id")
+    chry_inspect.add_argument("--synthetic", action="store_true",
+                              help="inspect a mechanics-only calibration")
     common(chry_inspect)
     chry_inspect.set_defaults(handler=_inspect_chry)
 
@@ -114,7 +116,7 @@ def _register_chry(args: argparse.Namespace, store: LabStore) -> tuple[int, dict
 def _inspect_chry(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]]:
     store.check_version()
     try:
-        contract = inspect_chry_contract(store, args.input_id)
+        contract = inspect_chry_contract(store, args.input_id, synthetic=args.synthetic)
     except FetalChrYContractError as exc:
         payload = _payload("lab fetal chry-inspect", "blocked", "Fetal chrY calibration unavailable",
                            store, {"cause": str(exc)})

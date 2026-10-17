@@ -15,8 +15,10 @@ from traceback_lab.cli import main as lab_main
 from traceback_lab.fetal_chry_contract import (
     FetalChrYContractError, inspect_contract, register_contract,
 )
-from traceback_lab.registry import Requirements, Skip, load_registry
-from traceback_lab.store import LabStore
+from traceback_lab.registry import PlanItem, Requirements, Skip, execution_identity, load_registry
+from traceback_lab.runner import RunTarget, run_plan
+from traceback_lab.scrub import Scrubber
+from traceback_lab.store import LabStore, new_run_id
 
 from .bam_fixtures import Read, context_for
 
@@ -88,12 +90,20 @@ def test_synthetic_registration_needs_opt_in_and_cannot_run(tmp_path: Path) -> N
     assert not (store.lab / "assets" / "fetal-fraction-chry" / INPUT).exists()
     contract = register_contract(store, path, digest, allow_synthetic=True)
     assert contract.calibration_status == "synthetic"
+    assert inspect_contract(store, INPUT, synthetic=True) == contract
+    with pytest.raises(FetalChrYContractError):
+        inspect_contract(store, INPUT)
+    assert lab_main(["fetal", "chry-inspect", INPUT, "--synthetic", "--root", str(store.root), "--json"]) == 0
     ctx = context_for(tmp_path / "data", [("chr1", 248_956_422)],
                       [Read("anonymous", "chr1", 100, "A" * 75)], eligible_reads=2_000_000)
     ctx = replace(ctx, root=store.root, source_id=SOURCE, input_id=INPUT,
                   reference_sha256=REFERENCE, approx_depth_x=1,
                   extras={**ctx.extras, "planned_asset_sha256s": [contract.manifest_sha256]})
     assert fetal.FETAL_FRACTION_CHRY.preflight(ctx).reason_code == "missing_asset"
+    real_path, real_digest = _file(tmp_path, status="operator_verified")
+    real = register_contract(store, real_path, real_digest)
+    assert inspect_contract(store, INPUT) == real
+    assert inspect_contract(store, INPUT, synthetic=True) == contract
 
 
 def test_registration_publish_error_is_path_free(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -112,14 +122,27 @@ def test_registration_publish_error_is_path_free(tmp_path: Path, monkeypatch, ca
     assert not (root / "lab" / "assets" / "fetal-fraction-chry" / INPUT).exists()
 
 
+def test_registration_source_error_is_path_free(tmp_path: Path, monkeypatch, capsys) -> None:
+    from traceback_lab import fetal_chry_contract as contract_module
+
+    path, digest = _file(tmp_path)
+    monkeypatch.setattr(contract_module, "_regular_source",
+                        lambda _path: (_ for _ in ()).throw(OSError(f"private path {path}")))
+    assert lab_main(["fetal", "chry-register", "--file", str(path), "--sha256", digest,
+                     "--root", str(tmp_path / "root"), "--json"]) != 0
+    assert str(path) not in capsys.readouterr().out
+
+
 def test_chry_counting_uses_half_open_par_boundaries_and_bounded_slices(monkeypatch) -> None:
     monkeypatch.setattr(fetal, "CHUNK_ROWS", 3)
     starts = np.array([9_999, 10_000, 2_781_478, 2_781_479,
-                       56_887_901, 56_887_902, 57_217_414, 57_217_415], dtype=np.int32)
+                       56_887_901, 56_887_902, 57_217_414, 57_217_415,
+                       3_000_000, 3_000_000], dtype=np.int32)
     chrom = np.full(len(starts), 23, dtype=np.int16)
+    chrom[9] = 24  # canonical D21 eligibility excludes alternate contigs
     flags = np.zeros(len(starts), dtype=np.uint16)
     mapqs = np.full(len(starts), 60, dtype=np.uint8)
-    flags[0] = 0x400
+    flags[8] = 0x400
     mapqs[7] = 19
     columns = {"contig": chrom, "start": starts, "flag": flags, "mapq": mapqs}
 
@@ -134,7 +157,21 @@ def test_chry_counting_uses_half_open_par_boundaries_and_bounded_slices(monkeypa
         def eligible():
             pytest.fail("full-summary eligibility mask must not be allocated")
 
-    assert fetal._counts(Summary()) == (2, 6)
+    assert fetal._counts(Summary()) == (3, 7)
+
+
+def test_f1_protocol_refuses_drift_in_shared_counting_constants(monkeypatch) -> None:
+    assert fetal._protocol_matches()
+    monkeypatch.setattr(fetal, "MIN_MAPQ", 21)
+    assert not fetal._protocol_matches()
+
+
+def test_duplicate_calibration_fields_are_rejected(tmp_path: Path) -> None:
+    path, _ = _file(tmp_path)
+    raw = path.read_text().replace('"female_control_n": 10', '"female_control_n": 10, "female_control_n": 99')
+    path.write_text(raw)
+    with pytest.raises(FetalChrYContractError, match="invalid JSON"):
+        register_contract(LabStore(tmp_path / "root"), path, hashlib.sha256(path.read_bytes()).hexdigest())
 
 
 def test_real_summary_counts_nonpar_y_and_calibrates_only_within_bounds(tmp_path: Path) -> None:
@@ -161,8 +198,8 @@ def test_real_summary_counts_nonpar_y_and_calibrates_only_within_bounds(tmp_path
                         "fetal_chry_nonpar_reads": 2,
                         "fetal_chry_reads_per_million": 200_000}
     assert algorithm.preflight(replace(ctx, derived={"half": "A"})).reason_code == "unsupported_input"
-    assert algorithm.preflight(replace(ctx, source_id="f" * 64)).reason_code == "unsupported_input"
-    assert algorithm.preflight(replace(ctx, reference_sha256="f" * 64)).reason_code == "reference"
+    assert algorithm.preflight(replace(ctx, source_id="f" * 64)).reason_code == "missing_asset"
+    assert algorithm.preflight(replace(ctx, reference_sha256="f" * 64)).reason_code == "missing_asset"
     assert algorithm.preflight(replace(ctx, extras={**ctx.extras, "planned_asset_sha256s": []})).reason_code == "missing_asset"
     assert fetal._fraction(0, 10, contract) is None
     assert fetal._fraction(3, 10, contract) is None
@@ -176,3 +213,26 @@ def test_registry_and_interpretation_keep_chr_y_separate_from_nipter() -> None:
     library = load_library()
     assert library.entry("fetal-fraction", "fetal_fraction").raw["performance"] is None
     assert library.entry("fetal-fraction-chry", "fetal_fraction").raw["tier"] == "SPECULATIVE"
+
+
+def test_registered_calibration_enters_identity_and_derived_skip_is_published(tmp_path: Path) -> None:
+    store = LabStore(tmp_path / "root")
+    path, digest = _file(tmp_path)
+    contract = register_contract(store, path, digest)
+    algorithm = fetal.FETAL_FRACTION_CHRY
+    assets = algorithm.asset_sha256s_for_input(store.root, INPUT)
+    assert assets == [contract.manifest_sha256]
+    assert execution_identity(algorithm, reference_sha256=REFERENCE, asset_sha256s=assets) != execution_identity(
+        algorithm, reference_sha256=REFERENCE)
+
+    run_id = new_run_id()
+    target = RunTarget(INPUT, SOURCE, tmp_path, "hg38", REFERENCE,
+                       eligible_reads=2_000_000, derived={"transform": "split", "half": "A"})
+    derived_algorithm = replace(algorithm, upstream=())
+    results = run_plan(store, None, store.run_log(run_id), target,
+                       [PlanItem(derived_algorithm, False)], {}, run_id=run_id,
+                       scrubber=Scrubber(root=store.root))
+    assert len(results) == 1 and results[0].status == "skipped"
+    assert results[0].skip_reason == "unsupported_input"
+    saved = store.read_result(INPUT, derived_algorithm.id, results[0].parameters_sha256)
+    assert saved is not None and saved.status == "skipped"

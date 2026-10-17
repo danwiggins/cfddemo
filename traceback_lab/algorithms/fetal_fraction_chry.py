@@ -19,6 +19,17 @@ from .sex_check import HG38_CHRY_LENGTH, HG38_CHRY_PARS
 
 _CONTIGS = tuple(f"chr{chrom}" for chrom in range(1, 23)) + ("chrX", "chrY")
 _HG38_CHR1_LENGTH = 248_956_422
+_F1_MIN_MAPQ = 20
+_F1_FLAG_EXCLUDE = 0x4 | 0x100 | 0x200 | 0x400 | 0x800
+_F1_PARS = ((10_000, 2_781_479), (56_887_902, 57_217_415))
+_UNAVAILABLE = Skip("missing_asset", "Verified fetal chrY calibration is unavailable for this input")
+
+
+def _protocol_matches() -> bool:
+    """Refuse old calibrations if shared D21 or hg38 counting policy changes."""
+
+    return (MIN_MAPQ == _F1_MIN_MAPQ and FLAG_EXCLUDE == _F1_FLAG_EXCLUDE
+            and HG38_CHRY_PARS == _F1_PARS)
 
 
 def _counts(summary: Any) -> tuple[int, int]:
@@ -83,23 +94,25 @@ class FetalFractionChrY(Base):
             return Skip("depth", "fetal chrY fraction needs at least 2,000,000 eligible reads")
         if ctx.derived is not None:
             return Skip("unsupported_input", "fetal chrY calibration applies to the full input")
+        if not _protocol_matches():
+            return Skip("unsupported_input", "fetal chrY counting protocol has changed")
         from ..store import LabStore
 
         try:
             contract = inspect_contract(LabStore(ctx.root), ctx.input_id)
-        except FetalChrYContractError as exc:
-            return Skip("missing_asset", f"verified fetal chrY calibration unavailable: {exc}")
+        except FetalChrYContractError:
+            return _UNAVAILABLE
         if contract.source_id != ctx.source_id:
-            return Skip("unsupported_input", "fetal calibration is bound to a different source")
+            return _UNAVAILABLE
         if contract.reference_sha256 != ctx.reference_sha256:
-            return Skip("reference", "fetal calibration is bound to a different reference")
+            return _UNAVAILABLE
         if contract.calibration_status != "operator_verified":
-            return Skip("missing_asset", "synthetic fetal calibration is for mechanics only")
+            return _UNAVAILABLE
         if list(ctx.extras.get("planned_asset_sha256s", ())) != [contract.manifest_sha256]:
-            return Skip("missing_asset", "fetal calibration changed after result identity was planned")
+            return _UNAVAILABLE
         if (ctx.approx_depth_x is None or not math.isfinite(ctx.approx_depth_x)
                 or ctx.approx_depth_x < contract.min_depth_x):
-            return Skip("depth", f"calibrated minimum is {contract.min_depth_x:g}x")
+            return _UNAVAILABLE
         summary, _ = load_summary(ctx)
         if (tuple(summary.contigs[:24]) != _CONTIGS or summary.lengths[0] != _HG38_CHR1_LENGTH
                 or summary.lengths[23] != HG38_CHRY_LENGTH):
@@ -109,9 +122,9 @@ class FetalFractionChrY(Base):
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
         from ..store import LabStore
 
-        contract = inspect_contract(LabStore(ctx.root), ctx.input_id)
         if not isinstance(self.preflight(ctx), Ready):
             raise RuntimeError("fetal calibration or input changed after preflight")
+        contract = inspect_contract(LabStore(ctx.root), ctx.input_id)
         summary, _ = load_summary(ctx)
         y_count, denominator = _counts(summary)
         if denominator != ctx.eligible_reads:
