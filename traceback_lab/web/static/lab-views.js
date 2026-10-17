@@ -1048,13 +1048,13 @@
       const points = primary.bin_start_bp.map((start, i) => [start + step / 2, primary.gc_corrected_coverage[i]]);
       const rows = profiles.map((profile) => [profile.site_name, profile.site_count, profile.central_coverage, profile.amplitude]);
       slot.replaceWith(
-        h("p", {}, `Primary TF list: ${data.primary_site}; ${fmt(primary.site_count)} sites. Bin coordinates below are starts, while chart points are bin centers.`),
+        h("p", {}, `Primary TF list: ${data.primary_site}; ${fmt(primary.site_count)} sites. The table preserves upstream bin starts and lists the exact centers plotted on the x-axis.`),
         chart(`GC-corrected Griffin nucleosome coverage at ${data.primary_site} sites.`, {
           grid: { left: 65, right: 20, top: 20, bottom: 45 },
           xAxis: { type: "value", name: "bp from site" }, yAxis: { type: "value", name: "relative coverage" },
           series: [{ type: "line", showSymbol: false, data: points, lineStyle: { color: "#1f5f8b" } }],
-        }, dataTable(`Griffin ${data.primary_site} corrected profile`, ["Bin start (bp)", "Relative coverage"],
-          primary.bin_start_bp.map((start, i) => [start, primary.gc_corrected_coverage[i]]))),
+        }, dataTable(`Griffin ${data.primary_site} corrected profile`, ["Bin start (bp)", "Plotted bin center (bp)", "Relative coverage"],
+          primary.bin_start_bp.map((start, i) => [start, start + step / 2, primary.gc_corrected_coverage[i]]))),
         dataTable("Griffin TF-site lists", ["Site list", "Sites", "Central coverage", "Amplitude"], rows),
       );
     }).catch((error) => slot.replaceWith(h("p", { class: "problem" }, `Griffin profile unavailable (${error.message}).`)));
