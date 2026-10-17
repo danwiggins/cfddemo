@@ -78,6 +78,9 @@ def test_bundle_code_and_basecaller_each_change_execution_identity(tmp_path, mon
     original = identity(first)
     identity(_context(tmp_path))
     assert probes[:2] == [True, False]
+    code = adapter.METHYLBERT.identity_parameters(first)["execution_code_sha256s"]
+    assert set(code) == set(adapter._EXECUTION_CODE_FILES)
+    assert all(len(digest) == 64 for digest in code.values())
     assert original != identity(_context(tmp_path, methylbert_bundle_sha256="d" * 64, methylbert_code_sha256="c" * 64,
                                          methylbert_min_classified_reads=100000))
     assert original != identity(_context(tmp_path, methylbert_bundle_sha256="b" * 64, methylbert_code_sha256="d" * 64,
@@ -86,6 +89,7 @@ def test_bundle_code_and_basecaller_each_change_execution_identity(tmp_path, mon
                                          methylbert_min_classified_reads=200000))
     monkeypatch.setattr(adapter, "header_model", lambda *_: "dorado-model-B")
     assert original != identity(first)
+    monkeypatch.setattr(adapter, "header_model", lambda *_: "dorado-model-A")
     runtime = {"python": "3.11", "packages": {"torch": "2.2"}, "cuda": None}
     assert original != identity(first)
 
@@ -164,7 +168,8 @@ def test_private_worker_lifecycle_publishes_only_aggregate(tmp_path, monkeypatch
         tmp_path, reference_fasta=str(fasta),
         methylbert_bundle_sha256="b" * 64, methylbert_code_sha256="c" * 64,
         methylbert_min_classified_reads=100000, planned_parameters={
-            "child_sha256": "a" * 64, "numerical_runtime": {"packages": {"torch": "fixture"}},
+            "execution_code_sha256s": {name: "a" * 64 for name in adapter._EXECUTION_CODE_FILES},
+            "numerical_runtime": {"packages": {"torch": "fixture"}},
         },
     )
     monkeypatch.setattr(adapter.METHYLBERT, "preflight", lambda *_: Ready())
@@ -203,7 +208,9 @@ def test_private_worker_lifecycle_publishes_only_aggregate(tmp_path, monkeypatch
     assert result.metrics[2]["n"] == MIN_ELIGIBLE_READS
     assert set(result.artifacts) == {"methylbert_provenance.json"}
     assert json.loads(result.artifacts["methylbert_provenance.json"])["bundle_sha256"] == "b" * 64
-    assert json.loads(result.artifacts["methylbert_provenance.json"])["child_sha256"] == "a" * 64
+    assert json.loads(result.artifacts["methylbert_provenance.json"])["execution_code_sha256s"] == {
+        name: "a" * 64 for name in adapter._EXECUTION_CODE_FILES
+    }
     assert json.loads(result.artifacts["methylbert_provenance.json"])["numerical_runtime"] == {"packages": {"torch": "fixture"}}
 
     monkeypatch.setattr(adapter, "numerical_runtime_identity", lambda **_kwargs: {"packages": {"torch": "changed"}})

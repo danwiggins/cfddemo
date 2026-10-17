@@ -122,7 +122,7 @@ def main(argv: list[str]) -> int:
     # the Lab source that owns this script; the model package stays site-local.
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from traceback_lab.methylbert_runtime import (
-        PINNED_UPSTREAM_COMMIT, installed_identity, require_numerical_runtime,
+        PINNED_UPSTREAM_COMMIT, apply_precision_flags, installed_identity, require_numerical_runtime,
     )
 
     identity = installed_identity()
@@ -135,6 +135,7 @@ def main(argv: list[str]) -> int:
         raise ValueError("MethylBERT child imports from outside the attested installation")
     if installed_identity() != identity:
         raise ValueError("MethylBERT installed sources changed during child import")
+    apply_precision_flags(request["numerical_runtime"])
     require_numerical_runtime(request["numerical_runtime"])
 
     import numpy as np

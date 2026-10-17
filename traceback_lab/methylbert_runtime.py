@@ -76,6 +76,26 @@ class RuntimeRefusal(ValueError):
     """Model, input, environment, or aggregate result violates the contract."""
 
 
+def apply_precision_flags(expected: object) -> None:
+    """Restore selected Torch precision settings after model-package imports."""
+
+    cuda = expected.get("cuda") if isinstance(expected, dict) else None
+    if not isinstance(cuda, dict):
+        raise RuntimeRefusal("MethylBERT selected precision settings are missing")
+    booleans = ("matmul_allow_tf32", "cudnn_allow_tf32", "cudnn_benchmark")
+    if any(type(cuda.get(key)) is not bool for key in booleans):
+        raise RuntimeRefusal("MethylBERT selected precision settings are invalid")
+    precision = cuda.get("float32_matmul_precision")
+    if precision not in {"highest", "high", "medium"}:
+        raise RuntimeRefusal("MethylBERT selected matmul precision is invalid")
+    import torch
+
+    torch.set_float32_matmul_precision(precision)
+    torch.backends.cuda.matmul.allow_tf32 = cuda["matmul_allow_tf32"]
+    torch.backends.cudnn.allow_tf32 = cuda["cudnn_allow_tf32"]
+    torch.backends.cudnn.benchmark = cuda["cudnn_benchmark"]
+
+
 def require_numerical_runtime(expected: object) -> dict[str, Any]:
     """Refuse package or CUDA drift before loading a trusted checkpoint."""
 

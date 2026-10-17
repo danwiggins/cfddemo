@@ -99,6 +99,27 @@ def test_parent_gpu_identity_uses_a_bounded_process_without_importing_cuda(monke
     assert seen["log_limit_bytes"] == 8 * 1024
 
 
+def test_child_restores_selected_precision_after_model_import(monkeypatch):
+    precision = []
+    matmul = SimpleNamespace(allow_tf32=True)
+    cudnn = SimpleNamespace(allow_tf32=False, benchmark=True)
+    torch = SimpleNamespace(
+        set_float32_matmul_precision=precision.append,
+        backends=SimpleNamespace(cuda=SimpleNamespace(matmul=matmul), cudnn=cudnn),
+    )
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    expected = {"cuda": {
+        "float32_matmul_precision": "highest", "matmul_allow_tf32": False,
+        "cudnn_allow_tf32": True, "cudnn_benchmark": False,
+    }}
+    runtime.apply_precision_flags(expected)
+    assert precision == ["highest"]
+    assert matmul.allow_tf32 is False
+    assert cudnn.allow_tf32 is True and cudnn.benchmark is False
+    with pytest.raises(runtime.RuntimeRefusal, match="invalid"):
+        runtime.apply_precision_flags({"cuda": {**expected["cuda"], "cudnn_benchmark": "false"}})
+
+
 def test_install_identity_requires_pinned_git_source_and_hashes_record_listed_code(tmp_path, monkeypatch):
     code = tmp_path / "methylbert" / "data" / "bam.py"
     code.parent.mkdir(parents=True)
