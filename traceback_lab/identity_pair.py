@@ -19,7 +19,7 @@ from typing import Any
 from traceback_runner.serialization import canonical_json_bytes
 
 from .assets import AssetError, _check_contained
-from .algorithms.identity import IDENTITY, MAX_SKETCH_BYTES, _somalier_env, somalier_tool
+from .algorithms.identity import IDENTITY, MAX_SKETCH_BYTES, MIN_ELIGIBLE, _somalier_env, somalier_tool
 from .file_access import open_regular_no_follow
 from .identity import SHA256_PATTERN, canonical_sha256, resolve_prefix
 from .identity_sites import IdentitySitesError, inspect_sites
@@ -31,6 +31,7 @@ from . import views
 PAIR_SCHEMA = "traceback.lab.identity-pair.v1"
 MAX_PAIRS_SHOWN = 64
 MAX_PAIR_DIRECTORIES_SCANNED = 4096
+MAX_PAIR_PEERS_VERIFIED = 4  # each selected sketch can be up to 16 MiB
 _PAIR_HEADER = {"sample_a", "sample_b", "relatedness", "ibs0", "ibs2", "concordance", "n"}
 
 
@@ -85,7 +86,7 @@ def _selected_sketch(store: LabStore, source_id: str, *, sites_sha256: str) -> S
         raise IdentityPairError("run the identity algorithm for both current full inputs first")
     if identity_result.provenance.source_id != source_id or identity_result.provenance.input_id != sample.full.input_id:
         raise IdentityPairError("fingerprint does not belong to the current source and input")
-    if identity_result.depth is None or identity_result.depth.eligible_reads < 10_000_000:
+    if identity_result.depth is None or identity_result.depth.eligible_reads < MIN_ELIGIBLE:
         raise IdentityPairError("fingerprint has fewer than 10 million eligible reads")
     try:
         reference = resolve_reference(store.root, identity_result.provenance.reference_id, example=True)
@@ -330,6 +331,10 @@ def pairs_for_sample(store: LabStore, source_id: str) -> list[dict[str, Any]]:
     anchor_identity: dict[str, str] | None = None
     anchor_checked = False
     peer_identities: dict[str, dict[str, str] | None] = {}
+    peer_failure_noted = False
+
+    class PeerBudgetReached(Exception):
+        pass
 
     def current_identity(participant_source: str) -> dict[str, str] | None:
         nonlocal anchor_identity, anchor_checked
@@ -342,6 +347,8 @@ def pairs_for_sample(store: LabStore, source_id: str) -> list[dict[str, Any]]:
                     anchor_identity = None
             return anchor_identity
         if participant_source not in peer_identities:
+            if len(peer_identities) >= MAX_PAIR_PEERS_VERIFIED:
+                raise PeerBudgetReached
             try:
                 peer_identities[participant_source] = _selected_sketch(
                     store, participant_source, sites_sha256=sites.sha256,
@@ -375,11 +382,18 @@ def pairs_for_sample(store: LabStore, source_id: str) -> list[dict[str, Any]]:
                 try:
                     anchor = current_identity(source_id)
                     if anchor is None:
-                        continue
+                        rows.append(status_notice("Current fingerprint is unavailable; rerun the identity algorithm before viewing comparisons"))
+                        break
                     current = [current_identity(row["source_id"]) for row in participants]
+                except PeerBudgetReached:
+                    rows.append(status_notice("Comparison list was truncated at its fingerprint verification budget"))
+                    break
                 except (IdentityPairError, KeyError, TypeError):
                     continue
                 if any(identity is None for identity in current):
+                    if not peer_failure_noted:
+                        rows.append(status_notice("A compared fingerprint is unavailable; rerun identity for the affected samples"))
+                        peer_failure_noted = True
                     continue
                 if current != participants or sites.sha256 != summary.get("sites_sha256"):
                     continue

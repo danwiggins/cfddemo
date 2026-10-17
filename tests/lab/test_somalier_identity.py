@@ -436,8 +436,46 @@ def test_pair_list_caches_failed_anchor_lookup(tmp_path, monkeypatch) -> None:
         raise pair.IdentityPairError("fingerprint unavailable")
 
     monkeypatch.setattr(pair, "_selected_sketch", missing_anchor)
-    assert pairs_for_sample(store, source) == []
+    unavailable = pairs_for_sample(store, source)
+    assert len(unavailable) == 1 and unavailable[0]["state"] == "unavailable"
+    assert "Current fingerprint" in unavailable[0]["reason"]
     assert calls == [source]
+
+
+def test_pair_list_bounds_fingerprint_verification_and_marks_truncation(tmp_path, monkeypatch) -> None:
+    from traceback_lab import identity_pair as pair
+
+    store = LabStore(tmp_path / "root")
+    pair_root = store.lab / "identity-pairs"
+    pair_root.mkdir(parents=True)
+    source = "a" * 64
+    peers = [f"{index + 1:064x}" for index in range(3)]
+    sketches = {key: SelectedSketch(key, "c" * 64,
+                                    "a-20261016T000000000000-aaaaaaaa", "e" * 64,
+                                    hashlib.sha256(key.encode()).hexdigest(), key.encode())
+                for key in (source, *peers)}
+    summaries = {}
+    for index, peer in enumerate(peers, start=1):
+        pair_id = f"{index:064x}"
+        (pair_root / pair_id).mkdir()
+        summaries[pair_id] = {"pair_id": pair_id, "participants": [sketches[source].identity(), sketches[peer].identity()],
+                              "sites_sha256": "f" * 64,
+                              "metrics": {"relatedness": 0.5, "concordance": 0.9, "n": 10}}
+    monkeypatch.setattr(pair, "MAX_PAIR_PEERS_VERIFIED", 2)
+    monkeypatch.setattr(pair, "inspect_sites", lambda _store: SimpleNamespace(sha256="f" * 64))
+    monkeypatch.setattr(pair, "_selected_pair", lambda _store, pair_id: summaries[pair_id])
+    calls = []
+
+    def selected(_store, participant, **_kwargs):
+        calls.append(participant)
+        return sketches[participant]
+
+    monkeypatch.setattr(pair, "_selected_sketch", selected)
+    monkeypatch.setattr(pair, "id12_for", lambda _store, participant: participant[:12])
+    rows = pairs_for_sample(store, source)
+    assert len(rows) == 3
+    assert any("verification budget" in row.get("reason", "") for row in rows)
+    assert len(calls) == 3  # one anchor and only two peers
 
 
 def test_malformed_stored_pair_is_ignored_by_sample_read(tmp_path, monkeypatch) -> None:
