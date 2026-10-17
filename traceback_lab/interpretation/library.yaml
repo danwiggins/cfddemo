@@ -2527,3 +2527,52 @@ entries:
       by: "Lab S4 evidence audit"
       date: "2026-10-16"
       note: "No scientific citation or reference interval displayed. Engineering formula: D21 eligible molecules supply aligned-span start and end-1, not claimed physical cleavage sites. Each valid end contributes once to the denominator, including both ends of one read even if they select the same CpG. A reference CG C coordinate within 10 bp inclusive is near; equal-distance ties select the lower C. Endpoint motifs are separate panels and require complete A/C/G/T contexts. LEGAL is a caution flag, not a rights clearance."
+
+  # -------------------------------------------------------------------- wps
+  - algorithm_id: wps
+    metric_id: mean_wps
+    label: "Mean long-fragment windowed protection score"
+    value_kind: signed
+    tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "Original cfDNA fragmentation analysis; this Lab uses ONT aligned spans"
+    min_depth_x: 10
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No healthy range or clinical performance is established for this ONT 1 kb WPS summary"
+    meaning_high: "More 120–180 bp fragments span a 120 bp window relative to fragments ending in it, averaged genome-wide."
+    meaning_low: "More fragments end inside the window relative to those spanning it, averaged genome-wide."
+    confounders: ["ONT fragment-length distribution", "aligned versus physical molecule ends", "mapping and copy-number bias", "sequencing depth"]
+    next_steps:
+      analytical: ["Inspect the 1 kb mean-WPS track", "Compare only with a protocol-matched cohort"]
+      clinical_setting: null
+    license_ids: [method-patents]
+    flags: [LEGAL]
+    headline: true
+    stability: {kind: absolute, tolerance: 0.5}
+    citations: ["doi:10.1016/j.cell.2015.11.050"]
+    citation_checked: {by: "Lab S5 source review", date: "2026-10-16", note: "Snyder et al. define WPS as spanning fragments minus fragments with an endpoint in a 120 bp window for 120–180 bp fragments. This in-house ONT implementation publishes a 1 kb mean, not their nucleosome peak calls; the 0.5 stability tolerance is an engineering comparison rule."}
+
+  - algorithm_id: wps
+    metric_id: positive_bin_fraction
+    label: "Fraction of 1 kb bins with positive mean WPS"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "Original cfDNA fragmentation analysis; this Lab uses ONT aligned spans"
+    min_depth_x: 10
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No healthy range or clinical performance is established for this ONT 1 kb WPS summary"
+    meaning_high: "A larger share of autosomal 1 kb bins has positive mean long-fragment WPS."
+    meaning_low: "A smaller share of autosomal 1 kb bins has positive mean long-fragment WPS."
+    confounders: ["ONT fragment-length distribution", "aligned versus physical molecule ends", "mapping and copy-number bias", "sequencing depth"]
+    next_steps:
+      analytical: ["Inspect the 1 kb mean-WPS track", "Compare only with a protocol-matched cohort"]
+      clinical_setting: null
+    license_ids: [method-patents]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1016/j.cell.2015.11.050"]
+    citation_checked: {by: "Lab S5 source review", date: "2026-10-16", note: "This fraction is an in-house summary of 1 kb mean WPS bins derived from the Snyder WPS definition; no published reference interval or validated ONT interpretation applies."}
