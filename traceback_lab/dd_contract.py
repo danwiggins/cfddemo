@@ -141,7 +141,8 @@ def inspect_contract(store: LabStore, input_id: str) -> DonorContract:
     return contract
 
 
-def register_contract(store: LabStore, source: Path, expected_sha256: str) -> DonorContract:
+def register_contract(store: LabStore, source: Path, expected_sha256: str, *,
+                      allow_synthetic: bool = False) -> DonorContract:
     if not _SHA.fullmatch(expected_sha256):
         raise DonorContractError("expected calibration SHA-256 must be lowercase hex")
     try:
@@ -151,15 +152,24 @@ def register_contract(store: LabStore, source: Path, expected_sha256: str) -> Do
     contract = _parse(raw)
     if contract.manifest_sha256 != expected_sha256:
         raise DonorContractError("donor calibration differs from expected SHA-256")
+    if contract.calibration_status == "synthetic" and not allow_synthetic:
+        raise DonorContractError("synthetic calibration requires explicit --allow-synthetic opt-in")
     directory = _directory(store, contract.input_id)
     try:
         _check_contained(store, directory)
     except AssetError as exc:
         raise DonorContractError("donor calibration destination is unsafe") from exc
     if directory.exists() or directory.is_symlink():
-        current = inspect_contract(store, contract.input_id)
+        try:
+            current = inspect_contract(store, contract.input_id)
+        except DonorContractError as exc:
+            raise DonorContractError(
+                "existing immutable calibration is damaged; restore its exact original bytes from backup"
+            ) from exc
         if current.manifest_sha256 != contract.manifest_sha256:
-            raise DonorContractError("a different calibration is already registered for this input")
+            raise DonorContractError(
+                "a different calibration is already registered and immutable; use a new input"
+            )
         return current
 
     def build(staging: Path) -> None:

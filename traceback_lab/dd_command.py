@@ -20,6 +20,8 @@ def add_dd_parser(commands: Any, common: Callable[[argparse.ArgumentParser], Non
     add = actions.add_parser("register", help="pin transplant assertions and calibration bytes")
     add.add_argument("--file", type=Path, required=True)
     add.add_argument("--sha256", required=True)
+    add.add_argument("--allow-synthetic", action="store_true",
+                     help="explicitly reserve this immutable input slot for mechanics-only calibration")
     common(add)
     add.set_defaults(handler=_register)
     inspect = actions.add_parser("inspect", help="verify the input-scoped transplant calibration")
@@ -51,7 +53,8 @@ def _register(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str,
     store.check_version()
     try:
         with store.writer("donor register", new_run_id(), step="dd-cfdna-chry"):
-            contract = register_contract(store, args.file, args.sha256)
+            contract = register_contract(store, args.file, args.sha256,
+                                         allow_synthetic=args.allow_synthetic)
     except DonorContractError as exc:
         payload = _payload("lab donor register", "blocked", "Transplant calibration not registered", store,
                            {"cause": str(exc)})

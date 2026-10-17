@@ -49,6 +49,7 @@ def _file(tmp_path: Path, *, status: str = "operator_verified", **changes) -> tu
 
 def test_registration_is_input_scoped_immutable_and_cli_inspectable(tmp_path: Path, capsys) -> None:
     path, digest = _file(tmp_path)
+    original = path.read_bytes()
     store = LabStore(tmp_path / "root")
     with pytest.raises(DonorContractError, match="expected"):
         register_contract(store, path, "0" * 64)
@@ -65,6 +66,9 @@ def test_registration_is_input_scoped_immutable_and_cli_inspectable(tmp_path: Pa
     (store.lab / "assets" / "dd-cfdna-chry" / INPUT / "contract.json").write_bytes(b"{}")
     with pytest.raises(DonorContractError):
         inspect_contract(store, INPUT)
+    path.write_bytes(original)
+    with pytest.raises(DonorContractError, match="restore its exact original bytes"):
+        register_contract(store, path, digest)
 
 
 def test_registration_publish_failure_is_structured_and_path_free(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -83,6 +87,7 @@ def test_registration_publish_failure_is_structured_and_path_free(tmp_path: Path
 
 @pytest.mark.parametrize("change", [
     {"male_donor_attested": False}, {"female_recipient_attested": False},
+    {"transplant_attested": False},
     {"pregnancy_excluded_attested": False}, {"min_depth_x": 0},
     {"min_depth_x": 10 ** 1000},
     {"female_background_y_per_million": 4000}, {"male_full_donor_y_per_million": 1000},
@@ -98,16 +103,20 @@ def test_contract_refuses_unverified_assertions_and_invalid_calibration(tmp_path
 def test_synthetic_calibration_skips_and_verified_mechanics_use_nonpar_y(tmp_path: Path, monkeypatch) -> None:
     store = LabStore(tmp_path / "root")
     path, digest = _file(tmp_path, status="synthetic")
-    contract = register_contract(store, path, digest)
+    with pytest.raises(DonorContractError, match="--allow-synthetic"):
+        register_contract(store, path, digest)
+    assert not (store.lab / "assets" / "dd-cfdna-chry" / INPUT).exists()
+    contract = register_contract(store, path, digest, allow_synthetic=True)
     contigs = [f"chr{i}" for i in range(1, 23)] + ["chrX", "chrY"]
     lengths = [248_956_422] + [1_000_000] * 22 + [57_227_415]
     chrom = np.zeros(1000, dtype=np.int16)
     chrom[:3] = 23
     starts = np.zeros(1000, dtype=np.int64)
     starts[:3] = [3_000_000, 4_000_000, 10_001]
-    summary = SimpleNamespace(contigs=contigs, lengths=lengths,
-                              eligible=lambda: np.ones(1000, dtype=bool),
-                              column=lambda name: {"contig": chrom, "start": starts}[name])
+    summary = SimpleNamespace(contigs=contigs, lengths=lengths, rows=1000,
+                              column=lambda name: {"contig": chrom, "start": starts,
+                                                   "flag": np.zeros(1000, dtype=np.uint16),
+                                                   "mapq": np.full(1000, 60, dtype=np.uint8)}[name])
     monkeypatch.setattr(donor, "load_summary", lambda ctx: (summary, None))
     ctx = InputContext(store.root, SOURCE, INPUT, "hg38", REFERENCE, tmp_path,
                        eligible_reads=1000, approx_depth_x=5,
@@ -134,8 +143,25 @@ def test_synthetic_calibration_skips_and_verified_mechanics_use_nonpar_y(tmp_pat
     assert donor.DD_CFDNA_CHRY.preflight(replace(verified_ctx, approx_depth_x=float("nan"))).reason_code == "depth"
     assert donor.DD_CFDNA_CHRY.preflight(replace(verified_ctx, derived={"half": "A"})).reason_code == "unsupported_input"
     assert donor.DD_CFDNA_CHRY.preflight(replace(verified_ctx, extras={})).reason_code == "missing_asset"
+    assert donor.DD_CFDNA_CHRY.preflight(replace(verified_ctx, source_id="f" * 64)).reason_code == "unsupported_input"
+    assert donor.DD_CFDNA_CHRY.preflight(replace(verified_ctx, reference_sha256="f" * 64)).reason_code == "reference"
     lengths[23] -= 1
     assert donor.DD_CFDNA_CHRY.preflight(verified_ctx).reason_code == "reference"
+
+
+def test_chry_counter_uses_bounded_slices_and_half_open_par_boundaries(monkeypatch) -> None:
+    monkeypatch.setattr(donor, "CHUNK_ROWS", 3)
+    starts = np.array([9_999, 10_000, 2_781_478, 2_781_479,
+                       56_887_901, 56_887_902, 57_217_414, 57_217_415], dtype=np.int32)
+    chrom = np.full(len(starts), 23, dtype=np.int16)
+    flags = np.zeros(len(starts), dtype=np.uint16)
+    mapqs = np.full(len(starts), 60, dtype=np.uint8)
+    flags[0] = 0x400
+    mapqs[7] = 19
+    columns = {"contig": chrom, "start": starts, "flag": flags, "mapq": mapqs}
+    summary = SimpleNamespace(rows=len(starts), column=lambda name: columns[name],
+                              eligible=lambda: pytest.fail("full-summary mask must not be allocated"))
+    assert donor._count_reads(summary) == (2, 6)
 
 
 def test_real_bam_summary_and_worker_obey_d21_and_par_boundaries(tmp_path: Path) -> None:

@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 
 from ..dd_contract import COUNTING_PROTOCOL, DonorContract, DonorContractError, inspect_contract
+from ..read_summary import CHUNK_ROWS, FLAG_EXCLUDE, MIN_MAPQ
 from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip
 from ._base import Base, load_summary, metric
 from .sex_check import HG38_CHRY_LENGTH, HG38_CHRY_PARS
@@ -29,6 +30,29 @@ def _fraction(y_reads: int, eligible_reads: int, contract: DonorContract) -> flo
     if not baseline <= observed <= full:
         return None
     return (observed - baseline) / (full - baseline)
+
+
+def _count_reads(summary: Any) -> tuple[int, int]:
+    """Count D21 reads in bounded slices of the memmapped summary columns."""
+
+    flags = summary.column("flag")
+    mapqs = summary.column("mapq")
+    contigs = summary.column("contig")
+    starts = summary.column("start")
+    eligible_count = y_count = 0
+    for offset in range(0, summary.rows, CHUNK_ROWS):
+        end = min(offset + CHUNK_ROWS, summary.rows)
+        chunk_contigs = contigs[offset:end]
+        eligible = (((flags[offset:end] & FLAG_EXCLUDE) == 0)
+                    & (mapqs[offset:end] >= MIN_MAPQ)
+                    & (chunk_contigs >= 0) & (chunk_contigs < 24))
+        eligible_count += int(np.count_nonzero(eligible))
+        y_rows = eligible & (chunk_contigs == 23)
+        chunk_starts = starts[offset:end]
+        for low, high in HG38_CHRY_PARS:
+            y_rows &= ~((chunk_starts >= low) & (chunk_starts < high))
+        y_count += int(np.count_nonzero(y_rows))
+    return y_count, eligible_count
 
 
 @dataclass
@@ -60,8 +84,10 @@ class DonorDerivedChrY(Base):
             contract = inspect_contract(LabStore(ctx.root), ctx.input_id)
         except DonorContractError as exc:
             return Skip("missing_asset", f"verified transplant calibration unavailable: {exc}")
-        if contract.source_id != ctx.source_id or contract.reference_sha256 != ctx.reference_sha256:
-            return Skip("reference", "transplant calibration is bound to a different input or reference")
+        if contract.source_id != ctx.source_id:
+            return Skip("unsupported_input", "transplant calibration is bound to a different source")
+        if contract.reference_sha256 != ctx.reference_sha256:
+            return Skip("reference", "transplant calibration is bound to a different reference")
         if contract.calibration_status != "operator_verified":
             return Skip("missing_asset", "synthetic calibration is for mechanics only")
         if contract.manifest_sha256 not in ctx.extras.get("planned_asset_sha256s", ()):
@@ -83,13 +109,7 @@ class DonorDerivedChrY(Base):
         if not isinstance(self.preflight(ctx), Ready):
             raise RuntimeError("donor calibration or input changed after preflight")
         summary, _ = load_summary(ctx)
-        eligible = summary.eligible()
-        starts = summary.column("start")
-        y_rows = eligible & (summary.column("contig") == 23)
-        for low, high in HG38_CHRY_PARS:
-            y_rows &= ~((starts >= low) & (starts < high))
-        y_reads = int(np.count_nonzero(y_rows))
-        denominator = int(np.count_nonzero(eligible))
+        y_reads, denominator = _count_reads(summary)
         fraction = _fraction(y_reads, denominator, contract)
         if self.asset_sha256s_for_input(ctx.root, ctx.input_id) != [contract.manifest_sha256]:
             raise RuntimeError("donor calibration changed during execution")

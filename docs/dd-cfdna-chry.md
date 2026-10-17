@@ -38,6 +38,12 @@ not from this example. A file marked `synthetic` supports test arithmetic but
 cannot run on an input. `operator_verified` is an assertion, not independent
 verification by the software. The Lab binds the exact calibration bytes to the
 input and reference SHA-256 and refuses changes to a registered input.
+Synthetic calibration needs `--allow-synthetic` at registration. That option
+irreversibly reserves the input's calibration slot for mechanics-only testing;
+it does not permit a numeric donor-fraction result. If an existing registration
+is damaged, restore its exact original bytes from backup. A different
+calibration requires a new input identity; the Lab never overwrites the
+immutable provenance.
 
 The estimator counts eligible read starts on hg38 chrY outside its two
 pseudoautosomal intervals. It divides that count by all eligible reads to get
