@@ -693,13 +693,14 @@ def test_status_finds_an_interrupted_run_through_the_pointer(tmp_path) -> None:
     assert status["interrupted"] == {"run_id": run_id, "step": "align"}
 
 
-def test_status_identifies_sample_only_after_run_sample_event(tmp_path) -> None:
+@pytest.mark.parametrize("command", ("run", "simulate cna", "simulate split"))
+def test_status_identifies_sample_only_after_run_sample_event(tmp_path, command) -> None:
     store = LabStore(tmp_path)
     run_id = "r-20261015-0101-abcd"
     source_id, input_id = "a" * 64, "b" * 64
-    with store.writer("run", run_id, step="bam-qc"):
+    with store.writer(command, run_id, step="bam-qc"):
         log = store.run_log(run_id)
-        log.append("run_start", command="run")
+        log.append("run_start", command=command)
         before = api_module.LabApi(store).status()["active"]
         assert "source_id" not in before and "input_id" not in before
         log.append("sample", source_id=source_id, input_id=input_id)
@@ -718,12 +719,13 @@ def test_status_identifies_sample_only_after_run_sample_event(tmp_path) -> None:
     ("wrong_run", "malformed_or_empty"),
     ("unsafe", "unreadable_or_over_1mib"),
 ))
-def test_status_reports_unavailable_latest_log_without_claiming_interruption(tmp_path, damage, reason) -> None:
+@pytest.mark.parametrize("command", ("run", "simulate cna", "simulate split"))
+def test_status_reports_unavailable_latest_log_without_claiming_interruption(tmp_path, damage, reason, command) -> None:
     store = LabStore(tmp_path / "root")
     run_id = "r-20261015-0101-abcd"
-    with store.writer("run", run_id, step="bam-qc"):
+    with store.writer(command, run_id, step="bam-qc"):
         log = store.run_log(run_id)
-        log.append("run_start", command="run")
+        log.append("run_start", command=command)
         log.append("step_start", step="bam-qc")
     path = store.runs_dir / f"{run_id}.jsonl"
     if damage == "oversized":

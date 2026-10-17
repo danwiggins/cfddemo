@@ -41,6 +41,8 @@ from ..problems import LabProblem
 from ..store import LabStore, summarize_run
 from .. import views
 
+_LOGGED_SAMPLE_COMMANDS = frozenset({"run", "simulate cna", "simulate split"})
+
 
 def _recovery_problem(problem: LabProblem) -> dict[str, str]:
     """Only operator-safe fields cross the local Compare API boundary."""
@@ -225,7 +227,7 @@ def _latest_analysis_run(store: LabStore) -> str | None:
         pointer = json.loads(raw)
     except ValueError:
         return None
-    if not isinstance(pointer, dict) or pointer.get("command") != "run":
+    if not isinstance(pointer, dict) or pointer.get("command") not in _LOGGED_SAMPLE_COMMANDS:
         return None
     run_id = pointer.get("run_id")
     return run_id if isinstance(run_id, str) and re.fullmatch(r"r-\d{8}-\d{4}-[0-9a-f]{4,8}", run_id) else None
@@ -253,7 +255,7 @@ class LabApi:
         status = self.store.status()
         interrupted = None
         run_log_unavailable = None
-        if status["active"] is not None and status["active"].get("command") == "run":
+        if status["active"] is not None and status["active"].get("command") in _LOGGED_SAMPLE_COMMANDS:
             run_id = status["active"]["run_id"]
             events, reason = _run_events(self.store, run_id)
             if not reason and events[0][1]["event"] != "run_start":
