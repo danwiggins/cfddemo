@@ -325,7 +325,8 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
     compat_source = Path(__file__).parent / "griffin_compat" / "sitecustomize.py"
     probe_pythonpath = str(compat_source.parent) + os.pathsep + os.environ.get("PYTHONPATH", "")
     snakemake_version = subprocess.run(
-        [str(snakemake), "--version"], check=True, capture_output=True, text=True, timeout=10,
+        [sys.executable, str(snakemake), "--version"], check=True,
+        capture_output=True, text=True, timeout=10,
         env={**os.environ, "PYTHONPATH": probe_pythonpath},
     ).stdout.strip()
     if snakemake_version != SNAKEMAKE_VERSION:
@@ -376,7 +377,7 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
     profile_config = _load_default(upstream, workflows[1])
     profile_config.update(_ref_options(reference, assets, scripts))
     profile_config.update({
-        "tmp_dir": "tmp", "results_dir": "results",
+        "tmp_dir": "tmp", "results_dir": "results", "mappability_correction": False,
         "sites_yaml": "config/sites.yaml", "samples_yaml": "config/samples.GC.yaml",
     })
     _write_yaml(profile_dir / "config" / "config.yaml", profile_config)
@@ -409,7 +410,7 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
     ):
         with (directory / "workflow.log").open("wb") as log:
             subprocess.run(
-                [str(snakemake), "-s", snakefile, "--cores", str(config.cores)],
+                [str(python), str(snakemake), "-s", snakefile, "--cores", str(config.cores)],
                 cwd=directory, stdout=log, stderr=subprocess.STDOUT, check=True,
                 env={**os.environ, "PATH": workflow_path,
                      "PYTHONPATH": workflow_pythonpath,

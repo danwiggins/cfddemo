@@ -44,6 +44,15 @@ def test_reads_pinned_upstream_healthy_demo_fixture() -> None:
     assert profile.offsets_bp[0] == -990 and profile.offsets_bp[-1] == 975
 
 
+def test_rejects_renamed_upstream_coordinate_column(tmp_path: Path) -> None:
+    source = Path(__file__).parent / "fixtures" / "griffin" / "Healthy_demo.GC_corrected.coverage.tsv"
+    path = tmp_path / source.name
+    raw = source.read_text(encoding="utf-8")
+    path.write_text(raw.replace("\t975\tmean_reads_per_bp", "\tlost_975\tmean_reads_per_bp", 1), encoding="utf-8")
+    with pytest.raises(GriffinFormatError, match="unknown Griffin output column"):
+        read_corrected_profiles(path, expected_sample="Healthy_demo")
+
+
 @pytest.mark.parametrize(
     ("filename", "correction", "sample"),
     [
@@ -152,7 +161,11 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
         if argv[:2] == ["git", "-C"]:
             return subprocess.CompletedProcess(argv, 0, GRIFFIN_COMMIT + "\n" if argv[-2:] == ["rev-parse", "HEAD"] else "")
         if argv[-1] == "--version":
+            assert argv[:2] == [sys.executable, str(tool_dir / "snakemake")]
             return subprocess.CompletedProcess(argv, 0, snakemake_version + "\n")
+        assert Path(argv[0]).name == "python" and Path(argv[0]).parent.name == "bin"
+        assert Path(argv[0]).resolve() == Path(sys.executable).resolve()
+        assert argv[1] == str(tool_dir / "snakemake")
         assert kwargs["env"]["PYTHONDONTWRITEBYTECODE"] == "1"
         directory = Path(kwargs["cwd"])
         calls.append(directory)
@@ -205,6 +218,9 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
         (attempt / "compat" / "sitecustomize.py").read_bytes()
     ).hexdigest()
     assert manifest["runtime"]["environment"]["PYTHONPATH"].startswith(str(attempt / "compat"))
+    assert "mappability_correction: false" in (
+        attempt / "griffin_nucleosome_profiling" / "config" / "config.yaml"
+    ).read_text(encoding="utf-8")
     for name in ("snakemake", "samtools", "bedtools"):
         assert manifest["runtime"]["executables"][name]["sha256"] == hashlib.sha256(name.encode()).hexdigest()
     assert manifest["runtime"]["packages"]["numpy"]
@@ -313,13 +329,16 @@ def test_pinned_checkout_gate_precedes_attempt(
     assert not attempt.exists()
 
 
-def test_native_ont_bam_fails_closed(tmp_path: Path) -> None:
+@pytest.mark.parametrize("read_groups", [[], [{"ID": "rg1", "PL": "ILLUMINA"}]])
+def test_native_ont_bam_fails_closed(tmp_path: Path, read_groups: list[dict[str, str]]) -> None:
     pysam = pytest.importorskip("pysam")
 
     from traceback_lab.adapters.griffin_run import _require_paired_input
 
     bam = tmp_path / "ont.bam"
-    with pysam.AlignmentFile(str(bam), "wb", header={"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 10000}]}) as out:
+    with pysam.AlignmentFile(str(bam), "wb", header={"HD": {"VN": "1.6"},
+                                                      "SQ": [{"SN": "chr1", "LN": 10000}],
+                                                      "RG": read_groups}) as out:
         for index in range(100):
             read = pysam.AlignedSegment()
             read.query_name = f"ont{index}"
@@ -412,6 +431,30 @@ def test_paired_input_gate_scans_past_first_10000_records(tmp_path: Path) -> Non
             read.template_length = 150
             out.write(read)
     _require_paired_input(bam)
+
+
+def test_paired_input_gate_requires_a_profile_window_fragment(tmp_path: Path) -> None:
+    pysam = pytest.importorskip("pysam")
+
+    from traceback_lab.adapters.griffin_run import _require_paired_input
+
+    bam = tmp_path / "out-of-window.bam"
+    header = {"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 100000}],
+              "RG": [{"ID": "rg1", "PL": "ILLUMINA"}]}
+    with pysam.AlignmentFile(str(bam), "wb", header=header) as out:
+        for index in range(100):
+            read = pysam.AlignedSegment()
+            read.query_name = f"pair{index}"
+            read.query_sequence = "A" * 150
+            read.flag = 99
+            read.reference_id = 0
+            read.reference_start = index * 10
+            read.mapping_quality = 60
+            read.cigarstring = "150M"
+            read.template_length = 500
+            out.write(read)
+    with pytest.raises(ValueError, match="positive-TLEN"):
+        _require_paired_input(bam)
 
 
 def test_griffin_bam_header_must_match_reference(tmp_path: Path) -> None:

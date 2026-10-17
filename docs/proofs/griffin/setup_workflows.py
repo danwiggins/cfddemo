@@ -11,6 +11,10 @@ upstream = base / 'upstream-posix'
 toy = base / 'proof'
 work = base / 'snakemake-proof'
 work.mkdir(exist_ok=True)
+compat = base / 'compat'
+compat.mkdir(exist_ok=True)
+shutil.copy2(Path(__file__).resolve().parents[3] / 'traceback_lab' / 'adapters'
+             / 'griffin_compat' / 'sitecustomize.py', compat / 'sitecustomize.py')
 (toy / 'exclude.bed').write_text('chr1\t0\t1\n')
 scripts = upstream / 'scripts'
 
@@ -19,6 +23,12 @@ for workflow in ('griffin_GC_and_mappability_correction', 'griffin_nucleosome_pr
     if target.exists():
         raise FileExistsError(target)
     shutil.copytree(upstream / 'snakemakes' / workflow, target)
+    cluster_path = target / 'config' / 'cluster_slurm.yaml'
+    cluster = yaml.safe_load(cluster_path.read_text())
+    for rule in cluster.values():
+        if isinstance(rule, dict) and 'ncpus' in rule:
+            rule['ncpus'] = 1
+    cluster_path.write_text(yaml.safe_dump(cluster, sort_keys=False))
     config_path = target / 'config' / 'config.yaml'
     config = yaml.safe_load(config_path.read_text())
     config.update({
