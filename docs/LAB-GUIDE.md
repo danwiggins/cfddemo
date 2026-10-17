@@ -252,6 +252,9 @@ stored result remains available but does not enter new platform-aware cohorts.
 For a legacy BAM without a platform declaration, verify its instrument
 provenance and regenerate a BAM with the correct `@RG PL` value from the trusted
 source before ingesting it. The Lab does not infer ONT from an absent value.
+Previously stored Lab-aligned inputs without read groups remain readable only
+when their manifest pins the historical `map-ont` alignment recipe; a new
+input still needs an explicit platform declaration.
 
 **PMD asset.** `pmd-score` needs an operator-supplied Zhou 2018 hg38
 common-PMD BED.gz file. The repository does not ship or download it; its
