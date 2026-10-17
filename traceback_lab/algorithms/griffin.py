@@ -53,6 +53,36 @@ def _public_provenance(manifest: dict[str, Any], raw_sha256: str,
     return json.dumps(public, sort_keys=True, separators=(",", ":")).encode()
 
 
+def _bam_gate(bam: Path, *, derived: bool) -> tuple[int, Skip | None]:
+    """Check the full BAM inside the timed worker, before the upstream workflow."""
+
+    try:
+        if derived:
+            pairs = count_d21_pairs(bam)
+            if pairs < MIN_ELIGIBLE_AUTOSOMAL_PAIRS:
+                return pairs, Skip(
+                    "depth", f"Griffin needs {MIN_ELIGIBLE_AUTOSOMAL_PAIRS:,} eligible autosomal pairs; this selection has {pairs:,}",
+                )
+        profile_reads = _require_paired_input(bam)
+        if not derived:
+            pairs = count_d21_pairs(bam)
+    except OSError:
+        return 0, Skip("input_unavailable", "Griffin could not read aligned BAM; inspect the Lab input and retry")
+    except ValueError as exc:
+        message = str(exc)
+        if message == "Griffin requires canonical hg38 autosomes":
+            return 0, Skip("reference", message)
+        return 0, Skip("platform", message if message in _SAFE_BAM_VALIDATION_MESSAGES else
+                       "Griffin could not validate the aligned BAM for paired-end Illumina input")
+    if profile_reads == 0:
+        return pairs, Skip("depth", "Griffin's pinned 100–200 bp profile window has no qualifying fragments")
+    if pairs < MIN_ELIGIBLE_AUTOSOMAL_PAIRS:
+        return pairs, Skip(
+            "depth", f"Griffin needs {MIN_ELIGIBLE_AUTOSOMAL_PAIRS:,} eligible autosomal pairs; this input has {pairs:,}",
+        )
+    return pairs, None
+
+
 @dataclass
 class Griffin(Base):
     input_gate: ClassVar[str] = f"at least {MIN_ELIGIBLE_AUTOSOMAL_PAIRS:,} D21-eligible autosomal pairs"
@@ -119,41 +149,18 @@ class Griffin(Base):
             return Skip("missing_toolchain", "Griffin requires tested Snakemake 5.19.2")
         if not registration_available(ctx.root):
             return Skip("missing_asset", "Griffin assets are not registered or registration is unsafe")
-        keep_name = None
         if ctx.derived is not None:
             try:
-                keep_name = derived_name_predicate(dict(ctx.derived))
+                derived_name_predicate(dict(ctx.derived))
             except (ValueError, KeyError, TypeError):
                 return Skip("derived_input", "Griffin requires a valid downsample or split read-name selection")
-        try:
-            bam = ctx.input_dir / "aligned.bam"
-            if keep_name is not None:
-                pairs = count_d21_pairs(bam, keep_name)
-                if pairs < MIN_ELIGIBLE_AUTOSOMAL_PAIRS:
-                    return Skip("depth", f"Griffin needs {MIN_ELIGIBLE_AUTOSOMAL_PAIRS:,} eligible autosomal pairs; this selection has {pairs:,}")
-                profile_reads = _require_paired_input(bam, keep_name)
-            else:
-                profile_reads = _require_paired_input(bam)
-                pairs = count_d21_pairs(bam)
-        except OSError:
-            return Skip("input_unavailable", "Griffin could not read aligned BAM; inspect the Lab input and retry")
-        except ValueError as exc:
-            message = str(exc)
-            if message == "Griffin requires canonical hg38 autosomes":
-                return Skip("reference", message)
-            return Skip("platform", message if message in _SAFE_BAM_VALIDATION_MESSAGES else
-                        "Griffin could not validate the aligned BAM for paired-end Illumina input")
-        if profile_reads == 0:
-            return Skip("depth", "Griffin's pinned 100–200 bp profile window has no qualifying fragments")
-        if pairs < MIN_ELIGIBLE_AUTOSOMAL_PAIRS:
-            return Skip("depth", f"Griffin needs {MIN_ELIGIBLE_AUTOSOMAL_PAIRS:,} eligible autosomal pairs; this input has {pairs:,}")
         try:
             inspect_griffin_assets(ctx.root)
         except GriffinAssetError as exc:
             return Skip("missing_asset", str(exc))
         return Ready()
 
-    def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
+    def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput | Skip:
         if ctx.platform != "illumina":
             raise RuntimeError("Griffin cannot run on a non-Illumina input")
         assets = inspect_griffin_assets(ctx.root)
@@ -171,11 +178,9 @@ class Griffin(Base):
             if ctx.derived is not None:
                 bam = Path(directory) / "selected.bam"
                 write_transient_bam(ctx.input_dir / "aligned.bam", bam, dict(ctx.derived))
-                if _require_paired_input(bam) == 0:
-                    raise RuntimeError("selected Griffin BAM has no qualifying 100–200 bp fragments")
-            pairs = count_d21_pairs(bam)
-            if pairs < MIN_ELIGIBLE_AUTOSOMAL_PAIRS:
-                raise RuntimeError("Griffin pair count fell below the required 5M after preflight")
+            pairs, refusal = _bam_gate(bam, derived=ctx.derived is not None)
+            if refusal is not None:
+                return refusal
             profiles = run_upstream(GriffinRun(
                 input_id=ctx.input_id, bam=bam,
                 reference_fasta=Path(ctx.extras["reference_fasta"]),

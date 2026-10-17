@@ -237,7 +237,12 @@ def run_plan(
         identity_parameters = getattr(algorithm, "identity_parameters", None)
         identity_tools = getattr(algorithm, "identity_tools", None)
         worker_env = _worker_env()
-        tool_pins = tuple(algorithm.tools)
+        # A platform skip consumes no live toolchain.  Dynamic tool probes may
+        # launch processes or hash binaries, so use an explicit static skip pin
+        # when an algorithm declares one.  Static algorithms keep their prior
+        # skip identity, and supported runs still attest their live tools.
+        skip_tools = getattr(algorithm, "platform_skip_tools", None) if platform_rejected else None
+        tool_pins = tuple(skip_tools) if skip_tools is not None else tuple(algorithm.tools)
         planned_tools = [tool.identity() for tool in
                          (identity_tools(worker_pythonpath=worker_env["PYTHONPATH"])
                           if callable(identity_tools) and not platform_rejected

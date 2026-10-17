@@ -1,7 +1,9 @@
 """Generate synthetic-only inputs for an isolated run of pinned upstream Griffin."""
 
+import argparse
 from pathlib import Path
 import random
+import tempfile
 
 import pandas as pd
 import pyBigWig
@@ -9,7 +11,11 @@ import pysam
 import yaml
 
 
-root = Path('/var/tmp/cfdna-griffin/proof')
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--base-dir', type=Path,
+                    default=Path(tempfile.gettempdir()) / 'cfdna-griffin')
+args = parser.parse_args()
+root = args.base_dir.resolve() / 'proof'
 root.mkdir(parents=True, exist_ok=True)
 random.seed(160)
 sequence = ''.join(random.choices('ACGT', k=30000))

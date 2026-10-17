@@ -18,7 +18,7 @@ import tempfile
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pysam
 
@@ -255,6 +255,10 @@ def _classify_streamed(bam: Path, read_length: int, kraken: str, database: Path,
 
 @dataclass
 class Microbial(Base):
+    platform_skip_tools: ClassVar[tuple[ToolPin, ...]] = (
+        ToolPin("kraken2", "not-applicable", "kraken2-mit"),
+        ToolPin("bracken", "not-applicable", "bracken-gpl3"),
+    )
     version: str = "5"
     family: str = "non-human"
     consumes: str = "full_bam"

@@ -218,14 +218,16 @@ def test_griffin_preflight_depth_and_native_ont_skip(tmp_path: Path, monkeypatch
     assert "5,000,000 D21-eligible autosomal pairs" in depth.message
     assert "4,999,999 eligible reads" in depth.message
     _available_toolchain(monkeypatch)
-    unsupported = GRIFFIN.preflight(InputContext(**base, eligible_reads=5_000_000))
+    monkeypatch.setattr(module, "inspect_griffin_assets", lambda _: object())
+    assert isinstance(GRIFFIN.preflight(InputContext(**base, eligible_reads=5_000_000)), Ready)
+    _, unsupported = module._bam_gate(bam, derived=False)
     assert isinstance(unsupported, Skip) and unsupported.reason_code == "platform"
     assert "single-end" in unsupported.message
     platform = GRIFFIN.preflight(InputContext(**{**base, "platform": "ont"}, eligible_reads=5_000_000))
     assert isinstance(platform, Skip) and platform.reason_code == "platform"
     monkeypatch.setattr(module, "_require_paired_input", lambda _: None)
     monkeypatch.setattr(module, "count_d21_pairs", lambda _: 4_999_999)
-    short_pairs = GRIFFIN.preflight(InputContext(**base, eligible_reads=10_000_000))
+    _, short_pairs = module._bam_gate(bam, derived=False)
     assert isinstance(short_pairs, Skip) and short_pairs.reason_code == "depth"
     assert "4,999,999" in short_pairs.message
 
@@ -255,12 +257,7 @@ def test_paired_350_bp_fragments_are_depth_skip_not_platform_skip(tmp_path: Path
                 read.template_length = 350 if first else -350
                 out.write(read)
     monkeypatch.setattr(module, "count_d21_pairs", lambda _: 5_000_000)
-    _available_toolchain(monkeypatch)
-    ctx = InputContext(root=tmp_path, source_id="1" * 64, input_id="2" * 64,
-                       reference_id="hg38", reference_sha256="3" * 64,
-                       input_dir=input_dir, platform="illumina", eligible_reads=10_000_000,
-                       extras={"reference_fasta": str(tmp_path / "hg38.fa")})
-    decision = GRIFFIN.preflight(ctx)
+    _, decision = module._bam_gate(bam, derived=False)
     assert decision == Skip("depth", "Griffin's pinned 100–200 bp profile window has no qualifying fragments")
 
 
@@ -318,6 +315,43 @@ def test_missing_registration_skips_before_scanning_bam(tmp_path: Path, monkeypa
     assert isinstance(decision, Skip) and decision.reason_code == "missing_asset"
 
 
+def test_ready_griffin_preflight_leaves_full_bam_scan_to_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import traceback_lab.algorithms.griffin as module
+
+    _available_toolchain(monkeypatch)
+    monkeypatch.setattr(module, "inspect_griffin_assets", lambda _: object())
+    monkeypatch.setattr(module, "_require_paired_input", lambda _: pytest.fail("parent scanned BAM"))
+    monkeypatch.setattr(module, "count_d21_pairs", lambda _: pytest.fail("parent counted BAM pairs"))
+    ctx = InputContext(root=tmp_path, source_id="1" * 64, input_id="2" * 64,
+                       reference_id="hg38", reference_sha256="3" * 64,
+                       input_dir=tmp_path, platform="illumina", eligible_reads=5_000_000,
+                       extras={"reference_fasta": str(tmp_path / "hg38.fa")})
+    assert isinstance(GRIFFIN.preflight(ctx), Ready)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="worker timeouts use POSIX process groups")
+def test_slow_griffin_bam_gate_obeys_worker_process_timeout(tmp_path: Path) -> None:
+    from traceback_lab.pipeline import Stage, run_pipeline
+
+    marker = tmp_path / "scan-started"
+    script = (
+        "import time\n"
+        "from pathlib import Path\n"
+        "import traceback_lab.algorithms.griffin as griffin\n"
+        "def slow_scan(_):\n"
+        f"    Path({str(marker)!r}).write_text('started')\n"
+        "    time.sleep(30)\n"
+        "griffin._require_paired_input = slow_scan\n"
+        "griffin._bam_gate(Path('unused.bam'), derived=False)\n"
+    )
+    outcome = run_pipeline([Stage("griffin-gate", [sys.executable, "-c", script])],
+                           timeout_s=2, cwd=tmp_path)
+    assert marker.is_file()
+    assert outcome.timed_out and not outcome.ok
+
+
 @pytest.mark.parametrize("error", [OSError, ValueError])
 def test_bam_scan_failure_omits_private_path_from_skip(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: type[Exception],
@@ -331,11 +365,7 @@ def test_bam_scan_failure_omits_private_path_from_skip(
         raise error(f"could not read {private_path}")
 
     monkeypatch.setattr(module, "_require_paired_input", fail_scan)
-    ctx = InputContext(root=tmp_path, source_id="1" * 64, input_id="2" * 64,
-                       reference_id="hg38", reference_sha256="3" * 64,
-                       input_dir=private_path.parent, platform="illumina", eligible_reads=5_000_000,
-                       extras={"reference_fasta": str(tmp_path / "hg38.fa")})
-    decision = GRIFFIN.preflight(ctx)
+    _, decision = module._bam_gate(private_path, derived=False)
     assert isinstance(decision, Skip)
     assert decision.reason_code == ("input_unavailable" if error is OSError else "platform")
     assert str(tmp_path) not in decision.message
@@ -344,8 +374,9 @@ def test_bam_scan_failure_omits_private_path_from_skip(
 
 def test_unreadable_bam_skip_is_published_without_private_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import traceback_lab.algorithms.griffin as module
+    import traceback_lab.runner as runner
+    from traceback_lab.pipeline import PipelineResult, StageOutcome
 
-    _available_toolchain(monkeypatch)
     private_path = tmp_path / "private-donor" / "aligned.bam"
 
     def fail_scan(_: Path) -> None:
@@ -363,8 +394,23 @@ def test_unreadable_bam_skip_is_published_without_private_path(tmp_path: Path, m
     # The real read-summary upstream supplies the depth gate; this regression
     # isolates publication after that gate has populated the RunTarget.
     algorithm = replace(GRIFFIN, upstream=())
+    monkeypatch.setattr(algorithm, "preflight", lambda _: Ready())
+    monkeypatch.setattr(algorithm, "identity_tools", lambda **_: algorithm.tools)
+    monkeypatch.setattr(algorithm, "asset_sha256s", lambda _: [])
+
+    def worker_skip(stages: object, **kwargs: object) -> PipelineResult:
+        _, decision = module._bam_gate(private_path, derived=False)
+        assert isinstance(decision, Skip)
+        scratch = Path(kwargs["cwd"])
+        (scratch / "output.json").write_text(json.dumps({"skip": {
+            "reason_code": decision.reason_code, "message": decision.message,
+        }}))
+        return PipelineResult([StageOutcome("worker", returncode=0)], 0.01, 0)
+
+    monkeypatch.setattr(runner, "run_pipeline", worker_skip)
     result = run_plan(
-        store, None, store.run_log(run_id), target, [PlanItem(algorithm, False)], {},
+        store, None, store.run_log(run_id), target, [PlanItem(algorithm, False)],
+        {"griffin": "traceback_lab.algorithms.griffin:GRIFFIN"},
         run_id=run_id, scrubber=Scrubber(root=tmp_path),
     )[0]
     assert result.status == "skipped" and result.skip_reason == "input_unavailable"
@@ -385,11 +431,7 @@ def test_missing_canonical_hg38_autosomes_is_reference_skip(tmp_path: Path, monk
         raise ValueError("Griffin requires canonical hg38 autosomes")
 
     monkeypatch.setattr(module, "count_d21_pairs", no_autosomes)
-    ctx = InputContext(root=tmp_path, source_id="1" * 64, input_id="2" * 64,
-                       reference_id="hg38", reference_sha256="3" * 64,
-                       input_dir=tmp_path, platform="illumina", eligible_reads=5_000_000,
-                       extras={"reference_fasta": str(tmp_path / "hg38.fa")})
-    decision = GRIFFIN.preflight(ctx)
+    _, decision = module._bam_gate(tmp_path / "aligned.bam", derived=False)
     assert decision == Skip("reference", "Griffin requires canonical hg38 autosomes")
 
 
@@ -470,6 +512,7 @@ def test_algorithm_publishes_primary_profile_and_input_bound_provenance(
 
     monkeypatch.setattr(module, "run_upstream", fake_workflow)
     monkeypatch.setattr(module, "count_d21_pairs", lambda _: 5_000_000)
+    monkeypatch.setattr(module, "_require_paired_input", lambda _: 1)
     output = tmp_path / "scratch" / "artifacts"
     output.mkdir(parents=True)
     result = GRIFFIN.run(ctx, output)
@@ -548,7 +591,7 @@ def test_derived_split_counts_selected_pairs_and_uses_transient_bam(
     assert a.input_id != b.input_id
     decision = module.GRIFFIN.preflight(a)
     assert isinstance(decision, Ready), decision
-    assert module.GRIFFIN.preflight(b).reason_code == "depth"
+    assert isinstance(module.GRIFFIN.preflight(b), Ready)
 
     def fake_workflow(config: object) -> tuple[GriffinProfile, ...]:
         assert config.bam.name == "selected.bam"
@@ -575,6 +618,11 @@ def test_derived_split_counts_selected_pairs_and_uses_transient_bam(
     result = module.GRIFFIN.run(a, out)
     assert result.metrics[0]["value"] == 0.5
     assert json.loads(result.artifacts["griffin_provenance.json"])["eligible_autosomal_pairs"] == 120
+    assert not list(out.parent.glob("griffin-derived-*"))
+
+    rejected = module.GRIFFIN.run(b, out)
+    assert isinstance(rejected, Skip) and rejected.reason_code == "depth"
+    assert "80" in rejected.message
     assert not list(out.parent.glob("griffin-derived-*"))
 
     def fail_workflow(_: object) -> None:

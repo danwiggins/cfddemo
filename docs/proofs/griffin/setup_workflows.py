@@ -1,13 +1,21 @@
 """Configure pinned Griffin Snakefiles against the generated synthetic toy."""
 
+import argparse
 from pathlib import Path
 import shutil
+import tempfile
 
 import yaml
 
 
-base = Path('/var/tmp/cfdna-griffin')
-upstream = base / 'upstream-posix'
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--base-dir', type=Path,
+                    default=Path(tempfile.gettempdir()) / 'cfdna-griffin')
+parser.add_argument('--upstream', type=Path,
+                    help='clean checkout of the pinned Griffin commit; defaults to base-dir/upstream-posix')
+args = parser.parse_args()
+base = args.base_dir.resolve()
+upstream = args.upstream.resolve() if args.upstream else base / 'upstream-posix'
 toy = base / 'proof'
 work = base / 'snakemake-proof'
 work.mkdir(exist_ok=True)

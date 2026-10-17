@@ -17,7 +17,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 import pysam
@@ -242,6 +242,7 @@ def _delfi(path: Path, expected: set[tuple[str, int]]) -> dict[tuple[str, int], 
 
 @dataclass
 class FinaleToolkitXcheck(Base):
+    platform_skip_tools: ClassVar[tuple[ToolPin, ...]] = (ToolPin("finaletoolkit", "not-applicable"),)
     version: str = "1"
     family: str = "fragmentomics"
     requires: Requirements = field(default_factory=lambda: Requirements(

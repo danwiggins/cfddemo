@@ -99,6 +99,44 @@ def test_derived_platform_skip_is_persisted_and_shown_in_depth_curve(
     assert row["cells"][0]["state"] == "skipped" and row["cells"][0]["reason"] == "platform"
 
 
+@pytest.mark.parametrize("method,platform", [("finaletoolkit", "ont"), ("microbial", "illumina")])
+def test_dynamic_tool_platform_skip_uses_static_identity_without_probes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, method: str, platform: str,
+) -> None:
+    import traceback_lab.algorithms.finaletoolkit_xcheck as finale_module
+    import traceback_lab.algorithms.microbial as microbial_module
+    from traceback_lab.registry import PlanItem, execution_identity
+    from traceback_lab.runner import RunTarget, run_plan
+    from traceback_lab.scrub import Scrubber
+    from traceback_lab.store import LabStore
+
+    if method == "finaletoolkit":
+        algorithm = finale_module.FINALETOOLKIT_XCHECK
+        monkeypatch.setattr(finale_module, "_tool", lambda *_: pytest.fail("platform skip probed finale"))
+    else:
+        algorithm = microbial_module.MICROBIAL
+        monkeypatch.setattr(microbial_module, "_tool", lambda *_: pytest.fail("platform skip probed microbial"))
+    store = LabStore(tmp_path / "store")
+    store.ensure()
+    log = store.run_log("r-20261017-1200-aaaa")
+    target = RunTarget(input_id="a" * 64, source_id="b" * 64, input_dir=tmp_path,
+                       reference_id="hg38", reference_sha256="c" * 64,
+                       platform=platform, eligible_reads=5_000_000)
+    expected = execution_identity(
+        algorithm, reference_sha256=target.reference_sha256,
+        platform=platform if platform != "ont" else None,
+        tool_pins=[pin.identity() for pin in algorithm.platform_skip_tools],
+    )
+    plan = [PlanItem(algorithm, False)]
+    entries: dict[str, str] = {}
+    first, = run_plan(store, None, log, target, plan, entries,
+                      run_id=log.run_id, scrubber=Scrubber(root=store.root))
+    second, = run_plan(store, None, log, target, plan, entries,
+                       run_id=log.run_id, scrubber=Scrubber(root=store.root))
+    assert (first.status, first.skip_reason, first.parameters_sha256) == ("skipped", "platform", expected)
+    assert second.parameters_sha256 == expected and second.attempt_id == first.attempt_id
+
+
 def test_each_unaligned_chunk_must_declare_the_platform() -> None:
     from traceback_lab.ingest import Chunk, ChunkSet, _refuse_mixed_models
     from traceback_lab.problems import LabProblem
