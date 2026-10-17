@@ -149,8 +149,14 @@ def _validate_entry(raw: Mapping[str, Any], licenses: Mapping[str, Any]) -> Entr
     if raw["value_kind"] in ("vector", "categorical"):
         stability = None
     elif stability is None:
-        _require(raw["value_kind"] in _DEFAULT_STABILITY, where, "a signed metric needs an explicit stability")
-        stability = dict(_DEFAULT_STABILITY[raw["value_kind"]])
+        if raw["value_kind"] in _DEFAULT_STABILITY:
+            stability = dict(_DEFAULT_STABILITY[raw["value_kind"]])
+        else:
+            _require(
+                raw["value_kind"] == "signed" and raw["tier"] == "SPECULATIVE" and reference["kind"] == "none",
+                where,
+                "a signed metric needs an explicit stability unless it is speculative with no reference",
+            )
     if stability is not None:
         _require(stability.get("kind") in STABILITY_KINDS, where, f"stability kind in {STABILITY_KINDS}")
         if stability["kind"] in ("absolute", "relative", "scales_with_depth"):
@@ -469,13 +475,13 @@ def license_callouts(entries: Iterable[Entry | None], library: Library) -> list[
 
 __all__ = [
     "COHORT_MIN",
+    "OUT_OF_RANGE",
     "Cohort",
     "Entry",
-    "InterpretedMetric",
     "Interpretation",
+    "InterpretedMetric",
     "Library",
     "LibraryError",
-    "OUT_OF_RANGE",
     "bootstrap_p95_interval",
     "classify",
     "findings_sort_key",

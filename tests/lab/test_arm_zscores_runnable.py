@@ -15,8 +15,9 @@ from traceback_lab.algorithms import arm_summary
 from traceback_lab.arm_zscores import report_arm_zscores
 from traceback_lab.cli import main as lab_main
 from traceback_lab.cohort_contracts import CohortGeneration, CohortMember, CohortResult
-from traceback_lab.registry import InputContext, Skip, load_registry
+from traceback_lab.interpretation.engine import classify, load_library
 from traceback_lab.problems import LabProblem
+from traceback_lab.registry import InputContext, Skip, load_registry
 from traceback_lab.store import LabStore
 
 
@@ -137,27 +138,45 @@ def _member(index: int, value: float, *, protocol: str = "a" * 64) -> CohortMemb
     )
 
 
+def test_each_arm_value_has_an_exploratory_library_label() -> None:
+    library = load_library()
+    arm_entries = [entry for (algorithm_id, metric_id), entry in library.entries.items()
+                   if algorithm_id == "arm-summary" and metric_id.endswith("_log2")]
+    assert len(arm_entries) == 44
+    for entry in arm_entries:
+        assert entry["tier"] == "SPECULATIVE"
+        assert entry.stability is None
+        assert entry["headline"] is False
+        result = classify(0.01, entry)
+        assert result.state == "no_reference"
+        assert result.reason == "none_published"
+
+
 def test_read_side_arm_z_requires_ten_controls_after_self_exclusion(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = LabStore(tmp_path)
     members = tuple(_member(index, float(index)) for index in range(1, 12))
     target = members[0]
-    generation = CohortGeneration(
-        cohort_id="synthetic", version=1, members=members, pon_n=11,
-        pon_asset_sha256="e" * 64,
-        pon_build={
-            "source_ids": tuple(sorted(member.source_id for member in members)),
-            "loo_asset_sha256s": tuple((member.source_id, f"{index + 200:064x}")
-                                          for index, member in enumerate(members)),
-            "reference_sha256": "f" * 64, "aligner_identity": "synthetic-matched",
-            "grid_sha256": "1" * 64, "counting_parameters_sha256": "2" * 64,
-            "toolchain_lock_sha256": "3" * 64, "builder_source_sha256": "4" * 64,
-            "builder_sha256": "5" * 64, "validator_sha256": "6" * 64,
-            "gc_sha256": "7" * 64, "map_sha256": "8" * 64,
-            "centromere_sha256": "9" * 64,
-        },
-    )
+
+    def generation_for(selected: tuple[CohortMember, ...]) -> CohortGeneration:
+        return CohortGeneration(
+            cohort_id="synthetic", version=1, members=selected, pon_n=len(selected),
+            pon_asset_sha256="e" * 64,
+            pon_build={
+                "source_ids": tuple(sorted(member.source_id for member in selected)),
+                "loo_asset_sha256s": tuple((member.source_id, member.pon_asset_sha256)
+                                              for member in selected),
+                "reference_sha256": "f" * 64, "aligner_identity": "synthetic-matched",
+                "grid_sha256": "1" * 64, "counting_parameters_sha256": "2" * 64,
+                "toolchain_lock_sha256": "3" * 64, "builder_source_sha256": "4" * 64,
+                "builder_sha256": "5" * 64, "validator_sha256": "6" * 64,
+                "gc_sha256": "7" * 64, "map_sha256": "8" * 64,
+                "centromere_sha256": "9" * 64,
+            },
+        )
+
+    generation = generation_for(members)
     monkeypatch.setattr(arm_zscores, "read_current", lambda *_: generation)
     monkeypatch.setattr(arm_zscores, "member_for_generation", lambda *_: target)
     monkeypatch.setattr(arm_zscores.ARM_SUMMARY, "asset_sha256s", lambda *_: ["9" * 64])
@@ -167,8 +186,8 @@ def test_read_side_arm_z_requires_ten_controls_after_self_exclusion(
     assert score.reference_mean == 6.5
     assert score.z == pytest.approx((1 - 6.5) / math.sqrt(8.25))
 
-    monkeypatch.setattr(arm_zscores, "read_current", lambda *_: generation.model_copy(update={
-        "members": members[:10], "pon_n": 10,
-    }))
+    ten_member_generation = generation_for(members[:10])
+    assert CohortGeneration.model_validate(ten_member_generation.model_dump()) == ten_member_generation
+    monkeypatch.setattr(arm_zscores, "read_current", lambda *_: ten_member_generation)
     score = report_arm_zscores(store, "synthetic", target.source_id).scores["chr1p"]
     assert score.state == "no_reference" and score.reference_n == 9
