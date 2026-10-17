@@ -191,7 +191,7 @@ def test_cohort_reads_recorded_effective_identity_without_runtime_probe(
     produced_tools = [ToolPin("parser", "A").identity()]
     algorithm = SimpleNamespace(
         id=name, version="1", parameters=static_parameters,
-        tools=[ToolPin("parser", "B" if name == "cell-origin" else "A")],
+        tools=[ToolPin("parser", "A")],
         upstream=(), requires=SimpleNamespace(platforms=frozenset({"ont"})),
     )
     if name == "methylbert":

@@ -7,6 +7,7 @@ asset support must be added before that is safe.
 
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
 import os
@@ -279,11 +280,18 @@ def _require_chrom_sizes(reference: Path, chrom_sizes: Path) -> tuple[str, ...]:
 def _require_site_contigs(path: Path, chromosomes: tuple[str, ...]) -> int:
     allowed = set(chromosomes)
     rows = 0
-    with path.open("r", encoding="utf-8") as stream:
-        for line_number, line in enumerate(stream, 1):
-            chrom = line.split("\t", 1)[0].strip()
-            if line_number == 1 and chrom.lower() in {"chrom", "chromosome"}:
-                continue
+    with path.open("r", encoding="utf-8", newline="") as stream:
+        reader = csv.reader(stream, delimiter="\t", strict=True)
+        header = next(reader, None)
+        # The pinned workflow reads the column named Chrom, regardless of its
+        # position. Validate that same field instead of assuming column zero.
+        if header is None or header.count("Chrom") != 1:
+            raise ValueError("Griffin TF-site list needs one Chrom header")
+        chrom_index = header.index("Chrom")
+        for fields in reader:
+            if len(fields) != len(header):
+                raise ValueError("Griffin TF-site list has a malformed row")
+            chrom = fields[chrom_index].strip()
             if chrom not in allowed:
                 raise ValueError("Griffin TF-site list contains a chromosome outside the workflow scope")
             rows += 1

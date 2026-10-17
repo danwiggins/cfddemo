@@ -58,7 +58,9 @@ def _registered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, 
     def fake_git(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
         assert argv[:2] == ["git", "-C"]
         return subprocess.CompletedProcess(
-            argv, 0, GRIFFIN_COMMIT + "\n" if argv[-2:] == ["rev-parse", "HEAD"] else ""
+            argv, 0, (GRIFFIN_COMMIT + "\n" if argv[-2:] == ["rev-parse", "HEAD"]
+                      else str(upstream.resolve()) + "\n" if argv[-2:] == ["rev-parse", "--show-toplevel"]
+                      else "")
         )
 
     monkeypatch.setattr(asset_module.subprocess, "run", fake_git)
@@ -69,6 +71,29 @@ def _registered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, 
         source_label="operator supplied TF sites", terms="unknown",
     )
     return root, sites
+
+
+def test_registration_rejects_ignored_checkout_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import traceback_lab.griffin_assets as asset_module
+
+    upstream = tmp_path / "upstream"
+    upstream.mkdir()
+    commands: list[list[str]] = []
+
+    def fake_git(argv: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        commands.append(argv)
+        if argv[-2:] == ["rev-parse", "--show-toplevel"]:
+            output = str(upstream.resolve()) + "\n"
+        elif argv[-2:] == ["rev-parse", "HEAD"]:
+            output = GRIFFIN_COMMIT + "\n"
+        else:
+            output = "!! .snakemake/\n"
+        return subprocess.CompletedProcess(argv, 0, output)
+
+    monkeypatch.setattr(asset_module.subprocess, "run", fake_git)
+    with pytest.raises(GriffinAssetError, match="must be clean"):
+        asset_module._checkout(upstream)
+    assert commands[-1][-4:] == ["status", "--porcelain", "--ignored", "--untracked-files=all"]
 
 
 def test_registered_assets_pin_site_bytes_and_execution_identity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
