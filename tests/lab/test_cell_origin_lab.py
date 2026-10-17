@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pysam
 import pytest
 
@@ -59,6 +61,7 @@ def test_preflight_skips_until_the_atlas_is_registered(world) -> None:
 
 def test_execution_identity_pins_the_mmml_parser_versions() -> None:
     pins = {tool.name: tool.version for tool in co.CELL_ORIGIN.tools}
+    assert pins["numpy"] == np.__version__
     assert pins["pysam"] == pysam.__version__
     assert pins["htslib"] == pysam.__samtools_version__
     original = execution_identity(co.CELL_ORIGIN, reference_sha256="a" * 64)
@@ -68,6 +71,19 @@ def test_execution_identity_pins_the_mmml_parser_versions() -> None:
             for tool in co.CELL_ORIGIN.tools
         ))
         assert execution_identity(changed, reference_sha256="a" * 64) != original
+    sources = co.CELL_ORIGIN.parameters["implementation_sha256s"]
+    root = Path(co.__file__).resolve().parents[2]
+    assert set(sources) == set(co._IMPLEMENTATION_FILES)
+    assert all(
+        digest == hashlib.sha256((root / name).read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+        for name, digest in sources.items()
+    )
+    name = "evidence_inspector/deconvolution.py"
+    changed = replace(co.CELL_ORIGIN, parameters={
+        **co.CELL_ORIGIN.parameters,
+        "implementation_sha256s": {**sources, name: "0" * 64},
+    })
+    assert execution_identity(changed, reference_sha256="a" * 64) != original
 
 
 def _publish_cohort_cell_origin(

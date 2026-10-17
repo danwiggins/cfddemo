@@ -237,6 +237,11 @@ new measurement.
 | `frag-x-meth` | descriptive molecule-count matrix of aligned-size bins by per-read 5mC fraction (at least four distinct CpG sites/read); the scalar is long (151–220 bp) mean minus short (100–150 bp) mean, null if either group is empty; no normal range |
 | `breakpoint-motifs` | 4-mer counts at aligned-reference-span start and end−1, stratified by CpG proximity; the scalar is the fraction of ends near a CpG. These are not proven physical cleavage positions, and the methylation link is unavailable without a supported joint input |
 
+The Lab's cell-origin v2 execution identity pins normalized source digests of
+its MM/ML decoder and reused UXM, NNLS, bootstrap, model, and prefilter code,
+along with the NumPy, pysam, and htslib versions. A changed implementation
+therefore needs a new result rather than reusing a prior cached estimate.
+
 **Short-read support.** For a prealigned paired-end Illumina BAM against the
 registered hg38 reference, run the normal Lab command:
 

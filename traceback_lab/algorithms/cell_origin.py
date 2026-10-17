@@ -11,10 +11,12 @@ directory after the result is published (D30, D33).
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pysam
 
 from ..adapters.mmml_extract import EXTRACTOR_VERSION
@@ -24,6 +26,18 @@ from ._base import Base, metric
 
 MIN_ELIGIBLE_READS = 2_500_000
 LOYFER_KINDS = ("loyfer-atlas", "loyfer-markers", "loyfer-regions")
+_IMPLEMENTATION_FILES = (
+    "traceback_lab/algorithms/cell_origin.py",
+    "traceback_lab/adapters/cell_origin_inhouse.py",
+    "traceback_lab/adapters/mmml_extract.py",
+    "traceback_lab/algorithms/_records.py",
+    "traceback_lab/modbase.py",
+    "evidence_inspector/cell_origin_pipeline.py",
+    "evidence_inspector/cell_origin_prefilter.py",
+    "evidence_inspector/cell_origin_models.py",
+    "evidence_inspector/deconvolution.py",
+    "evidence_inspector/uxm.py",
+)
 
 
 def loyfer_assets(root: Path) -> dict[str, Any]:
@@ -96,6 +110,15 @@ def _downstream_parameters_sha256() -> str:
     values = default_parameters().model_dump(mode="json")
     values.pop("modkit_arguments", None)
     return canonical_sha256(values)
+
+
+def _implementation_sha256s() -> dict[str, str]:
+    """Pin the Lab decoder and reused solver, independent of checkout newlines."""
+    root = Path(__file__).resolve().parents[2]
+    return {
+        name: hashlib.sha256((root / name).read_bytes().replace(b"\r\n", b"\n")).hexdigest()
+        for name in _IMPLEMENTATION_FILES
+    }
 
 
 class CellOrigin(Base):
@@ -217,8 +240,10 @@ CELL_ORIGIN = CellOrigin(
     cost="slow",
     requires=Requirements(mm_tags=True, min_eligible_reads=MIN_ELIGIBLE_READS),
     tools=(ToolPin("lab-mmml", EXTRACTOR_VERSION),
+           ToolPin("numpy", np.__version__),
            ToolPin("pysam", pysam.__version__),
            ToolPin("htslib", pysam.__samtools_version__)),
     parameters={"method": "lab-mmml-loyfer-uxm-v1", "atlas": "loyfer-u250",
-                "downstream_parameters_sha256": _downstream_parameters_sha256()},
+                "downstream_parameters_sha256": _downstream_parameters_sha256(),
+                "implementation_sha256s": _implementation_sha256s()},
 )
