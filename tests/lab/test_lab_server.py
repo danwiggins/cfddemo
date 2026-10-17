@@ -693,6 +693,27 @@ def test_status_finds_an_interrupted_run_through_the_pointer(tmp_path) -> None:
     assert status["interrupted"] == {"run_id": run_id, "step": "align"}
 
 
+@pytest.mark.parametrize("partial", (b'{"event":', b'{"event":"step_start","step":"caf\xc3'))
+def test_status_keeps_complete_events_before_torn_final_line(tmp_path, partial) -> None:
+    store = LabStore(tmp_path)
+    run_id = "r-20261015-0101-abcd"
+    with store.writer("run", run_id, step="align"):
+        log = store.run_log(run_id)
+        log.append("run_start", command="run")
+        log.append("step_start", step="align")
+        with log.path.open("ab") as stream:
+            stream.write(partial)
+        events, reason = api_module._run_events(store, run_id)
+        assert reason is None
+        assert [number for number, _ in events] == [1, 2]
+        active = api_module.LabApi(store).status()
+        assert active["active"]["step"] == "align"
+        assert active["run_log_unavailable"] is None
+    interrupted = api_module.LabApi(store).status()
+    assert interrupted["interrupted"] == {"run_id": run_id, "step": "align"}
+    assert interrupted["run_log_unavailable"] is None
+
+
 @pytest.mark.parametrize("command", ("run", "simulate cna", "simulate split"))
 def test_status_identifies_sample_only_after_run_sample_event(tmp_path, command) -> None:
     store = LabStore(tmp_path)
