@@ -267,10 +267,10 @@ def _memory_warning() -> dict[str, Any] | None:
     physical_gib = physical_ram / GIB
     return {
         "kind": "low_memory",
-        "code": "TBX-LAB-024",
+        "code": "TBX-LAB-025",
         "cause": f"physical RAM is {physical_gib:g} GiB, below the {recommended_gib} GiB alignment recommendation",
         "retryable": False,
-        "docs": "docs/LAB-GUIDE.md#tbx-lab-024",
+        "docs": "docs/LAB-GUIDE.md#tbx-lab-025",
         "summary": f"Less than {recommended_gib} GiB of physical RAM detected; alignment may fail or be slow",
         "physical_ram_bytes": physical_ram,
         "recommended_bytes": MIN_RAM,

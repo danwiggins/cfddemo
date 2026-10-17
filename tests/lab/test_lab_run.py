@@ -85,8 +85,8 @@ def test_low_memory_warning_is_advisory_in_run_and_dry_run(lab_world, capsys, mo
     assert len(low_memory) == 1
     (warning,) = low_memory
     assert warning["kind"] == "low_memory"
-    assert warning["code"] == "TBX-LAB-024"
-    assert warning["cause"] and warning["docs"].endswith("#tbx-lab-024")
+    assert warning["code"] == "TBX-LAB-025"
+    assert warning["cause"] and warning["docs"].endswith("#tbx-lab-025")
     assert warning["physical_ram_bytes"] == 8 * doctor.GIB
     assert warning["recommended_bytes"] == doctor.MIN_RAM
     assert warning["fix"]

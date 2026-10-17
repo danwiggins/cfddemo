@@ -539,7 +539,7 @@ the same sample, or the local sex metadata is malformed (exit 3). Reuse the
 recorded assertion or omit the flag. Inspect and restore malformed metadata
 from a known-good local backup before rerunning; no measured result is changed.
 
-### TBX-LAB-024
+### TBX-LAB-025
 
 An advisory warning (exit 0): physical RAM is below the 16 GiB recommendation
 for full hg38 alignment. The run continues, but alignment may fail or be slow.
