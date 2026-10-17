@@ -29,6 +29,7 @@ from ._base import Base, metric
 R_CODE = r'''suppressPackageStartupMessages(library(NIPTeR))
 args <- commandArgs(trailingOnly=TRUE)
 if (length(args) != 3L || as.character(packageVersion("NIPTeR")) != "1.0.2") stop("NIPTeR version mismatch")
+if (getRversion() < "4.4.0") stop("R 4.4.0 or newer is required to read control RDS")
 control <- readRDS(args[[2L]])
 if (!inherits(control, "NIPTControlGroup") || is.null(control$samples) ||
     length(control$samples) != as.integer(args[[3L]])) stop("invalid NIPTeR control group")
@@ -49,6 +50,13 @@ for (chrom in c(13L, 18L, 21L)) {
 '''
 SCRIPT_SHA256 = hashlib.sha256(R_CODE.encode()).hexdigest()
 _CONTIGS = tuple(f"chr{chrom}" for chrom in range(1, 23)) + ("chrX", "chrY")
+# UCSC hg38 primary chromosome sizes, in _CONTIGS order.
+_HG38_LENGTHS = (
+    248_956_422, 242_193_529, 198_295_559, 190_214_555, 181_538_259, 170_805_979,
+    159_345_973, 145_138_636, 138_394_717, 133_797_422, 135_086_622, 133_275_309,
+    114_364_328, 107_043_718, 101_991_189, 90_338_345, 83_257_441, 80_373_285,
+    58_617_616, 64_444_167, 46_709_983, 50_818_468, 156_040_895, 57_227_415,
+)
 MAX_PACKAGE_ENTRIES = 10000
 MAX_PACKAGE_BYTES = 256 << 20
 
@@ -114,7 +122,7 @@ def _compatible_bam_layout(path: Path) -> bool:
         with pysam.AlignmentFile(str(path), "rb") as bam:
             return (tuple(bam.references[:24]) == _CONTIGS
                     and bam.header.get("HD", {}).get("SO") == "coordinate"
-                    and bam.lengths[0] == 248_956_422 and bam.lengths[23] == 57_227_415)
+                    and tuple(bam.lengths[:24]) == _HG38_LENGTHS)
     except (OSError, ValueError, IndexError):
         return False
 
