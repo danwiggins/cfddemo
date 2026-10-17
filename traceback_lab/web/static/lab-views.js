@@ -659,7 +659,7 @@
   function context(sample, algorithmId, seen) {
     const c = (sample.catalog || []).find((x) => x.algorithm_id === algorithmId);
     const out = [];
-    if (c) out.push(h("p", { class: "help" }, tierBadge(c.tier), ` As run here. Original evidence: ${c.origin_tier || "—"}. Footnote: ${c.footnote || "none published"}`,
+    if (c) out.push(h("p", { class: "help" }, tierBadge(c.tier), ` As run here (${sample.platform === "illumina" ? "Illumina" : sample.platform === "ont" ? "ONT" : "unverified platform"}). Original evidence: ${c.origin_tier || "—"}. Footnote: ${c.footnote || "none published"}`,
       spacedUnverifiedBadge(c.has_library_entry ? c : null)));
     for (const id of (c ? c.license_ids : [])) {
       if (seen.has(id)) { out.push(licenseRef(sample, id)); continue; }

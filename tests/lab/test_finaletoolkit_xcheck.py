@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import random
+import shutil
+from types import SimpleNamespace
 from pathlib import Path
 
 import pysam
@@ -22,6 +24,7 @@ def _fixture(root: Path) -> InputContext:
     input_dir.mkdir()
     reference = root / "hg38.fa"
     bases = "".join(random.Random(419).choices("ACGT", k=300_000))
+    bases = bases[:10_000] + "N" + bases[10_001:]
     reference.write_text(f">chr1\n{bases}\n>chrX\n{bases[:100_000]}\n")
     pysam.faidx(str(reference))
     manifest = {"kind": "prealigned", "platform": "illumina"}
@@ -95,6 +98,8 @@ def _fixture(root: Path) -> InputContext:
     add_pair("duplicate", 233_000, 120, flag_add=0x400)
     add_pair("secondary", 234_000, 120, flag_add=0x100)
     add_pair("improper", 235_000, 120, proper=False)
+    add_pair("midpoint-without-read1-overlap", 99_900, 220)
+    add_pair("midpoint-with-read1-overlap", 99_960, 120)
     records.sort(key=lambda record: (record.reference_id, record.reference_start))
     bam_path = input_dir / "aligned.bam"
     with pysam.AlignmentFile(str(bam_path), "wb", header=header) as bam:
@@ -119,6 +124,8 @@ def test_registered_and_platform_gate(tmp_path: Path) -> None:
         "derived_not_supported", "FinaleToolkit cross-check uses the full paired-end input only")
     unknown_depth = InputContext(**{**ctx.__dict__, "eligible_reads": None})
     assert FINALETOOLKIT_XCHECK.preflight(unknown_depth).reason_code == "depth"
+    shallow = InputContext(**{**ctx.__dict__, "eligible_reads": 999_999})
+    assert FINALETOOLKIT_XCHECK.preflight(shallow).reason_code == "depth"
 
 
 def test_parsers_reject_incomplete_or_changed_outputs(tmp_path: Path) -> None:
@@ -130,6 +137,8 @@ def test_parsers_reject_incomplete_or_changed_outputs(tmp_path: Path) -> None:
     delfi.write_text("#contig\tstart\tshort\tlong\nchr1\t0\t-1\t2\n")
     with pytest.raises(ValueError, match="invalid"):
         _delfi(delfi, {("chr1", 0)})
+    delfi.write_text("#contig\tstart\tshort\tlong\nchr1\t0\t0\t0\n")
+    assert _delfi(delfi, {("chr1", 0)}) == {("chr1", 0): (0, 0)}
 
 
 def test_invalid_launcher_is_missing_toolchain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -137,6 +146,31 @@ def test_invalid_launcher_is_missing_toolchain(tmp_path: Path, monkeypatch: pyte
     launcher.write_bytes(b"\xff\xfe\x00\x00")
     monkeypatch.setenv("TRACEBACK_FINALETOOLKIT_BIN", str(launcher))
     assert _tool() is None
+
+
+def test_pinned_tool_outputs_exercise_run_without_external_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import traceback_lab.algorithms.finaletoolkit_xcheck as module
+
+    ctx = _fixture(tmp_path)
+    monkeypatch.setattr(module, "_tool", lambda: ("pinned-fixture", "e" * 64))
+    ctx.extras["planned_tool_pins"] = [pin.identity() for pin in FINALETOOLKIT_XCHECK.tools]
+    fixtures = Path(__file__).parent / "data"
+
+    def replay(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        name = "finaletoolkit_110_motifs.tsv" if command[1] == "end-motifs" else "finaletoolkit_110_delfi.tsv"
+        shutil.copyfile(fixtures / name, Path(command[command.index("-o") + 1]))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(module.subprocess, "run", replay)
+    result = FINALETOOLKIT_XCHECK.run(ctx, tmp_path / "out")
+    panel = json.loads(result.artifacts["finaletoolkit_xcheck.json"])
+    assert panel["pairs"] == 45 and panel["motif_ends"] == 89
+    assert panel["motif"]["r"] == pytest.approx(1.0)
+    assert panel["delfi"]["r"] == pytest.approx(1.0)
+    assert panel["delfi"]["upstream_counts_equal"]
+    assert panel["verdict"] == "concordant"
 
 
 @pytest.mark.skipif(not os.environ.get("TRACEBACK_FINALETOOLKIT_BIN"),
@@ -152,8 +186,8 @@ def test_actual_finaletoolkit_110_pair_parity(tmp_path: Path) -> None:
             "reference_delfi.tsv"} == set(result.artifacts)
     panel = json.loads(result.artifacts["finaletoolkit_xcheck.json"])
     assert panel["version"] == "1.1.0"
-    assert panel["pairs"] == 43
-    assert panel["motif_ends"] == 86
+    assert panel["pairs"] == 45
+    assert panel["motif_ends"] == 89
     assert panel["motif"]["r"] > 0.95
     assert all(abs(panel["motif"]["upstream"][k] - panel["motif"]["reference"][k]) < 1e-12
                for k in panel["motif"]["upstream"])
@@ -162,7 +196,7 @@ def test_actual_finaletoolkit_110_pair_parity(tmp_path: Path) -> None:
     assert panel["delfi"]["upstream_counts_equal"]
     counts = _delfi(tmp_path / "finaletoolkit-work" / "delfi.tsv",
                     {("chr1", start) for start in (0, 100_000, 200_000)})
-    assert counts == {("chr1", 0): (10, 4), ("chr1", 100_000): (5, 7),
+    assert counts == {("chr1", 0): (10, 4), ("chr1", 100_000): (6, 7),
                       ("chr1", 200_000): (5, 9)}
     assert b"chr1\t0\t10\t4\t2.5\n" in result.artifacts["reference_delfi.tsv"]
     assert panel["verdict"] == "concordant"

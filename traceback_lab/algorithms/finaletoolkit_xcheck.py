@@ -12,6 +12,7 @@ import json
 import math
 import os
 import re
+import shlex
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -59,15 +60,34 @@ def _tool() -> tuple[str, str] | None:
     if not path.is_file():
         return None
     try:
-        first_line = path.open("rb").readline(512).decode("utf-8")
-        if not first_line.startswith("#!"):
-            return None
-        interpreter = Path(first_line[2:].strip())
+        override = os.environ.get("TRACEBACK_FINALETOOLKIT_PYTHON")
+        if override:
+            interpreter = Path(override)
+        else:
+            with path.open("rb") as stream:
+                first_line = stream.readline(512).decode("utf-8")
+            if not first_line.startswith("#!"):
+                return None
+            parts = shlex.split(first_line[2:])
+            if not parts:
+                return None
+            if Path(parts[0]).name == "env":
+                name = parts[2] if len(parts) > 2 and parts[1] == "-S" else parts[1]
+                resolved = shutil.which(name)
+                if not resolved:
+                    return None
+                interpreter = Path(resolved)
+            else:
+                interpreter = Path(parts[0])
         if not interpreter.is_file():
+            return None
+        cli = subprocess.run([str(path), "--version"], capture_output=True, text=True,
+                             timeout=20, check=False)
+        if cli.returncode or not re.search(r"\b1\.1\.0\b", cli.stdout + cli.stderr):
             return None
         answer = subprocess.run([str(interpreter), "-c", _PIN_SCRIPT], capture_output=True,
                                 text=True, timeout=20, check=False)
-    except (OSError, UnicodeError, subprocess.TimeoutExpired):
+    except (OSError, UnicodeError, ValueError, IndexError, subprocess.TimeoutExpired):
         return None
     if answer.returncode:
         return None
@@ -75,6 +95,7 @@ def _tool() -> tuple[str, str] | None:
         identity = json.loads(answer.stdout)
         if identity["version"] != VERSION or not re.fullmatch(r"[0-9a-f]{64}", identity["code_sha256"]):
             return None
+        identity["cli_version"] = (cli.stdout + cli.stderr).strip()
         identity["launcher_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
         pin = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
     except (KeyError, ValueError, TypeError):
@@ -127,6 +148,8 @@ def _reference_counts(bam_path: Path, fasta: Path, contigs: list[tuple[str, int]
                     or read.mapping_quality < MAPQ):
                     continue
                 tlen = read.template_length
+                if read.reference_end is None:
+                    continue
                 if tlen > 0:
                     start, stop = read.reference_start, read.reference_start + tlen
                 elif tlen < 0:
@@ -150,6 +173,11 @@ def _reference_counts(bam_path: Path, fasta: Path, contigs: list[tuple[str, int]
                 span = stop - start
                 if _AUTOSOME.fullmatch(name) and 100 <= span <= 220:
                     key = (name, ((start + stop) // 2 // BIN) * BIN)
+                    # FinaleToolkit queries indexed read1 alignments per bin;
+                    # a fragment whose midpoint is in a bin but whose read1
+                    # alignment does not overlap it is absent upstream.
+                    if not (read.reference_start < key[1] + BIN and read.reference_end > key[1]):
+                        continue
                     row = counts.setdefault(key, [0, 0])
                     row[0 if span <= 150 else 1] += 1
     return motifs, {key: (row[0], row[1]) for key, row in counts.items()}, pairs
