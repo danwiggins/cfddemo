@@ -66,7 +66,7 @@ def test_route_license_references_resolve_to_one_full_callout(route, route_page_
 @pytest.mark.parametrize("route,expected", [
     ("home", "FLAG: PII"),
     ("findings", "FLAG: CLIA"),
-    ("trust-qc", "FLAG: FDA"),
+    ("signals", "FLAG: FDA"),
     ("body-map", "FLAG: LEGAL"),
     ("methods", "FLAG: PII"),
 ])
