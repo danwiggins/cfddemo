@@ -711,6 +711,65 @@ def test_status_identifies_sample_only_after_run_sample_event(tmp_path) -> None:
                            "source_id": source_id, "input_id": input_id}
 
 
+@pytest.mark.parametrize(("damage", "reason"), (
+    ("oversized", "unreadable_or_over_1mib"),
+    ("too_many_lines", "over_4096_lines"),
+    ("malformed", "malformed_or_empty"),
+    ("wrong_run", "malformed_or_empty"),
+    ("unsafe", "unreadable_or_over_1mib"),
+))
+def test_status_reports_unavailable_latest_log_without_claiming_interruption(tmp_path, damage, reason) -> None:
+    store = LabStore(tmp_path / "root")
+    run_id = "r-20261015-0101-abcd"
+    with store.writer("run", run_id, step="bam-qc"):
+        log = store.run_log(run_id)
+        log.append("run_start", command="run")
+        log.append("step_start", step="bam-qc")
+    path = store.runs_dir / f"{run_id}.jsonl"
+    if damage == "oversized":
+        path.write_bytes(b"x" * (1024 * 1024 + 1))
+    elif damage == "too_many_lines":
+        path.write_bytes(b"{}\n" * 4097)
+    elif damage == "malformed":
+        path.write_bytes(b'{"event":"run_start"}\n{broken\n')
+    elif damage == "wrong_run":
+        path.write_bytes(b'{"event":"run_start","run_id":"r-20261015-0101-eeee"}\n')
+    else:
+        target = tmp_path / "other.jsonl"
+        target.write_text('{}\n')
+        path.unlink()
+        path.symlink_to(target)
+    status = api_module.LabApi(store).status()
+    assert status["active"] is None and status["interrupted"] is None
+    assert status["run_log_unavailable"] == {"run_id": run_id, "reason": reason}
+
+
+def test_status_does_not_require_run_logs_from_other_writer_commands(tmp_path) -> None:
+    store = LabStore(tmp_path)
+    run_id = "r-20261015-0101-abcd"
+    with store.writer("cohort add", run_id):
+        active = api_module.LabApi(store).status()
+        assert active["active"]["command"] == "cohort add"
+        assert active["run_log_unavailable"] is None
+    ended = api_module.LabApi(store).status()
+    assert ended["active"] is None and ended["interrupted"] is None
+    assert ended["run_log_unavailable"] is None
+
+
+def test_recent_run_candidates_are_bounded_and_do_not_use_unbounded_run_ids(tmp_path, monkeypatch) -> None:
+    store = LabStore(tmp_path)
+    store.runs_dir.mkdir(parents=True)
+    for index in range(80):
+        path = store.runs_dir / f"r-20261015-{index:04d}-abcd.jsonl"
+        path.write_text('{}\n')
+        os.utime(path, ns=((index + 1) * 1_000_000_000, (index + 1) * 1_000_000_000))
+    monkeypatch.setattr(store, "run_ids", lambda: (_ for _ in ()).throw(AssertionError("unbounded run_ids")))
+    recent = api_module._recent_run_ids(store)
+    assert len(recent) == 64
+    assert recent[0] == "r-20261015-0079-abcd"
+    assert recent[-1] == "r-20261015-0016-abcd"
+
+
 @pytest.mark.skipif(_chrome() is None, reason="no Chrome/Chromium for the headless Trust/QC check")
 @pytest.mark.parametrize("kind", ("active", "active-before-sample", "interrupted"))
 @pytest.mark.parametrize("selected", ("a", "c"))
@@ -761,7 +820,8 @@ def test_trust_qc_run_note_is_scoped_without_replacing_result_status(tmp_path, k
 
 @pytest.mark.skipif(_chrome() is None, reason="no Chrome/Chromium for the headless Trust/QC check")
 @pytest.mark.parametrize("selected", ("a", "c"))
-def test_interrupted_first_step_without_result_is_sample_scoped(tmp_path, selected) -> None:
+@pytest.mark.parametrize("log_state", ("interrupted", "unavailable"))
+def test_interrupted_first_step_without_result_is_sample_scoped(tmp_path, selected, log_state) -> None:
     store = LabStore(tmp_path / "root")
     store.ensure()
     source_a, input_a = "a" * 64, "b" * 64
@@ -781,6 +841,8 @@ def test_interrupted_first_step_without_result_is_sample_scoped(tmp_path, select
         log.append("run_start", command="run")
         log.append("sample", source_id=source_a, input_id=input_a)
         log.append("step_start", step="bam-qc")
+    if log_state == "unavailable":
+        (store.runs_dir / f"{run_id}.jsonl").write_bytes(b"x" * (1024 * 1024 + 1))
     api = api_module.LabApi(store)
     for source_id, input_id in ((source_a, input_a), (source_b, input_b)):
         payload = api.sample(source_id[:12])
@@ -795,7 +857,8 @@ def test_interrupted_first_step_without_result_is_sample_scoped(tmp_path, select
             ok=lambda page: 'data-ready="1"' in page and "<h2>Run</h2>" in page,
         )
     run_panel = dom.split("<h2>Run</h2>", 1)[1].split("</section>", 1)[0]
-    assert ("Latest run interrupted during bam-qc; no result was published for this step." in run_panel) == (selected == "a")
+    assert ("Latest run interrupted during bam-qc; no result was published for this step." in run_panel) == (selected == "a" and log_state == "interrupted")
+    assert ("status is unavailable (log unreadable, unsafe, or over 1 MiB)" in dom) == (log_state == "unavailable")
     assert "Run log line →" not in run_panel
 
 

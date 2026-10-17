@@ -306,7 +306,7 @@
           const line = await api(`/api/samples/${sample.id12}/run-log/${a.algorithm_id}`);
           logLine.replaceChildren(line.found
             ? `${line.run_id} · line ${line.line} · ${line.utc || "time unavailable"} · step_end ${line.step} status=${line.status}${line.skip_reason ? ` (${line.skip_reason})` : ""}${line.duration_s !== null ? ` · ${line.duration_s} s` : ""}`
-            : "Run log line unavailable (checked 64 recently updated runs; logs over 1 MiB or 4,096 lines are not shown).");
+            : "Run log line unavailable (searched up to 64 recently updated runs; logs over 1 MiB or 4,096 lines are not shown).");
         } catch (error) {
           logLine.replaceChildren(error.session ? "Session expired; reopen Lab." : "Run log line unavailable.");
         }
@@ -389,14 +389,20 @@
       document.body.classList.remove("dimmed");
       const previous = state.lastStatus;
       state.lastStatus = status;
+      const logIssue = status.run_log_unavailable;
+      const logReason = logIssue && ({ invalid_run_id: "invalid run ID", unreadable_or_over_1mib: "log unreadable, unsafe, or over 1 MiB",
+        over_4096_lines: "log over 4,096 lines", malformed_or_empty: "log malformed or empty" }[logIssue.reason] || "log unavailable");
       if (state.generationAtLoad === null) state.generationAtLoad = status.generation;
       if (status.active) {
         const minutes = Math.max(0, Math.round((Date.now() - Date.parse(status.active.started_utc)) / 60000));
-        setStatus(`A Lab run is in progress (step: ${status.active.step}, ${minutes} min). Results below are from completed steps.`);
+        setStatus(`A Lab run is in progress (step: ${status.active.step}, ${minutes} min). Results below are from completed steps.${logIssue ? ` Run log status unavailable (${logReason}).` : ""}`);
       } else if (status.interrupted) {
         // A run that died (stale heartbeat, open log) is "interrupted", even
         // if it published results before it stopped.
         setStatus(`The last run (${status.interrupted.run_id}) stopped during ${status.interrupted.step || "a step"}. Results shown are from completed steps. Rerun the same command; only missing results recompute.`,
+          status.generation > state.generationAtLoad ? "Reload" : null);
+      } else if (logIssue) {
+        setStatus(`The last run (${logIssue.run_id}) status is unavailable (${logReason}). Results shown are from completed steps. Inspect the run log or rerun the command.`,
           status.generation > state.generationAtLoad ? "Reload" : null);
       } else if (status.generation > state.generationAtLoad && previous && previous.active) {
         setStatus("New results are available.", "Reload");
