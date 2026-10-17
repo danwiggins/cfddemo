@@ -336,9 +336,9 @@
           ...["Other sample", "Relatedness", "Concordance", "Sites compared"].map((label) => h("th", { scope: "col" }, label)))),
           h("tbody", {}, ...identityPairs.map((pair) => h("tr", {},
             h("th", { scope: "row" }, pair.peer_id12),
-            h("td", {}, fmt(pair.metrics.relatedness)),
-            h("td", {}, fmt(pair.metrics.concordance)),
-            h("td", {}, fmt(pair.metrics.n)))))))
+            h("td", {}, pair.state === "unavailable" ? pair.reason : fmt(pair.metrics.relatedness)),
+            h("td", {}, pair.state === "unavailable" ? "unavailable" : fmt(pair.metrics.concordance)),
+            h("td", {}, pair.state === "unavailable" ? "unavailable" : fmt(pair.metrics.n)))))))
           : h("p", { class: sample.identity_pairs_reason ? "problem" : "" },
             sample.identity_pairs_reason || "No current pair comparison. Prepare fingerprints with lab run --only identity, then use lab identity compare SAMPLE_A SAMPLE_B.")));
     }

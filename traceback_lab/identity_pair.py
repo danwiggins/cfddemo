@@ -18,6 +18,7 @@ from typing import Any
 
 from traceback_runner.serialization import canonical_json_bytes
 
+from .assets import AssetError, _check_contained
 from .algorithms.identity import IDENTITY, MAX_SKETCH_BYTES, _somalier_env, somalier_tool
 from .file_access import open_regular_no_follow
 from .identity import SHA256_PATTERN, canonical_sha256, resolve_prefix
@@ -192,6 +193,42 @@ def _selected_pair(store: LabStore, pair_id: str) -> dict[str, Any] | None:
     return summary
 
 
+def _unreadable_pair_notice(store: LabStore, pair_id: str, source_id: str) -> dict[str, Any] | None:
+    """Name a relevant invalid selection without trusting any stored metrics."""
+
+    directory = store.lab / "identity-pairs" / pair_id
+    try:
+        with os.fdopen(open_regular_no_follow(directory / "selected.json"), "rb") as stream:
+            selected_raw = stream.read(4097)
+        if len(selected_raw) > 4096:
+            return None
+        attempt = json.loads(selected_raw).get("attempt_id")
+        if not isinstance(attempt, str) or not re.fullmatch(r"a-[0-9A-Za-z-]{8,80}", attempt):
+            return None
+        with os.fdopen(open_regular_no_follow(directory / "attempts" / attempt / "summary.json"), "rb") as stream:
+            summary_raw = stream.read(8193)
+        if len(summary_raw) > 8192:
+            return None
+        summary = json.loads(summary_raw)
+    except (OSError, ValueError, AttributeError):
+        return None
+    if not isinstance(summary, dict) or summary.get("pair_id") != pair_id:
+        return None
+    participants = summary.get("participants")
+    if not isinstance(participants, list) or len(participants) != 2:
+        return None
+    ids = [row.get("source_id") if isinstance(row, dict) else None for row in participants]
+    if source_id not in ids:
+        return None
+    other = next((item for item in ids if item != source_id and isinstance(item, str)
+                  and SHA256_PATTERN.fullmatch(item)), None)
+    if other is None or pair_id != canonical_sha256({"sources": sorted((source_id, other)),
+                                                      "kind": "somalier-pair-v1"}):
+        return None
+    return {"pair_id": pair_id, "peer_id12": other[:12],
+            "state": "unavailable", "reason": "Stored comparison is unreadable; rerun lab identity compare for these samples"}
+
+
 def compare_pair(store: LabStore, sample_a: str, sample_b: str, *, force: bool = False) -> dict[str, Any]:
     """Compare exactly two chosen current samples. Caller holds the writer lock."""
 
@@ -223,7 +260,15 @@ def compare_pair(store: LabStore, sample_a: str, sample_b: str, *, force: bool =
         if cached is not None and cached.get("execution_id") == execution_id:
             return {**cached, "cached": True}
     work_root = store.lab / "tmp"
+    try:
+        _check_contained(store, work_root)
+    except AssetError as exc:
+        raise IdentityPairError("temporary comparison directory is unsafe") from exc
     work_root.mkdir(parents=True, exist_ok=True)
+    try:
+        _check_contained(store, work_root)
+    except AssetError as exc:
+        raise IdentityPairError("temporary comparison directory is unsafe") from exc
     with tempfile.TemporaryDirectory(prefix="identity-pair-", dir=work_root) as temp:
         work = Path(temp)
         paths = []
@@ -300,7 +345,14 @@ def pairs_for_sample(store: LabStore, source_id: str) -> list[dict[str, Any]]:
                 if not re.fullmatch(r"[0-9a-f]{64}", entry.name) or not entry.is_dir(follow_symlinks=False):
                     continue
                 summary = _selected_pair(store, entry.name)
-                if summary is None or not isinstance(summary.get("participants"), list):
+                if summary is None:
+                    notice = _unreadable_pair_notice(store, entry.name, source_id)
+                    if notice is not None:
+                        rows.append(notice)
+                        if len(rows) == MAX_PAIRS_SHOWN:
+                            break
+                    continue
+                if not isinstance(summary.get("participants"), list):
                     continue
                 participants = summary["participants"]
                 if (len(participants) != 2 or not all(isinstance(row, dict) for row in participants)

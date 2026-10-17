@@ -222,6 +222,29 @@ def test_pair_attempt_binds_both_selected_fingerprints_and_caches(tmp_path, monk
     assert first["interpretation"].startswith("exploratory")
 
 
+def test_pair_refuses_symlinked_temporary_directory(tmp_path, monkeypatch) -> None:
+    from traceback_lab import identity_pair as pair
+
+    store = LabStore(tmp_path / "root")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    store.lab.mkdir(parents=True)
+    (store.lab / "tmp").symlink_to(outside, target_is_directory=True)
+    a, b = "a" * 64, "b" * 64
+    sketches = {
+        a: SelectedSketch(a, "c" * 64, "a-20261016T000000000000-aaaaaaaa", "e" * 64, "f" * 64, b"a"),
+        b: SelectedSketch(b, "d" * 64, "a-20261016T000000000000-bbbbbbbb", "e" * 64, "f" * 64, b"b"),
+    }
+    monkeypatch.setattr(pair, "source_ids", lambda _: [a, b])
+    monkeypatch.setattr(pair, "resolve_prefix", lambda value, _: SimpleNamespace(state="found", value=a if value.startswith("a") else b))
+    monkeypatch.setattr(pair, "inspect_sites", lambda _: SimpleNamespace(file=tmp_path / "sites.vcf.gz", sha256="f" * 64))
+    monkeypatch.setattr(pair, "somalier_tool", lambda: ("somalier", "0.3.5"))
+    monkeypatch.setattr(pair, "_selected_sketch", lambda _, source, **kwargs: sketches[source])
+    with pytest.raises(pair.IdentityPairError, match="temporary comparison directory is unsafe"):
+        compare_pair(store, a[:12], b[:12])
+    assert list(outside.iterdir()) == []
+
+
 def test_pair_list_limits_matching_pairs_after_filtering_unrelated_directories(tmp_path, monkeypatch) -> None:
     from traceback_lab import identity_pair as pair
 
@@ -275,7 +298,7 @@ def test_malformed_stored_pair_is_ignored_by_sample_read(tmp_path, monkeypatch) 
 
     store = LabStore(tmp_path / "root")
     source, peer = "a" * 64, "b" * 64
-    pair_id = "f" * 64
+    pair_id = pair.canonical_sha256({"sources": [source, peer], "kind": "somalier-pair-v1"})
     attempt = "a-20261016T000000000000-aaaaaaaa"
     pair_dir = store.lab / "identity-pairs" / pair_id
     summary_dir = pair_dir / "attempts" / attempt
@@ -303,11 +326,13 @@ def test_malformed_stored_pair_is_ignored_by_sample_read(tmp_path, monkeypatch) 
     assert len(pairs_for_sample(store, source)) == 1
     summary["metrics"]["n"] = 0
     summary_file.write_text(json.dumps(summary))
-    assert pairs_for_sample(store, source) == []
+    notice = {"pair_id": pair_id, "peer_id12": peer[:12], "state": "unavailable",
+              "reason": "Stored comparison is unreadable; rerun lab identity compare for these samples"}
+    assert pairs_for_sample(store, source) == [notice]
     summary["metrics"]["n"] = 10
     summary["metrics"] = None
     summary_file.write_text(json.dumps(summary))
-    assert pairs_for_sample(store, source) == []
+    assert pairs_for_sample(store, source) == [notice]
     summary["metrics"] = {"relatedness": 0.5, "concordance": 0.9, "ibs0": 0, "ibs2": 10, "n": 10}
     summary["participants"] = [sketches[source].identity(), sketches[source].identity()]
     summary_file.write_text(json.dumps(summary))
