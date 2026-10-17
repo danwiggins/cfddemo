@@ -205,11 +205,13 @@ def test_stale_derived_results_are_not_compared(default_run) -> None:
     for view in sample.derived:
         if "fragment-size" in view.results:
             assert view.results["fragment-size"].provenance.parameters_sha256 == full_identity
-    rows = views.selected_results(store, sample.derived[0].input_id, {"fragment-size": "0" * 64})
+    issues = {}
+    rows = views.selected_results(store, sample.derived[0].input_id, {"fragment-size": "0" * 64}, issues=issues)
     assert rows == {}
+    assert "fragment-size" in issues["stale"]
 
 
-def _published_split_store(tmp_path):
+def _published_split_store(tmp_path, *, split_identity=None):
     store = LabStore(tmp_path)
     store.ensure()
     source_id, full_id, split_id, identity = (character * 64 for character in "abcd")
@@ -227,13 +229,30 @@ def _published_split_store(tmp_path):
         envelope = ResultEnvelope.model_validate({
             "algorithm_id": "fragment-size", "algorithm_version": "1", "status": "ok",
             "provenance": provenance(
-                tool="test", parameters_sha256=identity, source_id=source_id,
+                tool="test", source_id=source_id,
+                parameters_sha256=split_identity if input_id == split_id and split_identity else identity,
                 input_id=input_id, reference_id="ref", timestamp_utc="2026-10-16T00:00:00Z",
             ),
             "metrics": [{"metric_id": "mode_bp", "value": 167.0}],
         })
         store.publish_result(envelope, input_id=input_id)
     return store, source_id, full_id, split_id, identity
+
+
+def test_stale_split_selection_is_visible_but_not_compared(tmp_path) -> None:
+    store, source_id, _, _, _ = _published_split_store(tmp_path, split_identity="e" * 64)
+    sample = views.load_sample(store, source_id)
+    assert sample is not None
+    half = sample.by_transform("split")[0]
+    assert half.results == {} and half.stale == {"fragment-size"}
+    panel = next(panel for panel in views.stability_panels(sample)
+                 if panel["algorithm_id"] == "fragment-size" and panel["metric_id"] == "mode_bp")
+    assert panel["split"] is None
+    assert panel["split_status"]["A"] == {
+        "state": "unavailable", "reason": "result parameters differ from full depth",
+        "value": None, "deviation": None,
+    }
+    assert views.repeatability([panel]) is None
 
 
 def test_damaged_split_selection_is_explained_by_loaded_sample(tmp_path) -> None:
@@ -330,6 +349,12 @@ def test_split_half_missingness_keeps_each_status_visible() -> None:
     view.ambiguous = {"fragment-size"}
     assert status(view, "fragment-size", "mode_bp", 100, spec)["reason"] == "result selection ambiguous"
     view.ambiguous = set()
+    view.stale = {"fragment-size"}
+    assert status(view, "fragment-size", "mode_bp", 100, spec) == {
+        "state": "unavailable", "reason": "result parameters differ from full depth",
+        "value": None, "deviation": None,
+    }
+    view.stale = set()
 
     view.results["fragment-size"] = SimpleNamespace(status="skipped", skip_reason="depth")
     assert status(view, "fragment-size", "mode_bp", 100, spec) == {

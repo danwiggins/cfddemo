@@ -54,6 +54,7 @@ def selected_results(
     out: dict[str, tuple[int | None, ResultEnvelope]] = {}
     ambiguous: set[str] = set()
     unreadable: set[str] = set()
+    stale: set[str] = set()
     if not base.is_dir():
         return {}
     for algorithm_dir in sorted(base.iterdir()):
@@ -64,6 +65,14 @@ def selected_results(
             continue
         for identity_dir in sorted(algorithm_dir.iterdir()):
             if wanted is not None and identity_dir.name != wanted:
+                try:
+                    os.lstat(identity_dir / "selected.json")
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    pass
+                else:
+                    stale.add(algorithm_dir.name)
                 continue
             try:
                 selected = store.selected_result_with_order(
@@ -92,6 +101,7 @@ def selected_results(
     if issues is not None:
         issues["unreadable"] = unreadable
         issues["ambiguous"] = ambiguous - unreadable
+        issues["stale"] = stale - out.keys()
     return {
         key: value for key, (_, value) in out.items()
         if key not in ambiguous and key not in unreadable
@@ -108,6 +118,7 @@ class InputView:
     fraction: float = 1.0
     unreadable: set[str] = field(default_factory=set)
     ambiguous: set[str] = field(default_factory=set)
+    stale: set[str] = field(default_factory=set)
 
     def depth_x(self) -> float | None:
         for envelope in self.results.values():
@@ -161,6 +172,7 @@ def load_sample(store: LabStore, source_id: str) -> SampleView | None:
                 fraction=fraction if entry["transform"] in ("downsample", "split") else 1.0,
                 unreadable=issues.get("unreadable", set()),
                 ambiguous=issues.get("ambiguous", set()),
+                stale=issues.get("stale", set()),
             )
         )
     try:
@@ -227,6 +239,8 @@ def _split_half_status(view: InputView | None, algorithm_id: str, metric_id: str
             return {"state": "unavailable", "reason": "result unreadable", "value": None, "deviation": None}
         if algorithm_id in getattr(view, "ambiguous", ()):
             return {"state": "unavailable", "reason": "result selection ambiguous", "value": None, "deviation": None}
+        if algorithm_id in getattr(view, "stale", ()):
+            return {"state": "unavailable", "reason": "result parameters differ from full depth", "value": None, "deviation": None}
         return {"state": "not_recorded", "reason": "no selected result recorded", "value": None, "deviation": None}
     if envelope.status != "ok":
         reason = envelope.skip_reason if envelope.status == "skipped" else "algorithm failed"
@@ -251,6 +265,8 @@ def cell_state(
             return {"state": "unavailable", "reason": "result unreadable"}
         if algorithm_id in view.ambiguous:
             return {"state": "unavailable", "reason": "result selection ambiguous"}
+        if algorithm_id in view.stale:
+            return {"state": "unavailable", "reason": "result parameters differ from full depth"}
         return {"state": None}
     if envelope.status == "failed":
         return {"state": "failed", "reason": envelope.failure.first_line if envelope.failure else None}

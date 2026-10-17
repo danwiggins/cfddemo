@@ -369,7 +369,9 @@ script or style, no outside requests.
   metric; a split-half verdict appears only when both values are available
   and the stability comparison is interpretable. When both halves have numeric
   usable values, their raw values and relative difference remain visible without a
-  verdict. When a half is unavailable, its status remains visible. An extra
+  verdict. When a half is unavailable, its status remains visible. A selected
+  half with parameters that differ from the current full-depth result
+  is named unavailable and excluded from the comparison. An extra
   unrecognized split label is disclosed even when A and B are both usable. REPEATABILITY's
   median and worst-three list include every numeric split comparison; only
   metrics with a validated verdict enter its stability count. Home separately
