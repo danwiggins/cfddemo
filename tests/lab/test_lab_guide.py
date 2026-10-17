@@ -33,11 +33,12 @@ def _serve_banner(process, stdout_path: Path, stderr_path: Path, *, timeout: flo
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
+        exited = process.poll() is not None
         with stdout_path.open("rb") as output:
-            lines = output.read(8192).decode("utf-8", errors="replace").splitlines()
-        if len(lines) >= 2:
-            return lines[:2]
-        if process.poll() is not None:
+            parts = output.read(8192).split(b"\n")
+        if len(parts) >= 3:
+            return [line.decode("utf-8", errors="replace").rstrip("\r") for line in parts[:2]]
+        if exited:
             break
         time.sleep(0.1)
     raise AssertionError(
@@ -64,6 +65,23 @@ def test_serve_banner_deadline_reaches_cleanup_for_a_silent_process(tmp_path) ->
         finally:
             process.terminate()
             process.wait(timeout=5)
+
+
+def test_serve_banner_requires_two_complete_lines(tmp_path) -> None:
+    from types import SimpleNamespace
+
+    stdout_path = tmp_path / "partial-stdout.log"
+    stderr_path = tmp_path / "partial-stderr.log"
+    stderr_path.write_text("")
+    running = SimpleNamespace(poll=lambda: None)
+    stdout_path.write_bytes(b"ROOT  /tmp/root\nhttp://127.0.0.1:5")
+    with pytest.raises(AssertionError, match="serve banner unavailable within"):
+        _serve_banner(running, stdout_path, stderr_path, timeout=0.01)
+    with stdout_path.open("ab") as output:
+        output.write(b"4211/#bootstrap=token\n")
+    assert _serve_banner(running, stdout_path, stderr_path, timeout=0.01) == [
+        "ROOT  /tmp/root", "http://127.0.0.1:54211/#bootstrap=token",
+    ]
 
 
 def test_journey_block_is_the_documented_four_steps() -> None:
