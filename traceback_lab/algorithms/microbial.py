@@ -24,7 +24,7 @@ import pysam
 from traceback_runner.serialization import canonical_json_bytes
 
 from ..assets import AssetError, _check_contained
-from ..microbial_db import MicrobialDbError, inspect_database
+from ..microbial_db import MicrobialDbError, MicrobialDbReceiptChanged, RECEIPT_RECOVERY, inspect_database
 from ..registry import AlgorithmOutput, InputContext, Ready, Skip, ToolPin
 from ._base import Base, metric
 
@@ -231,6 +231,8 @@ class Microbial(Base):
             return Skip("missing_toolchain", "Kraken2/Bracken launchers, upstream helpers, and Bracken's python interpreter are required")
         try:
             inspect_database(LabStore(ctx.root), verify_bytes=False)
+        except MicrobialDbReceiptChanged:
+            return Skip("missing_asset", RECEIPT_RECOVERY)
         except MicrobialDbError:
             return Skip("missing_asset", "register a pinned Kraken2/Bracken database")
         if not (ctx.input_dir / "aligned.bam").is_file():
@@ -278,20 +280,26 @@ class Microbial(Base):
             omitted = classified = unclassified = 0
             if candidates:
                 report, assignments, abundance = (work / "kraken.report", work / "kraken.output", work / "bracken.tsv")
-                kraken_run = subprocess.run(
-                    [kraken[0], "--db", str(database.directory), "--threads", "1", "--report", str(report),
-                     "--output", str(assignments), str(reads)],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3600, check=False,
-                )
+                try:
+                    kraken_run = subprocess.run(
+                        [kraken[0], "--db", str(database.directory), "--threads", "1", "--report", str(report),
+                         "--output", str(assignments), str(reads)],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3600, check=False,
+                    )
+                except (subprocess.TimeoutExpired, OSError):
+                    raise RuntimeError("Kraken2 classification timed out or could not start") from None
                 if kraken_run.returncode != 0:
                     raise RuntimeError("Kraken2 classification failed")
                 lineages, classified, unclassified, species_present = _report_lineages(report, candidates)
                 if classified and species_present:
-                    bracken_run = subprocess.run(
-                        [bracken[0], "-d", str(database.directory), "-i", str(report), "-o", str(abundance),
-                         "-r", str(database.read_length), "-l", "S", "-t", "1"],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1800, check=False,
-                    )
+                    try:
+                        bracken_run = subprocess.run(
+                            [bracken[0], "-d", str(database.directory), "-i", str(report), "-o", str(abundance),
+                             "-r", str(database.read_length), "-l", "S", "-t", "1"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1800, check=False,
+                        )
+                    except (subprocess.TimeoutExpired, OSError):
+                        raise RuntimeError("Bracken estimation timed out or could not start") from None
                     if bracken_run.returncode != 0:
                         raise RuntimeError("Bracken abundance estimation failed")
                     taxa, microbial_estimate, omitted = _bracken_species(abundance, lineages, denominator)

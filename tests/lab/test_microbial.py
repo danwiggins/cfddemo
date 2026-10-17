@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import traceback
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -19,7 +20,9 @@ from traceback_lab.algorithms import microbial as algorithm
 from traceback_lab import cohorts
 from traceback_lab.cohort_contracts import CohortGeneration, CohortMember, CohortResult
 from traceback_lab.envelope import Metric, ResultEnvelope, provenance
-from traceback_lab.microbial_db import MicrobialDbError, inspect_database, register_database
+from traceback_lab.microbial_db import (
+    MicrobialDbError, MicrobialDbReceiptChanged, inspect_database, register_database,
+)
 from traceback_lab.microbial_view import profile_for_sample
 from traceback_lab.registry import InputContext, ToolPin
 from traceback_lab.registry import execution_identity
@@ -94,7 +97,7 @@ def test_planned_result_resolves_into_sample_profile_without_identity_stubs(
     bam = write_bam(tmp_path / "aligned.bam", contigs, [
         Read("mapped", "chr1", 100, "A" * 75),
         Read("unmapped", "chr1", 0, "A" * 75, flag=4),
-    ])
+    ], platform="ONT")
     assert signed_cli.main(["lab", "run", str(bam), "--root", str(store.root),
                             "--only", "microbial", "--no-downsample", "--no-controls", "--json"]) == 0
     source = source_ids(store)[0]
@@ -135,7 +138,7 @@ def test_outer_timeout_removes_private_candidate_files(
     bam = write_bam(tmp_path / "aligned.bam", contigs, [
         Read("mapped", "chr1", 100, "A" * 75),
         Read("candidate", "chr1", 0, "A" * 75, flag=4),
-    ])
+    ], platform="ONT")
     common = [str(bam), "--root", str(store.root), "--no-downsample", "--no-controls", "--json"]
     assert signed_cli.main(["lab", "run", *common, "--only", "read-summary"]) == 0
     signed_cli.main(["lab", "run", *common, "--only", "microbial", "--timeout-s", "15"])
@@ -158,6 +161,14 @@ def test_production_cohort_snapshot_excludes_unassayable_and_changed_db(tmp_path
                                 parameters={}, tools=pins, asset_sha256s=lambda root: db_digest)
     monkeypatch.setattr(cohorts, "load_registry", lambda: (summary, microbial))
     manifest = {"kind": "prealigned", "source_id": source_id, "reference_sha256": reference_sha}
+    input_dir = store.inputs_dir / input_id
+    input_dir.mkdir(parents=True)
+    with pysam.AlignmentFile(str(input_dir / "aligned.bam"), "wb", header={
+        "HD": {"VN": "1.6", "SO": "coordinate"},
+        "SQ": [{"SN": "chr1", "LN": 1000}],
+        "RG": [{"ID": "synthetic", "PL": "ONT"}],
+    }):
+        pass
     summary_identity = execution_identity(summary, reference_sha256=reference_sha)
     microbial_identity = execution_identity(
         microbial, reference_sha256=reference_sha, asset_sha256s=db_digest,
@@ -392,7 +403,7 @@ def microbial_dom_root(tmp_path_factory, synthetic_world):
     with pysam.FastaFile(str(synthetic_world["fasta"])) as fasta:
         contigs = list(zip(fasta.references, fasta.lengths))
     bam = write_bam(base / "aligned.bam", contigs,
-                    [Read("anonymous-synthetic", "chr1", 100, "A" * 75)])
+                    [Read("anonymous-synthetic", "chr1", 100, "A" * 75)], platform="ONT")
     assert signed_cli.main(["lab", "run", str(bam), "--root", str(root),
                             "--only", "read-summary", "--no-downsample", "--no-controls", "--json"]) == 0
     return root
@@ -455,6 +466,70 @@ def test_legacy_registration_upgrades_by_full_verification(tmp_path) -> None:
     assert upgraded.sha256 == old["sha256"]
     assert json.loads(manifest.read_text())["schema"] == "traceback.lab.microbial-db.v2"
     assert inspect_database(store, verify_bytes=False).sha256 == old["sha256"]
+
+
+def test_metadata_drift_explains_recovery_and_reregisters_same_bytes(tmp_path, monkeypatch) -> None:
+    store, directory = _database(tmp_path)
+    pinned = inspect_database(store).sha256
+    file = directory / "hash.k2d"
+    info = file.stat()
+    os.utime(file, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000_000))
+    with pytest.raises(MicrobialDbReceiptChanged, match="changed since byte verification"):
+        inspect_database(store, verify_bytes=False)
+
+    monkeypatch.setattr(algorithm.shutil, "which", lambda name: name)
+    monkeypatch.setattr(algorithm, "_tool", lambda name: (name, "a" * 64))
+    ctx = InputContext(store.root, "a" * 64, "b" * 64, "ref", "c" * 64, tmp_path)
+    skipped = algorithm.MICROBIAL.preflight(ctx)
+    assert skipped.reason_code == "missing_asset"
+    assert "rerun lab microbial db add" in skipped.message
+    assert "restore the pinned bytes" in skipped.message
+
+    with store.writer("microbial db add", "r-20261016-0005-aabb", step="database"):
+        refreshed = register_database(store, directory, 75, "synthetic database")
+    assert refreshed.sha256 == pinned
+    assert inspect_database(store, verify_bytes=False).sha256 == pinned
+
+
+@pytest.mark.parametrize("stage", ["kraken", "bracken"])
+def test_classifier_timeout_hides_operator_database_path(tmp_path, monkeypatch, stage) -> None:
+    store, directory = _database(tmp_path)
+    monkeypatch.setattr(algorithm, "_tool", lambda name: (name, "a" * 64))
+    monkeypatch.setattr(algorithm, "_write_candidates", lambda *_args: (1, 1, 0, 0))
+    monkeypatch.setattr(algorithm, "_report_lineages", lambda *_args: ({}, 1, 0, True))
+
+    def run(argv, **_kwargs):
+        if stage == "kraken" or Path(argv[0]).name == "bracken":
+            raise subprocess.TimeoutExpired(argv, 1)
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(algorithm.subprocess, "run", run)
+    ctx = InputContext(store.root, "a" * 64, "b" * 64, "ref", "c" * 64, tmp_path)
+    with pytest.raises(RuntimeError, match="timed out or could not start") as failure:
+        algorithm.MICROBIAL.run(ctx, _private_out(store))
+    assert str(directory) not in str(failure.value)
+    assert failure.value.__suppress_context__
+
+
+def test_database_read_failure_traceback_hides_operator_path(tmp_path, monkeypatch) -> None:
+    from traceback_lab import microbial_db
+
+    store, directory = _database(tmp_path)
+    private_file = directory / "hash.k2d"
+    original_read = os.read
+
+    def fail_private_read(descriptor, size):
+        if os.fstat(descriptor).st_ino == private_file.stat().st_ino:
+            raise OSError(5, "private database read failed", str(private_file))
+        return original_read(descriptor, size)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(microbial_db.os, "read", fail_private_read)
+        with pytest.raises(MicrobialDbError, match="could not be verified") as failure:
+            inspect_database(store)
+    rendered = "".join(traceback.format_exception(failure.value))
+    assert str(private_file) not in rendered
+    assert failure.value.__suppress_context__
 
 
 def test_reregistration_write_failure_preserves_manifest_and_hides_path(tmp_path, monkeypatch) -> None:
