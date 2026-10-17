@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import os
 import signal
+import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -110,6 +113,311 @@ def test_disk_sampling(tmp_path: Path) -> None:
     script = f"open({str(target / 'blob')!r}, 'wb').write(b'x' * 2_000_000)"
     result = run_pipeline([Stage("write", [PY, "-c", script])], timeout_s=30, disk_path=target)
     assert result.peak_disk_bytes is not None and result.peak_disk_bytes >= 2_000_000
+
+
+@pytest.mark.parametrize("error_type", [OSError, ValueError])
+def test_disk_sampler_failure_does_not_discard_successful_step(error_type: type[Exception]) -> None:
+    def unavailable() -> int:
+        raise error_type("scratch changed during sampling")
+
+    result = run_pipeline(
+        [Stage("ok", [PY, "-c", "print('done')"])], timeout_s=30,
+        disk_usage=unavailable,
+    )
+    assert result.ok
+    assert result.peak_disk_bytes is None
+
+
+def test_rss_sampler_failure_preserves_worker_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    import traceback_lab.pipeline as pipeline
+
+    def unavailable(_pid: int) -> int:
+        raise ValueError("process enumeration unavailable")
+
+    monkeypatch.setattr(pipeline, "_process_tree_rss_bytes", unavailable)
+    result = run_pipeline([Stage("ok", [PY, "-c", "print('done')"])], timeout_s=30)
+    assert result.ok
+    assert result.peak_rss_bytes is not None and result.peak_rss_bytes > 0
+    assert result.sampled_tree_peak_rss_bytes is None
+
+
+def test_sampler_thread_start_failure_preserves_worker_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    original_start = threading.Thread.start
+    rejected: set[str] = set()
+
+    def reject_sampler(self: threading.Thread) -> None:
+        name = getattr(getattr(self, "_target", None), "__name__", "")
+        if name in {"sample_rss", "sample_disk"}:
+            rejected.add(name)
+            raise RuntimeError("cannot start another telemetry thread")
+        original_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", reject_sampler)
+    result = run_pipeline(
+        [Stage("ok", [PY, "-c", "print('done')"])], timeout_s=10,
+        disk_usage=lambda: 1,
+    )
+    assert result.ok
+    assert result.peak_rss_bytes is not None and result.peak_rss_bytes > 0
+    assert rejected == {"sample_rss", "sample_disk"}
+    assert result.sampled_tree_peak_rss_bytes is None
+    assert result.peak_disk_bytes is None
+
+
+def test_final_disk_thread_start_failure_keeps_earlier_sample(monkeypatch: pytest.MonkeyPatch) -> None:
+    import traceback_lab.pipeline as pipeline
+
+    monkeypatch.setattr(pipeline, "DISK_SAMPLE_S", 1000.0)
+    original_start = threading.Thread.start
+    disk_starts = 0
+
+    def reject_final(self: threading.Thread) -> None:
+        nonlocal disk_starts
+        if getattr(getattr(self, "_target", None), "__name__", "") == "sample_disk":
+            disk_starts += 1
+            if disk_starts == 2:
+                raise RuntimeError("cannot start final disk scan")
+        original_start(self)
+
+    monkeypatch.setattr(threading.Thread, "start", reject_final)
+    result = run_pipeline(
+        [Stage("ok", [PY, "-c", "import time; time.sleep(0.2)"])],
+        timeout_s=10, disk_usage=lambda: 7,
+    )
+    assert result.ok
+    assert disk_starts == 2
+    assert result.peak_disk_bytes == 7
+
+
+def test_slow_rss_sampler_does_not_delay_worker_polling(monkeypatch: pytest.MonkeyPatch) -> None:
+    import traceback_lab.pipeline as pipeline
+
+    release = threading.Event()
+    finished = threading.Event()
+    def slow(_pid: int) -> None:
+        release.wait(30)
+        finished.set()
+
+    monkeypatch.setattr(pipeline, "_process_tree_rss_bytes", slow)
+    try:
+        result = run_pipeline([Stage("ok", [PY, "-c", "print('done')"])], timeout_s=10)
+        assert not finished.is_set()
+    finally:
+        release.set()
+    assert result.ok
+
+
+def test_slow_disk_sampler_does_not_delay_worker_polling() -> None:
+    release = threading.Event()
+    finished = threading.Event()
+    calls = 0
+
+    def slow() -> int:
+        nonlocal calls
+        calls += 1
+        release.wait(30)
+        finished.set()
+        return 1
+
+    try:
+        result = run_pipeline(
+            [Stage("ok", [PY, "-c", "print('done')"])], timeout_s=10,
+            disk_usage=slow,
+        )
+        assert not finished.is_set()
+    finally:
+        release.set()
+    assert result.ok
+    assert calls >= 2
+    assert result.peak_disk_bytes is None
+
+
+def test_incomplete_final_disk_scan_keeps_earlier_observation(monkeypatch: pytest.MonkeyPatch) -> None:
+    import traceback_lab.pipeline as pipeline
+
+    monkeypatch.setattr(pipeline, "DISK_SAMPLE_S", 1000.0)
+    release = threading.Event()
+    calls = 0
+
+    def disk_usage() -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return 1
+        release.wait(30)
+        return 2_000_000
+
+    try:
+        result = run_pipeline(
+            [Stage("ok", [PY, "-c", "import time; time.sleep(0.2)"])],
+            timeout_s=10,
+            disk_usage=disk_usage,
+        )
+    finally:
+        release.set()
+    assert result.ok
+    assert calls == 2
+    assert result.peak_disk_bytes == 1
+
+
+def test_final_disk_scan_starts_after_worker_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    import traceback_lab.pipeline as pipeline
+
+    monkeypatch.setattr(pipeline, "DISK_SAMPLE_S", 1000.0)
+    calls = 0
+
+    def disk_usage() -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            time.sleep(0.4)
+            return 1
+        return 2_000_000
+
+    result = run_pipeline(
+        [Stage("ok", [PY, "-c", "import time; time.sleep(0.2)"])],
+        timeout_s=10,
+        disk_usage=disk_usage,
+    )
+    assert result.ok
+    assert calls == 2
+    assert result.peak_disk_bytes == 2_000_000
+
+
+def test_final_disk_reporting_wait_is_not_worker_duration(monkeypatch: pytest.MonkeyPatch) -> None:
+    import traceback_lab.pipeline as pipeline
+
+    monkeypatch.setattr(pipeline, "DISK_SAMPLE_S", 1000.0)
+    release = threading.Event()
+    calls = 0
+
+    def disk_usage() -> int:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return 1
+        release.wait(30)
+        return 2
+
+    started = time.monotonic()
+    try:
+        result = run_pipeline(
+            [Stage("ok", [PY, "-c", "import time; time.sleep(0.2)"])],
+            timeout_s=10, disk_usage=disk_usage,
+        )
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+    assert result.ok
+    assert calls == 2
+    assert elapsed - result.duration_s >= 0.8
+
+
+def test_ps_sampler_does_not_report_zero_for_unmeasured_tree(monkeypatch: pytest.MonkeyPatch) -> None:
+    import traceback_lab.pipeline as pipeline
+
+    monkeypatch.setattr(pipeline.subprocess, "run", lambda *_, **__: SimpleNamespace(returncode=0, stdout=""))
+    assert pipeline._ps_tree_rss_bytes(12345) is None
+
+
+def test_tree_rss_keeps_sampling_after_pipeline_leader_exits() -> None:
+    first = "import time; print('ready', flush=True); time.sleep(0.2)"
+    second = (
+        "import sys, time; sys.stdin.read(); "
+        "blob = bytearray(40_000_000); blob[:] = b'x' * len(blob); time.sleep(2)"
+    )
+    result = run_pipeline(
+        [Stage("leader", [PY, "-c", first]), Stage("downstream", [PY, "-c", second])],
+        timeout_s=30,
+    )
+    assert result.ok
+    assert result.sampled_tree_peak_rss_bytes is not None
+    assert result.sampled_tree_peak_rss_bytes >= 40_000_000
+
+
+def test_direct_and_sampled_tree_memory_remain_distinct() -> None:
+    result = PipelineResult(
+        stages=[StageOutcome("worker", peak_rss_bytes=100)],
+        duration_s=1.0, peak_disk_bytes=None,
+        sampled_tree_peak_rss_bytes=200,
+    )
+    assert result.peak_rss_bytes == 100
+    assert result.sampled_tree_peak_rss_bytes == 200
+
+
+def test_process_group_seed_includes_orphan_descendants() -> None:
+    from traceback_lab.pipeline import _tree_members
+
+    # The intermediate process was reparented, but still has the worker's
+    # process group. Its own child must also be counted.
+    assert _tree_members(1, {1: (0, 1), 2: (0, 1), 3: (2, 3)}) == {1, 2, 3}
+
+
+def test_process_group_seed_excludes_unrelated_pid() -> None:
+    from traceback_lab.pipeline import _tree_members
+
+    assert _tree_members(1, {1: (0, 9), 2: (0, 1), 3: (1, 9)}) == {2}
+
+
+def test_simulate_commands_accept_verbose() -> None:
+    from traceback_lab.cli import build_parser
+
+    for kind in ("cna", "split"):
+        args = build_parser().parse_args(["simulate", kind, "latest", "--verbose"])
+        assert args.verbose is True
+
+
+@pytest.mark.parametrize("force_ps", [False, True])
+def test_tree_rss_includes_new_session_child(monkeypatch: pytest.MonkeyPatch, force_ps: bool) -> None:
+    if force_ps:
+        from traceback_lab import pipeline
+
+        def no_proc(_pid: int) -> int:
+            raise OSError("/proc unavailable")
+
+        monkeypatch.setattr(pipeline, "_proc_tree_rss_bytes", no_proc)
+    script = (
+        "import subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', "
+        "'import time; blob = bytearray(40_000_000); "
+        "blob[:] = b\"x\" * len(blob); time.sleep(3)'], start_new_session=True)\n"
+        "child.wait()\n"
+    )
+    result = run_pipeline([Stage("parent", [PY, "-c", script])], timeout_s=120)
+    assert result.ok
+    assert result.sampled_tree_peak_rss_bytes is not None
+    assert result.sampled_tree_peak_rss_bytes >= 40_000_000
+
+
+def test_proc_enumeration_failure_uses_ps(monkeypatch: pytest.MonkeyPatch) -> None:
+    from traceback_lab.pipeline import _process_tree_rss_bytes
+
+    original = Path.iterdir
+
+    def scan(path: Path):
+        if path == Path("/proc"):
+            raise OSError("synthetic proc failure")
+        return original(path)
+
+    monkeypatch.setattr(Path, "iterdir", scan)
+    child = subprocess.Popen([PY, "-c", "import time; time.sleep(30)"], start_new_session=True)
+    try:
+        assert (_process_tree_rss_bytes(child.pid) or 0) > 0
+    finally:
+        child.terminate()
+        child.wait(timeout=5)
+
+
+def test_empty_proc_sample_does_not_spawn_ps(monkeypatch: pytest.MonkeyPatch) -> None:
+    from traceback_lab import pipeline
+
+    monkeypatch.setattr(pipeline, "_proc_tree_rss_bytes", lambda _pid: None)
+
+    def unexpected_ps(_pid: int) -> int:
+        raise AssertionError("ps fallback is only for unavailable /proc")
+
+    monkeypatch.setattr(pipeline, "_ps_tree_rss_bytes", unexpected_ps)
+    assert pipeline._process_tree_rss_bytes(os.getpid()) is None
 
 def test_upstream_independent_failure_wins_despite_reversed_reap_times() -> None:
     """Observed reap times cannot prove which stage exited first."""

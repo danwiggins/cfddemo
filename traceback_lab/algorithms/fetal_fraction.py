@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import pysam
+from traceback_runner.contained_process import ContainedProcessError, run_contained
 
 from ..fetal_contract import FetalContractError, inspect_contract
 from ..derived_calibration import calibrated_input_id
@@ -72,12 +73,20 @@ class _RResult:
 
 
 def _run_bounded_r(argv: list[str], *, cwd: Path, timeout_seconds: int,
-                   log_limit_bytes: int = 4096) -> _RResult:
-    """Bound both pipes while keeping R in the enclosing worker process group.
+                   log_limit_bytes: int = 4096, contained: bool = False) -> _RResult:
+    """Bound both pipes; contain pre-worker probes, inherit the worker group in run.
 
-    The Lab pipeline kills that group on outer timeout or interruption. A nested
-    contained process would start a new session and escape that group kill.
+    The Lab pipeline kills the worker group on outer timeout or interruption.
+    A nested contained process during extraction would escape that group kill.
     """
+
+    if contained:
+        try:
+            result = run_contained(argv, cwd=cwd, env=dict(os.environ),
+                                   timeout_seconds=timeout_seconds, log_limit_bytes=log_limit_bytes)
+        except ContainedProcessError as exc:
+            raise RuntimeError("R process could not start") from exc
+        return _RResult(result.outcome, result.returncode, result.stdout, result.stdout_truncated)
 
     def drain(stream: Any, output: bytearray, truncated: list[bool]) -> None:
         try:
@@ -186,7 +195,7 @@ def _rscript() -> tuple[Path, str] | None:
         return None
 
 
-def _nipter_package_sha(rscript: Path) -> str | None:
+def _nipter_package_sha(rscript: Path, *, contained: bool = True) -> str | None:
     packages = ("NIPTeR", "sets", "Rsamtools", "S4Vectors")
     try:
         result = _run_bounded_r(
@@ -196,6 +205,7 @@ def _nipter_package_sha(rscript: Path) -> str | None:
              "cat('\\n') }"],
             cwd=Path.cwd().resolve(), timeout_seconds=20,
             log_limit_bytes=4096,
+            contained=contained,
         )
     except RuntimeError:
         return None
@@ -297,7 +307,8 @@ class FetalFraction(Base):
         "fetal_fraction_model": "unavailable", "r_script_sha256": SCRIPT_SHA256,
     })
 
-    def asset_sha256s_for_input(self, root: Path, input_id: str) -> list[str]:
+    def asset_sha256s_for_input(self, root: Path, input_id: str,
+                               *, contained: bool = True) -> list[str]:
         from ..store import LabStore
 
         try:
@@ -307,7 +318,7 @@ class FetalFraction(Base):
                 return []
             contract = inspect_contract(store, parent)
             runtime = _rscript()
-            package_sha = _nipter_package_sha(runtime[0]) if runtime else None
+            package_sha = _nipter_package_sha(runtime[0], contained=contained) if runtime else None
             return [contract.manifest_sha256, contract.control_sha256, SCRIPT_SHA256,
                     *(runtime[1:] if runtime else ()), *((package_sha,) if package_sha else ())]
         except (FetalContractError, OSError):
@@ -359,7 +370,7 @@ class FetalFraction(Base):
         runtime = _rscript()
         if runtime is None:
             raise RuntimeError("NIPTeR toolchain changed after preflight")
-        package_sha = _nipter_package_sha(runtime[0])
+        package_sha = _nipter_package_sha(runtime[0], contained=False)
         if package_sha is None:
             raise RuntimeError("NIPTeR package changed after preflight")
         expected = {contract.manifest_sha256, contract.control_sha256, SCRIPT_SHA256, runtime[1], package_sha}
@@ -394,7 +405,7 @@ class FetalFraction(Base):
         if completed.outcome != "exited" or completed.returncode != 0 or completed.stdout_truncated:
             raise RuntimeError("NIPTeR trisomy calculation failed; inspect the registered control and toolchain")
         values = _parse_z_output(completed.stdout.decode("utf-8", errors="replace"))
-        if self.asset_sha256s_for_input(ctx.root, ctx.input_id) != list(ctx.extras["planned_asset_sha256s"]):
+        if self.asset_sha256s_for_input(ctx.root, ctx.input_id, contained=False) != list(ctx.extras["planned_asset_sha256s"]):
             raise RuntimeError("prenatal control or Rscript changed during execution")
         return AlgorithmOutput(metrics=[
             metric("fetal_fraction", None, unit="fraction"),

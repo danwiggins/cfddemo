@@ -76,14 +76,66 @@ def test_outer_lab_timeout_kills_r_descendant(tmp_path: Path) -> None:
         "sys.path.insert(0, str(Path.cwd()))\n"
         "from traceback_lab.algorithms.fetal_fraction import _run_bounded_r\n"
         f"_run_bounded_r([sys.executable, {str(child)!r}, {str(marker)!r}], "
-        f"cwd=Path({str(tmp_path)!r}), timeout_seconds=30)\n")
+        f"cwd=Path({str(tmp_path)!r}), timeout_seconds=90)\n")
+    def wait_for_child(_elapsed: float) -> None:
+        deadline = time.monotonic() + 60
+        while not marker.is_file() and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert marker.is_file(), "R descendant did not start before the test deadline"
+
     result = run_pipeline([Stage("prenatal-worker", [sys.executable, str(worker)])],
-                          timeout_s=2, cwd=Path.cwd())
+                          timeout_s=2, cwd=Path.cwd(), on_tick=wait_for_child)
     assert result.timed_out
     assert marker.is_file()
     stopped_at = marker.stat().st_size
     time.sleep(0.3)
     assert marker.stat().st_size == stopped_at
+
+
+@pytest.mark.skipif(os.name == "nt", reason="planning probe process groups use POSIX cleanup")
+def test_planning_and_preflight_package_probes_kill_launcher_descendants(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path, digest, _ = _contract(tmp_path)
+    store = LabStore(tmp_path / "root")
+    register_contract(store, path, digest)
+    marker, pids = tmp_path / "ticks", tmp_path / "pids"
+    child = tmp_path / "ticker.py"
+    child.write_text(
+        "import sys, time\n"
+        "with open(sys.argv[1], 'ab') as out:\n"
+        "    while True:\n"
+        "        out.write(b'tick\\n'); out.flush(); time.sleep(0.05)\n"
+    )
+    launcher = tmp_path / "Rscript"
+    launcher.write_text(
+        f"#!{sys.executable}\n"
+        "import pathlib, subprocess, sys, time\n"
+        f"child = subprocess.Popen([sys.executable, {str(child)!r}, {str(marker)!r}])\n"
+        f"with open({str(pids)!r}, 'a') as out: out.write(str(child.pid) + '\\n')\n"
+        f"marker = pathlib.Path({str(marker)!r})\n"
+        "for _ in range(100):\n"
+        "    if marker.exists(): break\n"
+        "    time.sleep(0.01)\n"
+    )
+    launcher.chmod(0o755)
+    monkeypatch.setattr(fetal, "_rscript", lambda: (launcher, "d" * 64))
+    try:
+        assets = fetal.FETAL_FRACTION.asset_sha256s_for_input(store.root, INPUT)
+        assert len(assets) == 4 and marker.exists()
+        ctx = InputContext(store.root, SOURCE, INPUT, "hg38", REFERENCE, tmp_path,
+                           eligible_reads=2_000_000, extras={"planned_asset_sha256s": assets})
+        assert fetal.FETAL_FRACTION.preflight(ctx).reason_code == "missing_toolchain"
+        stopped_at = marker.stat().st_size
+        time.sleep(0.3)
+        assert marker.stat().st_size == stopped_at
+    finally:
+        if pids.exists():
+            for pid in pids.read_text().splitlines():
+                try:
+                    os.kill(int(pid), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
 
 def _contract(tmp_path: Path, *, control_n: int = 20, sex: str = "unknown") -> tuple[Path, str, Path]:
@@ -155,7 +207,7 @@ def test_nipter_preflight_and_synthetic_adapter_output(tmp_path: Path, monkeypat
     runtime.write_bytes(b"synthetic executable stand-in")
     binary_sha = hashlib.sha256(runtime.read_bytes()).hexdigest()
     monkeypatch.setattr(fetal, "_rscript", lambda: (runtime, binary_sha))
-    monkeypatch.setattr(fetal, "_nipter_package_sha", lambda path: "e" * 64)
+    monkeypatch.setattr(fetal, "_nipter_package_sha", lambda path, **_kwargs: "e" * 64)
     monkeypatch.setattr(fetal, "_compatible_bam_layout", lambda path: True)
     assets = [contract.manifest_sha256, contract.control_sha256, fetal.SCRIPT_SHA256, binary_sha, "e" * 64]
     input_dir = tmp_path / "input"
