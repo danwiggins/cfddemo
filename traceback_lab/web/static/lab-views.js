@@ -688,7 +688,7 @@
     };
     families.forEach(([, label], i) => tabs.append(h("button", { type: "button", class: "control subtab", "aria-pressed": "false", onclick: () => show(i) }, label)));
     out.push(tabs, body);
-    const initial = ["fragment-size", "end-motifs", "delfi-ratio", "long-tail", "mtdna", "breakpoint-motifs", "aligned-end-structure"].some((id) => algo(sample, id))
+    const initial = ["fragment-size", "end-motifs", "delfi-ratio", "tss-profile", "long-tail", "mtdna", "breakpoint-motifs", "aligned-end-structure"].some((id) => algo(sample, id))
       ? 0 : algo(sample, "copy-number") ? 1 : 2;
     show(initial);
     return out;
@@ -759,7 +759,7 @@
   function fragmentSignals(sample) {
     const a = algo(sample, "fragment-size");
     const section = h("section", { class: "panel" }, h("h2", {}, "Size density"));
-    if (!a || a.status !== "ok") return [section, absent(a, "fragment-size"), ...breakpointMotifSignals(sample), ...alignedEndSignals(sample)];
+    if (!a || a.status !== "ok") return [section, absent(a, "fragment-size"), ...tssProfileSignals(sample), ...breakpointMotifSignals(sample), ...alignedEndSignals(sample)];
     const slot = h("div", {}, h("p", {}, "Loading…"));
     const short = a.metrics.find((m) => m.metric_id === "short_fraction_lt150");
     section.append(h("p", { class: "help" }, `No size-density cohort band yet; 167 bp marked. Short-fragment reference: ${cohortReadiness(sample, short ? [short] : [])}.`), ...context(sample, "fragment-size", new Set()), slot);
@@ -777,7 +777,43 @@
         ? h("table", { class: "data-table" }, h("tbody", {}, ...other.metrics.filter((m) => m.value === null || typeof m.value !== "object").map((m) => h("tr", {}, h("th", { scope: "row" }, m.label), h("td", {}, fmt(m.value, m.unit))))))
         : absent(other, id), id === "end-motifs" || id === "delfi-ratio" ? flagPill("LEGAL") : ""));
     }
-    return [section, ...more, ...breakpointMotifSignals(sample), ...alignedEndSignals(sample)];
+    return [section, ...more, ...tssProfileSignals(sample), ...breakpointMotifSignals(sample), ...alignedEndSignals(sample)];
+  }
+
+  function tssProfileSignals(sample) {
+    const a = algo(sample, "tss-profile");
+    if (!a) return [];
+    const section = h("section", { class: "panel" }, h("h2", {}, "TSS coverage profile"));
+    if (a.status !== "ok") return [section, absent(a, "tss-profile")];
+    const ratio = a.metrics.find((m) => m.metric_id === "central_flank_ratio");
+    const flags = ratio && ratio.entry ? ratio.entry.flags || [] : [];
+    section.append(h("p", { class: "help" }, "GENCODE v46 protein-coding gene TSSs; 50 bp strand-oriented bins across ±1 kb, plotted at bin centres. Central −150 to +50 bp coverage divided by outer-flank coverage. Descriptive gene-set profile only; no expression call or clinical cutoff."),
+      h("p", {}, `Central/flank ratio: ${ratio ? fmt(ratio.value, ratio.unit) : "—"}. ${ratio ? ratio.caption || "" : ""}`),
+      ...flags.map((flag) => flagPill(flag)),
+      ...context(sample, "tss-profile", new Set()));
+    const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading TSS coverage…"));
+    section.append(slot);
+    artifact(sample, "tss-profile", "tss-coverage").then((data) => {
+      if (!Array.isArray(data.offset_bp) || !Array.isArray(data.coverage_x) ||
+          data.offset_bp.length !== 40 || data.coverage_x.length !== 40 ||
+          !data.offset_bp.every((offset, index) => offset === -1000 + index * 50) ||
+          !data.coverage_x.every((value) => Number.isFinite(value) && value >= 0) ||
+          !Number.isInteger(data.gene_n) || data.gene_n < 1 ||
+          !Number.isInteger(data.eligible_autosomal_reads) ||
+          !/^[0-9a-f]{64}$/.test(data.annotation_sha256 || "")) {
+        throw new Error("TSS panel dimensions or provenance invalid");
+      }
+      const points = data.offset_bp.map((offset, i) => [offset + 25, data.coverage_x[i]]);
+      const rows = data.offset_bp.map((offset, i) => [`[${offset}, ${offset + 50})`, data.coverage_x[i]]);
+      slot.replaceWith(h("p", { class: "help" }, `${data.gene_n.toLocaleString("en-US")} complete protein-coding gene windows; ${data.eligible_autosomal_reads.toLocaleString("en-US")} eligible autosomal reads. Annotation ${data.annotation_sha256.slice(0, 12)}.`),
+        chart("Mean aligned-fragment coverage across strand-oriented protein-coding TSS windows", {
+          grid: { left: 60, right: 20, top: 20, bottom: 40 },
+          xAxis: { type: "value", name: "bp from TSS (bin centre)", min: -1000, max: 1000 },
+          yAxis: { type: "value", name: "mean coverage ×" },
+          series: [{ type: "line", showSymbol: false, data: points, lineStyle: { color: "#1f5f8b" } }],
+        }, dataTable("TSS coverage in 50 bp bins", ["Bin interval (bp)", "Mean coverage ×"], rows)));
+    }).catch((error) => slot.replaceWith(h("div", { class: "problem" }, `TSS profile could not be drawn (${error.message}).`)));
+    return [section];
   }
 
   function copyNumberSignals(sample) {
