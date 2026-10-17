@@ -142,6 +142,10 @@ def _validate_entry(raw: Mapping[str, Any], licenses: Mapping[str, Any]) -> Entr
         _require(isinstance(raw["min_depth_x"], (int, float)) and raw["min_depth_x"] >= 0, where, "min_depth_x >= 0")
     if raw.get("performance") is None:
         _require(bool(raw.get("performance_missing_reason")), where, "performance or performance_missing_reason")
+    citations = raw.get("citations", [])
+    _require(isinstance(citations, list) and all(isinstance(citation, str) and citation.strip()
+                                                for citation in citations),
+             where, "citations must be nonempty strings")
     checked = raw.get("citation_checked")
     if checked is not None:
         _require(isinstance(checked, Mapping) and checked.get("by") and checked.get("date"), where, "citation_checked needs by and date")
