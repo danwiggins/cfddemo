@@ -84,7 +84,7 @@ def test_planned_result_resolves_into_sample_profile_without_identity_stubs(
     """The runner and page resolver must agree on actual tool and reference pins."""
     from traceback_runner import cli as signed_cli
     from traceback_runner.references import register_reference
-    from traceback_lab.ingest import source_ids
+    from traceback_lab.ingest import input_manifest, source_ids
     from traceback_lab.views import load_sample
     from traceback_lab.web.api import LabApi
     from tests.lab.bam_fixtures import Read, write_bam
@@ -128,6 +128,10 @@ def test_planned_result_resolves_into_sample_profile_without_identity_stubs(
     source = source_ids(store)[0]
     sample = load_sample(store, source)
     assert sample is not None and sample.full.results["microbial"].status == "ok"
+    manifest = input_manifest(store, sample.full.input_id)
+    assert manifest is not None
+    assert "microbial" in {row.algorithm_id for row in cohorts._selected_results(
+        store, sample.full.input_id, manifest)}
     profile = profile_for_sample(store, sample, None, None, "not_built")
     assert profile is not None and profile["state"] == "cohort_unavailable"
     assert profile["candidate_unmapped_reads"] == 1
