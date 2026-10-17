@@ -34,7 +34,8 @@ unit and source; the registered Lab wrapper must compute and verify it from
 the BAM. The attempt records the sample ID, pair count, gate, and hashes for
 BAM, BAM index, reference, reference index, site lists and reference assets.
 It copies the pinned upstream scripts into the attempt, records their digest,
-and hashes all five generated workflow YAML files. The generated config sets
+disables Python bytecode writes during execution, and hashes all five generated
+workflow YAML files. The generated config sets
 `mappability_correction: false`, so the accepted output is GC-corrected only;
 this is an explicit deviation from a workflow that also applies mappability
 correction. The attempt only marks its manifest

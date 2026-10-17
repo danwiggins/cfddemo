@@ -128,6 +128,7 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         if argv[:2] == ["git", "-C"]:
             return subprocess.CompletedProcess(argv, 0, GRIFFIN_COMMIT + "\n" if argv[-2:] == ["rev-parse", "HEAD"] else "")
+        assert kwargs["env"]["PYTHONDONTWRITEBYTECODE"] == "1"
         directory = Path(kwargs["cwd"])
         calls.append(directory)
         if directory.name.startswith("griffin_GC_and"):

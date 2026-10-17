@@ -262,6 +262,7 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
             subprocess.run(
                 [config.snakemake, "-s", snakefile, "--cores", str(config.cores)],
                 cwd=directory, stdout=log, stderr=subprocess.STDOUT, check=True,
+                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
             )
     if _digest(bam) != fingerprints["bam_sha256"] or _digest(reference) != config.reference_sha256:
         raise RuntimeError("BAM or reference changed during Griffin computation")
