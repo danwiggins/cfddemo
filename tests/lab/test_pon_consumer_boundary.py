@@ -588,8 +588,9 @@ def test_failed_member_recompute_keeps_previous_generation(
         assert LabApi(store).status()["interrupted"]["run_id"] == log.run_id
 
 
+@pytest.mark.parametrize("failure_site", ["generation", "current_pointer"])
 def test_failed_generation_publish_restores_member_selections(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure_site: str,
 ) -> None:
     store = LabStore(tmp_path)
     sources = tuple(_sample(store, index) for index in range(1, 11))
@@ -620,6 +621,8 @@ def test_failed_generation_publish_restores_member_selections(
         )
 
     store.publish_result(cn_result(first.source_id, first.input_id, old_identity), input_id=first.input_id)
+    original_selected = store.selected_attempt(first.input_id, "copy-number", old_identity)
+    assert original_selected is not None
     attempted: list[str] = []
 
     def fake_recompute(store, pending, source_id, **kwargs):
@@ -627,7 +630,8 @@ def test_failed_generation_publish_restores_member_selections(
         attempted.append(source_id)
         kwargs["log"].append("sample", sample=source_id[:12], source_id=source_id, input_id=member.input_id)
         if source_id in (first.source_id, second.source_id):
-            store.publish_result(cn_result(source_id, member.input_id, pending_identity), input_id=member.input_id)
+            identity = old_identity if source_id == first.source_id else pending_identity
+            store.publish_result(cn_result(source_id, member.input_id, identity), input_id=member.input_id)
         return member
 
     monkeypatch.setattr(pon_consumer, "recompute_member", fake_recompute)
@@ -638,14 +642,26 @@ def test_failed_generation_publish_restores_member_selections(
             raise OSError("synthetic generation publish failure")
         return original_publish(parent, name, write)
 
-    monkeypatch.setattr(store, "publish_directory", fail_generation_publish)
-    with pytest.raises(OSError, match="synthetic generation publish failure"):
+    original_write_atomic = cohorts.write_atomic
+
+    def fail_current_write(path, content):
+        if path == store.lab / "cohorts" / "healthy-v1" / "current.json":
+            raise OSError("synthetic current pointer failure")
+        return original_write_atomic(path, content)
+
+    if failure_site == "generation":
+        monkeypatch.setattr(store, "publish_directory", fail_generation_publish)
+    else:
+        monkeypatch.setattr(cohorts, "write_atomic", fail_current_write)
+    with pytest.raises(OSError, match="synthetic generation publish failure|synthetic current pointer failure"):
         build_cohort(store, "healthy-v1")
     assert attempted == list(sources)
     assert read_current(store, "healthy-v1") == previous
     assert selected_results(store, first.input_id)["copy-number"].provenance.parameters_sha256 == old_identity
+    assert store.selected_attempt(first.input_id, "copy-number", old_identity) == original_selected
     assert "copy-number" not in selected_results(store, second.input_id)
-    for member in (first, second):
-        assert store.selected_attempt(member.input_id, "copy-number", pending_identity) is None
-        attempts = store.result_dir(member.input_id, "copy-number", pending_identity) / "attempts"
+    assert store.selected_attempt(second.input_id, "copy-number", pending_identity) is None
+    for member, identity in ((first, old_identity), (second, pending_identity)):
+        attempts = store.result_dir(member.input_id, "copy-number", identity) / "attempts"
         assert any((path / "result.json").is_file() for path in attempts.iterdir())
+    assert len(list((store.result_dir(first.input_id, "copy-number", old_identity) / "attempts").iterdir())) >= 2
