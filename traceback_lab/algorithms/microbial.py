@@ -250,14 +250,6 @@ def _classify_streamed(bam: Path, read_length: int, kraken: str, database: Path,
             process.kill()
         process.wait()
         writer.join(timeout=2)
-        if writer.is_alive() and process.stdin is not None:
-            raw = getattr(process.stdin, "raw", None)
-            try:
-                if raw is not None:
-                    raw.close()
-            except OSError:
-                pass
-            writer.join(timeout=2)
         raise
 
 
