@@ -118,6 +118,8 @@ class DonorDerivedChrY(Base):
         from ..store import LabStore
 
         contract = inspect_contract(LabStore(ctx.root), ctx.input_id)
+        if [contract.manifest_sha256] != list(ctx.extras.get("planned_asset_sha256s", ())):
+            raise RuntimeError("consumed donor calibration differs from planned result identity")
         if not isinstance(self.preflight(ctx), Ready):
             raise RuntimeError("donor calibration or input changed after preflight")
         summary, _ = load_summary(ctx)
