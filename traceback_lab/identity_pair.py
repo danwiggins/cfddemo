@@ -142,18 +142,51 @@ def _selected_pair(store: LabStore, pair_id: str) -> dict[str, Any] | None:
         return None
     try:
         with os.fdopen(open_regular_no_follow(directory / "selected.json"), "rb") as stream:
-            selected = json.loads(stream.read(4097))
+            raw = stream.read(4097)
+        if len(raw) > 4096:
+            return None
+        selected = json.loads(raw)
         attempt = selected["attempt_id"]
         if not isinstance(attempt, str) or not re.fullmatch(r"a-[0-9A-Za-z-]{8,80}", attempt):
             return None
         with os.fdopen(open_regular_no_follow(directory / "attempts" / attempt / "summary.json"), "rb") as stream:
-            summary = json.loads(stream.read(8193))
+            raw = stream.read(8193)
+        if len(raw) > 8192:
+            return None
+        summary = json.loads(raw)
     except (OSError, ValueError, KeyError, TypeError):
         return None
-    if (isinstance(summary, dict) and summary.get("schema") == PAIR_SCHEMA
-            and summary.get("pair_id") == pair_id and summary.get("attempt_id") == attempt):
-        return summary
-    return None
+    if (not isinstance(summary, dict) or summary.get("schema") != PAIR_SCHEMA
+            or summary.get("pair_id") != pair_id or summary.get("attempt_id") != attempt
+            or not isinstance(summary.get("sites_sha256"), str)
+            or not SHA256_PATTERN.fullmatch(summary["sites_sha256"])
+            or not isinstance(summary.get("execution_id"), str)
+            or not SHA256_PATTERN.fullmatch(summary["execution_id"])):
+        return None
+    participants = summary.get("participants")
+    if not isinstance(participants, list) or len(participants) != 2:
+        return None
+    required = {"source_id", "input_id", "attempt_id", "parameters_sha256", "sketch_sha256"}
+    for participant in participants:
+        if (not isinstance(participant, dict) or set(participant) != required
+                or any(not isinstance(participant[key], str) for key in required)
+                or any(not SHA256_PATTERN.fullmatch(participant[key]) for key in
+                       ("source_id", "input_id", "parameters_sha256", "sketch_sha256"))
+                or not re.fullmatch(r"a-[0-9A-Za-z-]{8,80}", participant["attempt_id"])):
+            return None
+    if (participants[0]["source_id"] == participants[1]["source_id"]
+            or participants[0]["input_id"] == participants[1]["input_id"]
+            or participants[0]["parameters_sha256"] != participants[1]["parameters_sha256"]):
+        return None
+    metrics = summary.get("metrics")
+    if not isinstance(metrics, dict) or set(metrics) != {"relatedness", "concordance", "ibs0", "ibs2", "n"}:
+        return None
+    if (any(not isinstance(metrics[key], float) or not math.isfinite(metrics[key])
+            for key in ("relatedness", "concordance"))
+            or any(isinstance(metrics[key], bool) or not isinstance(metrics[key], int)
+                   or metrics[key] < 0 for key in ("ibs0", "ibs2", "n"))):
+        return None
+    return summary
 
 
 def compare_pair(store: LabStore, sample_a: str, sample_b: str, *, force: bool = False) -> dict[str, Any]:
@@ -241,6 +274,22 @@ def pairs_for_sample(store: LabStore, source_id: str) -> list[dict[str, Any]]:
         sites = inspect_sites(store)
     except IdentitySitesError:
         return []
+    anchor_identity: dict[str, str] | None = None
+    peer_identities: dict[str, dict[str, str]] = {}
+
+    def current_identity(participant_source: str) -> dict[str, str]:
+        nonlocal anchor_identity
+        if participant_source == source_id:
+            if anchor_identity is None:
+                anchor_identity = _selected_sketch(store, source_id, sites_sha256=sites.sha256).identity()
+            return anchor_identity
+        if participant_source not in peer_identities:
+            if len(peer_identities) == MAX_PAIRS_SHOWN:
+                peer_identities.pop(next(iter(peer_identities)))
+            peer_identities[participant_source] = _selected_sketch(
+                store, participant_source, sites_sha256=sites.sha256,
+            ).identity()
+        return peer_identities[participant_source]
     try:
         with os.scandir(root) as entries:
             for entry in entries:
@@ -254,11 +303,10 @@ def pairs_for_sample(store: LabStore, source_id: str) -> list[dict[str, Any]]:
                         or source_id not in [row.get("source_id") for row in participants]):
                     continue
                 try:
-                    current = [_selected_sketch(store, row["source_id"], sites_sha256=sites.sha256)
-                               for row in participants]
+                    current = [current_identity(row["source_id"]) for row in participants]
                 except (IdentityPairError, KeyError, TypeError):
                     continue
-                if [sketch.identity() for sketch in current] != participants or sites.sha256 != summary.get("sites_sha256"):
+                if current != participants or sites.sha256 != summary.get("sites_sha256"):
                     continue
                 other = next(row["source_id"] for row in participants if row["source_id"] != source_id)
                 rows.append({"peer_id12": id12_for(store, other), "metrics": summary.get("metrics"),

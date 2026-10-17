@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import stat
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from .store import LabStore
 SITES_SCHEMA = "traceback.lab.identity-sites.v1"
 SITES_NAME = "sites.hg38.vcf.gz"
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+MAX_UNCOMPRESSED_BYTES = 512 << 20
 
 
 class IdentitySitesError(ValueError):
@@ -104,11 +106,16 @@ def register_sites(store: LabStore, source: Path, expected_sha256: str, source_l
     if digest != expected_sha256:
         raise IdentitySitesError("identity sites source does not match the expected SHA-256")
     try:
-        with gzip.open(source, "rt", encoding="ascii") as stream:
+        with gzip.open(source, "rb") as stream:
             header = stream.readline(256)
-    except (OSError, UnicodeError) as exc:
+            expanded = len(header)
+            while block := stream.read(1 << 20):
+                expanded += len(block)
+                if expanded > MAX_UNCOMPRESSED_BYTES:
+                    raise IdentitySitesError("identity sites exceed the expanded size limit")
+    except (OSError, EOFError, zlib.error) as exc:
         raise IdentitySitesError("identity sites are not a readable gzip VCF") from exc
-    if not header.startswith("##fileformat=VCF"):
+    if not header.startswith(b"##fileformat=VCF"):
         raise IdentitySitesError("identity sites are not a VCF")
     directory = _directory(store)
     try:

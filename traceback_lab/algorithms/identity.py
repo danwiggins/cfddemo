@@ -29,11 +29,21 @@ MAX_SKETCH_BYTES = 16 << 20
 _VERSION = re.compile(r"somalier version:\s*([^\s]+)")
 
 
-@lru_cache(maxsize=1)
 def somalier_tool() -> tuple[str, str] | None:
     path = shutil.which("somalier")
     if path is None:
         return None
+    try:
+        info = os.stat(path)
+    except OSError:
+        return None
+    return _probe_somalier(path, info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+
+
+@lru_cache(maxsize=8)
+def _probe_somalier(path: str, device: int, inode: int, size: int, mtime_ns: int) -> tuple[str, str] | None:
+    """Cache one executable incarnation, not a process-lifetime tool selection."""
+
     try:
         found = subprocess.run([path, "--help"], stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                timeout=5, check=False)

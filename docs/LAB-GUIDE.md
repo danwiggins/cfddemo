@@ -106,6 +106,10 @@ Fingerprints and relatedness can reveal family relationships (FLAG: PRIVACY).
 Keep the Lab ROOT private. There is no validated ONT duplicate or kinship
 threshold here, and this command makes no diagnostic claim. No real donor data
 is required for the synthetic checks in this repository.
+An altered or unreadable sites registration is blocked, not silently replaced.
+Preserve the affected ROOT for review; the safe repeat path is a fresh ROOT,
+the verified original VCF and SHA-256, and new extraction/comparison runs.
+Any in-place repair requires an offline backup and operator review first.
 
 `--sex M|F` records an operator assertion in versioned local sample metadata.
 It does not change the measured `sex-check` ratio, source or input identity, or
