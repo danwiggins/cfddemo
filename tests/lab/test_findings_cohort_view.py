@@ -67,8 +67,9 @@ def test_cohort_findings_counts_and_readiness_are_explicit(tmp_path, monkeypatch
     assert "1 without a reference" in summary
     assert "1 in range" in summary
     assert "eligible cohort n = 10" in summary
+    assert "after leave-one-out" in summary and "exclusions: self" not in summary
     assert ("protocol incompatible up to 3 per metric" if outside else "protocol incompatible 3") in summary
-    assert "recompute members with matching reference, aligner and counting protocol" in summary
+    assert "recompute members with matching reference, aligner and counting protocol" not in summary
     assert re.findall(r"<summary>(Not interpretable|No reference|In range) \((\d+)\)", dom) == [
         ("Not interpretable", "0"), ("No reference", "1"), ("In range", "1")]
     assert dom.count('class="finding-card"') == int(outside)

@@ -338,11 +338,14 @@
     for (const metric of cohort) for (const [reason, count] of Object.entries(metric.cohort_excluded || {})) {
       if (Number.isInteger(count) && count > 0) excluded[reason] = Math.max(excluded[reason] || 0, count);
     }
+    const leaveOneOut = Boolean(excluded.self);
+    delete excluded.self;
     const reasons = Object.entries(excluded).map(([reason, count]) =>
       `${reason === "incompatible" ? "protocol incompatible" : reason.replace(/_/g, " ")} ${cohort.length > 1 ? `up to ${count} per metric` : count}`);
     const detail = reasons.length ? `; exclusions: ${reasons.join(" · ")}` : "";
+    const needsMembers = !eligible.length || Math.min(...eligible) < (sample.cohort_min || 10);
     const remedy = stale ? "; selected result identity changed—reload or recompute this sample, then rebuild the cohort if needed"
-      : excluded.incompatible ? "; recompute members with matching reference, aligner and counting protocol, then rebuild the cohort"
+      : excluded.incompatible && needsMembers ? "; recompute members with matching reference, aligner and counting protocol, then rebuild the cohort"
         : excluded.missing_result || excluded.missing_metric ? "; recompute missing member results, then rebuild the cohort" : "";
     if (!eligible.length) return (sample.cohort_state === "not_built" ? "cohort not built" : "no comparable cohort values for these metrics") + detail + remedy;
     const low = Math.min(...eligible), high = Math.max(...eligible);
@@ -352,7 +355,7 @@
       : cohort.some((m) => m.percentile !== null && m.percentile !== undefined) ? "; percentile reference"
         : cohort.some((m) => m.exploratory_n !== null && m.exploratory_n !== undefined) ? "; exploratory reference"
           : "; metric not interpretable at this depth or QC";
-    return `eligible cohort n = ${n}${phase}${detail}${remedy}`;
+    return `eligible cohort n = ${n}${leaveOneOut ? " after leave-one-out" : ""}${phase}${detail}${remedy}`;
   }
 
   function strip(metric) {
