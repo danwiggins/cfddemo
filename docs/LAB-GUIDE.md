@@ -251,6 +251,10 @@ progress", then "New results are available. [Reload]" (it never swaps
 content under you). The page is strict: same-origin scripts only, no inline
 script or style, no outside requests.
 
+The run-status banner follows the latest Lab writer; a later cohort update or
+other writer can supersede an earlier interrupted-run banner. It does not
+serve as a history of every interrupted run.
+
 ## What the page shows
 
 - **Landing (`#/`)**: the CLIA explainer (short version, "Read the full
