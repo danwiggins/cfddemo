@@ -141,19 +141,22 @@ def _published_agreement(tmp_path, monkeypatch):
 
     selected = selected_results(store, input_id)
     assert all(selected[name].status == "ok" for name in ("copy-number", "meth-tf", "fragment-size", "mtdna"))
-    compat = {"fragment-size": "a" * 64, "mtdna": "b" * 64}
+    compat = {"fragment-size": "a" * 64, "mtdna": "b" * 64, "copy-number": "c" * 64}
 
     def result(name, value):
         return CohortResult(
             algorithm_id=name, parameters_sha256=selected[name].provenance.parameters_sha256,
-            cohort_compat_key=compat[name], metrics={"mode_bp" if name == "fragment-size" else "chrm_fraction": value},
+            cohort_compat_key=compat[name], metrics={
+                {"fragment-size": "mode_bp", "mtdna": "chrm_fraction", "copy-number": "tumor_fraction"}[name]: value,
+            },
         )
 
     target = CohortMember(source_id=source_id, input_id=input_id, aligner_identity="fixture aligner",
-                          results=(result("fragment-size", 170.0), result("mtdna", 0.015)))
+                          results=(result("fragment-size", 170.0), result("mtdna", 0.015),
+                                   result("copy-number", 0.25)))
     peers = tuple(CohortMember(
         source_id=f"{index:064x}", input_id=f"{index + 100:064x}", aligner_identity="fixture aligner",
-        results=(result("fragment-size", 165.0), result("mtdna", 0.01)),
+        results=(result("fragment-size", 165.0), result("mtdna", 0.01), result("copy-number", 0.10)),
     ) for index in range(1, 11))
     incompatible = CohortMember(source_id=f"{99:064x}", input_id=f"{199:064x}", aligner_identity="fixture aligner",
                                 results=(CohortResult(algorithm_id="fragment-size", parameters_sha256="5" * 64,
@@ -188,6 +191,11 @@ def test_positive_agreement_uses_selected_results_and_source_excluded_baselines(
     assert pairs["cn-mtdna"]["x"] == pytest.approx(0.005)
     assert pairs["cn-mtdna"]["baseline_median"] == pytest.approx(0.01)
     assert pairs["cn-mtdna"]["reference_n"] == 10
+    plotted = {pair["pair_id"]: pair for pair in payload["agreement_pairs"]}
+    assert set(plotted) == {"size-cn", "mtdna-cn"}
+    assert all(pair["state"] == "ready" and pair["eligible_n"] == 10 for pair in plotted.values())
+    assert plotted["size-cn"]["points"][0]["x"] == 165.0
+    assert plotted["size-cn"]["points"][0]["y"] == 0.10
 
 
 @needs_chrome
@@ -201,6 +209,6 @@ def test_positive_agreement_renders_three_plots_with_flags(tmp_path, monkeypatch
     assert "2 covered markers, 20 CpG calls" in dom
     assert ("condition number 1. Unnormalized weight-fit residual RMS 0. "
             "With two covered markers, an interior fit is exactly determined") in dom
-    assert "Matched cohort median 165 (n = 10)" in dom
+    assert "10 compatible paired cohort sources" in dom
     assert "not independent confirmation" in dom and "whole-genome doubling" in dom
     assert "aggregate score" not in dom.lower()

@@ -1220,8 +1220,7 @@
       }
       if (methPair.state !== "ok") {
         const unavailable = methPair.unavailable_reasons?.length ? methPair.unavailable_reasons : [methPair.state];
-        section.append(h("p", { class: "empty" }, unavailable.map(reason => reasons[reason] || "This pair is unavailable.").join(" "),
-          ""));
+        section.append(h("p", { class: "empty" }, unavailable.map(reason => reasons[reason] || "This pair is unavailable.").join(" ")));
       } else {
         section.append(chart(`${methPair.label}: this sample at ${fmt(methPair.x)} and ${fmt(methPair.y)}.`, {
           grid: { left: 60, right: 20, top: 20, bottom: 40 }, xAxis: { type: "value", name: methPair.x_label, scale: true }, yAxis: { type: "value", name: methPair.y_label, min: 0 },
