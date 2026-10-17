@@ -70,10 +70,13 @@ def read_corrected_profiles(path: Path, *, expected_sample: str | None = None) -
         fields = reader.fieldnames
         if fields is None or len(fields) != len(set(fields)) or not _FIELDS.issubset(fields):
             raise GriffinFormatError("missing or duplicate Griffin output columns")
-        if any(field.lstrip("-").isdigit() and not re.fullmatch(r"-?[0-9]+", field) for field in fields):
-            raise GriffinFormatError("coverage coordinates must use ASCII digits")
+        if any(field.lstrip("+-").isdigit() and not re.fullmatch(r"[+-]?[0-9]+", field) for field in fields):
+            raise GriffinFormatError("coverage coordinates must use canonical ASCII integers")
+        if any(re.fullmatch(r"[+-]?[0-9]+", field) and not re.fullmatch(r"(?:0|-[1-9][0-9]*|[1-9][0-9]*)", field)
+               for field in fields):
+            raise GriffinFormatError("coverage coordinates must use canonical integer spelling")
         try:
-            offsets = tuple(int(field) for field in fields if re.fullmatch(r"-?[0-9]+", field))
+            offsets = tuple(int(field) for field in fields if re.fullmatch(r"(?:0|-[1-9][0-9]*|[1-9][0-9]*)", field))
         except ValueError as exc:
             raise GriffinFormatError("invalid coverage coordinate") from exc
         if len(offsets) < 3 or sorted(offsets) != list(offsets):

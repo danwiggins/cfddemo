@@ -71,7 +71,16 @@ def test_rejects_non_ascii_coordinate_header(tmp_path: Path) -> None:
     path = _write(tmp_path / "S1.GC_corrected.coverage.tsv")
     path.write_text(path.read_text(encoding="utf-8").replace("-15\t0\t15", "-15\t٠\t15"),
                     encoding="utf-8")
-    with pytest.raises(GriffinFormatError, match="ASCII digits"):
+    with pytest.raises(GriffinFormatError, match="ASCII"):
+        read_corrected_profiles(path)
+
+
+@pytest.mark.parametrize("header", ["+15", "015", "-0"])
+def test_rejects_noncanonical_coordinate_header(tmp_path: Path, header: str) -> None:
+    path = _write(tmp_path / "S1.GC_corrected.coverage.tsv")
+    path.write_text(path.read_text(encoding="utf-8").replace("-15\t0\t15", f"-15\t0\t{header}"),
+                    encoding="utf-8")
+    with pytest.raises(GriffinFormatError, match="canonical"):
         read_corrected_profiles(path)
 
 
@@ -91,6 +100,7 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
             "# test fixture\n", encoding="utf-8"
         )
     (upstream / "scripts").mkdir()
+    (upstream / "scripts" / "profile.py").write_text("# pinned test script\n", encoding="utf-8")
     assets = tmp_path / "assets"
     assets.mkdir()
     for name in griffin_run._REF_FILES:
@@ -112,6 +122,7 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
     sample = f"lab_{input_id}"
     calls: list[Path] = []
     mutate_index = False
+    mutate_script = False
 
     def fake_run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         if argv[:2] == ["git", "-C"]:
@@ -128,6 +139,10 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
             _write(output, sample=sample)
             if mutate_index:
                 bam.with_suffix(".bam.bai").write_bytes(b"changed index")
+            if mutate_script:
+                (directory.parent / "upstream_scripts" / "profile.py").write_text(
+                    "# changed during run\n", encoding="utf-8"
+                )
         return subprocess.CompletedProcess(argv, 0)
 
     monkeypatch.setattr(subprocess, "run", fake_run)
@@ -145,11 +160,17 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
     assert manifest["status"] == "complete"
     assert manifest["input_id"] == input_id
     assert manifest["sample"] == sample
-    assert manifest["eligible_reads"] == 5_000_000
-    assert manifest["minimum_eligible_reads"] == 5_000_000
+    assert manifest["eligible_autosomal_pairs"] == 5_000_000
+    assert manifest["minimum_eligible_autosomal_pairs"] == 5_000_000
+    assert manifest["eligibility_source"] == "caller_supplied"
     assert manifest["fingerprints"]["bam_sha256"] == hashlib.sha256(b"bam").hexdigest()
     assert manifest["fingerprints"]["bam_indexes_sha256"]["aligned.bam.bai"] == hashlib.sha256(b"index").hexdigest()
     assert manifest["fingerprints"]["reference_index_sha256"] == hashlib.sha256(b"index").hexdigest()
+    assert len(manifest["fingerprints"]["generated_configs_sha256"]) == 5
+    assert manifest["fingerprints"]["upstream_scripts_sha256"] != hashlib.sha256().hexdigest()
+    assert str(attempt / "upstream_scripts") in (
+        attempt / "griffin_nucleosome_profiling" / "config" / "config.yaml"
+    ).read_text(encoding="utf-8")
     with pytest.raises(FileExistsError):
         run_upstream(GriffinRun(
             input_id=input_id, bam=bam, reference_fasta=reference,
@@ -164,6 +185,16 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
             reference_id="hg38", reference_sha256=hashlib.sha256(reference.read_bytes()).hexdigest(),
             eligible_reads=5_000_000, upstream_root=upstream, ref_assets=assets,
             site_lists={"CTCF": sites}, attempt_dir=tmp_path / "changed-index-attempt",
+        ))
+    bam.with_suffix(".bam.bai").write_bytes(b"index")
+    mutate_index = False
+    mutate_script = True
+    with pytest.raises(RuntimeError, match="scripts or generated configuration changed"):
+        run_upstream(GriffinRun(
+            input_id=input_id, bam=bam, reference_fasta=reference,
+            reference_id="hg38", reference_sha256=hashlib.sha256(reference.read_bytes()).hexdigest(),
+            eligible_reads=5_000_000, upstream_root=upstream, ref_assets=assets,
+            site_lists={"CTCF": sites}, attempt_dir=tmp_path / "changed-script-attempt",
         ))
 
 

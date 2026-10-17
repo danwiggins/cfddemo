@@ -27,9 +27,16 @@ the registered hg38 FASTA and its SHA-256, Griffin's
 reference assets (including mappability BigWig, exclusion BEDs and all
 15–500 bp genome GC-frequency tables), and high-mappability TF-site lists.
 It requires the 5M D21 gate, a clean upstream checkout at the pinned commit,
-and a fresh per-input attempt directory. The attempt records the sample ID,
-eligible-read count, gate, and hashes for BAM, BAM index, reference, reference
-index, site lists and reference assets. It only marks its manifest
+and a fresh per-input attempt directory. The adapter's `eligible_reads` input
+is a caller-supplied count of eligible autosomal **pairs**, recorded with that
+unit and source; the registered Lab wrapper must compute and verify it from
+the BAM. The attempt records the sample ID, pair count, gate, and hashes for
+BAM, BAM index, reference, reference index, site lists and reference assets.
+It copies the pinned upstream scripts into the attempt, records their digest,
+and hashes all five generated workflow YAML files. The generated config sets
+`mappability_correction: false`, so the accepted output is GC-corrected only;
+this is an explicit deviation from a workflow that also applies mappability
+correction. The attempt only marks its manifest
 complete after Griffin returns a valid corrected TSV. Partial outputs remain
 inspectable after failure. Griffin's upstream shell rules interpolate paths
 without quoting, so the adapter refuses paths containing shell-special
