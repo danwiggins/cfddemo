@@ -214,7 +214,7 @@ def run_plan(
             # re-registered asset never reuses an older result.
             asset_sha256s=planned_assets,
             platform=target.platform if target.platform != "ont" else None,
-            tool_identities=planned_tools,
+            tool_pins=planned_tools,
         )
         target.extras["planned_asset_sha256s"] = list(planned_assets)
         target.extras["planned_tool_identities"] = planned_tools
@@ -245,6 +245,8 @@ def run_plan(
             for name in algorithm.upstream
             if name in done and done[name].artifacts_dir
         }
+        target.extras["planned_asset_sha256s"] = planned_assets
+        target.extras["planned_tool_pins"] = planned_tools
         ctx = target.context(store.root)
         decision: Ready | Skip
         if platform_rejected:
