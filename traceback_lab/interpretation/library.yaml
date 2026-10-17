@@ -7,7 +7,7 @@
 # original evidence (D4).  citation_checked records who confirmed that every
 # DOI resolves and every displayed number matches the source (D27); an entry
 # without it renders an "UNVERIFIED citation" badge.
-version: 0.6.4
+version: 0.6.5
 hidden_algorithms: [read-summary, meth-calls]
 entries:
   # ---------------------------------------------------------------- bam-qc
@@ -2604,6 +2604,78 @@ entries:
       date: "2026-10-16"
       note: "No scientific citation or reference interval displayed. Engineering formula: D21 eligible molecules supply aligned-span start and end-1, not claimed physical cleavage sites. Each valid end contributes once to the denominator, including both ends of one read even if they select the same CpG. A reference CG C coordinate within 10 bp inclusive is near; equal-distance ties select the lower C. Endpoint motifs are separate panels and require complete A/C/G/T contexts. LEGAL is a caution flag, not a rights clearance."
 
+  # ------------------------------------------------------------- viral-reads
+  - algorithm_id: viral-reads
+    metric_id: ebv_rpm
+    label: "EBV-aligned reads per million human-unmapped primaries"
+    value_kind: positive
+    tier: SPECULATIVE
+    origin_tier: PROVEN
+    origin_platform: "qPCR (different assay)"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No validated ONT cfDNA viral-read cutoff or performance estimate"
+    missing_value_caption: "Viral RPM unavailable; inspect availability_reason and read counts in the aggregate artifact."
+    meaning_high: "More human-unmapped reads align to the registered EBV sequences; this does not establish infection or cancer."
+    meaning_low: "Few or no reads align to those EBV sequences; absence is not established."
+    confounders: ["reference coverage", "cross-mapping", "contamination", "unmapped-read denominator"]
+    next_steps:
+      analytical: ["Review the registered accession list and alignment evidence", "Confirm a signal with an independent assay"]
+      clinical_setting: null
+    license_ids: [viral-reference-terms-vary]
+    flags: [LEGAL]
+    headline: true
+    citations: []
+    citation_checked: {by: "Lab method contract", date: "2026-10-16", note: "No ONT cfDNA assay citation or clinical cutoff is claimed; qPCR context comes from the approved D10 catalog."}
+
+  - algorithm_id: viral-reads
+    metric_id: hpv_rpm
+    label: "HPV-aligned reads per million human-unmapped primaries"
+    value_kind: positive
+    tier: SPECULATIVE
+    origin_tier: PROVEN
+    origin_platform: "qPCR (different assay)"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No validated ONT cfDNA viral-read cutoff or performance estimate"
+    missing_value_caption: "Viral RPM unavailable; inspect availability_reason and read counts in the aggregate artifact."
+    meaning_high: "More human-unmapped reads align to the HPV types included in this registered bundle; other types are not assessed."
+    meaning_low: "Few or no reads align to the included HPV types; absence is not established."
+    confounders: ["included HPV types", "cross-mapping", "contamination", "unmapped-read denominator"]
+    next_steps:
+      analytical: ["Review which HPV accession versions are registered", "Confirm a signal with an independent assay"]
+      clinical_setting: null
+    license_ids: [viral-reference-terms-vary]
+    flags: [LEGAL]
+    headline: false
+    citations: []
+    citation_checked: {by: "Lab method contract", date: "2026-10-16", note: "No ONT cfDNA assay citation or clinical cutoff is claimed; HPV coverage is bundle-specific."}
+
+  - algorithm_id: viral-reads
+    metric_id: hbv_rpm
+    label: "HBV-aligned reads per million human-unmapped primaries"
+    value_kind: positive
+    tier: SPECULATIVE
+    origin_tier: PROVEN
+    origin_platform: "qPCR (different assay)"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No validated ONT cfDNA viral-read cutoff or performance estimate"
+    missing_value_caption: "Viral RPM unavailable; inspect availability_reason and read counts in the aggregate artifact."
+    meaning_high: "More human-unmapped reads align to the registered HBV sequences; this does not establish infection."
+    meaning_low: "Few or no reads align to those HBV sequences; absence is not established."
+    confounders: ["reference coverage", "cross-mapping", "contamination", "unmapped-read denominator"]
+    next_steps:
+      analytical: ["Review the registered accession list and alignment evidence", "Confirm a signal with an independent assay"]
+      clinical_setting: null
+    license_ids: [viral-reference-terms-vary]
+    flags: [LEGAL]
+    headline: false
+    citations: []
+    citation_checked: {by: "Lab method contract", date: "2026-10-16", note: "No ONT cfDNA assay citation or clinical cutoff is claimed; qPCR context is separate."}
   # ----------------------------------------------- short-read-fragment-size
   - algorithm_id: short-read-fragment-size
     metric_id: mode_bp
