@@ -59,7 +59,8 @@ def test_bundle_code_and_basecaller_each_change_execution_identity(tmp_path, mon
     runtime = {"python": "3.11", "packages": {"torch": "2.1"}, "cuda": None}
     probes = []
 
-    def numerical_runtime(*, probe_gpu):
+    def numerical_runtime(*, probe_gpu, isolated_gpu):
+        assert isolated_gpu is True
         probes.append(probe_gpu)
         return runtime
 

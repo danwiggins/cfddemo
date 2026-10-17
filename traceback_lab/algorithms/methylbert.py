@@ -124,7 +124,7 @@ class Methylbert(Base):
                 "bundle_sha256": ctx.extras.get("methylbert_bundle_sha256"),
                 "code_sha256": ctx.extras.get("methylbert_code_sha256"),
                 "min_classified_reads": ctx.extras.get("methylbert_min_classified_reads"),
-                "numerical_runtime": numerical_runtime_identity(probe_gpu=probe_gpu),
+                "numerical_runtime": numerical_runtime_identity(probe_gpu=probe_gpu, isolated_gpu=True),
                 "child_sha256": _digest(Path(__file__).resolve().parents[1] / "methylbert_child.py")}
 
     def preflight(self, ctx: InputContext) -> Ready | Skip:
@@ -169,14 +169,10 @@ class Methylbert(Base):
             if directory.exists() or directory.is_symlink():
                 raise RuntimeError("registered MethylBERT bundle failed integrity verification") from exc
             return Skip("missing_asset", f"the trusted MethylBERT bundle is unavailable: {type(exc).__name__}")
-        try:
-            import torch
-            gpu = bool(torch.cuda.is_available())
-        except (ImportError, OSError, RuntimeError):
-            gpu = False
+        runtime = numerical_runtime_identity(probe_gpu=True, isolated_gpu=True)
+        gpu = bool(runtime["cuda"] and runtime["cuda"]["available"])
         if not gpu:
             return Skip("missing_gpu", "MethylBERT needs a usable CUDA GPU")
-        runtime = numerical_runtime_identity(probe_gpu=True)
         if runtime["cuda"] is None or not runtime["cuda"]["available"]:
             return Skip("missing_gpu", "MethylBERT CUDA device could not be identified")
         if any(version is None for version in runtime["packages"].values()):
@@ -205,7 +201,7 @@ class Methylbert(Base):
         planned = ctx.extras.get("planned_parameters", {})
         if _digest(child) != planned.get("child_sha256"):
             raise RuntimeError("MethylBERT child code changed since execution identity was selected")
-        if numerical_runtime_identity(probe_gpu=True) != planned.get("numerical_runtime"):
+        if numerical_runtime_identity(probe_gpu=True, isolated_gpu=True) != planned.get("numerical_runtime"):
             raise RuntimeError("MethylBERT numerical runtime changed since execution identity was selected")
         with tempfile.TemporaryDirectory(prefix="methylbert-", dir=out.parent) as private_name:
             private = Path(private_name)

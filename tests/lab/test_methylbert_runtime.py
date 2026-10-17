@@ -78,6 +78,27 @@ def test_child_runtime_guard_refuses_a_changed_numerical_package(monkeypatch):
         runtime.require_numerical_runtime(expected)
 
 
+def test_parent_gpu_identity_uses_a_bounded_process_without_importing_cuda(monkeypatch):
+    monkeypatch.setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+    monkeypatch.setattr(runtime, "probe_cuda", lambda: pytest.fail("parent initialized CUDA"))
+    seen = {}
+    cuda = {"available": True, "torch_cuda": "12.4", "device_count": 1}
+
+    def contained(argv, **kwargs):
+        seen.update({"argv": argv, **kwargs})
+        output = json.dumps(cuda).encode()
+        return ContainedResult(tuple(argv), "exited", 0, 0.1, output, b"", len(output), 0, False, False)
+
+    monkeypatch.setattr(runtime, "run_contained", contained)
+    actual = runtime.numerical_runtime_identity(probe_gpu=True, isolated_gpu=True)
+    assert actual["cuda"] == cuda
+    assert seen["argv"][1] == "-I"
+    assert seen["argv"][2].endswith("methylbert_gpu_probe.py")
+    assert seen["env"]["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID"
+    assert seen["timeout_seconds"] == 30
+    assert seen["log_limit_bytes"] == 8 * 1024
+
+
 def test_install_identity_requires_pinned_git_source_and_hashes_record_listed_code(tmp_path, monkeypatch):
     code = tmp_path / "methylbert" / "data" / "bam.py"
     code.parent.mkdir(parents=True)
