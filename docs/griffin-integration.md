@@ -47,9 +47,9 @@ all five generated workflow YAML files. It requires Snakemake 5.19.2, records
 the resolved Snakemake, Python, samtools, and bedtools executable digests and
 the numerical Python package versions, and checks the runtime again after
 execution. The attempt contains a `bin/python` link to the recorded Lab interpreter
-and a hashed compatibility shim for Snakemake 5.19.2 on Python 3.11+. Its PATH
-and PYTHONPATH ensure the upstream scripts' `#!/usr/bin/env python` and the
-Snakemake launcher use that interpreter and shim. The generated config sets the pinned
+and a hashed compatibility shim for Snakemake 5.19.2 on Python 3.11+. The
+adapter invokes Snakemake through that interpreter; PATH and PYTHONPATH make
+upstream scripts' `#!/usr/bin/env python` resolve to it too. The generated config sets the pinned
 upstream default `mappability_correction: false`, so the accepted output is
 GC-corrected only. The attempt only marks its manifest complete after Griffin returns
 a valid corrected TSV with exactly the requested site-list names. Partial outputs remain
@@ -79,7 +79,8 @@ diagnostic threshold is asserted.
 Both complete pinned Snakemake workflows have run in an isolated synthetic
 toolchain on 500 toy paired-end fragments, with a generated reference, site
 list, and mappability track. The corrected output passed the Lab parser. That
-proof used a compatibility shim for Snakemake 5.19.2 under Python 3.11 and
+proof exercised upstream orchestration, not the `run_upstream` adapter or the
+biological signal. It used a compatibility shim for Snakemake 5.19.2 under Python 3.11 and
 does not satisfy the Lab's 5M eligible-pair gate or validate a production hg38
 sample. The commands, fixture generators, and output digest are in
 [`docs/proofs/griffin/README.md`](proofs/griffin/README.md). A production run still needs registered hg38 assets and a compatible

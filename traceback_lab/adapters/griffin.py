@@ -37,6 +37,10 @@ _FIELDS = {
     "sample", "site_name", "number_of_sites", "correction",
     "central_coverage", "amplitude", "smoothing", "CNA_normalization",
 }
+_META_FIELDS = _FIELDS | {
+    "mean_reads_per_bp_in_normalization_window", "mean_reads_per_bp_in_saved_window",
+    "mean_coverage", "outlier_cutoff", "exclude_zero_mappability",
+}
 
 
 def _boolean(value: str, field: str) -> bool:
@@ -80,6 +84,10 @@ def read_corrected_profiles(path: Path, *, expected_sample: str | None = None) -
             offsets = tuple(int(field) for field in coordinate_fields)
         except ValueError as exc:
             raise GriffinFormatError("invalid coverage coordinate") from exc
+        if set(fields) - _META_FIELDS - {str(offset) for offset in offsets}:
+            raise GriffinFormatError("unknown Griffin output column")
+        if fields[:len(offsets)] != [str(offset) for offset in offsets]:
+            raise GriffinFormatError("coverage coordinates must precede feature columns")
         if len(offsets) < 3 or sorted(offsets) != list(offsets):
             raise GriffinFormatError("coverage coordinates must increase")
         step = offsets[1] - offsets[0]
