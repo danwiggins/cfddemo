@@ -1,4 +1,42 @@
-# Public ONT patient-source mixtures
+# Validation utilities
+
+## Lab storage accounting
+
+After a completed default run, with the Lab writer stopped, inventory the store:
+
+```sh
+python -m scripts.validation.lab_storage_accounting --root ROOT --source-id SOURCE_SHA256
+```
+
+If the source has more than one full aligned input, add `--input-id FULL_INPUT_SHA256`.
+The command reads metadata and apparent file sizes only; it does not run analysis or write to
+the store. `literal_lab_inputs_bytes` is the apparent-byte total beneath `lab/inputs`,
+including the shared hash cache. The AC4 ratio divides that value by the chosen
+full input's aligned BAM plus index. The AC4 verdict is `null` if other samples'
+input directories or leftover input files are present, including a second full
+input for the same source; use an isolated validation
+root for that ratio claim. The JSON repeats the numerator and denominator scope;
+the boolean alone is not a full D30 or AC4 acceptance verdict because staging
+cleanup and other required conditions are reported separately.
+`sample_result_bytes` includes every retained attempt for the selected full and
+derived inputs. `complete_lab_persistent_bytes` covers all files below `lab`,
+including other samples, runs, cohort assets, shared `.mmi` files and leftovers.
+The shared `.mmi` total is reported once, not added to each sample. Staging and
+temporary bytes and staging entry count are reported so even an empty staged
+directory is visible. `other_lab_bytes` holds the remaining files beneath `lab`,
+including source records and run logs, so the input, result, index and other
+buckets sum to `complete_lab_persistent_bytes`. Staging and temporary bytes are
+cross-cutting subsets of those buckets and must not be added a second time.
+`recorded_included_chunk_bytes` sums only chunk sizes
+preserved in the source record; excluded chunk bytes are unknown, so this is not
+automatically the complete original S required by D30.
+The inventory is capped at 100,000 entries by default and refuses symlinks,
+special files or unreadable entries rather than reporting an incomplete total.
+Values are apparent file bytes, counting each hard-link path separately. It is a best-effort
+snapshot if a writer runs concurrently. This receipt does not establish full-FBB
+runtime, peak disk/RSS or cached-rerun acceptance.
+
+## Public ONT patient-source mixtures
 
 This standalone utility supports the public-source experiment in demo spec D25(c).
 It is separate from `lab simulate cna` and does not change production controls or
