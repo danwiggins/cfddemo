@@ -405,7 +405,10 @@ def test_stored_dry_run_uses_selected_depth_without_writing(
                 unavailable.append(missing["data"])
         with monkeypatch.context() as patch:
             selected = SimpleNamespace(
-                status="ok", metrics=[SimpleNamespace(metric_id="eligible_reads", value=2_000_000)],
+                status="ok", metrics=[
+                    SimpleNamespace(metric_id="eligible_reads", value=2_000_000),
+                    SimpleNamespace(metric_id="approx_depth_x", value=1.0),
+                ],
             )
             patch.setattr(LabStore, "read_result", selected_result_for(selected))
             met_code, met = _json(
@@ -415,6 +418,14 @@ def test_stored_dry_run_uses_selected_depth_without_writing(
         with monkeypatch.context() as patch:
             patch.setattr(LabStore, "read_result", selected_result_for(SimpleNamespace(status="ok", metrics=[])))
             no_depth_code, no_depth = _json(
+                capsys, "run", "latest", "--root", str(root),
+                "--only", "delfi-ratio", "--dry-run",
+            )
+        with monkeypatch.context() as patch:
+            patch.setattr(LabStore, "read_result", selected_result_for(SimpleNamespace(
+                status="ok", metrics=[SimpleNamespace(metric_id="eligible_reads", value=2_000_000)],
+            )))
+            partial_depth_code, partial_depth = _json(
                 capsys, "run", "latest", "--root", str(root),
                 "--only", "delfi-ratio", "--dry-run",
             )
@@ -438,7 +449,7 @@ def test_stored_dry_run_uses_selected_depth_without_writing(
                 capsys, "run", "latest", "--root", str(root), "--dry-run",
             )
         assert snapshot() == before
-    assert code == human_code == forced_code == met_code == no_depth_code == incomplete_code == incomplete_human_code == 0
+    assert code == human_code == forced_code == met_code == no_depth_code == partial_depth_code == incomplete_code == incomplete_human_code == 0
     data = payload["data"]
     assert data["sample"]["id12"] == first["data"]["sample"]["id12"]
     assert data["sample"]["input_id"] == first["data"]["sample"]["input_id"]
@@ -473,6 +484,9 @@ def test_stored_dry_run_uses_selected_depth_without_writing(
     assert "eligible_reads" not in no_depth["data"]
     assert no_depth["data"]["plan"][0]["decision"] == "reused (selected result)"
     assert no_depth["data"]["plan"][1]["decision"] == "decided at run time"
+    assert "eligible_reads" not in partial_depth["data"]
+    assert partial_depth["data"]["plan"][0]["decision"] == "reused (selected result)"
+    assert partial_depth["data"]["plan"][1]["decision"] == "decided at run time"
     assert incomplete["data"]["chunks"] == {"count": None, "bytes": None, "excluded": [4]}
     assert "INPUT     unknown (stored chunk record incomplete) · excluded [4]" in incomplete_human
 

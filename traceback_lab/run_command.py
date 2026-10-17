@@ -337,7 +337,11 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
                 ] = "reused (selected result)"
                 values = {metric.metric_id: metric.value for metric in selected.metrics}
                 eligible = values.get("eligible_reads")
-                if isinstance(eligible, int) and not isinstance(eligible, bool) and eligible >= 0:
+                depth_x = values.get("approx_depth_x")
+                if (
+                    isinstance(eligible, int) and not isinstance(eligible, bool) and eligible >= 0
+                    and isinstance(depth_x, (int, float)) and not isinstance(depth_x, bool)
+                ):
                     data["eligible_reads"] = eligible
                     lines.append(f"DEPTH     {eligible:,} eligible reads (selected read-summary)")
                     for row, item in zip(plan_rows, items):
