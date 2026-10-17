@@ -22,6 +22,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 import numpy as np
+import pysam
 
 from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip, ToolPin
 from ._base import Base, metric
@@ -44,6 +45,23 @@ REQUIRED_DIRS = (
     "chromatin_masks/ATAC/sparse_overlaps_by_chromosome",
     "chromatin_masks/DNase/sparse_overlaps_by_chromosome",
 )
+
+
+def _ont_input(ctx: InputContext) -> bool:
+    """Lab-aligned inputs use map-ont; imported BAMs must declare ONT read groups."""
+    try:
+        manifest = json.loads((ctx.input_dir / "manifest.json").read_bytes())
+        if manifest.get("kind") == "aligned":
+            return True
+        if manifest.get("kind") != "prealigned":
+            return False
+        with pysam.AlignmentFile(str(ctx.input_dir / "aligned.bam"), "rb", check_sq=False) as bam:
+            groups = bam.header.to_dict().get("RG", [])
+        return bool(groups) and all(
+            group.get("PL", "").upper() in {"ONT", "OXFORD_NANOPORE"} for group in groups
+        )
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
 
 
 def _program(variable: str | None, default: str) -> Path | None:
@@ -308,6 +326,8 @@ class Lionheart(Base):
             return decision
         if os.environ.get("TRACEBACK_LIONHEART_ENABLE_ONT") != "1":
             return Skip("platform_unverified", "ONT single-end feature extraction is experimental; set TRACEBACK_LIONHEART_ENABLE_ONT=1 to opt in")
+        if not _ont_input(ctx):
+            return Skip("platform_unverified", "LIONHEART requires a Lab-aligned ONT input or a prealigned BAM whose read groups all declare ONT")
         executable = _program("TRACEBACK_LIONHEART_BIN", "lionheart")
         mosdepth = _program("TRACEBACK_LIONHEART_MOSDEPTH_BIN", "mosdepth")
         if executable is None or mosdepth is None or _program(None, "samtools") is None or _program(None, "unpigz") is None:
@@ -348,6 +368,8 @@ class Lionheart(Base):
         return Ready()
 
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
+        if not _ont_input(ctx):
+            raise RuntimeError("LIONHEART input no longer declares an ONT platform")
         executable = _program("TRACEBACK_LIONHEART_BIN", "lionheart")
         mosdepth = _program("TRACEBACK_LIONHEART_MOSDEPTH_BIN", "mosdepth")
         directory, archive = _resources(ctx.root)

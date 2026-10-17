@@ -12,6 +12,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+import pysam
 
 from tests.lab.test_landing import _dom, needs_chrome
 from tests.lab.fake_algorithms import ASSET_PROBE
@@ -55,6 +56,7 @@ def _setup(tmp_path: Path, monkeypatch) -> tuple[InputContext, Path]:
     input_dir = root / "lab" / "inputs" / ("b" * 64)
     input_dir.mkdir(parents=True)
     (input_dir / "aligned.bam").write_bytes(b"BAM from selected input")
+    (input_dir / "manifest.json").write_text('{"kind":"aligned"}')
     directory = root / "lab" / "assets" / "lionheart" / "inference_resources_v003"
     for relative in lionheart.REQUIRED_FILES:
         path = directory / relative
@@ -170,6 +172,22 @@ def test_lionheart_preflight_requires_opt_in_depth_reference_and_pinned_assets(t
     monkeypatch.setenv("TRACEBACK_LIONHEART_ENABLE_ONT", "1")
     (directory / "ATAC.idx_to_cell_type.csv").unlink()
     assert lionheart.LIONHEART.preflight(ctx).reason_code == "missing_asset"
+
+
+@pytest.mark.parametrize("platform,allowed", [
+    ("ILLUMINA", False), ("ONT", True), ("OXFORD_NANOPORE", True), (None, False),
+])
+def test_prealigned_lionheart_requires_declared_ont_platform(tmp_path, monkeypatch, platform, allowed) -> None:
+    ctx, _ = _setup(tmp_path, monkeypatch)
+    (ctx.input_dir / "manifest.json").write_text('{"kind":"prealigned"}')
+    header = {"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 1000}]}
+    if platform is not None:
+        header["RG"] = [{"ID": "library", "PL": platform}]
+    with pysam.AlignmentFile(str(ctx.input_dir / "aligned.bam"), "wb", header=header):
+        pass
+    assert lionheart._ont_input(ctx) is allowed
+    if not allowed:
+        assert lionheart.LIONHEART.preflight(ctx).reason_code == "platform_unverified"
 
 
 def test_lionheart_opt_out_does_not_read_resource_archive(tmp_path, monkeypatch) -> None:
