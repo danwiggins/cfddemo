@@ -3,6 +3,12 @@
 # callout (>= 20px bold) once per route, pills elsewhere.
 version: 0.1.0
 licenses:
+  somalier-mit:
+    headline: "MIT: Somalier"
+    body: >-
+      Somalier is MIT-licensed. Its fingerprint and relatedness output can
+      reveal family relationships; use it only for explicitly selected pairs.
+    url: "https://github.com/brentp/somalier/blob/master/LICENSE"
   modkit-ont-public:
     headline: "RESEARCH-ONLY: modkit"
     body: >-
