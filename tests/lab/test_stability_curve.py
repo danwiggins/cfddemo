@@ -53,6 +53,13 @@ def test_absolute_needs_a_tolerance() -> None:
         stable({"kind": "absolute"}, Side(1.0), Side(1.0))
 
 
+def test_unvalidated_depth_dependent_fraction_has_no_stability_verdict() -> None:
+    spec = {"kind": "unvalidated"}
+    assert stable(spec, Side(0.2, n=1_000_000), Side(0.8, n=1_000_000)) is None
+    assert deviation(spec, 0.2, 0.8, 0.5) == (None, "none")
+    assert band_at(spec, Side(0.2), Side(0.8)) is None
+
+
 def test_deviation_and_band_units() -> None:
     assert deviation(R, 110.0, 100.0) == (10.0, "percent")
     assert deviation(A, 170, 167) == (3, "unit")

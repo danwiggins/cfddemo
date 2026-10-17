@@ -192,8 +192,10 @@ def run_derived(
             approx_depth_x=stamp["approx_depth_x"],
             index_mapped_upper_bound=None,
         )
-        chosen = [item for item in derived_plan_items(items, spec.transform)
-                  if parent.platform in item.algorithm.requires.platforms]
+        # Keep unsupported algorithms in the requested derived plan so
+        # run_plan publishes an explicit skipped/platform envelope. Its
+        # platform gate runs before preflight or the expensive worker.
+        chosen = derived_plan_items(items, spec.transform)
         results = run_plan(
             store,
             lock,

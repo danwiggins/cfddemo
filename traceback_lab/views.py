@@ -203,10 +203,6 @@ def cell_state(
 ) -> dict[str, Any]:
     envelope = view.results.get(algorithm_id)
     if envelope is None:
-        if view is not full:
-            parent = full.results.get(algorithm_id)
-            if parent is not None and parent.status == "skipped" and parent.skip_reason == "platform":
-                return {"state": "skipped", "reason": "platform"}
         return {"state": None}
     if envelope.status == "failed":
         return {"state": "failed", "reason": envelope.failure.first_line if envelope.failure else None}
@@ -226,7 +222,7 @@ def cell_state(
     full_metric = _value(full.results.get(algorithm_id), metric_id)
     verdict = stable(entry.stability if entry else None, _side(metric, view.fraction), _side(full_metric, 1.0))
     return {
-        "state": "ok_usable" if verdict else "ok_unstable",
+        "state": "ok_usable" if verdict is not False else "ok_unstable",
         "value": metric.value,
         "verdict": verdict,
     }

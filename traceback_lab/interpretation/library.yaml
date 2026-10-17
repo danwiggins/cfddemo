@@ -131,7 +131,7 @@ entries:
     headline: false
     stability: {kind: relative, tolerance: 0.05}
     citations: []
-    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "No citation displayed; QC measure."}
+    citation_checked: {by: "Lab S5 platform review", date: "2026-10-17", note: "No citation displayed. This is raw recorded base quality; interpretation is restricted to platform- and protocol-matched QC."}
 
   - algorithm_id: bam-qc
     metric_id: genome_ge1x_fraction
@@ -2772,6 +2772,6 @@ entries:
     license_ids: [method-patents]
     flags: [LEGAL]
     headline: false
-    stability: {kind: proportion}
+    stability: {kind: unvalidated}
     citations: ["doi:10.1016/j.cell.2015.11.050"]
-    citation_checked: {by: "Lab S5 source review", date: "2026-10-16", note: "This fraction is an in-house summary of 1 kb mean WPS bins derived from the Snyder WPS definition; no published reference interval or validated ONT interpretation applies."}
+    citation_checked: {by: "Lab S5 source review", date: "2026-10-17", note: "This fraction is an in-house summary of 1 kb mean WPS bins derived from the Snyder WPS definition. It changes nonlinearly with depth and local coverage, so no stability tolerance, reference interval, or validated ONT interpretation applies."}
