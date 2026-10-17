@@ -693,6 +693,19 @@ def test_status_finds_an_interrupted_run_through_the_pointer(tmp_path) -> None:
     assert status["interrupted"] == {"run_id": run_id, "step": "align"}
 
 
+def test_status_keeps_sample_identity_before_first_step(tmp_path) -> None:
+    store = LabStore(tmp_path)
+    run_id = "r-20261015-0101-abcd"
+    source_id, input_id = "a" * 64, "b" * 64
+    with store.writer("run", run_id):
+        log = store.run_log(run_id)
+        log.append("run_start", command="run")
+        log.append("sample", source_id=source_id, input_id=input_id)
+    assert api_module.LabApi(store).status()["interrupted"] == {
+        "run_id": run_id, "step": None, "source_id": source_id, "input_id": input_id,
+    }
+
+
 @pytest.mark.parametrize("partial", (b'{"event":', b'{"event":"step_start","step":"caf\xc3'))
 def test_status_keeps_complete_events_before_torn_final_line(tmp_path, partial) -> None:
     store = LabStore(tmp_path)
@@ -904,7 +917,7 @@ def test_trust_qc_run_note_is_scoped_without_replacing_result_status(tmp_path, k
 
 @pytest.mark.skipif(_chrome() is None, reason="no Chrome/Chromium for the headless Trust/QC check")
 @pytest.mark.parametrize("selected", ("a", "c"))
-@pytest.mark.parametrize("log_state", ("interrupted", "unavailable"))
+@pytest.mark.parametrize("log_state", ("interrupted", "before-step", "unavailable"))
 def test_interrupted_first_step_without_result_is_sample_scoped(tmp_path, selected, log_state) -> None:
     store = LabStore(tmp_path / "root")
     store.ensure()
@@ -924,7 +937,8 @@ def test_interrupted_first_step_without_result_is_sample_scoped(tmp_path, select
         log = store.run_log(run_id)
         log.append("run_start", command="run")
         log.append("sample", source_id=source_a, input_id=input_a)
-        log.append("step_start", step="bam-qc")
+        if log_state != "before-step":
+            log.append("step_start", step="bam-qc")
     if log_state == "unavailable":
         (store.runs_dir / f"{run_id}.jsonl").write_bytes(b"x" * (1024 * 1024 + 1))
     api = api_module.LabApi(store)
@@ -942,6 +956,12 @@ def test_interrupted_first_step_without_result_is_sample_scoped(tmp_path, select
         )
     run_panel = dom.split("<h2>Run</h2>", 1)[1].split("</section>", 1)[0]
     assert ("Latest run interrupted during bam-qc; no result was published for this step." in run_panel) == (selected == "a" and log_state == "interrupted")
+    if log_state == "before-step":
+        assert api.status()["interrupted"] == {"run_id": run_id, "step": None,
+                                               "source_id": source_a, "input_id": input_a}
+        assert "The last run (" in dom and "stopped during a step" in dom
+        assert "no result was published for this step" not in run_panel
+        assert "during null" not in dom
     assert ("status is unavailable (log unreadable, unsafe, or over 1 MiB)" in dom) == (log_state == "unavailable")
     assert "Run log line →" not in run_panel
 

@@ -300,7 +300,7 @@
     // Run table.
     const active = state.lastStatus && state.lastStatus.active;
     const interrupted = state.lastStatus && state.lastStatus.interrupted;
-    const pending = [active, interrupted].find((run) => run && run.source_id === sample.source_id &&
+    const pending = [active, interrupted].find((run) => run && run.step && run.source_id === sample.source_id &&
       run.input_id === sample.full_input_id && !sample.algorithms.some((a) => a.algorithm_id === run.step));
     const runRows = sample.algorithms.map((a) => {
       const status = a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status;
