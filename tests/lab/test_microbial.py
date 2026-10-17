@@ -490,6 +490,26 @@ def test_metadata_drift_explains_recovery_and_reregisters_same_bytes(tmp_path, m
     assert inspect_database(store, verify_bytes=False).sha256 == pinned
 
 
+@pytest.mark.parametrize("stage", ["kraken", "bracken"])
+def test_classifier_timeout_hides_operator_database_path(tmp_path, monkeypatch, stage) -> None:
+    store, directory = _database(tmp_path)
+    monkeypatch.setattr(algorithm, "_tool", lambda name: (name, "a" * 64))
+    monkeypatch.setattr(algorithm, "_write_candidates", lambda *_args: (1, 1, 0, 0))
+    monkeypatch.setattr(algorithm, "_report_lineages", lambda *_args: ({}, 1, 0, True))
+
+    def run(argv, **_kwargs):
+        if stage == "kraken" or Path(argv[0]).name == "bracken":
+            raise subprocess.TimeoutExpired(argv, 1)
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(algorithm.subprocess, "run", run)
+    ctx = InputContext(store.root, "a" * 64, "b" * 64, "ref", "c" * 64, tmp_path)
+    with pytest.raises(RuntimeError, match="timed out or could not start") as failure:
+        algorithm.MICROBIAL.run(ctx, _private_out(store))
+    assert str(directory) not in str(failure.value)
+    assert failure.value.__suppress_context__
+
+
 def test_reregistration_write_failure_preserves_manifest_and_hides_path(tmp_path, monkeypatch) -> None:
     from traceback_lab import store as store_module
 

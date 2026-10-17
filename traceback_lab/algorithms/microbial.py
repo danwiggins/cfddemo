@@ -261,20 +261,26 @@ class Microbial(Base):
             omitted = classified = unclassified = 0
             if candidates:
                 report, assignments, abundance = (work / "kraken.report", work / "kraken.output", work / "bracken.tsv")
-                kraken_run = subprocess.run(
-                    [kraken[0], "--db", str(database.directory), "--threads", "1", "--report", str(report),
-                     "--output", str(assignments), str(reads)],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3600, check=False,
-                )
+                try:
+                    kraken_run = subprocess.run(
+                        [kraken[0], "--db", str(database.directory), "--threads", "1", "--report", str(report),
+                         "--output", str(assignments), str(reads)],
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3600, check=False,
+                    )
+                except (subprocess.TimeoutExpired, OSError):
+                    raise RuntimeError("Kraken2 classification timed out or could not start") from None
                 if kraken_run.returncode != 0:
                     raise RuntimeError("Kraken2 classification failed")
                 lineages, classified, unclassified, species_present = _report_lineages(report, candidates)
                 if classified and species_present:
-                    bracken_run = subprocess.run(
-                        [bracken[0], "-d", str(database.directory), "-i", str(report), "-o", str(abundance),
-                         "-r", str(database.read_length), "-l", "S", "-t", "1"],
-                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1800, check=False,
-                    )
+                    try:
+                        bracken_run = subprocess.run(
+                            [bracken[0], "-d", str(database.directory), "-i", str(report), "-o", str(abundance),
+                             "-r", str(database.read_length), "-l", "S", "-t", "1"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1800, check=False,
+                        )
+                    except (subprocess.TimeoutExpired, OSError):
+                        raise RuntimeError("Bracken estimation timed out or could not start") from None
                     if bracken_run.returncode != 0:
                         raise RuntimeError("Bracken abundance estimation failed")
                     taxa, microbial_estimate, omitted = _bracken_species(abundance, lineages, denominator)
