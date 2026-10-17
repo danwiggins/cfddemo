@@ -210,7 +210,6 @@ def run_plan(
             asset_sha256s=planned_assets,
             platform=target.platform if target.platform != "ont" else None,
             tool_pins=planned_tools,
-            platform=target.platform,
         )
         step = algorithm.id if target.label == "full" else f"{algorithm.id}@{target.label}"
         existing = store.read_result(target.input_id, algorithm.id, identity)
