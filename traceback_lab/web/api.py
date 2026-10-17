@@ -61,11 +61,17 @@ def _agreement_pairs(
     """Pair only compatible scalar values from one pinned generation by source ID."""
 
     rows = []
+    # One generation-wide map keeps a source's label stable even when the
+    # eligible sets differ between agreement charts.
+    labels = shortest_unique_prefixes(
+        [source_id, *(member.source_id for member in generation.members)]
+    ) if generation is not None else {}
     for pair_id, (x_algorithm, x_metric), (y_algorithm, y_metric) in _AGREEMENT_AXES:
         row: dict[str, Any] = {
             "pair_id": pair_id, "state": cohort_state if cohort_state != "ready" else "unavailable",
             "cohort_version": generation.version_id if generation else None,
             "eligible_n": 0, "points": [], "excluded": {},
+            "target_display_id": labels.get(source_id, source_id[:12]),
         }
         if generation is None or target is None or cohort_state != "ready":
             rows.append(row)
@@ -93,6 +99,8 @@ def _agreement_pairs(
             for member_source, x_value in zip(x_projection.source_ids, x_projection.values, strict=True)
             if member_source in y_by_source
         ]
+        for point in points:
+            point["display_id"] = labels[point["source_id"]]
         row.update({
             "state": "ready" if points else "no_paired_values",
             "eligible_n": len(points), "points": points,
@@ -391,6 +399,11 @@ class LabApi:
             interpreted, projections = self._interpret_sample_envelope(
                 envelope, library, depth_x, source_id, generation, target,
             )
+            selected_target = next((result for result in target.results if result.algorithm_id == algorithm_id), None) if target else None
+            target_result_state = (
+                "missing_selected_result" if selected_target is None else
+                "stale_parameters" if selected_target.parameters_sha256 != envelope.provenance.parameters_sha256 else None
+            ) if generation is not None and target is not None and envelope.status == "ok" else None
             for row in interpreted:
                 entry = row.entry
                 if entry is None and algorithm_id not in library.hidden_algorithms:
@@ -401,6 +414,10 @@ class LabApi:
                     if license_id not in used_licenses:
                         used_licenses.append(license_id)
                 payload = _metric_payload(row, entry, qc_band(row.value, entry))
+                payload["cohort_target_state"] = (
+                    target_result_state if entry is not None and
+                    entry["reference"]["kind"] in ("internal_cohort", "provisional_external") else None
+                )
                 projection = projections.get(row.metric_id)
                 payload["eligible_n"] = projection.percentile_n if projection else None
                 payload["cohort_values"] = list(projection.values) if projection else []
@@ -695,6 +712,7 @@ class LabApi:
             selected_b = member_from_store(self.store, source_b)
         except (LabProblem, ValueError):
             return {**base, "state": "sample_unavailable", "which": "b", "metrics": [], "unscored": []}
+        not_current: set[str] = set()
         for source, sample, selected, which in (
             (source_a, sample_a, selected_a, "a"), (source_b, sample_b, selected_b, "b"),
         ):
@@ -705,7 +723,11 @@ class LabApi:
                 if envelope.status != "ok":
                     continue
                 pinned = current.get(algorithm_id)
-                if pinned is None or pinned.parameters_sha256 != envelope.provenance.parameters_sha256:
+                if pinned is None:
+                    # The stored view can outlive a registry version change or removal.
+                    not_current.add(algorithm_id)
+                    continue
+                if pinned.parameters_sha256 != envelope.provenance.parameters_sha256:
                     return {**base, "state": "stale_sample", "which": which, "metrics": [], "unscored": []}
                 for metric in envelope.metrics:
                     value = metric.value
@@ -723,6 +745,9 @@ class LabApi:
             envelope_b = sample_b.full.results.get(algorithm_id)
             if envelope_b is None or envelope_a.status != "ok" or envelope_b.status != "ok":
                 unscored.append({"algorithm_id": algorithm_id, "metric_id": "*", "reason": "missing_or_not_ok"})
+                continue
+            if algorithm_id in not_current or algorithm_id not in selected_results_a or algorithm_id not in selected_results_b:
+                unscored.append({"algorithm_id": algorithm_id, "metric_id": "*", "reason": "not_current_result"})
                 continue
             result_a, result_b = selected_results_a[algorithm_id], selected_results_b[algorithm_id]
             if result_a.cohort_compat_key != result_b.cohort_compat_key:

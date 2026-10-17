@@ -327,20 +327,35 @@
   function outOfRange(sample) { return allMetrics(sample).filter((m) => ["above_typical", "markedly_above", "below_typical", "markedly_below"].includes(m.state)); }
 
   function cohortReadiness(sample, metrics) {
+    if (sample.example || sample.cohort_state === "example")
+      return "EXAMPLE sample; no kit cohort reference. Run a real sample for cohort comparison";
     if (["cohort_unavailable", "target_unavailable", "stale_target"].includes(sample.cohort_state))
-      return `cohort ${sample.cohort_state.replace(/_/g, " ")}`;
+      return `cohort ${sample.cohort_state.replace(/_/g, " ")}; ${sample.cohort_problem?.fix || "reload the sample and check the cohort"}`;
     const cohort = metrics.filter((m) => ["internal_cohort", "provisional_external"].includes(m.reference_kind));
     const eligible = cohort.filter((m) => Number.isInteger(m.eligible_n)).map((m) => m.eligible_n);
-    if (!eligible.length) return sample.cohort_state === "not_built" ? "cohort not built" : "no comparable cohort values for these metrics";
+    const stale = cohort.some((m) => m.cohort_target_state === "stale_parameters" || m.cohort_target_state === "missing_selected_result");
+    const excluded = {};
+    for (const metric of cohort) for (const [reason, count] of Object.entries(metric.cohort_excluded || {})) {
+      if (Number.isInteger(count) && count > 0) excluded[reason] = Math.max(excluded[reason] || 0, count);
+    }
+    const leaveOneOut = Boolean(excluded.self);
+    delete excluded.self;
+    const reasons = Object.entries(excluded).map(([reason, count]) =>
+      `${reason === "incompatible" ? "protocol incompatible" : reason.replace(/_/g, " ")} ${cohort.length > 1 ? `up to ${count} per metric` : count}`);
+    const detail = reasons.length ? `; exclusions: ${reasons.join(" · ")}` : "";
+    const needsMembers = !eligible.length || Math.min(...eligible) < (sample.cohort_min || 10);
+    const remedy = stale ? "; selected result identity changed—reload or recompute this sample, then rebuild the cohort if needed"
+      : excluded.incompatible && needsMembers ? "; recompute members with matching reference, aligner and counting protocol, then rebuild the cohort"
+        : excluded.missing_result || excluded.missing_metric ? "; recompute missing member results, then rebuild the cohort" : "";
+    if (!eligible.length) return (sample.cohort_state === "not_built" ? "cohort not built" : "no comparable cohort values for these metrics") + detail + remedy;
     const low = Math.min(...eligible), high = Math.max(...eligible);
     const n = low === high ? String(low) : `${low}–${high} by metric`;
-    const self = cohort.some((m) => m.cohort_excluded && m.cohort_excluded.self);
     const minimum = sample.cohort_min || 10;
     const phase = high < minimum ? ` of ${minimum} needed` : low < minimum ? `; some metrics need ${minimum}`
       : cohort.some((m) => m.percentile !== null && m.percentile !== undefined) ? "; percentile reference"
         : cohort.some((m) => m.exploratory_n !== null && m.exploratory_n !== undefined) ? "; exploratory reference"
           : "; metric not interpretable at this depth or QC";
-    return `eligible cohort n = ${n}${phase}${self ? " after leave-one-out" : ""}`;
+    return `eligible cohort n = ${n}${leaveOneOut ? " after leave-one-out" : ""}${phase}${detail}${remedy}`;
   }
 
   function strip(metric) {
@@ -377,9 +392,13 @@
       const x = (p) => 10 + (p / 100) * (width - 20);
       const interval = Array.isArray(metric.interval) && metric.interval.length === 2 &&
         metric.interval.every(Number.isFinite) ? metric.interval : null;
-      const values = [Number(metric.value), ...(metric.cohort_values || []), ...(interval || [])].filter(Number.isFinite);
-      const low = Math.min(...values), high = Math.max(...values);
+      // Give the cutoff CI its own scale; an extreme sample must not compress
+      // the whisker to an unreadable stroke. Off-scale samples sit at an edge.
+      const low = interval ? Math.min(...interval) : 0;
+      const high = interval ? Math.max(...interval) : 1;
       const valueX = (v) => 110 + ((v - low) / (high - low || 1)) * 200;
+      const sampleValue = Number(metric.value);
+      const sampleOffScale = sampleValue < low ? "left" : sampleValue > high ? "right" : null;
       return h("figure", { class: "strip" }, svg("svg", { viewBox: `0 0 ${width} ${height}`, role: "img", "aria-label": metric.caption, class: "strip-svg" },
         svg("title", {}, metric.caption),
         svg("rect", { x: x(5), y: 10, width: x(95) - x(5), height: 14, class: "strip-band" }),
@@ -392,9 +411,10 @@
           svg("line", { x1: valueX(interval[0]), x2: valueX(interval[1]), y1: 14, y2: 14, class: "cohort-band" }),
           ...interval.map((end) => svg("line", { x1: valueX(end), x2: valueX(end), y1: 8, y2: 20, class: "cohort-band" })),
           svg("text", { x: 6, y: 43, class: "axis" }, "This sample"),
-          svg("text", { x: valueX(Number(metric.value)), y: 43, "text-anchor": "middle", class: "strip-mark" }, "◆")) : "",
+          svg("text", { x: sampleOffScale === "left" ? 110 : sampleOffScale === "right" ? 310 : valueX(sampleValue), y: 43, "text-anchor": "middle", class: "strip-mark" },
+            sampleOffScale === "left" ? "◀" : sampleOffScale === "right" ? "▶" : "◆")) : "",
         h("figcaption", {}, metric.caption, interval
-          ? ` Cutoff CI: ${fmt(interval[0], metric.unit)}–${fmt(interval[1], metric.unit)} on a separate value scale.` : ""));
+          ? ` Cutoff CI: ${fmt(interval[0], metric.unit)}–${fmt(interval[1], metric.unit)} on a separate value scale.${sampleOffScale ? ` This sample is outside the cutoff CI scale (${sampleOffScale}).` : ""}` : ""));
     }
     return h("p", { class: "help" }, metric.caption || (ref.kind === "none" ? "No published reference." : ""));
   }
@@ -1026,7 +1046,7 @@
             { type: "scatter", name: "This sample", symbolSize: 12, data: [[xValue, yValue]], itemStyle: { color: "#8a4b08" } },
           ],
         }, dataTable(`${title}; ${cohortText}`, ["Sample", xLabel, yLabel],
-          [[`${sample.id12} (this sample)`, xValue, yValue], ...points.map((p) => [p.source_id.slice(0, 12), p.x, p.y])])));
+          [[`${cohort?.target_display_id || sample.id12} (this sample)`, xValue, yValue], ...points.map((p) => [p.display_id || p.source_id, p.x, p.y])])));
       }
       out.push(section);
     }
@@ -1231,6 +1251,8 @@
                 h("thead", {}, h("tr", {}, ...["Metric", "Overlay", "Sample A", "Sample B", "B−A"].map((name) => h("th", { scope: "col" }, name)))),
                 h("tbody", {}, ...rows))));
           } else nodes.push(h("p", { class: "empty" }, "No compatible scalar metric is available for this pair. Missing values are not zero."));
+          if (data.unscored.some((row) => row.reason === "not_current_result")) nodes.push(h("p", { class: "help" },
+            "A stored result is no longer current for its registered method. Recompute with the current method, or restore its registration before comparing."));
           if (data.unscored.length) nodes.push(h("details", {}, h("summary", {}, `Not paired (${data.unscored.length})`),
             dataTable("Unpaired metrics and reasons", ["Algorithm", "Metric", "Reason"],
               data.unscored.map((row) => [row.algorithm_id, row.metric_id, row.reason.replace(/_/g, " ")]))));

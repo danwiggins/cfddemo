@@ -102,6 +102,7 @@ def test_sample_lenses_pin_eligible_loo_reference(
     assert len(metric["cohort_values"]) == eligible_n
     assert metric["cohort_mean"] == (sum(metric["cohort_values"]) / eligible_n if eligible_n >= 10 else None)
     assert metric["cohort_excluded"] == ({"self": 1} if is_member else {})
+    assert metric["cohort_target_state"] is None
     assert metric["state"] == expected_state
     if eligible_n < 10:
         assert metric["reason"] == "cohort_too_small"
@@ -116,6 +117,15 @@ def test_sample_lenses_pin_eligible_loo_reference(
     summary = api.samples()["samples"][0]
     assert summary["outside_reference"] == outside_count
     assert reads == ["healthy-v1", "healthy-v1"]
+    if member_n == 10 and not is_member and target_value == 0.95:
+        stale = member(1, value=target_value)
+        stale_result = stale.results[0].model_copy(update={"parameters_sha256": "d" * 64})
+        monkeypatch.setattr(web_api, "member_from_store", lambda store, source_id: stale.model_copy(
+            update={"results": (stale_result,)}
+        ))
+        changed = api.sample(SOURCE[:12])["algorithms"][0]["metrics"][0]
+        assert changed["cohort_target_state"] == "stale_parameters"
+        assert changed["eligible_n"] is None and changed["cohort_values"] == []
 
 
 def test_incompatible_or_stale_target_never_scores_against_cohort(tmp_path, monkeypatch) -> None:

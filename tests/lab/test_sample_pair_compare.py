@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import re
 from types import SimpleNamespace
 
 import pytest
 
 from traceback_lab.cohort_contracts import CohortMember, CohortResult
+from traceback_lab import cohorts
 from traceback_lab.envelope import Metric, ResultEnvelope, provenance
+from traceback_lab.identity import parameters_sha256
 from traceback_lab.store import LabStore
 from traceback_lab.web import api as web_api
 
@@ -63,6 +66,63 @@ def test_sample_pair_reports_exact_b_minus_a_and_distinct_sources(tmp_path, monk
     assert (row["value_a"], row["value_b"], row["delta_b_minus_a"], row["unit"]) == (160.0, 170.0, 10.0, "bp")
     assert row["parameters_sha256_a"] == PARAM_A and row["parameters_sha256_b"] == PARAM_B
     assert api.compare_samples(SOURCE_A[:12], SOURCE_A[:12])["state"] == "same_sample"
+
+
+def test_store_selected_results_keep_hidden_and_null_metrics(tmp_path, monkeypatch) -> None:
+    from tests.lab.test_cohort_store import _sample as stored_sample
+
+    store = LabStore(tmp_path)
+    registry = tuple(SimpleNamespace(id=name, version="1", parameters={}, tools=[], upstream=())
+                     for name in ("fragment-size", "read-summary"))
+    monkeypatch.setattr(cohorts, "load_registry", lambda: registry)
+    first = stored_sample(store, 1, value=160.0)
+    second = stored_sample(store, 2, value=170.0)
+    hidden_params = parameters_sha256(
+        algorithm_id="read-summary", algorithm_version="1", parameters={},
+        tools=[], reference_sha256=f"{900:064x}",
+    )
+    for source, input_id in ((first, f"{101:064x}"), (second, f"{102:064x}")):
+        store.publish_result(ResultEnvelope(
+            algorithm_id="read-summary", algorithm_version="1", status="ok",
+            provenance=provenance(tool="fixture", parameters_sha256=hidden_params,
+                                  source_id=source, input_id=input_id, reference_id="synthetic"),
+            metrics=[Metric(metric_id="optional_count", value=None)],
+        ), input_id=input_id)
+
+    api = web_api.LabApi(store)
+    selected = cohorts.member_from_store(store, first)
+    assert {row.algorithm_id for row in selected.results} == {"fragment-size", "read-summary"}
+    assert next(row for row in selected.results if row.algorithm_id == "read-summary").metrics == {"optional_count": None}
+    payload = api.compare_samples(first, second)
+    assert payload["state"] == "ready"
+    assert [(row["algorithm_id"], row["metric_id"], row["delta_b_minus_a"]) for row in payload["metrics"]] == [
+        ("fragment-size", "mode_bp", 10.0),
+    ]
+    assert payload["unscored"] == []
+
+
+@pytest.mark.parametrize("change", ["version_bump", "removed"])
+def test_old_stored_result_after_registry_change_is_unpaired(tmp_path, monkeypatch, change) -> None:
+    from tests.lab.test_cohort_store import _sample as stored_sample
+
+    store = LabStore(tmp_path)
+    algorithm = SimpleNamespace(id="fragment-size", version="1", parameters={}, tools=[], upstream=())
+    monkeypatch.setattr(cohorts, "load_registry", lambda: (algorithm,))
+    first = stored_sample(store, 1, value=160.0)
+    second = stored_sample(store, 2, value=170.0)
+    assert web_api.views.load_sample(store, first).full.results["fragment-size"].metrics[0].value == 160.0
+    current = () if change == "removed" else (SimpleNamespace(
+        id="fragment-size", version="2", parameters={}, tools=[], upstream=(),
+    ),)
+    monkeypatch.setattr(cohorts, "load_registry", lambda: current)
+    assert cohorts.member_from_store(store, first).results == ()
+
+    payload = web_api.LabApi(store).compare_samples(first, second)
+    assert payload["state"] == "ready"
+    assert payload["metrics"] == []
+    assert payload["unscored"] == [
+        {"algorithm_id": "fragment-size", "metric_id": "*", "reason": "not_current_result"},
+    ]
 
 
 def test_sample_pair_rejects_protocol_or_unit_mismatch(tmp_path, monkeypatch) -> None:
@@ -167,7 +227,10 @@ def test_sample_pair_selector_overlay_and_table_fallback(tmp_path, monkeypatch) 
     assert 'for="compare-other-sample"' in html and 'id="compare-other-sample"' in html
     assert 'aria-label="Sample A and B comparison"' in html
     assert "Sample A" in html and "Sample B" in html and "B−A" in html
-    assert "170" in html and "160" in html and "10" in html
+    assert re.search(
+        r'<td class="num">160 bp</td><td class="num">170 bp</td><td class="num">10 bp</td>',
+        html,
+    )
     assert "incompatible protocol" in html
     assert "Source IDs do not establish a shared donor or timepoint" in html
     assert 'data-csp-violations="0"' in html

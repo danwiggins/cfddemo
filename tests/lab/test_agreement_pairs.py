@@ -50,13 +50,16 @@ def test_pairs_join_by_source_after_compatibility_and_self_exclusion() -> None:
     assert size_cn["cohort_version"] == "healthy-v1:7"
     assert size_cn["state"] == "ready" and size_cn["eligible_n"] == 2
     assert size_cn["points"] == [
-        {"source_id": f"{2:064x}", "x": 200.0, "y": 0.2},
-        {"source_id": f"{4:064x}", "x": 400.0, "y": 0.4},
+        {"source_id": f"{2:064x}", "display_id": f"{2:064x}", "x": 200.0, "y": 0.2},
+        {"source_id": f"{4:064x}", "display_id": f"{4:064x}", "x": 400.0, "y": 0.4},
     ]
     assert size_cn["excluded"]["x"]["self"] == 1
     assert size_cn["excluded"]["unpaired_x"] == 1
     assert mtdna_cn["eligible_n"] == 1
-    assert mtdna_cn["points"] == [{"source_id": f"{2:064x}", "x": 0.02, "y": 0.2}]
+    assert mtdna_cn["points"] == [{"source_id": f"{2:064x}", "display_id": f"{2:064x}", "x": 0.02, "y": 0.2}]
+    assert size_cn["target_display_id"] == f"{1:064x}"
+    assert len({point["source_id"][:12] for point in size_cn["points"]}) == 1
+    assert len({point["display_id"] for point in size_cn["points"]}) == 2
     assert mtdna_cn["excluded"]["x"]["incompatible"] == 1
 
 
@@ -70,3 +73,20 @@ def test_pairs_fail_closed_when_target_execution_or_generation_unavailable() -> 
 
     rows = _agreement_pairs(_sample(), None, None, target.source_id, "not_built")
     assert all(row["state"] == "not_built" and not row["points"] for row in rows)
+
+
+def test_source_label_is_stable_across_charts_with_different_eligible_sets() -> None:
+    target = _member(1).model_copy(update={"source_id": "b" * 64})
+    both = _member(2).model_copy(update={"source_id": "a" * 12 + "1" + "0" * 51})
+    size_only = _member(4, mtdna_compat=OTHER).model_copy(
+        update={"source_id": "a" * 12 + "2" + "0" * 51}
+    )
+    generation = CohortGeneration(
+        cohort_id="healthy-v1", version=7, members=(target, both, size_only),
+    )
+    size_cn, mtdna_cn = _agreement_pairs(_sample(), generation, target, target.source_id, "ready")
+    assert [point["source_id"] for point in size_cn["points"]] == [both.source_id, size_only.source_id]
+    assert [point["source_id"] for point in mtdna_cn["points"]] == [both.source_id]
+    assert size_cn["points"][0]["display_id"] == "a" * 12 + "1"
+    assert mtdna_cn["points"][0]["display_id"] == "a" * 12 + "1"
+    assert size_cn["points"][1]["display_id"] == "a" * 12 + "2"

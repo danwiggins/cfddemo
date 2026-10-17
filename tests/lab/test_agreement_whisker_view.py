@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from tests.lab.test_lab_server import _chrome, _dom_cdp
@@ -20,10 +22,10 @@ def test_agreement_points_and_findings_cutoff_whisker(tmp_path, monkeypatch) -> 
                 "metrics": [metric], "provenance": {}}
 
     mode = {
-        "metric_id": "mode_bp", "label": "Fragment mode", "value": 167, "unit": "bp",
-        "state": "in_range", "reason": None, "reference_kind": "internal_cohort",
+        "metric_id": "mode_bp", "label": "Fragment mode", "value": 1000, "unit": "bp",
+        "state": "markedly_above", "reason": None, "reference_kind": "internal_cohort",
         "percentile": 50, "interval": [190, 200], "eligible_n": 30,
-        "cohort_values": list(range(150, 180)),
+        "cohort_values": list(range(150, 150150)),
         "caption": "p = 50.0 against n = 30. Whisker: 90% bootstrap interval of the 95th-percentile cut-off (1000 resamples).",
     }
     sample = {
@@ -38,10 +40,11 @@ def test_agreement_points_and_findings_cutoff_whisker(tmp_path, monkeypatch) -> 
         ],
         "agreement_pairs": [
             {"pair_id": "size-cn", "state": "ready", "cohort_version": "healthy-v1:8", "eligible_n": 2,
-             "points": [{"source_id": "b" * 64, "x": 160, "y": 0.03},
-                        {"source_id": "c" * 64, "x": 175, "y": 0.05}]},
+             "target_display_id": source_id,
+             "points": [{"source_id": f"{2:064x}", "display_id": f"{2:064x}", "x": 160, "y": 0.03},
+                        {"source_id": f"{4:064x}", "display_id": f"{4:064x}", "x": 175, "y": 0.05}]},
             {"pair_id": "mtdna-cn", "state": "ready", "cohort_version": "healthy-v1:8", "eligible_n": 1,
-             "points": [{"source_id": "b" * 64, "x": 0.002, "y": 0.03}]},
+             "points": [{"source_id": f"{2:064x}", "display_id": f"{2:064x}", "x": 0.002, "y": 0.03}]},
         ],
         "catalog": [], "licenses": [], "interpretation_version": "1.0.0",
     }
@@ -66,10 +69,15 @@ def test_agreement_points_and_findings_cutoff_whisker(tmp_path, monkeypatch) -> 
 
     assert "2 compatible paired cohort sources from healthy-v1:8" in agreement
     assert "1 compatible paired cohort source from healthy-v1:8" in agreement
-    assert "bbbbbbbbbbbb" in agreement and "cccccccccccc" in agreement
+    assert f"{2:064x}" in agreement and f"{4:064x}" in agreement
+    assert f"{source_id} (this sample)" in agreement
     assert "agreement is not validation" in agreement
     assert agreement.count('data-rendered="1"') >= 2
     assert 'class="strip-svg cutoff-whisker"' in findings
     assert "90% bootstrap interval 190 bp to 200 bp; separate value scale" in findings
     assert "Cutoff CI: 190 bp–200 bp on a separate value scale" in findings
+    assert "This sample is outside the cutoff CI scale (right)" in findings
+    whisker = findings.split('class="strip-svg cutoff-whisker"', 1)[1].split("</svg>", 1)[0]
+    segment = re.search(r'<line x1="([0-9.]+)" x2="([0-9.]+)" y1="14" y2="14"', whisker)
+    assert segment is not None and float(segment.group(2)) - float(segment.group(1)) > 50
     assert 'data-csp-violations="0"' in agreement and 'data-csp-violations="0"' in findings
