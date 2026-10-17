@@ -200,7 +200,7 @@
     for (const row of curve.rows) {
       const line = h("div", { class: "curve-row" });
       // One line per row (a fixed 44 px target) so the fold budget holds with any font; full label in title + data table.
-      const name = h("button", { type: "button", class: "curve-label", "aria-expanded": "false", title: row.label }, row.label);
+      const name = h("button", { type: "button", class: "curve-label", "aria-expanded": "false", title: row.input_gate ? `${row.label}: ${row.input_gate}` : row.label }, row.label);
       const cells = h("div", { class: "curve-track" });
       for (const cell of row.cells) {
         const [glyph, text] = CELL[cell.state] || ["·", "no result"];
@@ -215,7 +215,7 @@
       }
       const secondary = (sample.stability || []).filter((p) => p.algorithm_id === row.algorithm_id && p.metric_id !== row.metric_id);
       const detail = h("div", { class: "curve-detail", hidden: true },
-        h("p", {}, `${row.label}: full-depth state ${(CELL[row.full_state] || ["", row.full_state])[1]}; tier ${row.tier}; literature minimum ${row.min_depth_x ? row.min_depth_x + "x (literature, not measured)" : "none"}.`),
+        h("p", {}, `${row.label}: full-depth state ${(CELL[row.full_state] || ["", row.full_state])[1]}; tier ${row.tier}; literature minimum ${row.min_depth_x ? row.min_depth_x + "x (literature, not measured)" : "none"}${row.input_gate ? `; input gate ${row.input_gate}` : ""}.`),
         secondary.length ? h("table", { class: "data-table" }, h("caption", {}, "Secondary metrics by fraction"),
           h("thead", {}, h("tr", {}, h("th", { scope: "col" }, "Metric"), ...curve.fractions.map((f) => h("th", { scope: "col" }, `${f * 100}%`)))),
           h("tbody", {}, ...secondary.map((p) => h("tr", {}, h("th", { scope: "row" }, p.label), ...curve.fractions.map((f) => {
@@ -227,8 +227,8 @@
       grid.append(line, detail);
     }
     section.append(grid);
-    section.append(dataTable("Depth curve cells (literature minimums are not measured)", ["Algorithm", ...curve.fractions.map((f) => `${f * 100}%`), "Literature minimum"],
-      curve.rows.map((row) => [row.label, ...row.cells.map((c) => (CELL[c.state] || ["", "—"])[1]), row.min_depth_x ? `${row.min_depth_x}x (literature, not measured)` : "—"])));
+    section.append(dataTable("Depth curve cells (literature minimums are not measured)", ["Algorithm", ...curve.fractions.map((f) => `${f * 100}%`), "Literature minimum", "Input gate"],
+      curve.rows.map((row) => [row.label, ...row.cells.map((c) => (CELL[c.state] || ["", "—"])[1]), row.min_depth_x ? `${row.min_depth_x}x (literature, not measured)` : "—", row.input_gate || "—"])));
     return section;
   }
 
@@ -691,7 +691,7 @@
     };
     families.forEach(([, label], i) => tabs.append(h("button", { type: "button", class: "control subtab", "aria-pressed": "false", onclick: () => show(i) }, label)));
     out.push(tabs, body);
-    const initial = ["fragment-size", "end-motifs", "delfi-ratio", "tss-profile", "long-tail", "mtdna", "breakpoint-motifs", "lionheart"].some((id) => algo(sample, id))
+    const initial = ["fragment-size", "end-motifs", "delfi-ratio", "tss-profile", "long-tail", "mtdna", "breakpoint-motifs", "griffin", "lionheart"].some((id) => algo(sample, id))
       ? 0 : algo(sample, "copy-number") ? 1 : 2;
     show(initial);
     return out;
@@ -761,7 +761,7 @@
   function fragmentSignals(sample) {
     const a = algo(sample, "fragment-size");
     const section = h("section", { class: "panel" }, h("h2", {}, "Size density"));
-    if (!a || a.status !== "ok") return [section, absent(a, "fragment-size"), ...tssProfileSignals(sample), ...breakpointMotifSignals(sample), ...lionheartSignals(sample)];
+    if (!a || a.status !== "ok") return [section, absent(a, "fragment-size"), ...tssProfileSignals(sample), ...breakpointMotifSignals(sample), ...griffinSignals(sample), ...lionheartSignals(sample)];
     const slot = h("div", {}, h("p", {}, "Loading…"));
     const short = a.metrics.find((m) => m.metric_id === "short_fraction_lt150");
     section.append(h("p", { class: "help" }, `No size-density cohort band yet; 167 bp marked. Short-fragment reference: ${cohortReadiness(sample, short ? [short] : [])}.`), ...context(sample, "fragment-size", new Set()), slot);
@@ -779,7 +779,40 @@
         ? h("table", { class: "data-table" }, h("tbody", {}, ...other.metrics.filter((m) => m.value === null || typeof m.value !== "object").map((m) => h("tr", {}, h("th", { scope: "row" }, m.label), h("td", {}, fmt(m.value, m.unit))))))
         : absent(other, id), id === "end-motifs" || id === "delfi-ratio" ? flagPill("LEGAL") : ""));
     }
-    return [section, ...more, ...tssProfileSignals(sample), ...breakpointMotifSignals(sample), ...lionheartSignals(sample)];
+    return [section, ...more, ...tssProfileSignals(sample), ...breakpointMotifSignals(sample), ...griffinSignals(sample), ...lionheartSignals(sample)];
+  }
+
+  function griffinSignals(sample) {
+    const a = algo(sample, "griffin");
+    if (!a) return [];
+    const section = h("section", { class: "panel" },
+      h("div", { class: "findings-head" }, h("h2", {}, "Griffin TF-site profile"), flagPill("LEGAL")));
+    if (a.status !== "ok") return [section, absent(a, "griffin")];
+    section.append(h("p", { class: "help" }, "GC-corrected nucleosome protection from the pinned Griffin workflow on a compatible paired-end WGS BAM. The primary TF list is an operator-registered choice; this is not a TF expression call."));
+    const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading Griffin profile…"));
+    section.append(...context(sample, "griffin", new Set()), slot);
+    artifact(sample, "griffin", "tf-site-profile").then((data) => {
+      const profiles = Array.isArray(data.profiles) ? data.profiles : [];
+      const primary = profiles.find((profile) => profile.site_name === data.primary_site);
+      if (!primary || !Array.isArray(primary.bin_start_bp) || !Array.isArray(primary.gc_corrected_coverage) ||
+          primary.bin_start_bp.length !== primary.gc_corrected_coverage.length || primary.bin_start_bp.length < 3) {
+        throw new Error("primary Griffin profile is incomplete");
+      }
+      const step = primary.bin_start_bp[1] - primary.bin_start_bp[0];
+      const points = primary.bin_start_bp.map((start, i) => [start + step / 2, primary.gc_corrected_coverage[i]]);
+      const rows = profiles.map((profile) => [profile.site_name, profile.site_count, profile.central_coverage, profile.amplitude]);
+      slot.replaceWith(
+        h("p", {}, `Primary TF list: ${data.primary_site}; ${fmt(primary.site_count)} sites. Bin coordinates below are starts, while chart points are bin centers.`),
+        chart(`GC-corrected Griffin nucleosome coverage at ${data.primary_site} sites.`, {
+          grid: { left: 65, right: 20, top: 20, bottom: 45 },
+          xAxis: { type: "value", name: "bp from site" }, yAxis: { type: "value", name: "relative coverage" },
+          series: [{ type: "line", showSymbol: false, data: points, lineStyle: { color: "#1f5f8b" } }],
+        }, dataTable(`Griffin ${data.primary_site} corrected profile`, ["Bin start (bp)", "Relative coverage"],
+          primary.bin_start_bp.map((start, i) => [start, primary.gc_corrected_coverage[i]]))),
+        dataTable("Griffin TF-site lists", ["Site list", "Sites", "Central coverage", "Amplitude"], rows),
+      );
+    }).catch((error) => slot.replaceWith(h("p", { class: "problem" }, `Griffin profile unavailable (${error.message}).`)));
+    return [section];
   }
 
   function tssProfileSignals(sample) {

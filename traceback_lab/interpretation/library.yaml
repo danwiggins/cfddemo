@@ -22,8 +22,8 @@ entries:
     reference: {kind: none}
     performance: null
     performance_missing_reason: "QC measure, not a diagnostic"
-    meaning_high: "More sequenced molecules: more depth for every other algorithm."
-    meaning_low: "Few molecules: most algorithms will be skipped or not interpretable."
+    meaning_high: "More primary reads: more depth for other algorithms. Paired-end libraries contribute two reads per molecule."
+    meaning_low: "Few primary reads: many algorithms will be skipped or not interpretable."
     confounders: ["flow-cell yield", "input cfDNA mass"]
     next_steps:
       analytical: ["Check the depth curve for what this read count supports"]
@@ -91,23 +91,23 @@ entries:
     value_kind: proportion
     tier: NEWER
     origin_tier: NEWER
-    origin_platform: "ONT"
+    origin_platform: "any (QC)"
     min_depth_x: null
     reference: {kind: none}
     performance: null
     performance_missing_reason: "none published"
-    meaning_high: "More supplementary alignments; on ONT this can indicate ligation chimeras, while short-read split alignments have other causes."
-    meaning_low: "Fewer supplementary alignments; this alone does not establish a low chimera rate."
-    confounders: ["sequencing platform and alignment method", "library prep chemistry", "input mass"]
+    meaning_high: "More split alignments; inspect library preparation, mapping, and structural variation before interpretation."
+    meaning_low: "Few supplementary alignments."
+    confounders: ["library prep chemistry", "aligner", "structural variation"]
     next_steps:
-      analytical: ["Compare only within a matched platform and alignment method", "On ONT, check the long-fragment tail"]
+      analytical: ["Compare within the same sequencing platform and library preparation"]
       clinical_setting: null
     license_ids: []
     flags: []
     headline: false
     stability: {kind: proportion}
     citations: []
-    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "No citation displayed. V1 (partial run): the read-coverage chimera proxy is uninformative on ONT; this share is the proxy used."}
+    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "No citation displayed; generic alignment QC share without a platform-specific clinical interpretation."}
 
   - algorithm_id: bam-qc
     metric_id: mean_read_q
@@ -115,16 +115,16 @@ entries:
     value_kind: positive
     tier: PROVEN
     origin_tier: PROVEN
-    origin_platform: "ONT"
+    origin_platform: "any (QC)"
     min_depth_x: null
     reference: {kind: none}
     performance: null
     performance_missing_reason: "QC measure, not a diagnostic"
-    meaning_high: "Higher reported base quality within the same sequencing platform and quality pipeline."
-    meaning_low: "Lower reported base quality within the same sequencing platform and quality pipeline; ONT methylation calls and end motifs may be less reliable."
-    confounders: ["sequencing platform and quality-score calibration", "basecaller model", "flow-cell wear"]
+    meaning_high: "Higher reported base quality within the same sequencing platform and quality-score processing."
+    meaning_low: "Lower reported base quality within the same sequencing platform and quality-score processing."
+    confounders: ["sequencing chemistry", "sequencing platform", "quality-score processing"]
     next_steps:
-      analytical: ["Compare within one platform and quality pipeline", "For ONT, confirm the basecall model"]
+      analytical: ["Compare within one platform and quality-score process"]
       clinical_setting: null
     license_ids: []
     flags: []
@@ -2598,6 +2598,53 @@ entries:
       date: "2026-10-16"
       note: "No scientific citation or reference interval displayed. Engineering formula: D21 eligible molecules with at least four C+m CpG calls; per-molecule 5mC fraction is argmax-5mC calls divided by C+m CpG calls; group means are unweighted by call count; delta is mean for 151-220 bp minus mean for 100-150 bp. Null when either group is empty. Stability tolerance is an engineering comparison rule, not a biological threshold."
 
+
+  # -------------------------------------------------------------- griffin
+  - algorithm_id: griffin
+    metric_id: central_coverage
+    label: "Griffin GC-corrected central TF-site coverage"
+    value_kind: positive
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "paired-end cfDNA WGS, hg38"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No validated performance or reference range for this TF-site list and sample"
+    meaning_high: "More corrected nucleosome protection at the registered primary TF-site list; this is not a TF expression call."
+    meaning_low: "Less corrected nucleosome protection at the registered primary TF-site list; this is not a TF expression call."
+    confounders: ["TF binding-site selection", "GC correction and mappability filtering", "cell-type mixture", "sequencing depth", "fragment-size selection"]
+    next_steps:
+      analytical: ["Inspect the full site-centered profile and registered TF-site list", "Compare only against protocol-matched samples"]
+      clinical_setting: null
+    license_ids: [method-patents]
+    flags: [LEGAL]
+    headline: true
+    stability: {kind: relative, tolerance: 0.10}
+    citations: ["doi:10.1038/s41467-022-35076-w"]
+    citation_checked: {by: "Lab S5 method audit", date: "2026-10-16", note: "Doebley et al. Griffin reports GC-corrected central TF-site coverage for paired-end cfDNA WGS. The Lab's registered primary site list determines this scalar; no threshold or diagnostic interpretation is asserted."}
+
+  - algorithm_id: griffin
+    metric_id: site_count
+    label: "Sites in primary Griffin TF list"
+    value_kind: count
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "paired-end cfDNA WGS, hg38"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "Site count is coverage metadata, not a diagnostic"
+    meaning_high: "The registered primary site list contains more sites."
+    meaning_low: "The registered primary site list contains fewer sites."
+    confounders: ["TF-site annotation and filtering"]
+    next_steps: {analytical: ["Inspect the registered site list"], clinical_setting: null}
+    license_ids: [method-patents]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: absolute, tolerance: 1}
+    citations: ["doi:10.1038/s41467-022-35076-w"]
+    citation_checked: {by: "Lab S5 method audit", date: "2026-10-16", note: "Griffin output reports number_of_sites for each site list. The one-site stability tolerance is an engineering comparison rule, not a biological threshold."}
 
   # ------------------------------------------------------ breakpoint-motifs
   - algorithm_id: breakpoint-motifs

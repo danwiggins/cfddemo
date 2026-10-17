@@ -203,9 +203,23 @@ def run_plan(
             if name in done
         ]
         assets_of = getattr(algorithm, "asset_sha256s", None)
-        planned_assets = list(assets_of(store.root) if callable(assets_of) and not platform_rejected else ())
+        identity_assets = getattr(algorithm, "identity_assets", None)
+        identity_parameters = getattr(algorithm, "identity_parameters", None)
+        identity_tools = getattr(algorithm, "identity_tools", None)
+        worker_env = _worker_env()
         tool_pins = tuple(algorithm.tools)
-        planned_tools = [tool.identity() for tool in tool_pins]
+        planned_tools = [tool.identity() for tool in
+                         (identity_tools(worker_pythonpath=worker_env["PYTHONPATH"])
+                          if callable(identity_tools) and not platform_rejected
+                          else tool_pins)]
+        identity_ctx = target.context(store.root) if not platform_rejected else None
+        if callable(identity_assets) and identity_ctx is not None:
+            planned_assets = list(identity_assets(identity_ctx))
+        else:
+            planned_assets = list(assets_of(store.root)) if callable(assets_of) and not platform_rejected else []
+        planned_parameters = (identity_parameters(identity_ctx)
+                              if callable(identity_parameters) and identity_ctx is not None
+                              else algorithm.parameters)
         identity = execution_identity(
             algorithm,
             reference_sha256=target.reference_sha256,
@@ -215,7 +229,19 @@ def run_plan(
             asset_sha256s=planned_assets,
             platform=target.platform if target.platform != "ont" else None,
             tool_pins=planned_tools,
+            parameters=planned_parameters,
         )
+        execution_plan = {
+            "schema": "traceback.lab.execution-plan.v1",
+            "algorithm_id": algorithm.id, "algorithm_version": algorithm.version,
+            "input_id": target.input_id, "reference_sha256": target.reference_sha256,
+            "platform": target.platform, "parameters": planned_parameters,
+            "tools": planned_tools, "asset_sha256s": planned_assets,
+            "upstream": upstream,
+        }
+        target.extras["planned_asset_sha256s"] = list(planned_assets)
+        target.extras["planned_tool_identities"] = planned_tools
+        target.extras["planned_parameters"] = planned_parameters
         step = algorithm.id if target.label == "full" else f"{algorithm.id}@{target.label}"
         existing = store.read_result(target.input_id, algorithm.id, identity)
         blocked = [name for name in algorithm.upstream if done.get(name) is None or done[name].status != "ok"]
@@ -224,8 +250,8 @@ def run_plan(
             consumed is not None
             and store.selected_upstream_selections(target.input_id, algorithm.id, identity) == consumed
         )
-        if (existing is not None and existing.status == "ok" and not force
-                and not platform_rejected and not blocked and cache_valid):
+        if (existing is not None and existing.status == "ok" and not force and
+                not platform_rejected and not blocked and cache_valid):
             store.reselect_cached_result(target.input_id, algorithm.id, identity)
             selected = store.selected_attempt(target.input_id, algorithm.id, identity)
             result = StepResult(
@@ -328,7 +354,7 @@ def run_plan(
             outcome = run_pipeline(
                 [Stage("worker", [sys.executable, "-m", "traceback_lab.worker", str(request)])],
                 timeout_s=timeout_s,
-                env=_worker_env(),
+                env=worker_env,
                 cwd=scratch,
                 echo=echo,
                 disk_path=scratch,
@@ -368,6 +394,7 @@ def run_plan(
                         input_id=target.input_id,
                         artifacts_dir=scratch / "artifacts",
                         upstream_selections=consumed,
+                        execution_plan=execution_plan,
                     )
                     log.append(
                         "step_end",

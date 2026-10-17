@@ -65,6 +65,7 @@ ALGORITHMS: tuple[str, ...] = (
     "pmd_score:PMD_SCORE",
     "hypometh_reads:HYPOMETH_READS",
     "frag_x_meth:FRAG_X_METH",
+    "griffin:GRIFFIN",
 )
 
 
@@ -191,14 +192,20 @@ def execution_identity(
     upstream: Iterable[Mapping[str, str]] = (),
     platform: str | None = None,
     tool_pins: Iterable[Mapping[str, str]] | None = None,
+    tool_identities: Iterable[Mapping[str, str]] | None = None,
+    parameters: Mapping[str, Any] | None = None,
 ) -> str:
     """``parameters_sha256`` for one algorithm on one reference (D19)."""
+
+    if tool_pins is not None and tool_identities is not None:
+        raise ValueError("provide only one planned tool-identity list")
+    selected_tools = tool_pins if tool_pins is not None else tool_identities
 
     return parameters_sha256(
         algorithm_id=algorithm.id,
         algorithm_version=algorithm.version,
-        parameters=algorithm.parameters,
-        tools=list(tool_pins) if tool_pins is not None else [tool.identity() for tool in algorithm.tools],
+        parameters=algorithm.parameters if parameters is None else parameters,
+        tools=list(selected_tools) if selected_tools is not None else [tool.identity() for tool in algorithm.tools],
         reference_sha256=reference_sha256,
         asset_sha256s=asset_sha256s,
         upstream=upstream,

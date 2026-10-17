@@ -1,8 +1,8 @@
 """Run the pinned upstream Griffin workflows for one Lab aligned BAM.
 
-The output belongs to a fresh per-input attempt directory. This module does
-not publish a Lab algorithm result: runner identity and registered TF-site
-asset support must be added before that is safe.
+The output belongs to a fresh per-input attempt directory. This adapter does
+not publish the Lab result itself; the registered Griffin algorithm validates
+and publishes its output through the normal Lab worker.
 """
 
 from __future__ import annotations
@@ -56,6 +56,7 @@ class GriffinRun:
     ref_assets: Path
     site_lists: Mapping[str, Path]
     attempt_dir: Path
+    registration_sha256: str | None = None
     snakemake: str = "snakemake"
     cores: int = 1
 
@@ -129,6 +130,45 @@ def _runtime_identity(snakemake: Path, python: Path, samtools: Path, bedtools: P
     }
 
 
+def planned_runtime_sha256(*, worker_pythonpath: str | None = None) -> str:
+    """Stable pre-cache identity of the actual Griffin execution environment."""
+
+    executables = {}
+    for name in ("snakemake", "samtools", "bedtools"):
+        found = shutil.which(name)
+        try:
+            resolved = Path(found).resolve() if found else None
+            executables[name] = {"path": str(resolved), "sha256": _digest(resolved)} if resolved else None
+        except OSError:
+            executables[name] = None
+    try:
+        python = Path(sys.executable).resolve()
+        python_identity = {"path": str(python), "sha256": _digest(python)}
+    except OSError:
+        python_identity = None
+    compat = Path(__file__).parent / "griffin_compat" / "sitecustomize.py"
+    try:
+        compat_sha256 = _digest(compat)
+    except OSError:
+        compat_sha256 = None
+    packages = {}
+    for name in ("numpy", "pandas", "scipy", "pysam", "PyYAML", "pybedtools", "pyBigWig", "matplotlib"):
+        try:
+            packages[name] = version(name)
+        except PackageNotFoundError:
+            packages[name] = None
+    payload = {
+        "executables": executables, "python": python_identity,
+        "python_version": sys.version, "compat_sha256": compat_sha256,
+        "packages": packages,
+        "environment": {
+            **{key: os.environ.get(key, "") for key in ("PATH", "LD_LIBRARY_PATH", "CONDA_PREFIX")},
+            "PYTHONPATH": os.environ.get("PYTHONPATH", "") if worker_pythonpath is None else worker_pythonpath,
+        },
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 def _write_yaml(path: Path, data: dict) -> None:
     path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
@@ -155,12 +195,12 @@ def _ref_options(reference: Path, assets: Path, scripts: Path) -> dict:
     }
 
 
-def _require_paired_input(bam: Path) -> None:
-    """Upstream needs Illumina pairs with positive TLEN across the full BAM."""
+def _require_paired_input(bam: Path) -> int:
+    """Validate paired Illumina input; return reads in Griffin's 100–200 bp window."""
 
     import pysam
 
-    primary = paired = usable = 0
+    primary = paired = positive = usable = 0
     with pysam.AlignmentFile(str(bam), "rb") as alignments:
         groups = alignments.header.to_dict().get("RG", [])
         if not groups or any(group.get("PL", "").upper() != "ILLUMINA" for group in groups):
@@ -173,16 +213,18 @@ def _require_paired_input(bam: Path) -> None:
                 continue
             primary += 1
             paired += bool(read.is_paired)
+            positive += bool(read.is_paired and not read.is_reverse and read.template_length > 0)
             usable += bool(
                 read.is_paired and not read.is_reverse
                 and PROFILE_TLEN_RANGE[0] <= read.template_length <= PROFILE_TLEN_RANGE[1]
                 and read.mapping_quality >= 20 and not read.is_duplicate and not read.is_qcfail
             )
-    if primary < 100 or paired / primary < 0.95 or usable == 0:
+    if primary < 100 or paired / primary < 0.95 or positive == 0:
         raise ValueError(
             "pinned Griffin requires paired-end positive-TLEN WGS reads; "
             "native ONT single-end BAM is incompatible"
         )
+    return usable
 
 
 def _require_reference_header(bam: Path, reference: Path) -> None:
@@ -290,9 +332,10 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
     """Execute upstream GC correction and profiling, then validate its TSV.
 
     Caller supplies the exact filtered site lists and hg38 assets. No files
-    are downloaded or inferred. A fresh attempt directory is mandatory; on
-    any failure its partial outputs remain for inspection without becoming a
-    successful Lab result.
+    are downloaded or inferred. A fresh attempt directory is mandatory. A
+    standalone caller retains its partial attempt directory on failure. The
+    normal Lab worker places that directory under scratch and removes it after
+    the run.
     """
 
     if config.eligible_autosomal_pairs < MIN_ELIGIBLE_AUTOSOMAL_PAIRS:
@@ -301,6 +344,8 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
         raise ValueError("upstream Griffin is validated for hg38 only")
     if not re.fullmatch(r"[a-z0-9]{12,64}", config.input_id):
         raise ValueError("input_id must be a Lab hex identifier")
+    if config.registration_sha256 is not None and not re.fullmatch(r"[a-f0-9]{64}", config.registration_sha256):
+        raise ValueError("invalid Griffin registration digest")
     if not config.site_lists or config.cores < 1:
         raise ValueError("Griffin needs TF-site lists and at least one core")
     if os.name != "posix":
@@ -328,9 +373,10 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
     reference_index = reference.with_suffix(reference.suffix + ".fai")
     if not reference_index.is_file():
         raise ValueError("the registered reference FASTA needs an index for Griffin")
-    reference_index = _safe_path(reference_index)
     counted_bam_sha256 = _digest(bam)
-    _require_paired_input(bam)
+    if _require_paired_input(bam) == 0:
+        raise ValueError("Griffin's pinned 100–200 bp profile window has no qualifying fragments")
+    reference_index = _safe_path(reference_index)
     _require_reference_header(bam, reference)
     measured_pairs = count_d21_pairs(bam)
     if _digest(bam) != counted_bam_sha256:
@@ -464,6 +510,7 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
     (attempt / "provenance.json").write_text(json.dumps({
         "status": "attempt", "input_id": config.input_id,
         "upstream_commit": commit, "reference_id": config.reference_id,
+        "platform": "illumina", "registration_sha256": config.registration_sha256,
         "sample": sample, "eligible_autosomal_pairs": config.eligible_autosomal_pairs,
         "minimum_eligible_autosomal_pairs": MIN_ELIGIBLE_AUTOSOMAL_PAIRS,
         "eligibility_source": "bam_verified", "eligibility_predicate": D21_PAIR_PREDICATE,
@@ -522,6 +569,7 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
     manifest = {
         "status": "complete", "input_id": config.input_id,
         "upstream_commit": commit, "reference_id": config.reference_id,
+        "platform": "illumina", "registration_sha256": config.registration_sha256,
         "sample": sample, "eligible_autosomal_pairs": config.eligible_autosomal_pairs,
         "minimum_eligible_autosomal_pairs": MIN_ELIGIBLE_AUTOSOMAL_PAIRS,
         "eligibility_source": "bam_verified", "eligibility_predicate": D21_PAIR_PREDICATE,

@@ -168,6 +168,11 @@ intermediates they need, labelled "(upstream)".
 A result is reused only when its selected attempt matches the input, algorithm,
 and execution identity. Dependents also record the exact upstream attempts
 they consumed, including a parent-input summary reused by a derived control.
+Successful attempts record the effective execution-identity inputs in internal
+metadata. Cohort reads verify this record against the selected result, input,
+reference, upstream identities and consumed upstream attempts, then compare
+using the producer's recorded tools and parameters. They do not probe the
+reader's numerical runtime to reconstruct a historical result.
 An older dependent attempt without that record is recomputed once; leaf results
 remain cacheable. New attempts record artifact file sizes; older attempts
 remain readable, with known upstream layouts checked against their metadata.
@@ -224,6 +229,7 @@ new measurement.
 | `viral-reads` | EBV, HPV and HBV reads per million human-unmapped primary reads from a separate minimap2 ≥ 2.28 alignment; needs an operator-registered viral FASTA and is exploratory for ONT cfDNA |
 | `cell-origin` | share of cfDNA from each of 40 Loyfer U250 cell types with bootstrap intervals, through the signed method's own `compute_measurement` (modkit, UXM, NNLS); needs 2.5M eligible reads, `traceback toolchain install modkit` and `traceback method-asset register --from-dir LOYFER_DIR --root R`; minor cell types are not interpretable below 5x. Downsample and split runs read a transient filtered BAM that is deleted after publish |
 | `end-motifs` | reference 4-mers at both ends of each molecule (5′ forward end and the reverse complement of the other end), motif diversity score and CCCA share; needs 500,000 eligible reads and the registered FASTA |
+| `griffin` | pinned Griffin GC-corrected TF-site nucleosome profile on a registered hg38 site list; needs an Illumina-declared paired-end BAM, at least 5 million eligible autosomal pairs, the registered reference assets, Snakemake 5.19.2 importable by the Lab Python interpreter, and bedtools, samtools, pyBigWig and pybedtools. Native ONT and derived inputs skip; site profiles are descriptive, not a tissue-origin or clinical call |
 | `delfi-ratio` | short (100–150 bp) / long (151–220 bp) ratio per 5 Mb bin on chr1–22, median-centred, and its SD; no GC correction, cohort-relative only; needs 1,000,000 eligible reads |
 | `meth-calls` | intermediate: decodes MM/ML once into site-level CpG call chunks (read row, forward-strand C position, strand, 5mC/5hmC/canonical ML); derived inputs reuse it through their row mask |
 | `global-5mc` | share of CpG site calls whose most likely state is 5mC |

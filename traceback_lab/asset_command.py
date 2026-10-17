@@ -37,6 +37,19 @@ def add_asset_parser(commands: Any, common: Callable[[argparse.ArgumentParser], 
     inspect.add_argument("--sha256", help="registered MethylBERT bundle digest")
     common(inspect)
     inspect.set_defaults(handler=_inspect)
+    griffin = actions.add_parser("griffin-register", help="pin local Griffin code, reference assets and TF-site lists")
+    griffin.add_argument("--upstream-root", type=Path, required=True)
+    griffin.add_argument("--ref-assets", type=Path, required=True)
+    griffin.add_argument("--site-list", action="append", required=True, metavar="NAME=FILE")
+    griffin.add_argument("--primary-site", required=True)
+    griffin.add_argument("--source-label", required=True)
+    griffin.add_argument("--terms", choices=("known", "restricted", "unknown"), required=True)
+    griffin.add_argument("--license-id", help="required when terms are known")
+    common(griffin)
+    griffin.set_defaults(handler=_griffin_register)
+    griffin_inspect = actions.add_parser("griffin-inspect", help="rehash registered Griffin inputs")
+    common(griffin_inspect)
+    griffin_inspect.set_defaults(handler=_griffin_inspect)
 
 
 def _result_payload(
@@ -130,3 +143,47 @@ def _inspect(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, 
             f"FILE    {record.file}",
         ],
     )
+
+
+def _griffin_register(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]]:
+    from .griffin_assets import GriffinAssetError, register_griffin_assets
+
+    store.check_version()
+    try:
+        sites = {}
+        for item in args.site_list:
+            name, separator, path = item.partition("=")
+            if not separator or name in sites:
+                raise GriffinAssetError("each --site-list must be a unique NAME=FILE")
+            sites[name] = Path(path)
+        with store.writer("asset griffin-register", new_run_id(), step="griffin"):
+            record = register_griffin_assets(
+                store.root, upstream_root=args.upstream_root, ref_assets=args.ref_assets,
+                site_lists=sites, primary_site=args.primary_site,
+                source_label=args.source_label, terms=args.terms,
+                license_id=args.license_id,
+            )
+    except (GriffinAssetError, OSError) as exc:
+        payload = _result_payload("lab asset griffin-register", "blocked", "Griffin assets not registered", store, {"cause": str(exc)})
+        return EXIT_BLOCKED, _with_human(payload, [f"BLOCKED {exc}"])
+    payload = _result_payload("lab asset griffin-register", "ok", "Griffin assets pinned", store, {
+        "sha256": record.sha256, "primary_site": record.primary_site,
+        "site_lists": sorted(record.site_lists), "terms": record.terms,
+    })
+    return EXIT_OK, _with_human(payload, [f"GRIFFIN {record.sha256}", f"PRIMARY {record.primary_site}"])
+
+
+def _griffin_inspect(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]]:
+    from .griffin_assets import GriffinAssetError, inspect_griffin_assets
+
+    store.check_version()
+    try:
+        record = inspect_griffin_assets(store.root)
+    except GriffinAssetError as exc:
+        payload = _result_payload("lab asset griffin-inspect", "blocked", "Griffin assets unavailable", store, {"cause": str(exc)})
+        return EXIT_BLOCKED, _with_human(payload, [f"BLOCKED {exc}"])
+    payload = _result_payload("lab asset griffin-inspect", "ok", "Griffin assets verified", store, {
+        "sha256": record.sha256, "primary_site": record.primary_site,
+        "site_lists": sorted(record.site_lists), "terms": record.terms,
+    })
+    return EXIT_OK, _with_human(payload, [f"GRIFFIN {record.sha256}", f"PRIMARY {record.primary_site}"])
