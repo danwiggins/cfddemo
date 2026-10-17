@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import signal
 import sys
 import time
 from dataclasses import replace
@@ -34,6 +35,30 @@ def test_r_process_output_is_bounded(tmp_path: Path) -> None:
         cwd=tmp_path, timeout_seconds=10, log_limit_bytes=4096)
     assert result.outcome == "exited" and result.returncode == 0
     assert result.stdout_truncated and len(result.stdout) == 4096
+
+
+@pytest.mark.skipif(os.name == "nt", reason="inherited pipe regression uses POSIX cleanup")
+def test_r_process_rejects_pipe_held_open_by_descendant(tmp_path: Path) -> None:
+    child_pid = tmp_path / "child.pid"
+    launcher = (
+        "import pathlib, subprocess, sys\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid))\n"
+        "sys.stdout.write('13\\t1\\n18\\t2\\n21\\t3\\nEND\\n')\n"
+        "sys.stdout.flush()\n"
+    )
+    try:
+        result = fetal._run_bounded_r(
+            [sys.executable, "-c", launcher, str(child_pid)],
+            cwd=tmp_path, timeout_seconds=10)
+        assert result.outcome == "pipe_unclosed"
+        assert result.stdout_truncated
+    finally:
+        if child_pid.exists():
+            try:
+                os.kill(int(child_pid.read_text()), signal.SIGTERM)
+            except ProcessLookupError:
+                pass
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Lab process-group cancellation uses POSIX groups")
@@ -139,6 +164,9 @@ def test_nipter_preflight_and_synthetic_adapter_output(tmp_path: Path, monkeypat
     ctx = InputContext(store.root, SOURCE, INPUT, "hg38", REFERENCE, input_dir,
                        eligible_reads=2_000_000, extras={"planned_asset_sha256s": assets})
     assert isinstance(fetal.FETAL_FRACTION.preflight(ctx), Ready)
+    with monkeypatch.context() as patch:
+        patch.setattr(fetal, "_rscript", lambda: None)
+        assert fetal.FETAL_FRACTION.preflight(ctx).reason_code == "missing_toolchain"
     assert fetal.FETAL_FRACTION.preflight(ctx.__class__(
         **{**ctx.__dict__, "eligible_reads": 1_999_999})).reason_code == "depth"
     assert fetal.FETAL_FRACTION.preflight(ctx.__class__(
@@ -147,14 +175,17 @@ def test_nipter_preflight_and_synthetic_adapter_output(tmp_path: Path, monkeypat
         **{**ctx.__dict__, "extras": {"planned_asset_sha256s": []}})).reason_code == "missing_asset"
     with pytest.raises(RuntimeError, match="reference changed"):
         fetal.FETAL_FRACTION.run(replace(ctx, reference_sha256="f" * 64), tmp_path / "out")
+    with pytest.raises(RuntimeError, match="full prenatal input"):
+        fetal.FETAL_FRACTION.run(replace(ctx, derived={"transform": "split", "half": "A"}), tmp_path / "out")
     def fake_r_process(argv, **kwargs):
         assert Path(argv[2]).read_bytes() == fetal.R_CODE.encode("utf-8")
         assert Path(argv[4]).read_bytes() == control.read_bytes()
         assert Path(argv[4]) != control
+        assert Path(argv[4]).parent != tmp_path / "out"
         assert kwargs["log_limit_bytes"] == 4096
         assert kwargs["timeout_seconds"] == 900
         return SimpleNamespace(outcome="exited", returncode=0,
-                               stdout=b"13\t0.5\n18\t-0.25\n21\t1.75\n", stdout_truncated=False)
+                               stdout=b"13\t0.5\n18\t-0.25\n21\t1.75\nEND\n", stdout_truncated=False)
     monkeypatch.setattr(fetal, "_run_bounded_r", fake_r_process)
     output = fetal.FETAL_FRACTION.run(ctx, tmp_path / "out")
     values = {item["metric_id"]: item["value"] for item in output.metrics}
@@ -162,13 +193,17 @@ def test_nipter_preflight_and_synthetic_adapter_output(tmp_path: Path, monkeypat
                       "trisomy_18_z": -0.25, "trisomy_21_z": 1.75}
     assert not (tmp_path / "out" / "nipter-z.R").exists()
     assert not list((tmp_path / "out").glob("nipter-control-*.rds"))
+    assert not list(tmp_path.glob("nipter-private-*"))
     control.write_bytes(b"changed")
     assert isinstance(fetal.FETAL_FRACTION.preflight(ctx), Skip)
     with pytest.raises(FetalContractError):
         fetal.FETAL_FRACTION.run(ctx, tmp_path / "out")
 
 
-@pytest.mark.parametrize("output", ["", "13\tnan\n18\t0\n21\t0\n", "13\t1\n18\t2\n22\t3\n"])
+@pytest.mark.parametrize("output", ["", "13\tnan\n18\t0\n21\t0\nEND\n",
+                                     "13\t1\n18\t2\n22\t3\nEND\n",
+                                     "13\t1\n18\t2\n21\t3\n",
+                                     "13\t1\n18\t2\n21\t1.7"])
 def test_nipter_output_parser_refuses_incomplete_or_nonfinite_values(output: str) -> None:
     with pytest.raises(RuntimeError):
         fetal._parse_z_output(output)

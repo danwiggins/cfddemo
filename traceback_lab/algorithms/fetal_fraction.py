@@ -47,6 +47,7 @@ for (chrom in c(13L, 18L, 21L)) {
   cat(chrom, format(value, digits=17, scientific=FALSE, trim=TRUE), sep="\t")
   cat("\n")
 }
+cat("END\n")
 '''
 SCRIPT_SHA256 = hashlib.sha256(R_CODE.encode()).hexdigest()
 _CONTIGS = tuple(f"chr{chrom}" for chrom in range(1, 23)) + ("chrX", "chrY")
@@ -113,6 +114,8 @@ def _run_bounded_r(argv: list[str], *, cwd: Path, timeout_seconds: int,
             process.wait()
         for reader in readers:
             reader.join(timeout=5)
+    if any(reader.is_alive() for reader in readers):
+        return _RResult("pipe_unclosed", None, bytes(stdout), True)
     return _RResult(outcome, process.returncode if outcome == "exited" else None,
                     bytes(stdout), stdout_truncated[0])
 
@@ -260,9 +263,12 @@ def _nipter_package_sha(rscript: Path) -> str | None:
 
 
 def _parse_z_output(output: str) -> dict[int, float]:
+    if not output.endswith("END\n"):
+        raise RuntimeError("NIPTeR returned an incomplete z-score table")
     lines = output.splitlines()
-    if len(lines) != 3:
+    if len(lines) != 4 or lines[-1] != "END":
         raise RuntimeError("NIPTeR returned an unexpected z-score table")
+    lines = lines[:3]
     values: dict[int, float] = {}
     for expected, line in zip((13, 18, 21), lines):
         fields = line.split("\t")
@@ -333,6 +339,8 @@ class FetalFraction(Base):
         from ..store import LabStore
 
         contract = inspect_contract(LabStore(ctx.root), ctx.input_id)
+        if ctx.derived is not None:
+            raise RuntimeError("NIPTeR requires the full prenatal input")
         if contract.source_id != ctx.source_id or contract.reference_sha256 != ctx.reference_sha256:
             raise RuntimeError("prenatal assertion or reference changed after preflight")
         runtime = _rscript()
@@ -349,19 +357,17 @@ class FetalFraction(Base):
         out.mkdir(parents=True, exist_ok=True)
         script = out / "nipter-z.R"
         script.write_bytes(R_CODE.encode("utf-8"))
-        control_snapshot: Path | None = None
         try:
-            control_snapshot = _stage_control(contract.control_path, contract.control_sha256, out)
-            completed = _run_bounded_r(
-                [str(runtime[0]), "--vanilla", str(script), str(ctx.input_dir / "aligned.bam"),
-                 str(control_snapshot), str(contract.control_n)],
-                cwd=out, timeout_seconds=900, log_limit_bytes=4096,
-            )
-        except RuntimeError as exc:
+            with tempfile.TemporaryDirectory(prefix="nipter-private-", dir=out.parent) as private:
+                control_snapshot = _stage_control(contract.control_path, contract.control_sha256, Path(private))
+                completed = _run_bounded_r(
+                    [str(runtime[0]), "--vanilla", str(script), str(ctx.input_dir / "aligned.bam"),
+                     str(control_snapshot), str(contract.control_n)],
+                    cwd=out, timeout_seconds=900, log_limit_bytes=4096,
+                )
+        except (RuntimeError, OSError) as exc:
             raise RuntimeError("NIPTeR control or process unavailable; inspect the registered toolchain") from exc
         finally:
-            if control_snapshot is not None:
-                control_snapshot.unlink(missing_ok=True)
             script.unlink(missing_ok=True)
         if completed.outcome != "exited" or completed.returncode != 0 or completed.stdout_truncated:
             raise RuntimeError("NIPTeR trisomy calculation failed; inspect the registered control and toolchain")
