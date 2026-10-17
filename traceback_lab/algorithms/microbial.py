@@ -88,8 +88,6 @@ def _report_lineages(path: Path, candidates: int) -> tuple[dict[int, str], int, 
                 continue
             if taxid == 1:
                 root_count = clade
-            if fields[3] == "S" and clade > 0:
-                species_present = True
             raw_name = fields[5]
             indent = len(raw_name) - len(raw_name.lstrip(" "))
             while stack and stack[-1][0] >= indent:
@@ -98,6 +96,8 @@ def _report_lineages(path: Path, candidates: int) -> tuple[dict[int, str], int, 
             category = _ROOTS.get(taxid, parent)
             if category is not None:
                 lineages[taxid] = category
+                if fields[3] == "S" and clade > 0:
+                    species_present = True
             stack.append((indent, category))
     if root_count + unclassified != candidates:
         raise RuntimeError("Kraken2 report does not account for submitted reads")

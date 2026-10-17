@@ -352,6 +352,22 @@
             ? "Measured zero candidate microbial taxa under this database and read-length policy."
             : "No candidate microbial taxa are displayed in this profile.")));
     }
+    const identityPairs = sample.identity_pairs || [];
+    if (sample.algorithms.some((a) => a.algorithm_id === "identity") || identityPairs.length) {
+      out.push(h("section", { class: "panel" }, h("h2", {}, "Identity comparisons"),
+      h("p", { class: "problem" }, "FLAG: PRIVACY — pair comparison can reveal family relationships."),
+      h("p", { class: "help" }, "Exploratory Somalier measurements from explicitly selected stored samples. No ONT duplicate or kinship cutoff is claimed."),
+      identityPairs.length
+        ? h("div", { class: "table-wrap" }, h("table", {}, h("thead", {}, h("tr", {},
+          ...["Other sample", "Relatedness", "Concordance", "Sites compared"].map((label) => h("th", { scope: "col" }, label)))),
+          h("tbody", {}, ...identityPairs.map((pair) => h("tr", {},
+            h("th", { scope: "row" }, pair.peer_id12),
+            h("td", {}, pair.state === "unavailable" ? pair.reason : fmt(pair.metrics.relatedness)),
+            h("td", {}, pair.state === "unavailable" ? "unavailable" : fmt(pair.metrics.concordance)),
+            h("td", {}, pair.state === "unavailable" ? "unavailable" : fmt(pair.metrics.n)))))))
+          : h("p", { class: sample.identity_pairs_reason ? "problem" : "" },
+            sample.identity_pairs_reason || "No current pair comparison. Prepare fingerprints with lab run --only identity, then use lab identity compare SAMPLE_A SAMPLE_B.")));
+    }
     const health = sample.library_health;
     out.push(h("section", { class: "panel" }, h("h2", {}, "Library health"),
       h("p", {}, `no_library_entry: ${health.no_library_entry} · UNVERIFIED citations: ${health.unverified_citations} · interpretation v${health.version} · cohort ${sample.cohort_version || "none yet"} (members = ${sample.cohort_n})`),

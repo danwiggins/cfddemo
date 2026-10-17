@@ -11,6 +11,12 @@ licenses:
     headline: "GPL-3: Bracken abundance estimator"
     body: "Bracken runs as a separate process; its GPL-3 terms and database data terms require independent review."
     url: "https://github.com/jenniferlu717/Bracken"
+  somalier-mit:
+    headline: "MIT: Somalier"
+    body: >-
+      Somalier is MIT-licensed. Its fingerprint and relatedness output can
+      reveal family relationships; use it only for explicitly selected pairs.
+    url: "https://github.com/brentp/somalier/blob/master/LICENSE"
   modkit-ont-public:
     headline: "RESEARCH-ONLY: modkit"
     body: >-

@@ -321,6 +321,7 @@ def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) 
             identity = execution_identity(
                 algorithm, reference_sha256=manifest["reference_sha256"], upstream=upstream,
                 asset_sha256s=assets_of(store.root) if callable(assets_of) else (),
+                tool_pins=[tool.identity() for tool in algorithm.tools],
             )
         except (OSError, ValueError, KeyError, LabProblem):
             # An unresolved asset cannot make an old result current-compatible.

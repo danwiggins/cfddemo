@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -49,6 +51,53 @@ def _database(tmp_path: Path) -> tuple[LabStore, Path]:
     with store.writer("microbial db add", "r-20261016-0000-aabb", step="database"):
         register_database(store, directory, 75, "synthetic database")
     return store, directory
+
+
+def test_planned_result_resolves_into_sample_profile_without_identity_stubs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, synthetic_world,
+) -> None:
+    """The runner and page resolver must agree on actual tool and reference pins."""
+    from traceback_runner import cli as signed_cli
+    from traceback_runner.references import register_reference
+    from traceback_lab.ingest import source_ids
+    from traceback_lab.views import load_sample
+    from tests.lab.bam_fixtures import Read, write_bam
+
+    store, _ = _database(tmp_path)
+    register_reference(store.root, synthetic_world["fasta"], "synth")
+    tools_dir = tmp_path / "tools"
+    tools_dir.mkdir()
+    kraken = tools_dir / "kraken2"
+    kraken.write_text(
+        '#!/bin/sh\nreport=""\nwhile [ "$#" -gt 0 ]; do\n'
+        '  if [ "$1" = "--report" ]; then shift; report="$1"; fi\n'
+        '  shift\ndone\nprintf "100.00\\t1\\t1\\tU\\t0\\tunclassified\\n" > "$report"\n'
+    )
+    bracken = tools_dir / "bracken"
+    bracken.write_text("#!/bin/sh\nexit 99\n")
+    for launcher in (kraken, bracken):
+        launcher.chmod(0o755)
+    (tools_dir / "classify").write_bytes(b"pinned synthetic helper")
+    (tools_dir / "kraken2lib.pm").write_bytes(b"pinned synthetic library")
+    (tools_dir / "src").mkdir()
+    (tools_dir / "src" / "est_abundance.py").write_bytes(b"pinned synthetic Bracken helper")
+    (tools_dir / "python").symlink_to(sys.executable)
+    monkeypatch.setenv("PATH", f"{tools_dir}{os.pathsep}{os.environ['PATH']}")
+    with pysam.FastaFile(str(synthetic_world["fasta"])) as fasta:
+        contigs = list(zip(fasta.references, fasta.lengths))
+    bam = write_bam(tmp_path / "aligned.bam", contigs, [
+        Read("mapped", "chr1", 100, "A" * 75),
+        Read("unmapped", "chr1", 0, "A" * 75, flag=4),
+    ])
+    assert signed_cli.main(["lab", "run", str(bam), "--root", str(store.root),
+                            "--only", "microbial", "--no-downsample", "--no-controls", "--json"]) == 0
+    source = source_ids(store)[0]
+    sample = load_sample(store, source)
+    assert sample is not None and sample.full.results["microbial"].status == "ok"
+    profile = profile_for_sample(store, sample, None, None, "not_built")
+    assert profile is not None and profile["state"] == "cohort_unavailable"
+    assert profile["candidate_unmapped_reads"] == 1
+    assert profile["microbial_rpm_primary"] == 0
 
 
 def test_production_cohort_snapshot_excludes_unassayable_and_changed_db(tmp_path, monkeypatch) -> None:
@@ -349,6 +398,24 @@ def test_tool_identity_changes_when_executed_helper_changes(tmp_path, monkeypatc
     (tmp_path / "classify").write_bytes(b"classifier v2")
     assert algorithm._tool("kraken2")[1] != first[1]
 
+    bracken = tmp_path / "bracken"
+    bracken.write_bytes(b"bracken launcher")
+    source = tmp_path / "src" / "est_abundance.py"
+    source.parent.mkdir()
+    source.write_bytes(b"interpreter v1")
+    python = tmp_path / "python"
+    python.write_bytes(b"python interpreter v1")
+    locations = {"bracken": bracken, "python": python}
+    monkeypatch.setattr(algorithm.shutil, "which", lambda name: str(locations[name]))
+    first_bracken = algorithm._tool("bracken")
+    assert first_bracken is not None
+    source.write_bytes(b"interpreter v2")
+    second_bracken = algorithm._tool("bracken")
+    assert second_bracken is not None and second_bracken[1] != first_bracken[1]
+    python.write_bytes(b"python interpreter v2")
+    third_bracken = algorithm._tool("bracken")
+    assert third_bracken is not None and third_bracken[1] != second_bracken[1]
+
 
 def test_installed_launcher_without_required_helpers_has_actionable_skip(tmp_path, monkeypatch) -> None:
     launcher = tmp_path / "kraken2"
@@ -375,6 +442,20 @@ def test_report_lineage_excludes_human_and_unknown_taxa(tmp_path) -> None:
     assert species_present
     assert lineages[123] == "bacteria"
     assert 9606 not in lineages
+
+
+def test_human_only_species_does_not_require_bracken(tmp_path) -> None:
+    report = tmp_path / "report"
+    report.write_text(
+        "0.00\t0\t0\tU\t0\tunclassified\n"
+        "100.00\t1\t0\tR\t1\troot\n"
+        "100.00\t1\t0\tD\t2759\t  Eukaryota\n"
+        "100.00\t1\t1\tS\t9606\t    Homo sapiens\n"
+    )
+    lineages, classified, unclassified, species_present = algorithm._report_lineages(report, 1)
+    assert (classified, unclassified) == (1, 0)
+    assert 9606 not in lineages
+    assert not species_present
 
 
 def test_bracken_bounded_species_retains_total_and_refuses_malformed_rows(tmp_path: Path) -> None:
