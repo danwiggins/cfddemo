@@ -133,7 +133,7 @@ def project_density_band(
     row["eligible_n"] = len(vectors)
     row["excluded"] = dict(sorted(excluded.items()))
     if not vectors:
-        row["state"] = "old_generation_no_vectors" if excluded["missing_pinned_vector"] else "no_eligible_vectors"
+        row["state"] = "no_usable_pinned_vectors" if excluded["missing_pinned_vector"] else "no_eligible_vectors"
     elif len(vectors) < 10:
         row["state"] = "cohort_too_small"
     else:

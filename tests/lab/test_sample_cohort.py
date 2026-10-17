@@ -95,7 +95,7 @@ def test_sample_lenses_pin_eligible_loo_reference(
     assert payload["cohort_kind"] == kind
     assert payload["cohort_n"] == member_n
     assert payload["cohort_state"] == "ready"
-    assert payload["size_density_band"]["state"] == "old_generation_no_vectors"
+    assert payload["size_density_band"]["state"] == "no_usable_pinned_vectors"
     assert [row["state"] for row in payload["agreement_pairs"]] == ["target_metric_unavailable"] * 2
     assert metric["reference_kind"] == kind
     assert metric["eligible_n"] == eligible_n

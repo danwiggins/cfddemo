@@ -13,7 +13,7 @@ from traceback_lab.web.server import RunningLabServer
 
 
 @pytest.mark.skipif(_chrome() is None, reason="no Chrome/Chromium for density DOM check")
-def test_normalized_density_band_and_legacy_unavailable_state(tmp_path, monkeypatch) -> None:
+def test_normalized_density_band_and_fresh_unusable_vectors(tmp_path, monkeypatch) -> None:
     source_id = "a" * 64
     id12 = source_id[:12]
     counts = [0] * 1000
@@ -53,15 +53,18 @@ def test_normalized_density_band_and_legacy_unavailable_state(tmp_path, monkeypa
                 "Normalized aligned-span density" in page and 'data-rendered="1"' in page, timeout=60)
 
         ready = dom("ready-profile", "Observed cohort density min–max (n=10)")
-        sample["size_density_band"] = {"state": "old_generation_no_vectors", "eligible_n": 0,
+        # A newly built generation can also have no vectors when every member
+        # has a scalar-only result or zero eligible 50–1000 bp molecules.
+        sample["size_density_band"] = {"state": "no_usable_pinned_vectors", "eligible_n": 0,
                                        "excluded": {"missing_pinned_vector": 10},
                                        "span_bp": [], "low": [], "high": []}
-        old = dom("old-profile", "predates pinned size histograms")
+        unavailable = dom("fresh-unusable-profile", "no usable pinned size histograms")
 
     assert "descriptive, not a reference interval" in ready
     assert "Exclusions: self 1 · incompatible 2" in ready or "Exclusions: incompatible 2 · self 1" in ready
     assert "fraction of 50–1000 bp molecules" in ready and "0.600" in ready
     assert "167 bp marked" in ready
-    assert "rebuild the cohort" in old and "missing pinned vector 10" in old
-    assert "Normalized aligned-span density" in old
-    assert 'data-csp-violations="0"' in ready and 'data-csp-violations="0"' in old
+    assert "zero eligible 50–1000 bp molecules" in unavailable and "missing pinned vector 10" in unavailable
+    assert "predates pinned" not in unavailable and "rebuild the cohort" not in unavailable
+    assert "Normalized aligned-span density" in unavailable
+    assert 'data-csp-violations="0"' in ready and 'data-csp-violations="0"' in unavailable
