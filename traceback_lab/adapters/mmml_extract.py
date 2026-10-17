@@ -99,9 +99,10 @@ def extract_cpg_calls(
 ) -> Extraction:
     """Stream a prefiltered BAM, refusing the locked call cap while reading.
 
-    ``maximum_calls`` bounds the materialized calls handed to the existing
-    Loyfer UXM classifier. The caller owns any prefilter BAM and removes it
-    with its worker scratch directory.
+    ``maximum_calls`` counts reference-CpG candidate rows before confidence
+    and unsupported-code filtering, like the signed modkit output-row cap.
+    Materialized UXM calls cannot exceed it. The caller owns any prefilter
+    BAM and removes it with its worker scratch directory.
     """
 
     if maximum_calls < 1 or not 0 < filter_threshold < 1:

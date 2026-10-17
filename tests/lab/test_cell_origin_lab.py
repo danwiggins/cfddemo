@@ -52,7 +52,10 @@ def test_run_recovers_the_planted_mixture_with_intervals(world) -> None:
     register_loyfer_directory(world["root"], world["inputs"].loyfer_dir)
     out = world["tmp"] / "attempt" / "artifacts"
     out.mkdir(parents=True)
-    output = co.CELL_ORIGIN.run(world["ctx"], out)
+    extras = {**world["ctx"].extras,
+              "planned_asset_sha256s": co.CELL_ORIGIN.asset_sha256s(world["root"])}
+    ctx = InputContext(**{**world["ctx"].__dict__, "extras": extras})
+    output = co.CELL_ORIGIN.run(ctx, out)
     values = {m["metric_id"]: m for m in output.metrics}
     fractions = {k: v for k, v in values.items() if k.startswith("fraction_")}
     assert len(fractions) == 2
