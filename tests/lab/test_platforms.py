@@ -24,6 +24,20 @@ def test_read_group_platform(lines: list[str], expected: str) -> None:
     assert from_rg_lines(lines) == expected
 
 
+@pytest.mark.parametrize("platform", [None, "unknown", "pacbio"])
+def test_worker_context_refuses_missing_or_unsupported_platform(platform: str | None) -> None:
+    from traceback_lab.registry import context_from_json
+
+    payload = {
+        "root": "/tmp/lab", "source_id": "s", "input_id": "i",
+        "reference_id": "hg38", "reference_sha256": "r", "input_dir": "/tmp/lab/input",
+    }
+    if platform is not None:
+        payload["platform"] = platform
+    with pytest.raises(ValueError, match="no supported platform"):
+        context_from_json(payload)
+
+
 def test_derived_platform_skip_is_persisted_and_shown_in_depth_curve(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
