@@ -239,6 +239,12 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
     )
     for workflow in workflows:
         shutil.copytree(upstream / "snakemakes" / workflow, attempt / workflow)
+        cluster_path = attempt / workflow / "config" / "cluster_slurm.yaml"
+        cluster = yaml.safe_load(cluster_path.read_text(encoding="utf-8"))
+        for settings in cluster.values():
+            if isinstance(settings, dict) and "ncpus" in settings:
+                settings["ncpus"] = min(int(settings["ncpus"]), config.cores)
+        _write_yaml(cluster_path, cluster)
     gc_dir = attempt / workflows[0]
     profile_dir = attempt / workflows[1]
     gc_config = _load_default(upstream, workflows[0])
@@ -264,6 +270,7 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
         "upstream_commit": commit, "reference_id": config.reference_id,
         "platform": "illumina", "registration_sha256": config.registration_sha256,
         "eligible_autosomal_pairs": config.eligible_reads, "snakemake_version": snakemake_version,
+        "cores": config.cores,
         "fingerprints": fingerprints,
     }, sort_keys=True), encoding="utf-8")
     for directory, snakefile in (
@@ -274,6 +281,7 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
             subprocess.run(
                 [config.snakemake, "-s", snakefile, "--cores", str(config.cores)],
                 cwd=directory, stdout=log, stderr=subprocess.STDOUT, check=True,
+                env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
             )
     if _digest(bam) != fingerprints["bam_sha256"] or _digest(reference) != config.reference_sha256:
         raise RuntimeError("BAM or reference changed during Griffin computation")
@@ -290,6 +298,7 @@ def run_upstream(config: GriffinRun) -> tuple[GriffinProfile, ...]:
         "upstream_commit": commit, "reference_id": config.reference_id,
         "platform": "illumina", "registration_sha256": config.registration_sha256,
         "eligible_autosomal_pairs": config.eligible_reads, "snakemake_version": snakemake_version,
+        "cores": config.cores,
         "fingerprints": fingerprints,
         "gc_bias_sha256": _digest(gc_bias), "output_sha256": _digest(output),
         "profile_count": len(profiles),

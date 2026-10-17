@@ -79,6 +79,7 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
         config = upstream / "snakemakes" / workflow / "config"
         config.mkdir(parents=True)
         (config / "config.yaml").write_text("{}\n", encoding="utf-8")
+        (config / "cluster_slurm.yaml").write_text("GC_counts: {ncpus: 8}\ncalc_cov: {ncpus: 8}\n", encoding="utf-8")
         (upstream / "snakemakes" / workflow / (workflow + ".snakefile")).write_text(
             "# test fixture\n", encoding="utf-8"
         )
@@ -110,6 +111,7 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
         if argv[-1] == "--version":
             return subprocess.CompletedProcess(argv, 0, "5.19.2\n")
         directory = Path(kwargs["cwd"])
+        assert kwargs["env"]["PYTHONDONTWRITEBYTECODE"] == "1"
         calls.append(directory)
         if directory.name.startswith("griffin_GC_and"):
             output = directory / "results" / "GC_bias" / f"{sample}.GC_bias.txt"
@@ -137,6 +139,10 @@ def test_pinned_upstream_attempt_binds_input_and_assets(tmp_path: Path, monkeypa
     assert manifest["input_id"] == input_id
     assert manifest["eligible_autosomal_pairs"] == 5_000_000
     assert manifest["snakemake_version"] == "5.19.2"
+    assert manifest["cores"] == 1
+    for workflow in ("griffin_GC_and_mappability_correction", "griffin_nucleosome_profiling"):
+        cluster = (attempt / workflow / "config" / "cluster_slurm.yaml").read_text(encoding="utf-8")
+        assert "ncpus: 1" in cluster and "ncpus: 8" not in cluster
     assert manifest["fingerprints"]["bam_sha256"] == hashlib.sha256(b"bam").hexdigest()
     with pytest.raises(FileExistsError):
         run_upstream(GriffinRun(
