@@ -224,6 +224,12 @@ ONT-only algorithms skip with reason `platform`; the CNA spike is omitted for
 Illumina. Result and cohort compatibility identities include platform, so an
 Illumina measurement cannot reuse an ONT result or reference range. No clinical
 cutoff, short-read healthy range, or cross-platform comparison is supplied.
+If an Illumina BAM was ingested by the earlier opt-in TLEN path, run it again
+from the original BAM to create its platform-specific input identity. The old
+stored result remains available but does not enter new platform-aware cohorts.
+For a legacy BAM without a platform declaration, verify its instrument
+provenance and regenerate a BAM with the correct `@RG PL` value from the trusted
+source before ingesting it. The Lab does not infer ONT from an absent value.
 
 **PMD asset.** `pmd-score` needs an operator-supplied Zhou 2018 hg38
 common-PMD BED.gz file. The repository does not ship or download it; its
@@ -480,8 +486,9 @@ An input has missing, mixed, or unrecognized platform declarations, an
 unaligned Illumina input would need the ONT-only aligner, or a stored input's
 platform disagrees with its BAM header (exit 3). Use a BAM whose read groups
 unanimously declare `PL:ONT` or `PL:ILLUMINA`; align Illumina reads externally
-before supplying the BAM. Inspect a mismatched stored input and rerun from its
-original BAM.
+before supplying the BAM. For a damaged or mismatched stored input, restore
+that input from a known-good backup or re-ingest the original BAM under a fresh
+ROOT. Reusing the same ROOT does not replace an existing input manifest.
 
 ## Adding an algorithm
 

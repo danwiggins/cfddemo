@@ -179,6 +179,7 @@ def test_aligned_reference_mismatch_has_full_cli_fields(
     header = {
         "HD": {"VN": "1.6", "SO": "coordinate"},
         "SQ": [{"SN": name, "LN": length} for name, length in contigs],
+        "RG": [{"ID": "synthetic", "PL": "ONT"}],
     }
     with pysam.AlignmentFile(str(bam), "wb", header=header):
         pass
@@ -288,6 +289,7 @@ def test_interrupted_run_has_full_cli_fields_without_running_algorithms(
     header = {
         "HD": {"VN": "1.6", "SO": "coordinate"},
         "SQ": [{"SN": name, "LN": length} for name, length in reference.contigs],
+        "RG": [{"ID": "synthetic", "PL": "ONT"}],
     }
     with pysam.AlignmentFile(str(bam), "wb", header=header):
         pass
