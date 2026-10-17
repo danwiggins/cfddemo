@@ -14,10 +14,10 @@ from traceback_runner import cli as signed_cli
 from traceback_runner.references import register_reference
 
 
-def _paired_bam(path: Path, count: int = 120) -> None:
+def _paired_bam(path: Path, count: int = 120, *, platform: str = "ILLUMINA") -> None:
     header = {"HD": {"VN": "1.6", "SO": "coordinate"},
               "SQ": [{"SN": "chr1", "LN": 50000}],
-              "RG": [{"ID": "library-1", "PL": "ILLUMINA"}]}
+              "RG": [{"ID": "library-1", "PL": platform}]}
     with pysam.AlignmentFile(str(path), "wb", header=header) as bam:
         for index in range(count):
             start = 100 + index * 250
@@ -64,11 +64,11 @@ def _ont_bam(path: Path, count: int = 120) -> None:
 
 
 def _run(path: Path, root: Path, capsys: pytest.CaptureFixture[str],
-         *, downsample: bool = False) -> dict:
+         *, downsample: bool = False, only: str | None = None) -> dict:
     code = signed_cli.main([
         "lab", "run", str(path), "--root", str(root), "--reference", "hg38",
         *(("--downsample", "0.5") if downsample else ("--no-downsample",)),
-        "--no-controls", "--json",
+        "--no-controls", "--json", *(("--only", only) if only else ()),
     ])
     payload = json.loads(capsys.readouterr().out)
     assert code == 0, payload
@@ -111,7 +111,8 @@ def test_realistic_paired_bams_keep_platform_results_and_cohorts_separate(
                         if step["input"] == "0.5"}
     assert downsample_steps["short-read-fragment-size"]["status"] == "ok"
     assert downsample_steps["depth"]["status"] == "ok"
-    assert "fragment-size" not in downsample_steps
+    assert downsample_steps["fragment-size"]["status"] == "skipped"
+    assert downsample_steps["fragment-size"]["skip_reason"] == "platform"
 
     store = LabStore(root)
     short = next(item for item in member_from_store(store, illumina["sample"]["source_id"]).results
@@ -139,3 +140,22 @@ def test_realistic_paired_bams_keep_platform_results_and_cohorts_separate(
                       if item.algorithm_id == "depth")
     assert illumina_depth.parameters_sha256 != ont_depth.parameters_sha256
     assert illumina_depth.cohort_compat_key != ont_depth.cohort_compat_key
+
+
+def test_paired_ont_reads_follow_declared_platform_not_pair_flags(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    reference = tmp_path / "reference.fa"
+    reference.write_text(">chr1\n" + "A" * 50000 + "\n")
+    pysam.faidx(str(reference))
+    root = tmp_path / "root"
+    register_reference(root, reference, "hg38")
+    paired_ont = tmp_path / "paired-ont.bam"
+    _paired_bam(paired_ont, platform="ONT")
+
+    data = _run(paired_ont, root, capsys, only="fragment-size,short-read-fragment-size")
+    assert data["sample"]["platform"] == "ont"
+    steps = {step["algorithm_id"]: step for step in data["steps"] if step["input"] == "full"}
+    assert steps["fragment-size"]["status"] == "ok"
+    assert steps["short-read-fragment-size"]["status"] == "skipped"
+    assert steps["short-read-fragment-size"]["skip_reason"] == "platform"
