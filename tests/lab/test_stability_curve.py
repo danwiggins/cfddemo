@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 
 import pytest
 
@@ -117,6 +118,7 @@ def _assert_default_scalar_selection(store, sample, payload) -> None:
     library = load_library()
     chosen = plan(load_registry())
     full_ids = {item.algorithm.id for item in chosen}
+    assert {"read-summary", "meth-calls", "bam-qc", "depth", "fragment-size"} <= full_ids
     derived_ids = full_ids - {"read-summary", "meth-calls"}
     for transform in ("downsample", "split"):
         assert {item.algorithm.id for item in derived_plan_items(chosen, transform)} == derived_ids
@@ -137,7 +139,9 @@ def _assert_default_scalar_selection(store, sample, payload) -> None:
     attempt = store.selected_attempt(sample.full.input_id, "read-summary", summary_result.provenance.parameters_sha256)
     assert attempt is not None
     summary = ReadSummary.open(attempt / "artifacts" / "columns")
-    views_by_label = {view.label: view for view in [sample.full, *sample.derived] if view.label in labels}
+    all_views = [sample.full, *sample.derived]
+    assert len(all_views) == len(labels)
+    views_by_label = {view.label: view for view in all_views}
     assert set(views_by_label) == labels
     assert len({view.input_id for view in views_by_label.values()}) == len(labels)
     for label, view in views_by_label.items():
@@ -196,16 +200,38 @@ def _assert_default_scalar_selection(store, sample, payload) -> None:
         if library.headline(algorithm_id) is not None
     }
     assert expected_curve_ids
+    assert {"bam-qc", "depth", "fragment-size"} <= expected_curve_ids
     assert {row["algorithm_id"] for row in api["curve"]["rows"]} == expected_curve_ids
+    before_cells = {}
     for curve_row in api["curve"]["rows"]:
-        assert curve_row["metric_id"] == library.headline(curve_row["algorithm_id"]).metric_id
+        algorithm_id = curve_row["algorithm_id"]
+        assert curve_row["metric_id"] == library.headline(algorithm_id).metric_id
         assert [cell["label"] for cell in curve_row["cells"]] == ["0.1", "0.25", "0.5", "full"]
         for cell in curve_row["cells"]:
-            assert cell["state"] in views.CELL_STATES, (curve_row["algorithm_id"], cell["label"])
-            assert cell["depth_x"] == pytest.approx(views_by_label[cell["label"]].depth_x())
+            label = cell["label"]
+            before_cells[algorithm_id, label] = cell
+            view = views_by_label[label]
+            result = view.results[algorithm_id]
+            assert cell["state"] in views.CELL_STATES, (algorithm_id, label)
+            assert cell["depth_x"] == pytest.approx(view.depth_x())
+            if result.status != "ok":
+                assert cell["state"] == result.status
+                assert cell.get("value") is None
+                continue
+            metric = next(metric for metric in result.metrics if metric.metric_id == curve_row["metric_id"])
+            if isinstance(metric.value, (int, float)) and not isinstance(metric.value, bool):
+                assert cell["value"] == pytest.approx(metric.value)
+            else:
+                assert cell.get("value") == metric.value
+            if algorithm_id in {"bam-qc", "depth", "fragment-size"}:
+                assert cell["state"] in {"ok_usable", "ok_unstable"}
+                assert isinstance(metric.value, (int, float)) and math.isfinite(metric.value)
 
     # A later selected failure or null value changes the API's measured cell;
     # it must not fall back to the previous successful attempt or disappear.
+    for key in (("bam-qc", "0.1"), ("fragment-size", "0.25")):
+        assert before_cells[key]["state"] in {"ok_usable", "ok_unstable"}
+        assert before_cells[key]["value"] is not None
     failure_view = views_by_label["0.1"]
     prior = failure_view.results["bam-qc"]
     previous_attempt = store.selected_attempt(failure_view.input_id, "bam-qc", prior.provenance.parameters_sha256)
@@ -229,6 +255,11 @@ def _assert_default_scalar_selection(store, sample, payload) -> None:
     store.publish_result(null_result, input_id=null_view.input_id)
     updated = LabApi(store).sample(sample.id12)
     updated_rows = {row["algorithm_id"]: row for row in updated["curve"]["rows"]}
+    assert set(updated_rows) == expected_curve_ids
+    for algorithm_id, row in updated_rows.items():
+        for cell in row["cells"]:
+            if (algorithm_id, cell["label"]) not in {("bam-qc", "0.1"), ("fragment-size", "0.25")}:
+                assert cell == before_cells[algorithm_id, cell["label"]]
     failed_cells = {cell["label"]: cell for cell in updated_rows["bam-qc"]["cells"]}
     null_cells = {cell["label"]: cell for cell in updated_rows["fragment-size"]["cells"]}
     assert set(failed_cells) == set(null_cells) == {"0.1", "0.25", "0.5", "full"}
