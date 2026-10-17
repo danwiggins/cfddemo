@@ -117,8 +117,11 @@ def _assert_default_scalar_selection(store, sample, payload) -> None:
     library = load_library()
     chosen = plan(load_registry())
     full_ids = {item.algorithm.id for item in chosen}
-    derived_ids = {item.algorithm.id for item in derived_plan_items(chosen, "downsample")}
+    derived_ids = full_ids - {"read-summary", "meth-calls"}
+    for transform in ("downsample", "split"):
+        assert {item.algorithm.id for item in derived_plan_items(chosen, transform)} == derived_ids
     steps = {(step["input"], step["algorithm_id"]): step for step in payload["data"]["steps"]}
+    assert len(steps) == len(payload["data"]["steps"]), "a selected step was duplicated"
     labels = {"full", "0.5", "0.25", "0.1", "split-A", "split-B"}
     assert {label for label, _ in steps} == labels
     assert set(sample.full.results) == full_ids
@@ -129,6 +132,7 @@ def _assert_default_scalar_selection(store, sample, payload) -> None:
     summary = ReadSummary.open(attempt / "artifacts" / "columns")
     views_by_label = {view.label: view for view in [sample.full, *sample.derived] if view.label in labels}
     assert set(views_by_label) == labels
+    assert len({view.input_id for view in views_by_label.values()}) == len(labels)
     for label, view in views_by_label.items():
         expected_ids = full_ids if label == "full" else derived_ids
         assert {algorithm_id for step_label, algorithm_id in steps if step_label == label} == expected_ids
@@ -136,6 +140,7 @@ def _assert_default_scalar_selection(store, sample, payload) -> None:
         mask = derived_mask(summary, {"transform": view.transform, **view.parameters}) if label != "full" else None
         stamp = depth_stamp(summary, mask)
         for algorithm_id, result in view.results.items():
+            assert result.status in {"ok", "skipped", "failed"}
             assert result.status == steps[label, algorithm_id]["status"]
             assert result.provenance.input_id == view.input_id
             assert result.provenance.source_id == sample.source_id
@@ -157,9 +162,9 @@ def _assert_default_scalar_selection(store, sample, payload) -> None:
     halves = sample.by_transform("split")
     assert sum(view.results["bam-qc"].depth.eligible_reads for view in halves) == full_count
     downs = sorted(sample.by_transform("downsample"), key=lambda view: view.fraction)
-    assert [view.results["bam-qc"].depth.eligible_reads for view in downs] == sorted(
-        view.results["bam-qc"].depth.eligible_reads for view in downs
-    )
+    counts = [view.results["bam-qc"].depth.eligible_reads for view in downs]
+    assert counts[0] < counts[1] < counts[2] < full_count
+    assert all(abs(count / full_count - view.fraction) < 0.08 for count, view in zip(counts, downs))
 
     api = LabApi(store).sample(sample.id12)
     assert api["found"] is True and api["source_id"] == sample.source_id
@@ -178,7 +183,12 @@ def _assert_default_scalar_selection(store, sample, payload) -> None:
             assert {metric["metric_id"] for metric in row["metrics"]} == {metric.metric_id for metric in result.metrics}
     catalog = {row["algorithm_id"]: row for row in api["catalog"]}
     assert set(catalog) == full_ids - library.hidden_algorithms
-    assert all(row["status"] != "not run" for row in catalog.values())
+    assert all(row["status"] in {"ok", "skipped", "failed"} for row in catalog.values())
+    expected_curve_ids = {
+        algorithm_id for algorithm_id in full_ids - library.hidden_algorithms
+        if library.headline(algorithm_id) is not None
+    }
+    assert {row["algorithm_id"] for row in api["curve"]["rows"]} == expected_curve_ids
     for curve_row in api["curve"]["rows"]:
         assert curve_row["metric_id"] == library.headline(curve_row["algorithm_id"]).metric_id
         assert [cell["label"] for cell in curve_row["cells"]] == ["0.1", "0.25", "0.5", "full"]
@@ -197,17 +207,24 @@ def _assert_default_scalar_selection(store, sample, payload) -> None:
     store.publish_result(failed, input_id=failure_view.input_id)
     null_view = views_by_label["0.25"]
     prior = null_view.results["fragment-size"]
+    fragment_headline = library.headline("fragment-size")
+    assert fragment_headline is not None
     null_result = ResultEnvelope.model_validate({
-        **prior.model_dump(), "status": "ok", "metrics": [Metric(metric_id="mode_bp", value=None, unit="bp").model_dump()],
+        **prior.model_dump(), "status": "ok",
+        "metrics": [Metric(metric_id=fragment_headline.metric_id, value=None, unit="bp").model_dump()],
         "panels": [], "failure": None,
     })
     store.publish_result(null_result, input_id=null_view.input_id)
     updated = LabApi(store).sample(sample.id12)
     updated_rows = {row["algorithm_id"]: row for row in updated["curve"]["rows"]}
-    assert updated_rows["bam-qc"]["cells"][0]["state"] == "failed"
-    assert updated_rows["bam-qc"]["cells"][0]["reason"] == "fixture worker failed"
-    assert updated_rows["fragment-size"]["cells"][1]["state"] == "not_interpretable"
-    assert updated_rows["fragment-size"]["cells"][1]["value"] is None
+    failed_cells = {cell["label"]: cell for cell in updated_rows["bam-qc"]["cells"]}
+    null_cells = {cell["label"]: cell for cell in updated_rows["fragment-size"]["cells"]}
+    assert set(failed_cells) == set(null_cells) == {"0.1", "0.25", "0.5", "full"}
+    assert failed_cells["0.1"]["state"] == "failed"
+    assert failed_cells["0.1"]["reason"] == "fixture worker failed"
+    assert failed_cells["0.1"].get("value") is None
+    assert null_cells["0.25"]["state"] == "not_interpretable"
+    assert null_cells["0.25"]["value"] is None
 
 
 def test_rerun_is_cached_and_no_downsample_leaves_only_full(default_run, lab_world, capsys, shared_mmi) -> None:
