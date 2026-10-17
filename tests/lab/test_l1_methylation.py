@@ -261,7 +261,7 @@ def test_methylation_consumers_need_meth_calls_upstream() -> None:
 # ---------------------------------------------------------- bounded RSS
 _PEAK = textwrap.dedent(
     """
-    import json, resource, sys
+    import json, resource, sys, tracemalloc
     from pathlib import Path
     import numpy as np
     from traceback_lab.algorithms._meth import load_calls
@@ -274,6 +274,7 @@ _PEAK = textwrap.dedent(
                                             "read-summary": str(root / "read-summary")}})
     calls, mask = load_calls(ctx)
     assert mask is None and len(calls.meta["chunks"]) > 1
+    tracemalloc.start()
     result = None
     if sys.argv[2] == "stream":
         metric = GLOBAL_5MC.run(ctx, root).metrics[0]
@@ -281,8 +282,11 @@ _PEAK = textwrap.dedent(
     elif sys.argv[2] == "eager":
         materialized = np.concatenate(list(calls.chunks()))
         result = [int(materialized.size)]
+    traced_peak = tracemalloc.get_traced_memory()[1]
+    tracemalloc.stop()
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-    print(json.dumps({"rss": peak * (1 if sys.platform == "darwin" else 1024), "result": result}))
+    print(json.dumps({"rss": peak * (1 if sys.platform == "darwin" else 1024),
+                      "traced_peak": traced_peak, "result": result}))
     """
 )
 
@@ -322,7 +326,12 @@ def test_global_5mc_streaming_has_bounded_peak_rss(tmp_path: Path) -> None:
     # A 64 MiB fixed increment leaves room for platform allocator variation,
     # but remains below the cost of eagerly retaining all three normal chunks.
     assert streamed["rss"] - baseline["rss"] < 64 * 1024 * 1024, (baseline, streamed)
-    assert streamed["rss"] - baseline["rss"] < eager["rss"] - baseline["rss"] - 8 * 1024 * 1024, (
+    # Import peaks can dominate ru_maxrss on CI; tracing begins after imports
+    # and catches NumPy's eager materialization even when RSS highs coincide.
+    assert eager["traced_peak"] - baseline["traced_peak"] > 32 * 1024 * 1024, (
+        baseline, eager
+    )
+    assert streamed["traced_peak"] < eager["traced_peak"] - 8 * 1024 * 1024, (
         baseline, eager, streamed
     )
 
