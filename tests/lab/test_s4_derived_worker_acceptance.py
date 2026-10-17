@@ -6,6 +6,7 @@ the unchanged registered depth gate; this does not qualify either assay.
 
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from fractions import Fraction
 from math import ceil
@@ -40,6 +41,7 @@ FETAL_SMALL_BAM = replace(
 )
 BACKGROUND_Y_PER_MILLION = 20_000
 FULL_MALE_Y_PER_MILLION = 800_000
+DECOY_INPUT = "d" * 64
 
 
 def _selected(name: str, spec) -> bool:
@@ -93,10 +95,15 @@ def test_derived_worker_uses_selected_depth_and_pinned_parent_calibration(
             male_full_donor_y_per_million=FULL_MALE_Y_PER_MILLION,
         )
         contract = register_donor(store, path, digest)
+        decoy_values = {"female_background_y_per_million": 40_000,
+                        "male_full_donor_y_per_million": 400_000}
+        contract_file, register = donor_file, register_donor
         algorithm = DD_CFDNA_CHRY
         entry = "dd_cfdna_chry:DD_CFDNA_CHRY"
         fraction_metric, count_metric, refusal = "dd_cfdna_fraction", "chry_nonpar_reads", "depth"
     else:
+        assert FETAL_FRACTION_CHRY.requires.min_eligible_reads == 2_000_000
+        assert replace(FETAL_SMALL_BAM.requires, min_eligible_reads=2_000_000) == FETAL_FRACTION_CHRY.requires
         path, digest = fetal_file(
             tmp_path, min_depth_x=floor,
             female_background_y_per_million=BACKGROUND_Y_PER_MILLION,
@@ -104,12 +111,29 @@ def test_derived_worker_uses_selected_depth_and_pinned_parent_calibration(
             validated_min_fraction=0, validated_max_fraction=1,
         )
         contract = register_fetal(store, path, digest)
+        decoy_values = {"female_background_y_per_million": 40_000,
+                        "full_male_y_per_million": 400_000,
+                        "validated_min_fraction": 0, "validated_max_fraction": 1}
+        contract_file, register = fetal_file, register_fetal
         algorithm = FETAL_SMALL_BAM
         entry = "tests.lab.test_s4_derived_worker_acceptance:FETAL_SMALL_BAM"
         fraction_metric, count_metric, refusal = "fetal_fraction", "fetal_chry_nonpar_reads", "depth"
 
-    # The parent registration is the only calibration. Derived IDs must resolve
-    # it through their published manifests, never through a copied contract.
+    # A second registered input makes a store-wide/latest-contract lookup
+    # distinguishable from resolving the derived input's published parent.
+    decoy_dir = store.inputs_dir / DECOY_INPUT
+    decoy_dir.mkdir(parents=True)
+    (decoy_dir / "manifest.json").write_text(json.dumps({
+        "input_id": DECOY_INPUT, "source_id": SOURCE, "reference_sha256": REFERENCE,
+    }), encoding="utf-8")
+    decoy_path, decoy_digest = contract_file(
+        tmp_path, input_id=DECOY_INPUT, min_depth_x=floor, **decoy_values,
+    )
+    decoy = register(store, decoy_path, decoy_digest)
+    assert decoy.manifest_sha256 != contract.manifest_sha256
+    assert algorithm.asset_sha256s_for_input(store.root, INPUT) == [contract.manifest_sha256]
+    assert algorithm.asset_sha256s_for_input(store.root, DECOY_INPUT) == [decoy.manifest_sha256]
+
     full_result, = run_plan(
         store, None, log, parent, [PlanItem(algorithm, False)],
         {algorithm.id: entry}, run_id=run_id, scrubber=scrubber, timeout_s=60,
@@ -138,6 +162,7 @@ def test_derived_worker_uses_selected_depth_and_pinned_parent_calibration(
         result, = run.results
         stamp = stamps[run.derived.spec.label()]
         assert algorithm.asset_sha256s_for_input(store.root, run.derived.input_id) == [contract.manifest_sha256]
+        assert algorithm.asset_sha256s_for_input(store.root, run.derived.input_id) != [decoy.manifest_sha256]
         saved = store.read_result(run.derived.input_id, algorithm.id, result.parameters_sha256)
         assert saved is not None and saved.depth is not None
         assert saved.depth.eligible_reads == stamp["eligible_reads"]
@@ -165,6 +190,7 @@ def test_derived_worker_uses_selected_depth_and_pinned_parent_calibration(
             expected_fraction = (
                 selected_y * 1_000_000 / stamp["eligible_reads"] - BACKGROUND_Y_PER_MILLION
             ) / (FULL_MALE_Y_PER_MILLION - BACKGROUND_Y_PER_MILLION)
+            assert expected_fraction != pytest.approx(full_fraction)
             assert metrics[fraction_metric].value == pytest.approx(expected_fraction)
         else:
             assert (result.status, result.skip_reason) == ("skipped", refusal)
