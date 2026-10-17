@@ -606,6 +606,7 @@ def _derived_phase(
     runs = run_derived(
         store, lock, log, target, specs, items, by_id, run_id=run_id, read_summary=read_summary,
         force=args.force, timeout_s=args.timeout_s, scrubber=scrubber, progress=progress,
+        echo=_echo(args.verbose),
         parent_upstream=_parent_intermediates(items, results),
     )
     summary["cna"] = synthetic_summary(store, runs)
