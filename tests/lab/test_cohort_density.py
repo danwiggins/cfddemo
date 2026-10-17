@@ -72,13 +72,13 @@ def test_generation_band_is_normalized_min_max_and_excludes_target(monkeypatch) 
     assert project_density_band(generation, target, target.source_id, "e" * 64, "ready")["state"] == "target_unavailable"
 
 
-def test_old_generation_reports_missing_pinned_vectors() -> None:
+def test_missing_pinned_vectors_do_not_imply_an_old_generation() -> None:
     target = _member(1)
     generation = CohortGeneration(cohort_id="healthy-v1", version=1, members=(
         target, *(_member(n) for n in range(2, 12)),
     ))
     band = project_density_band(generation, target, target.source_id, PARAMETERS, "ready")
-    assert band["state"] == "old_generation_no_vectors"
+    assert band["state"] == "no_eligible_vectors"
     assert band["eligible_n"] == 0 and band["excluded"] == {"missing_pinned_vector": 10, "self": 1}
     assert band["low"] == [] and band["high"] == []
 

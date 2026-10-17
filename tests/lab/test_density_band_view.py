@@ -53,15 +53,15 @@ def test_normalized_density_band_and_legacy_unavailable_state(tmp_path, monkeypa
                 "Normalized aligned-span density" in page and 'data-rendered="1"' in page, timeout=60)
 
         ready = dom("ready-profile", "Observed cohort density min–max (n=10)")
-        sample["size_density_band"] = {"state": "old_generation_no_vectors", "eligible_n": 0,
+        sample["size_density_band"] = {"state": "no_eligible_vectors", "eligible_n": 0,
                                        "excluded": {"missing_pinned_vector": 10},
                                        "span_bp": [], "low": [], "high": []}
-        old = dom("old-profile", "predates pinned size histograms")
+        old = dom("old-profile", "no eligible pinned size histograms")
 
     assert "descriptive, not a reference interval" in ready
     assert "Exclusions: self 1 · incompatible 2" in ready or "Exclusions: incompatible 2 · self 1" in ready
     assert "fraction of 50–1000 bp molecules" in ready and "0.600" in ready
     assert "167 bp marked" in ready
-    assert "rebuild the cohort" in old and "missing pinned vector 10" in old
+    assert "Inspect the exclusions and source histograms" in old and "missing pinned vector 10" in old
     assert "Normalized aligned-span density" in old
     assert 'data-csp-violations="0"' in ready and 'data-csp-violations="0"' in old
