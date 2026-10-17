@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import signal
 import sys
 import time
 from dataclasses import replace
@@ -34,6 +35,30 @@ def test_r_process_output_is_bounded(tmp_path: Path) -> None:
         cwd=tmp_path, timeout_seconds=10, log_limit_bytes=4096)
     assert result.outcome == "exited" and result.returncode == 0
     assert result.stdout_truncated and len(result.stdout) == 4096
+
+
+@pytest.mark.skipif(os.name == "nt", reason="inherited pipe regression uses POSIX cleanup")
+def test_r_process_rejects_pipe_held_open_by_descendant(tmp_path: Path) -> None:
+    child_pid = tmp_path / "child.pid"
+    launcher = (
+        "import pathlib, subprocess, sys\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+        "pathlib.Path(sys.argv[1]).write_text(str(child.pid))\n"
+        "sys.stdout.write('13\\t1\\n18\\t2\\n21\\t3\\nEND\\n')\n"
+        "sys.stdout.flush()\n"
+    )
+    try:
+        result = fetal._run_bounded_r(
+            [sys.executable, "-c", launcher, str(child_pid)],
+            cwd=tmp_path, timeout_seconds=10)
+        assert result.outcome == "pipe_unclosed"
+        assert result.stdout_truncated
+    finally:
+        if child_pid.exists():
+            try:
+                os.kill(int(child_pid.read_text()), signal.SIGTERM)
+            except ProcessLookupError:
+                pass
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Lab process-group cancellation uses POSIX groups")
