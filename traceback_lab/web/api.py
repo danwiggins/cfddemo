@@ -224,23 +224,33 @@ def _recent_run_ids(store: LabStore, *, limit: int = 64) -> list[str]:
         return []
 
 
-def _latest_analysis_run(store: LabStore) -> str | None:
+def _latest_analysis_run(store: LabStore) -> tuple[str | None, bool]:
     """A small pointer read; other writer commands need not emit run logs."""
 
     raw = _read_run_log(store.last_run_file, limit=4096)
     if raw is None:
-        return None
+        try:
+            os.lstat(store.last_run_file)
+        except FileNotFoundError:
+            return None, False
+        except OSError:
+            pass
+        return None, True
     try:
         pointer = json.loads(raw)
     except ValueError:
-        return None
+        return None, True
     if not isinstance(pointer, dict):
-        return None
+        return None, True
     command = pointer.get("command")
-    if not isinstance(command, str) or command not in _LOGGED_SAMPLE_COMMANDS:
-        return None
+    if not isinstance(command, str):
+        return None, True
+    if command not in _LOGGED_SAMPLE_COMMANDS:
+        return None, False
     run_id = pointer.get("run_id")
-    return run_id if isinstance(run_id, str) and re.fullmatch(r"r-\d{8}-\d{4}-[0-9a-f]{4,8}", run_id) else None
+    if not isinstance(run_id, str) or not re.fullmatch(r"r-\d{8}-\d{4}-[0-9a-f]{4,8}", run_id):
+        return None, True
+    return run_id, False
 
 
 def _run_sample_identity(events: list[tuple[int, dict[str, Any]]]) -> dict[str, str]:
@@ -291,7 +301,9 @@ class LabApi:
             status["active"] = {**status["active"], **_run_sample_identity(events)}
         else:
             # Bounded (D22): one pointer file and that one run's log, never a scan.
-            last = _latest_analysis_run(self.store)
+            last, pointer_unavailable = _latest_analysis_run(self.store)
+            if pointer_unavailable:
+                run_log_unavailable = {"run_id": None, "reason": "latest_run_pointer_unavailable"}
             if last is not None:
                 events, reason = _run_events(self.store, last)
                 if reason == "pending_first_event":
