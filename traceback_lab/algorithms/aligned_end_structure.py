@@ -100,8 +100,9 @@ class AlignedEndStructure(Base):
 
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
         del out
-        if ctx.platform != "ont":
-            raise ValueError("aligned-end structure requires an ONT-declared input")
+        decision = self.preflight(ctx)
+        if isinstance(decision, Skip):
+            raise ValueError(decision.message)
         catalogues = inspect_end_catalogues(ctx.root)
         expected = ctx.extras.get("planned_asset_sha256s")
         if expected is not None and expected != [catalogues.identity]:
@@ -185,6 +186,8 @@ class AlignedEndStructure(Base):
         ends_total = 2 * valid_molecules
         artifact = {
             "schema": "traceback.lab.aligned-end-structure.v1",
+            "reference_id": ctx.reference_id,
+            "reference_sha256": ctx.reference_sha256,
             "catalogue_identity": catalogues.identity,
             "centers_sha256": catalogues.centers_sha256,
             "preferred_sha256": catalogues.preferred_sha256,

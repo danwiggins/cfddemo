@@ -106,6 +106,8 @@ def test_exact_ocf_like_sign_and_preferred_end_support(tmp_path: Path) -> None:
     assert metrics["preferred_end_support_fraction"]["value"] == 1.0
     assert metrics["preferred_end_support_fraction"]["n"] == 2
     artifact = json.loads(output.artifacts["aligned_end_structure.json"])
+    assert artifact["reference_id"] == "hg38"
+    assert artifact["reference_sha256"] == "3" * 64
     assert artifact["u_count"][40] == 1 and artifact["d_count"][160] == 1
     assert artifact["ocf_like_left"] == -1 and artifact["ocf_like_right"] == -1
     assert artifact["ocf_like_windows"] == {
@@ -257,6 +259,17 @@ def test_depth_full_input_and_pinned_asset_gates(tmp_path: Path) -> None:
     assert ALIGNED_END_STRUCTURE.asset_sha256s(root) == []
     assert ALIGNED_END_STRUCTURE.preflight(_context(root, summary_parent)).reason_code == "missing_asset"
     assert old_identity
+
+
+@pytest.mark.parametrize("updates,expected", [
+    ({"reference_id": "hg19"}, "hg38"),
+    ({"derived": {"transform": "split", "half": "A"}}, "full aligned"),
+    ({"example": True}, "genuine hg38"),
+])
+def test_direct_run_rechecks_input_scope(tmp_path: Path, updates: dict, expected: str) -> None:
+    root, _, _ = _catalogues(tmp_path)
+    with pytest.raises(ValueError, match=expected):
+        ALIGNED_END_STRUCTURE.run(_context(root, tmp_path / "read-summary", **updates), tmp_path / "out")
 
 
 @pytest.mark.parametrize("bad", [
