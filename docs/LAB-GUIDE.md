@@ -72,14 +72,14 @@ Lab data lives under `ROOT/lab/` and never touches signed records:
 
 ```
 traceback lab run (<BAM|uBAM|chunk dir>... | <id12> | latest | --example)
-    [--reference ID] [--profile all|fast] [--only a,b]
+    [--reference ID] [--profile all|fast] [--only a,b] [--cohort ID]
     [--downsample 0.5,0.25,0.1 | --no-downsample]
     [--controls | --no-controls] [--tf 0.03,0.10,0.30]
     [--skip-bad-chunks] [--sex M|F] [--force] [--timeout-s 3600]
     [--threads N] [--sort-mem 1G] [--mmi PATH]
     [--dry-run] [--verbose] [--json] [--root R]
-traceback lab simulate cna <id12|latest> [--tf 0.03,0.10,0.30] [--verbose]   synthetic CNA spike, copy-number recovery
-traceback lab simulate split <id12|latest> [--verbose]                         split-half pseudo-replicate
+traceback lab simulate cna <id12|latest> [--tf 0.03,0.10,0.30] [--cohort ID] [--verbose]   synthetic CNA spike, copy-number recovery
+traceback lab simulate split <id12|latest> [--cohort ID] [--verbose]                         split-half pseudo-replicate
 traceback lab algorithms [--json]          registered algorithms (id, tier, min depth, licenses, footnote)
 traceback lab doctor [--json]              setup checks, each with a fix command
 traceback lab serve [--open]               the local page (loopback only)
@@ -215,7 +215,7 @@ new measurement.
 | `fragment-size` | 1-bp aligned-span histogram, mode, short (< 150 bp) share, mono/di peaks, 10 bp periodicity |
 | `lionheart` | opt-in upstream LIONHEART v2.2.0 extraction of 898 raw sample-standardized chromatin-accessibility correlation scores from the selected hg38 BAM; needs ≥5M eligible reads, the modified mosdepth and Zenodo v003 resources; ONT single-end mode is experimental, and no cancer prediction is run |
 | `short-read-fragment-size` | separate exploratory paired-end Illumina histogram and size summaries from absolute BAM TLEN; requires a prealigned BAM with every `@RG PL:ILLUMINA` |
-| `copy-number` | tumour fraction, ploidy, genome log2 track and segments through the installed ichorCNA toolchain (no panel of normals yet, so read as not interpretable); needs 2M eligible reads, `traceback toolchain install ichor` and `traceback method-asset register --from-toolchain copy-number --root R` |
+| `copy-number` | tumour fraction, ploidy, genome log2 track and segments through the installed ichorCNA toolchain; a built protocol-matched cohort supplies a verified technical panel, but no clinical calibration or interpretation; the unbuilt default runs without a panel and remains not interpretable; needs 2M eligible reads, `traceback toolchain install ichor` and `traceback method-asset register --from-toolchain copy-number --root R` |
 | `instability` | bin-weighted median absolute deviation of the selected copy-number result's segment log2 values (`tmad`), with used-bin and null-estimate coverage counts; needs 2M eligible reads and a successful copy-number result for the same input; exploratory and cohort-relative, with no ONT cutoff |
 | `modbase-qc` | mod codes in the MM tags, MM-tagged share, mean ML at aligned CpG calls (read from `meth-calls`), share of those calls below 0.7 confidence, tagged reads with unusable MM/ML; skipped (`missing_tags`) when no read carries MM |
 | `long-tail` | shares of molecules > 300 bp, 1–4 kb (delayed processing) and > 7.5 kb (lysis); a supplementary-split read counts at its read length |
@@ -276,8 +276,8 @@ their ATAC/DNase labels and a research-only callout. The upstream single-end
 mode is experimental and its paired-end-trained cancer model is **not** run;
 these values are neither cell fractions nor a validated diagnostic.
 
-**Short-read support.** For a prealigned paired-end Illumina BAM against the
-registered hg38 reference, run the normal Lab command:
+**Short-read TLEN slice.** For a prealigned paired-end Illumina BAM against
+the registered hg38 reference, run the separate measurement explicitly:
 
 ```bash
 traceback lab run YOUR_LOCAL_aligned_illumina.bam \
@@ -465,6 +465,7 @@ idempotent; rerunning an analysis does not create a new member.
 
 ```bash
 traceback lab cohort add ID12 --cohort healthy --root R
+traceback lab cohort remove ID12 --cohort healthy --root R
 traceback lab cohort build --cohort healthy --root R
 traceback lab serve --root R --open
 ```
@@ -472,12 +473,43 @@ traceback lab serve --root R --open
 `build` publishes an immutable generation and changes the current pointer
 atomically. Open **Compare** and choose that cohort; the page names the exact
 generation used for the whole response. Build again after a member or its
-results change. Different aligners or incompatible algorithm parameters are
+results change. `cohort remove` removes one member from the pending roster by
+ID12 or full source ID, even if its stored source record is damaged. It does
+not delete that sample's input or results, or change the published generation;
+run `cohort build` to publish the revised membership. Different aligners or
+incompatible algorithm parameters are
 excluded per metric, with counts shown. Pre-aligned inputs whose processing
 provenance is unknown are isolated by their input identity; they are not
 pooled as protocol-matched references. Distinct source IDs are not proof of
 independent donors. The separate PoN denominator does not become a
 percentile denominator.
+
+For a verified internal cohort with at least ten eligible aligned members,
+`cohort build` creates one full panel and one leave-one-out panel per member.
+It recomputes each member's copy-number and instability results against that
+member's panel before publishing the generation. `pon_n` counts all panel
+sources; a selected member panel uses `pon_n - 1` sources. A nonmember uses
+the full panel. Both copy-number and instability still require 2M eligible
+reads on the target input. Copy-number also enforces the signed 1M counted-read
+floor after filtering, with or without a panel.
+The corrected copy-number method version does not reuse older copy-number or
+dependent instability attempts. Rerun affected inputs and rebuild existing
+cohorts to restore current-version comparisons. The sample view marks selected
+older copy-number and dependent instability results as `superseded_method`
+until rerun; their immutable attempts remain available for inspection.
+
+`lab run` and `lab simulate` use a built `healthy-v1` cohort by default when
+one exists for a real ONT input. Illumina and EXAMPLE inputs do not select
+that implicit ONT panel. An explicit ONT cohort refuses those inputs. Pass
+`--cohort ID` to pin another built cohort; an explicit cohort
+with no compatible verified panel fails rather than falling back. If the
+implicit `healthy-v1` is unbuilt, copy-number keeps its no-PoN baseline.
+If a built implicit panel's toolchain or registered method assets are missing,
+copy-number records `missing_toolchain` or `missing_asset`, its dependents
+skip upstream, and independent algorithms continue. An older uncorrected
+copy-number result is never reused. Other panel verification failures stop
+the run rather than silently substituting no-PoN copy number.
+An explicit `--cohort` is checked even when `--only` omits copy-number.
 
 If a selected cohort cannot be verified, **Compare** lists it as unavailable
 with a problem code and a next action. Other verified generations remain
@@ -485,10 +517,14 @@ selectable. Follow that action, then reload the page; an unavailable cohort or
 target sample has no comparison values, and the Lab does not fall back to an
 older generation. A cohort with members but no published generation needs
 `traceback lab cohort build --cohort ID --root R` before it can be selected.
+If only the selected panel's ichor toolchain or registered method assets are
+missing, Compare keeps independent metric comparisons from the pinned
+generation. It withholds copy-number and every dependent metric, names the
+missing panel dependency, and never substitutes an uncorrected result.
 
 ## Positive controls
 
-`traceback lab simulate cna <id12|latest>` builds a synthetic copy-number
+`traceback lab simulate cna <id12|latest>` requires an ONT sample and builds a synthetic copy-number
 spike from the healthy aligned input, with no external data: one-copy gains
 on 1q and 8q and losses on 13q and 17p at tumour fraction TF (default 0.03,
 0.10 and 0.30). Each read in a gain arm is duplicated with probability TF/2
@@ -570,7 +606,7 @@ The volume filled up during a step (exit 3, retryable). The staging directory wa
 ### TBX-LAB-012
 
 Another Lab writer is running (exit 3, retryable). Only one writer (`lab run`,
-`lab simulate`, `lab cohort add`, `lab cohort build`) may hold `ROOT/lab/.lock`
+`lab simulate`, `lab cohort add`, `lab cohort remove`, `lab cohort build`) may hold `ROOT/lab/.lock`
 at a time. The cause names the holder's command, run id, pid, step and start
 time. Wait for it (`traceback lab runs`), or stop that process.
 
@@ -593,8 +629,10 @@ The run completed and one or more algorithms failed (exit 8). The summary's `FAI
 ### TBX-LAB-017
 
 A run id, sample `id12` or `latest` was not found, or a prefix is ambiguous
-(exit 4). `traceback lab runs` lists runs. Pass the same `--root` (or
-`TRACEBACK_ROOT`) you ran with.
+(exit 4). For `cohort remove`, use a unique member ID12 or full source ID from
+the pending roster; damaged source records do not prevent removal.
+`traceback lab runs` lists runs. Pass the same `--root` (or `TRACEBACK_ROOT`)
+you ran with.
 
 ### TBX-LAB-018
 
@@ -648,8 +686,9 @@ unanimously declare `PL:ONT` or `PL:ILLUMINA`; align Illumina reads externally
 before supplying the BAM. For a damaged or mismatched stored input, restore
 that input from a known-good backup or re-ingest the original BAM under a fresh
 ROOT. Reusing the same ROOT does not replace an existing input manifest.
-Rewriting a BAM header changes its source identity; remove an unrecoverable
-member from its cohort before rebuilding that cohort.
+Rewriting a BAM header changes its source identity. Use
+`traceback lab cohort remove ID12 --cohort ID --root R` for an unrecoverable member, then rebuild
+that cohort; the old published generation stays selected until the rebuild.
 
 ## Adding an algorithm
 
