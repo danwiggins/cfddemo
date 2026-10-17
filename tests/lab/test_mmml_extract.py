@@ -211,6 +211,64 @@ def test_minus_cpg_outside_reference_is_counted_without_fetching_negative_interv
     assert result.non_reference_cpg == 1
 
 
+def test_overmass_at_one_cpg_invalidates_the_whole_read_like_modkit(tmp_path: Path) -> None:
+    fasta = tmp_path / "reference.fa"
+    fasta.write_text(">chr1\nACGACG\n", encoding="ascii")
+    pysam.faidx(str(fasta))
+    bam = tmp_path / "aligned.bam"
+    with pysam.AlignmentFile(str(bam), "wb", header={"SQ": [{"SN": "chr1", "LN": 6}]}) as writer:
+        read = pysam.AlignedSegment(writer.header)
+        read.query_name = "two-cpg"
+        read.query_sequence = "ACGACG"
+        read.reference_id = 0
+        read.reference_start = 0
+        read.mapping_quality = 60
+        read.cigarstring = "6M"
+        read.set_tag("MM", "C+m?,0,0;C+h?,0;")
+        read.set_tag("ML", array.array("B", [250, 250, 250]))
+        writer.write(read)
+    result = extract_cpg_calls(bam, fasta, maximum_calls=10, filter_threshold=0.9)
+    assert result.calls == () and result.invalid_mm == 1
+    binary = os.environ.get("LAB_MODKIT_PARITY_BINARY")
+    if binary:
+        output = tmp_path / "modkit.tsv"
+        subprocess.run(
+            [binary, "extract", "calls", "--reference", str(fasta), "--cpg",
+             "--filter-threshold", "0.9", "--suppress-progress", str(bam), str(output)],
+            check=True, capture_output=True, text=True, timeout=60,
+        )
+        with output.open(newline="") as stream:
+            assert list(csv.DictReader(stream, delimiter="\t")) == []
+
+
+def test_direct_extraction_rejects_nonprimary_and_hardclipped_records(tmp_path: Path) -> None:
+    fasta = tmp_path / "reference.fa"
+    fasta.write_text(">chr1\nACG\n", encoding="ascii")
+    pysam.faidx(str(fasta))
+    bam = tmp_path / "aligned.bam"
+    with pysam.AlignmentFile(str(bam), "wb", header={"SQ": [{"SN": "chr1", "LN": 3}]}) as writer:
+        for name, flag, cigar in (
+            ("primary", 0, "3M"), ("secondary", 0x100, "3M"),
+            ("supplementary", 0x800, "3M"), ("duplicate", 0x400, "3M"),
+            ("qc-fail", 0x200, "3M"), ("hard-clip", 0, "1H3M"),
+        ):
+            read = pysam.AlignedSegment(writer.header)
+            read.query_name = name
+            read.query_sequence = "ACG"
+            read.flag = flag
+            read.reference_id = 0
+            read.reference_start = 0
+            read.mapping_quality = 60
+            read.cigarstring = cigar
+            read.set_tag("MM", "C+m?,0;")
+            read.set_tag("ML", array.array("B", [250]))
+            writer.write(read)
+    result = extract_cpg_calls(bam, fasta, maximum_calls=10, filter_threshold=0.9)
+    assert result.records_scanned == 6
+    assert result.records_with_mm == 1
+    assert [(call.position0, call.state.value) for call in result.calls] == [(1, "methylated")]
+
+
 def test_extraction_cap_refuses_before_unbounded_growth(tmp_path: Path) -> None:
     bam, fasta = _write_input(tmp_path)
     with pytest.raises(ValueError, match="locked cap"):

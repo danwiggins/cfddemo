@@ -52,6 +52,7 @@ def test_stored_modkit_result_keeps_its_license_without_labeling_new_decoder() -
     skipped = _result_license_ids(entry, "cell-origin", "1", "skipped")
     assert "modkit-ont-public" in old
     assert "modkit-ont-public" not in new
+    assert "modkit-ont-public" not in _result_license_ids(entry, "cell-origin", "3", "ok")
     assert "modkit-ont-public" not in skipped
     assert "modkit-ont-public" in _result_license_ids(entry, "cell-origin", "", "ok")
     assert "modkit-ont-public" in LIBRARY.licenses
