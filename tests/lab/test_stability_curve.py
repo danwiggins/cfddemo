@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -104,6 +105,47 @@ def test_default_run_builds_the_curve_and_controls(default_run) -> None:
     assert all(panel["split_status"][half]["state"] == "ok" for panel in with_split for half in ("A", "B"))
     block = views.repeatability(panels)
     assert block["metrics"] == len([p for p in panels if p["split"]])
+
+    with patch.object(views, "stable", return_value=None):
+        no_verdict = next(p for p in views.stability_panels(sample)
+                          if p["algorithm_id"] == "fragment-size" and p["metric_id"] == "mode_bp")
+    assert no_verdict["split"] is None
+    assert all(no_verdict["split_status"][half]["state"] == "ok" for half in ("A", "B"))
+    assert all(no_verdict["split_status"][half]["value"] is not None for half in ("A", "B"))
+
+    halves = {view.parameters["half"]: view for view in sample.by_transform("split")}
+    selected = "fragment-size"
+    original_a = halves["A"].results.pop(selected)
+    original_b = halves["B"].results[selected]
+    try:
+        def fragment_panel():
+            return next(p for p in views.stability_panels(sample)
+                        if p["algorithm_id"] == selected and p["metric_id"] == "mode_bp")
+
+        missing = fragment_panel()
+        assert missing["split"] is None
+        assert missing["split_status"]["A"]["state"] == "unavailable"
+
+        halves["B"].results[selected] = original_b.model_copy(
+            update={"status": "skipped", "skip_reason": "depth", "metrics": []})
+        skipped = fragment_panel()
+        assert skipped["split"] is None
+        assert skipped["split_status"]["B"]["state"] == "skipped"
+        assert skipped["split_status"]["B"]["reason"] == "depth"
+
+        halves["B"].results[selected] = original_b.model_copy(
+            update={"status": "failed", "metrics": []})
+        assert fragment_panel()["split_status"]["B"]["state"] == "failed"
+
+        null_metrics = [m.model_copy(update={"value": None}) if m.metric_id == "mode_bp" else m
+                        for m in original_b.metrics]
+        halves["B"].results[selected] = original_b.model_copy(update={"metrics": null_metrics})
+        null = fragment_panel()
+        assert null["split"] is None
+        assert null["split_status"]["B"]["state"] == "not_interpretable"
+    finally:
+        halves["A"].results[selected] = original_a
+        halves["B"].results[selected] = original_b
 
 
 def test_rerun_is_cached_and_no_downsample_leaves_only_full(default_run, lab_world, capsys, shared_mmi) -> None:

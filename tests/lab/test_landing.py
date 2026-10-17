@@ -187,6 +187,35 @@ def test_navigation_order_with_compare(page_root, tmp_path) -> None:
 
 
 @needs_chrome
+def test_stability_names_both_halves_without_a_numeric_verdict(page_root, tmp_path, monkeypatch) -> None:
+    from traceback_lab import views
+
+    original = views.stability_panels
+
+    def panels_with_missing_halves(sample, library=None):
+        panels = original(sample, library)
+        states = [
+            (("skipped", "depth"), ("failed", "algorithm failed")),
+            (("unavailable", "selected result unavailable"), ("not_interpretable", "metric value unavailable")),
+        ]
+        for panel, (a, b) in zip(panels, states):
+            panel["split"] = None
+            panel["split_status"] = {
+                half: {"state": state, "reason": reason, "value": None, "deviation": None}
+                for half, (state, reason) in zip(("A", "B"), (a, b))
+            }
+        return panels
+
+    monkeypatch.setattr(views, "stability_panels", panels_with_missing_halves)
+    with RunningLabServer(LabStore(page_root)) as server:
+        dom = _dom(server, tmp_path, route=f"/sample/{_id12(page_root)}/stability",
+                   want=lambda page: "Split halves: split A skipped" in page)
+    assert "split A skipped (depth); split B failed (algorithm failed)" in dom
+    assert "split A unavailable (selected result unavailable); split B not interpretable (metric value unavailable)" in dom
+    assert "No split-half stability verdict." in dom
+
+
+@needs_chrome
 def test_findings_grouping_and_flags(page_root, tmp_path) -> None:
     with RunningLabServer(LabStore(page_root)) as server:
         dom = _dom(server, tmp_path, route=f"/sample/{_id12(page_root)}/findings")
