@@ -171,6 +171,7 @@ class AlignedEndStructure(Base):
             "terms": catalogues.terms,
             "observed_depth_x": ctx.approx_depth_x,
             "interpretation": "ONT aligned-span proxy; exploratory; no tissue-origin calibration",
+            "ocf_like_windows": self.parameters["ocf_like_windows"],
             "offset_bp": list(range(-RADIUS, RADIUS + 1)),
             "u_count": u_counts.tolist(), "d_count": d_counts.tolist(),
             "ocf_like_left": left, "ocf_like_right": right,
