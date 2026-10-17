@@ -493,7 +493,9 @@ reads on the target input. Copy-number also enforces the signed 1M counted-read
 floor after filtering, with or without a panel.
 The corrected copy-number method version does not reuse older copy-number or
 dependent instability attempts. Rerun affected inputs and rebuild existing
-cohorts to restore current-version comparisons.
+cohorts to restore current-version comparisons. The sample view marks selected
+older copy-number and dependent instability results as `superseded_method`
+until rerun; their immutable attempts remain available for inspection.
 
 `lab run` and `lab simulate` use a built `healthy-v1` cohort by default when
 one exists for a real ONT input. Illumina and EXAMPLE inputs do not select
