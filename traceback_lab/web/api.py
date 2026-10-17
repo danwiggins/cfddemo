@@ -71,6 +71,7 @@ def _agreement_pairs(
             "pair_id": pair_id, "state": cohort_state if cohort_state != "ready" else "unavailable",
             "cohort_version": generation.version_id if generation else None,
             "eligible_n": 0, "points": [], "excluded": {},
+            "target_display_id": labels.get(source_id, source_id[:12]),
         }
         if generation is None or target is None or cohort_state != "ready":
             rows.append(row)

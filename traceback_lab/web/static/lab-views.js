@@ -392,13 +392,13 @@
       const x = (p) => 10 + (p / 100) * (width - 20);
       const interval = Array.isArray(metric.interval) && metric.interval.length === 2 &&
         metric.interval.every(Number.isFinite) ? metric.interval : null;
-      let low = Infinity, high = -Infinity;
-      const expandRange = (value) => {
-        if (Number.isFinite(value)) { low = Math.min(low, value); high = Math.max(high, value); }
-      };
-      expandRange(Number(metric.value));
-      for (const value of (interval || [])) expandRange(value);
+      // Give the cutoff CI its own scale; an extreme sample must not compress
+      // the whisker to an unreadable stroke. Off-scale samples sit at an edge.
+      const low = interval ? Math.min(...interval) : 0;
+      const high = interval ? Math.max(...interval) : 1;
       const valueX = (v) => 110 + ((v - low) / (high - low || 1)) * 200;
+      const sampleValue = Number(metric.value);
+      const sampleOffScale = sampleValue < low ? "left" : sampleValue > high ? "right" : null;
       return h("figure", { class: "strip" }, svg("svg", { viewBox: `0 0 ${width} ${height}`, role: "img", "aria-label": metric.caption, class: "strip-svg" },
         svg("title", {}, metric.caption),
         svg("rect", { x: x(5), y: 10, width: x(95) - x(5), height: 14, class: "strip-band" }),
@@ -411,9 +411,10 @@
           svg("line", { x1: valueX(interval[0]), x2: valueX(interval[1]), y1: 14, y2: 14, class: "cohort-band" }),
           ...interval.map((end) => svg("line", { x1: valueX(end), x2: valueX(end), y1: 8, y2: 20, class: "cohort-band" })),
           svg("text", { x: 6, y: 43, class: "axis" }, "This sample"),
-          svg("text", { x: valueX(Number(metric.value)), y: 43, "text-anchor": "middle", class: "strip-mark" }, "◆")) : "",
+          svg("text", { x: sampleOffScale === "left" ? 110 : sampleOffScale === "right" ? 310 : valueX(sampleValue), y: 43, "text-anchor": "middle", class: "strip-mark" },
+            sampleOffScale === "left" ? "◀" : sampleOffScale === "right" ? "▶" : "◆")) : "",
         h("figcaption", {}, metric.caption, interval
-          ? ` Cutoff CI: ${fmt(interval[0], metric.unit)}–${fmt(interval[1], metric.unit)} on a separate value scale.` : ""));
+          ? ` Cutoff CI: ${fmt(interval[0], metric.unit)}–${fmt(interval[1], metric.unit)} on a separate value scale.${sampleOffScale ? ` This sample is outside the cutoff CI scale (${sampleOffScale}).` : ""}` : ""));
     }
     return h("p", { class: "help" }, metric.caption || (ref.kind === "none" ? "No published reference." : ""));
   }
@@ -1045,7 +1046,7 @@
             { type: "scatter", name: "This sample", symbolSize: 12, data: [[xValue, yValue]], itemStyle: { color: "#8a4b08" } },
           ],
         }, dataTable(`${title}; ${cohortText}`, ["Sample", xLabel, yLabel],
-          [[`${sample.id12} (this sample)`, xValue, yValue], ...points.map((p) => [p.display_id || p.source_id, p.x, p.y])])));
+          [[`${cohort?.target_display_id || sample.id12} (this sample)`, xValue, yValue], ...points.map((p) => [p.display_id || p.source_id, p.x, p.y])])));
       }
       out.push(section);
     }

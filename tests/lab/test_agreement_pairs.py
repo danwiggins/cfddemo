@@ -57,6 +57,7 @@ def test_pairs_join_by_source_after_compatibility_and_self_exclusion() -> None:
     assert size_cn["excluded"]["unpaired_x"] == 1
     assert mtdna_cn["eligible_n"] == 1
     assert mtdna_cn["points"] == [{"source_id": f"{2:064x}", "display_id": f"{2:064x}", "x": 0.02, "y": 0.2}]
+    assert size_cn["target_display_id"] == f"{1:064x}"
     assert len({point["source_id"][:12] for point in size_cn["points"]}) == 1
     assert len({point["display_id"] for point in size_cn["points"]}) == 2
     assert mtdna_cn["excluded"]["x"]["incompatible"] == 1
