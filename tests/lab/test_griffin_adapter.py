@@ -334,7 +334,7 @@ def test_native_ont_bam_fails_closed(tmp_path: Path) -> None:
 def test_paired_bam_without_unanimous_illumina_declaration_is_refused(
     tmp_path: Path, platforms: tuple[str, ...],
 ) -> None:
-    import pysam
+    pysam = pytest.importorskip("pysam")
 
     from traceback_lab.adapters.griffin_run import _require_paired_input
 
@@ -361,7 +361,7 @@ def test_paired_bam_without_unanimous_illumina_declaration_is_refused(
 
 
 def test_late_positive_tlen_is_considered_after_first_ten_thousand(tmp_path: Path) -> None:
-    import pysam
+    pysam = pytest.importorskip("pysam")
 
     from traceback_lab.adapters.griffin_run import _require_paired_input
 
@@ -377,10 +377,10 @@ def test_late_positive_tlen_is_considered_after_first_ten_thousand(tmp_path: Pat
             read.reference_id = 0
             read.reference_start = index
             read.next_reference_id = 0
-            read.next_reference_start = index + (50 if index == 10_000 else 400)
+            read.next_reference_start = index + (50 if index == 10_000 else 0)
             read.mapping_quality = 60
             read.cigarstring = "100M"
-            read.template_length = 150 if index == 10_000 else 500
+            read.template_length = 150 if index == 10_000 else 0
             read.set_tag("RG", "library-1")
             out.write(read)
     assert _require_paired_input(bam) == 1
