@@ -125,6 +125,13 @@ def _assert_default_scalar_selection(store, sample, payload) -> None:
     labels = {"full", "0.5", "0.25", "0.1", "split-A", "split-B"}
     assert {label for label, _ in steps} == labels
     assert set(sample.full.results) == full_ids
+    for algorithm_id in ("bam-qc", "depth", "fragment-size"):
+        result = sample.full.results[algorithm_id]
+        assert result.status == "ok", algorithm_id
+        headline = library.headline(algorithm_id)
+        assert headline is not None
+        assert any(metric.metric_id == headline.metric_id and metric.value is not None
+                   for metric in result.metrics)
 
     summary_result = sample.full.results["read-summary"]
     attempt = store.selected_attempt(sample.full.input_id, "read-summary", summary_result.provenance.parameters_sha256)
@@ -188,6 +195,7 @@ def _assert_default_scalar_selection(store, sample, payload) -> None:
         algorithm_id for algorithm_id in full_ids - library.hidden_algorithms
         if library.headline(algorithm_id) is not None
     }
+    assert expected_curve_ids
     assert {row["algorithm_id"] for row in api["curve"]["rows"]} == expected_curve_ids
     for curve_row in api["curve"]["rows"]:
         assert curve_row["metric_id"] == library.headline(curve_row["algorithm_id"]).metric_id
@@ -200,11 +208,15 @@ def _assert_default_scalar_selection(store, sample, payload) -> None:
     # it must not fall back to the previous successful attempt or disappear.
     failure_view = views_by_label["0.1"]
     prior = failure_view.results["bam-qc"]
+    previous_attempt = store.selected_attempt(failure_view.input_id, "bam-qc", prior.provenance.parameters_sha256)
+    assert previous_attempt is not None
     failed = ResultEnvelope.model_validate({
         **prior.model_dump(), "status": "failed", "metrics": [], "panels": [],
         "failure": Failure(first_line="fixture worker failed", stderr_tail=[]).model_dump(),
     })
     store.publish_result(failed, input_id=failure_view.input_id)
+    selected_attempt = store.selected_attempt(failure_view.input_id, "bam-qc", prior.provenance.parameters_sha256)
+    assert selected_attempt is not None and selected_attempt != previous_attempt
     null_view = views_by_label["0.25"]
     prior = null_view.results["fragment-size"]
     fragment_headline = library.headline("fragment-size")
