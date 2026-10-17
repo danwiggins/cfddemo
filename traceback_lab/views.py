@@ -355,9 +355,10 @@ def stability_panels(sample: SampleView, library: Library | None = None) -> list
                                          other_half_recorded=bool(halves))
                 for half in ("A", "B")
             }
-            if halves and not any(half in halves for half in ("A", "B")):
-                for status in split_status.values():
-                    status["reason"] = "split input has an unrecognized half label"
+            if any(half not in ("A", "B") for half in halves):
+                for half, status in split_status.items():
+                    if half not in halves:
+                        status["reason"] = "split input has an unrecognized half label"
             a = _value(halves["A"].results.get(algorithm_id), metric.metric_id) if "A" in halves else None
             b = _value(halves["B"].results.get(algorithm_id), metric.metric_id) if "B" in halves else None
             if split_status["A"]["state"] == "ok" and split_status["B"]["state"] == "ok":

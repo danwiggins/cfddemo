@@ -324,6 +324,13 @@ def test_missing_downsample_does_not_claim_instability() -> None:
     }
     assert all(item["reason"] == "split input has an unrecognized half label"
                for item in panel["split_status"].values())
+    sample.derived.append(views.InputView("split-A", "f" * 64, "split", {"half": "A"}, {
+        "fragment-size": SimpleNamespace(status="ok", metrics=[metric], depth=None),
+    }, 0.5))
+    panel = next(panel for panel in views.stability_panels(sample)
+                 if panel["algorithm_id"] == "fragment-size" and panel["metric_id"] == "mode_bp")
+    assert panel["split_status"]["A"]["state"] == "ok"
+    assert panel["split_status"]["B"]["reason"] == "split input has an unrecognized half label"
     down.results["fragment-size"] = SimpleNamespace(
         status="ok", metrics=[SimpleNamespace(metric_id="mode_bp", value=190.0,
                                                n=None, ci=None, ci_level=None)],
