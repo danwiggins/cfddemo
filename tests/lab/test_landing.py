@@ -133,6 +133,7 @@ def _dom(server, tmp_path, *, size="1280,800", route=None, want=None) -> str:
         [_chrome(), "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run",
          f"--user-data-dir={profile}", f"--window-size={size}", link],
         profile, ok=good, timeout=90,
+        viewport=tuple(map(int, size.split(","))),
     )
 
 

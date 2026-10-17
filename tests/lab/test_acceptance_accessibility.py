@@ -24,6 +24,67 @@ def test_large_viewport_banner_stays_within_landing_budget(tmp_path) -> None:
 
 
 @needs_chrome
+@pytest.mark.parametrize("size", ["1024,768", "768,1024", "360,740"])
+def test_landing_responsive_clia_and_single_column_geometry(size, tmp_path) -> None:
+    """AC6: the 1024px cap ends below 1024px; the landing band follows DOM order."""
+
+    observed = {}
+    with _server(tmp_path, _sample()) as server:
+        profile = tmp_path / "browser-profile"
+
+        def inspect(_command, evaluate) -> None:
+            observed.update(evaluate("""(() => {
+              const panel = document.querySelector('#main .clia-panel');
+              const band = document.querySelector('#main .landing-band');
+              const sections = [...band.children].map((node) => {
+                const rect = node.getBoundingClientRect();
+                return { top: rect.top, left: rect.left, right: rect.right };
+              });
+              const title = document.querySelector('.lab-title').getBoundingClientRect();
+              const switcher = document.querySelector('.switcher').getBoundingClientRect();
+              return {
+                viewportWidth: window.innerWidth,
+                panelHeight: panel.getBoundingClientRect().height,
+                panelScrollHeight: panel.scrollHeight,
+                panelClientHeight: panel.clientHeight,
+                panelMaxHeight: getComputedStyle(panel).maxHeight,
+                panelOverflowY: getComputedStyle(panel).overflowY,
+                cliaColumns: getComputedStyle(panel.querySelector('.clia-short')).columnCount,
+                bandColumns: getComputedStyle(band).gridTemplateColumns,
+                sections,
+                switcherBelowTitle: switcher.top >= title.bottom - 1
+              };
+            })()"""))
+
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", f"--window-size={size}",
+             server.issue_link() + "&route=/"],
+            profile,
+            ok=lambda dom: 'data-ready="1"' in dom and
+            re.search(r'<div class="clia-short">(?:(?!</div>).)*FLAG: LEGAL — verify', dom, re.DOTALL) is not None,
+            interact=inspect,
+            viewport=tuple(map(int, size.split(","))),
+        )
+
+    assert observed["panelScrollHeight"] <= observed["panelClientHeight"] + 1, (size, observed)
+    assert observed["viewportWidth"] == int(size.split(",")[0]), (size, observed)
+    assert observed["panelOverflowY"] == "visible", (size, observed)
+    assert observed["cliaColumns"] == "1", (size, observed)
+    assert len(observed["bandColumns"].split()) == 1, (size, observed)
+    defended, curve, controls = observed["sections"]
+    assert defended["top"] < curve["top"] < controls["top"], (size, observed)
+    assert max(section["left"] for section in observed["sections"]) - min(
+        section["left"] for section in observed["sections"]) <= 1, (size, observed)
+    if size == "1024,768":
+        assert observed["panelHeight"] <= 320, observed
+    else:
+        assert observed["panelMaxHeight"] == "none", (size, observed)
+    if size == "360,740":
+        assert observed["switcherBelowTitle"], observed
+
+
+@needs_chrome
 @pytest.mark.parametrize("size", ["1280,800", "1024,768", "768,1024", "360,740"])
 def test_all_routes_have_no_page_overflow_and_44px_targets(size, tmp_path) -> None:
     routes = [
@@ -227,6 +288,7 @@ def test_revealed_controls_and_each_signals_tab_keep_target_and_page_bounds(size
              server.issue_link() + f"&route=/sample/{ID12}/findings"],
             profile, ok=lambda d: 'data-ready="1"' in d and 'class="finding-card"' in d,
             interact=interact, timeout=180,
+            viewport=tuple(map(int, size.split(","))),
         )
 
 

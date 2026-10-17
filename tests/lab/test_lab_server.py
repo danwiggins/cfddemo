@@ -161,6 +161,44 @@ def test_status_samples_and_sample(server) -> None:
     assert "/Users/" not in text and "chunks" not in text.lower().replace("excluded_chunks", "")
 
 
+def test_missing_library_metric_is_counted_in_trust_qc(server, monkeypatch, tmp_path) -> None:
+    """D7: a real read-side join keeps an unknown metric and counts it on both routes."""
+
+    if _chrome() is None:
+        pytest.skip("no Chrome/Chromium for the D7 DOM check")
+    source_id = next(iter(server.app.api._id12s()))
+    sample = views.load_sample(server.app.store, source_id)
+    assert sample is not None
+    result = sample.full.results["fragment-size"]
+    assert result.status == "ok"
+    sample.full.results["fragment-size"] = result.model_copy(update={
+        "metrics": [*result.metrics, Metric(metric_id="missing_library_fixture", value=0.123)],
+    })
+    original = views.load_sample
+    monkeypatch.setattr(api_module.views, "load_sample",
+                        lambda store, source: sample if source == source_id else original(store, source))
+
+    payload = server.app.api.sample(sample.id12)
+    assert payload["library_health"]["no_library_entry"] == 1
+    unknown = next(metric for algorithm in payload["algorithms"]
+                   if algorithm["algorithm_id"] == "fragment-size"
+                   for metric in algorithm["metrics"] if metric["metric_id"] == "missing_library_fixture")
+    assert (unknown["state"], unknown["reason"], unknown["value"]) == (
+        "no_reference", "no_library_entry", 0.123)
+
+    for route, expected in (("findings", "missing_library_fixture"),
+                            ("trust-qc", "no_library_entry: 1")):
+        profile = tmp_path / route
+        dom = _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{sample.id12}/{route}"],
+            profile, ok=lambda page, expected=expected: 'data-ready="1"' in page and expected in page,
+        )
+        assert expected in dom
+        if route == "findings":
+            assert "No reference" in dom and "no library entry" in dom
+
+
 def _sample_with_unvalidated_wps(server, monkeypatch):
     """Keep the real stored sample and add WPS measurements at each control depth."""
     api = api_module.LabApi(server.app.store)
@@ -499,8 +537,13 @@ def _read_debug_port(path: Path) -> str | None:
 
 
 def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90,
-             action: str | None = None, interact=None) -> str:
-    """Wait for one Chrome page, optionally exercising it through DevTools."""
+             action: str | None = None, interact=None,
+             viewport: tuple[int, int] | None = None) -> str:
+    """Wait for one Chrome page, optionally setting its CSS viewport before load.
+
+    Chrome can clamp ``--window-size=360,740`` to a wider inner viewport. CDP
+    emulation before navigation lets load-time layout probes test actual 360px.
+    """
 
     deadline = time.monotonic() + timeout
     events: deque[str] = deque(maxlen=8)
@@ -511,7 +554,7 @@ def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90,
     with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
         process = subprocess.Popen(
             [*argv[:-1], "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0",
-             argv[-1]],
+             "about:blank" if viewport else argv[-1]],
             stdout=stdout, stderr=stderr, start_new_session=os.name != "nt",
         )
         try:
@@ -526,7 +569,9 @@ def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90,
                             targets = json.load(response)
                         target_url = next(
                             (target["webSocketDebuggerUrl"] for target in targets
-                             if target.get("type") == "page" and target.get("url", "").startswith("http://127.0.0.1:")),
+                            if target.get("type") == "page" and (
+                                target.get("url", "").startswith("http://127.0.0.1:") or
+                                (viewport is not None and target.get("url") == "about:blank"))),
                             None,
                         )
                     except (OSError, ValueError, KeyError):
@@ -568,6 +613,15 @@ def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90,
 
             command("Runtime.enable")
             command("Log.enable")
+            if viewport is not None:
+                width, height = viewport
+                command("Emulation.setDeviceMetricsOverride", {
+                    "width": width, "height": height, "deviceScaleFactor": 1, "mobile": False,
+                })
+                assert evaluate("window.innerWidth") == width, "CDP did not set the requested CSS viewport"
+                destination = urllib.parse.urlsplit(argv[-1])
+                assert destination.scheme == "http" and destination.hostname == "127.0.0.1"
+                command("Page.navigate", {"url": argv[-1]})
             action_done = False
             def read_state() -> dict:
                 nonlocal dom, action_done

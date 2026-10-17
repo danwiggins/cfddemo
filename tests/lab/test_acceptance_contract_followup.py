@@ -92,6 +92,35 @@ def test_findings_show_every_strip_variant_and_missing_library_entry(tmp_path) -
 
 
 @needs_chrome
+def test_findings_details_break_down_each_reason_count(tmp_path) -> None:
+    sample = _sample()
+    metrics = [metric for algorithm in sample["algorithms"] for metric in algorithm["metrics"]]
+    assert len(metrics) >= 6
+    for metric, state, reason in zip(
+        metrics[:6],
+        ("not_interpretable", "not_interpretable", "not_interpretable",
+         "no_reference", "no_reference", "in_range"),
+        ("depth", "depth", "qc", "cohort_too_small", "no_library_entry", None),
+        strict=True,
+    ):
+        metric.update(state=state, reason=reason)
+    metrics[4].update(entry=None, label="Missing library entry fixture")
+
+    with _server(tmp_path, sample) as server:
+        dom = _dom(server, tmp_path / "browser", route=f"/sample/{ID12}/findings")
+
+    summaries = re.findall(r'<details class="finding-group"><summary>(.*?)</summary>', dom, re.DOTALL)
+    assert len(summaries) == 3
+    summary_text = [" ".join(re.sub(r"<[^>]+>", "", item).split()) for item in summaries]
+    assert summary_text == [
+        "Not interpretable (3) depth 2 · qc 1",
+        "No reference (2) cohort too small 1 · no library entry 1",
+        "In range (1)",
+    ]
+    assert "Missing library entry fixture" in dom
+
+
+@needs_chrome
 def test_sample_switcher_round_trips_through_home_deep_link(tmp_path) -> None:
     second_id = "aaaaaaaaaaaa"
     first = _sample()

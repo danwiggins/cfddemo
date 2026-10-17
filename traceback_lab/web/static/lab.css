@@ -30,7 +30,7 @@ body.lab { background: #f3f1ec; }
 .run-note { margin-left: .5rem; }
 .qc-band { display: inline-block; padding: .1rem .45rem; border: 1px solid var(--neutral); border-radius: .25rem; }
 .unverified { display: inline-block; padding: .15rem .45rem; background: #fff1c7; color: #573b00; font-weight: 700; font-size: .875rem; }
-.license-callout { margin: .75rem 0; padding: .75rem 1rem; border: 3px solid var(--license); background: #ffffff; }
+.license-callout { margin: .75rem 0; padding: .75rem 1rem; border: 3px solid var(--license); background: #ffffff; overflow-wrap: anywhere; }
 .license-callout h3 { font-size: 1.25rem; font-weight: 800; color: var(--ink); }
 .license-callout p { font-size: 1.25rem; font-weight: 700; margin: .25rem 0 0; }
 .license-pill { display: inline-block; padding: .1rem .5rem; border: 2px solid var(--license); border-radius: 1rem; font-size: .875rem; font-weight: 700; color: var(--ink); text-decoration: none; }
@@ -50,7 +50,11 @@ body.lab { background: #f3f1ec; }
 .reload { margin-left: .5rem; }
 pre.stderr { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; background: #f6f6f4; padding: .5rem; }
 #key-dialog { max-width: min(48rem, calc(100% - 2rem)); }
-@media (max-width: 47.99rem) { .lenses { flex-wrap: nowrap; overflow-x: auto; } .switcher { flex-basis: 100%; } }
+@media (max-width: 47.99rem) {
+  .lenses { flex-wrap: nowrap; overflow-x: auto; }
+  .switcher { flex-basis: 100%; min-width: 0; }
+  .switcher select { flex: 1 1 auto; min-width: 0; }
+}
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 .lenses a.disabled, main a.disabled { pointer-events: none; color: var(--muted); }
 /* ---- S6c: landing, Findings, Stability ---------------------------------------------- */
@@ -97,6 +101,7 @@ pre.stderr { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; 
 .example-pill { font-size: .8rem; margin-left: .35rem; }
 .findings-head { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: center; }
 .finding-card { margin: .75rem 0; padding: .75rem 1rem; background: #ffffff; border: 1px solid var(--rule); border-radius: .5rem; }
+.card-details { overflow-wrap: anywhere; }
 .card-head { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
 .card-value { font-size: 1.25rem; margin: .25rem 0; }
 .strip { margin: .25rem 0; }
