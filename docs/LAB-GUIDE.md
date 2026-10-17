@@ -241,6 +241,15 @@ publishes the bundle SHA-256 and source label. The registration requires
 `hash.k2d`, `opts.k2d`, `taxo.k2d`, and
 `database<READ_LENGTH>mers.kmer_distrib`. The Bracken read length must be
 75–500 bases. An altered or missing file makes the measurement unavailable.
+Registration records a bounded file-stat receipt for the sample page. The page
+checks that receipt without streaming the large database; execution planning
+and the worker verify the complete file bytes before and after classification.
+If the database is moved, register it as a new Lab root; this registration
+will not silently switch to another directory with identical bytes.
+An older registration without a page receipt can be refreshed in place with
+the same `lab microbial db add` command: it verifies all bytes before adding
+the receipt. The sample page reports that legacy registration as unavailable
+until refreshed.
 
 ```bash
 traceback lab microbial db add --directory KRAKEN_DB --read-length 75 \
@@ -262,6 +271,7 @@ An input with no primary QC-passing non-duplicate reads has no microbial rate
 or cohort comparison. If unmapped reads exist but all are too short or lack
 sequence, the rate and cohort comparison are also unavailable. An input with
 only confidently human-mapped reads has a measured zero candidate burden.
+The QC panel counts missing-sequence unmapped reads separately from short reads.
 
 The profile is speculative and marked **PRIVACY**. A compatible healthy-v1
 cohort of at least ten *other* samples supplies a per-taxon and overall 97.5th

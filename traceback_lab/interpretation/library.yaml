@@ -2576,6 +2576,13 @@ entries:
     meaning_low: "Few reads were excluded by the registered length."
     headline: false
   - <<: *microbial_base
+    metric_id: missing_sequence_unmapped_reads
+    label: "Human-unmapped reads without sequence"
+    value_kind: count
+    meaning_high: "More unmapped reads lacked bases and could not be classified."
+    meaning_low: "Few unmapped reads lacked sequence."
+    headline: false
+  - <<: *microbial_base
     metric_id: classified_candidate_reads
     label: "Kraken2 classified candidate reads"
     value_kind: count

@@ -109,7 +109,7 @@ def profile_for_sample(store: LabStore, sample: SampleView, generation: CohortGe
         return {"state": "tool_unavailable", "reason": "Kraken2/Bracken tools or required upstream source-install helpers are unavailable; restore the pinned toolchain",
                 "taxa": []}
     try:
-        database = inspect_database(store)
+        database = inspect_database(store, verify_bytes=False)
         reference = resolve_reference(store.root, envelope.provenance.reference_id, example=True)
         upstream = sample.full.results["read-summary"].provenance.parameters_sha256
         expected = execution_identity(

@@ -45,6 +45,69 @@ def test_database_is_pinned_and_refuses_changed_bytes(tmp_path) -> None:
         inspect_database(store)
 
 
+def test_sample_page_uses_bounded_receipt_and_reports_changed_database(tmp_path, monkeypatch) -> None:
+    from traceback_lab import microbial_db as db, microbial_view as view
+
+    store, directory = _database(tmp_path)
+    database = inspect_database(store)
+    source, input_id, identity = "a" * 64, "b" * 64, "c" * 64
+    prov = provenance(tool="fixture", parameters_sha256=identity, source_id=source,
+                      input_id=input_id, reference_id="ref")
+    summary = ResultEnvelope(algorithm_id="read-summary", algorithm_version="1", status="ok", provenance=prov)
+    measured = ResultEnvelope(algorithm_id="microbial", algorithm_version="3", status="ok", provenance=prov,
+                              metrics=[Metric(metric_id="microbial_rpm_primary", value=0.0)])
+    sample = SampleView(source, source[:12], False,
+                        InputView("full", input_id, None, {}, {"read-summary": summary, "microbial": measured}))
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "microbial_profile.json").write_text(json.dumps({
+        "schema": "traceback.lab.microbial-profile.v1", "source_id": source, "input_id": input_id,
+        "database_sha256": database.sha256, "database_source_label": database.source_label,
+        "read_length": database.read_length, "denominator": 1, "candidate_unmapped_reads": 0,
+        "too_short_unmapped_reads": 0, "missing_sequence_unmapped_reads": 0,
+        "omitted_taxa": 0, "taxa": [],
+    }))
+    monkeypatch.setattr(view, "_tool", lambda name: (name, "e" * 64))
+    monkeypatch.setattr(view, "resolve_reference", lambda *_args, **_kwargs: SimpleNamespace(sha256="f" * 64))
+    monkeypatch.setattr(view, "execution_identity", lambda *_args, **_kwargs: identity)
+    monkeypatch.setattr(store, "selected_artifacts", lambda *_args: artifacts)
+    monkeypatch.setattr(db, "_digest_file", lambda _path: pytest.fail("page streamed database bytes"))
+
+    assert profile_for_sample(store, sample, None, None, "not_built")["state"] == "cohort_unavailable"
+    (directory / "hash.k2d").write_bytes(b"changed and different sized bytes")
+    assert profile_for_sample(store, sample, None, None, "not_built")["state"] == "asset_unavailable"
+    (directory / "hash.k2d").unlink()
+    assert profile_for_sample(store, sample, None, None, "not_built")["state"] == "asset_unavailable"
+
+
+def test_same_bytes_at_different_database_directory_are_refused(tmp_path) -> None:
+    store, directory = _database(tmp_path)
+    alternate = tmp_path / "alternate-db"
+    alternate.mkdir()
+    for file in directory.iterdir():
+        (alternate / file.name).write_bytes(file.read_bytes())
+    with store.writer("microbial db add", "r-20261016-0001-aabb", step="database"):
+        with pytest.raises(MicrobialDbError, match="different directory"):
+            register_database(store, alternate, 75, "synthetic database")
+
+
+def test_legacy_registration_upgrades_by_full_verification(tmp_path) -> None:
+    store, directory = _database(tmp_path)
+    manifest = store.lab / "assets" / "microbial-db" / "manifest.json"
+    old = json.loads(manifest.read_text())
+    old["schema"] = "traceback.lab.microbial-db.v1"
+    del old["file_stats"]
+    manifest.write_text(json.dumps(old))
+    with pytest.raises(MicrobialDbError, match="re-registration"):
+        inspect_database(store, verify_bytes=False)
+    assert inspect_database(store).sha256 == old["sha256"]
+    with store.writer("microbial db add", "r-20261016-0002-aabb", step="database"):
+        upgraded = register_database(store, directory, 75, "synthetic database")
+    assert upgraded.sha256 == old["sha256"]
+    assert json.loads(manifest.read_text())["schema"] == "traceback.lab.microbial-db.v2"
+    assert inspect_database(store, verify_bytes=False).sha256 == old["sha256"]
+
+
 def test_database_registration_and_inspection_cli(tmp_path, capsys) -> None:
     from traceback_runner import cli
 
@@ -307,7 +370,7 @@ def test_cohort_975_zero_fills_complete_absent_taxa_and_refuses_missing_referenc
                   "estimated_reads": 1.0, "rpm_primary": 4.0}],
     }))
     monkeypatch.setattr(view, "_tool", lambda name: (name, "e" * 64))
-    monkeypatch.setattr(view, "inspect_database", lambda _store: SimpleNamespace(
+    monkeypatch.setattr(view, "inspect_database", lambda _store, **_kwargs: SimpleNamespace(
         sha256="d" * 64, source_label="synthetic database", read_length=75))
     monkeypatch.setattr(view, "resolve_reference", lambda *_args, **_kwargs: SimpleNamespace(sha256="f" * 64))
     monkeypatch.setattr(view, "execution_identity", lambda *_args, **_kwargs: identity)
