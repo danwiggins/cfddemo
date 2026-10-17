@@ -16,6 +16,12 @@ if (any(vapply(as.list(columns), function(x) any(is.infinite(x) | is.nan(x)), lo
     !any(is.finite(columns$Median))) {
   stop("panel has no finite median or contains infinite values")
 }
+expected_median <- apply(as.matrix(columns[, source_ids, drop = FALSE]),
+                         1L, median, na.rm = TRUE)
+if (!isTRUE(all.equal(as.numeric(columns$Median), as.numeric(expected_median),
+                      tolerance = 0, check.attributes = FALSE))) {
+  stop("panel median differs from its source counts")
+}
 if (reference != "-") {
   full <- readRDS(reference)
   if (!inherits(full, "GRanges") ||

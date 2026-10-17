@@ -75,6 +75,8 @@ def test_full_and_leave_one_out_panels_are_distinct_immutable_assets(tmp_path: P
     expected = tuple(item.source_id for item in _inputs(store))
     assert build.source_ids == expected
     assert build.pon_n == 10
+    assert build.provenance().builder_source_sha256 == pon.BUILDER_SOURCE_SHA256
+    assert build.provenance().builder_sha256 == pon.BUILDER_SHA256
     assert calls[0] == ("full", expected)
     assert len(calls) == 11
     assert {excluded: included for label, included in calls[1:]
@@ -146,6 +148,11 @@ def test_cohort_binding_uses_member_loo_and_full_for_nonmember(tmp_path: Path, m
         pon.binding_for(store, generation, _sha(1), **{**expected, "aligner_identity": "other aligner"})
     with pytest.raises(LabProblem, match="TBX-LAB-020"):
         pon.binding_for(store, generation, _sha(1), **{**expected, "gc_sha256": _sha(901)})
+    other_builder = generation.model_copy(update={
+        "pon_build": generation.pon_build.model_copy(update={"builder_sha256": _sha(901)}),
+    })
+    with pytest.raises(LabProblem, match="TBX-LAB-020"):
+        pon.binding_for(store, other_builder, _sha(1), **expected)
     stored = store.lab / "assets" / "pon" / f"{build.full_asset_sha256}.rds"
     stored.write_bytes(b"changed")
     with pytest.raises(LabProblem, match="TBX-LAB-020"):
@@ -172,7 +179,8 @@ def test_explicit_selection_refuses_generation_without_panel(tmp_path: Path) -> 
                         centromere_sha256=_sha(703))
 
 
-def test_vendored_builder_matches_reviewed_upstream_bytes() -> None:
+def test_source_and_adapted_builder_match_pinned_bytes() -> None:
+    assert hashlib.sha256(pon.BUILDER_SOURCE_SCRIPT.read_bytes()).hexdigest() == pon.BUILDER_SOURCE_SHA256
     assert hashlib.sha256(pon.BUILDER_SCRIPT.read_bytes()).hexdigest() == pon.BUILDER_SHA256
 
 
@@ -193,10 +201,7 @@ def test_builder_passes_canonical_protocol_arguments(tmp_path: Path, monkeypatch
     assert panel.read_bytes() == b"synthetic RDS"
     script, checksum, args = observed[0]
     assert script == pon.BUILDER_SCRIPT and checksum == pon.BUILDER_SHA256
-    assert args[args.index("--chrs") + 1] == "c(1:22)"
-    assert args[args.index("--chrNormalize") + 1] == "c(1:22)"
-    assert args[args.index("--genomeStyle") + 1] == "UCSC"
-    assert args[args.index("--method") + 1] == "median"
+    assert args[::2] == ("--filelist", "--gcWig", "--mapWig", "--centromere", "--outfile")
     assert Path(args[args.index("--filelist") + 1]).read_text() == f"{wig}\n"
 
 

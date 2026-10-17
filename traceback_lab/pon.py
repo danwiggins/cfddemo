@@ -22,8 +22,10 @@ from .identity import SHA256_PATTERN
 from .problems import LabProblem
 from .store import LabStore, open_regular_no_follow
 
-BUILDER_SHA256 = "64d67f0c6526d5de1fe914c83a5ab5dccf63140f23b0ad9f4260f9a282642e05"
-BUILDER_SCRIPT = Path(__file__).parent / "pon_scripts" / "createPanelOfNormals.R"
+BUILDER_SOURCE_SHA256 = "64d67f0c6526d5de1fe914c83a5ab5dccf63140f23b0ad9f4260f9a282642e05"
+BUILDER_SOURCE_SCRIPT = Path(__file__).parent / "pon_scripts" / "createPanelOfNormals.R"
+BUILDER_SHA256 = "785e48ab18c15bb4c1168d8ac941843ea31e9cc1ba93c6437280b00671dffb5b"
+BUILDER_SCRIPT = Path(__file__).parent / "pon_scripts" / "buildPanelLab.R"
 VALIDATOR_SCRIPT = Path(__file__).parent / "pon_scripts" / "validatePanelOfNormals.R"
 MIN_PON_N = 10
 
@@ -47,6 +49,7 @@ class PonBuild:
     grid_sha256: str
     counting_parameters_sha256: str
     toolchain_lock_sha256: str
+    builder_source_sha256: str
     builder_sha256: str
     gc_sha256: str
     map_sha256: str
@@ -61,7 +64,8 @@ class PonBuild:
             source_ids=self.source_ids, reference_sha256=self.reference_sha256,
             aligner_identity=self.aligner_identity, grid_sha256=self.grid_sha256,
             counting_parameters_sha256=self.counting_parameters_sha256,
-            toolchain_lock_sha256=self.toolchain_lock_sha256, builder_sha256=self.builder_sha256,
+            toolchain_lock_sha256=self.toolchain_lock_sha256,
+            builder_source_sha256=self.builder_source_sha256, builder_sha256=self.builder_sha256,
             gc_sha256=self.gc_sha256, map_sha256=self.map_sha256,
             centromere_sha256=self.centromere_sha256,
         )
@@ -164,8 +168,7 @@ def _create_panel(
         (
             "--filelist", str(filelist), "--gcWig", str(assets.gc_wig),
             "--mapWig", str(assets.map_wig), "--centromere", str(assets.centromere),
-            "--outfile", str(prefix), "--method", "median", "--chrs", "c(1:22)",
-            "--chrNormalize", "c(1:22)", "--genomeStyle", "UCSC",
+            "--outfile", str(prefix),
         ),
         panel_dir,
     )
@@ -235,8 +238,9 @@ def build_panels(store: LabStore, inputs: tuple[PonInput, ...]) -> PonBuild:
     aligners = {item.aligner_identity for item in ordered}
     if len(references) != 1 or len(aligners) != 1:
         raise _problem("the PoN inputs do not share reference and aligner identity", "Use one protocol-matched cohort")
-    if _sha256(BUILDER_SCRIPT) != BUILDER_SHA256:
-        raise _problem("the pinned PoN builder script changed", "Restore the packaged ichorCNA script")
+    if (_sha256(BUILDER_SOURCE_SCRIPT) != BUILDER_SOURCE_SHA256
+            or _sha256(BUILDER_SCRIPT) != BUILDER_SHA256):
+        raise _problem("a pinned PoN builder script changed", "Restore the packaged builder scripts")
     from traceback_runner.references import ReferenceProblem
     from traceback_runner.toolchain import ToolchainProblem, resolve_copy_number_toolchain
 
@@ -300,7 +304,7 @@ def build_panels(store: LabStore, inputs: tuple[PonInput, ...]) -> PonBuild:
         aligner_identity=ordered[0].aligner_identity,
         grid_sha256=grid_sha256, counting_parameters_sha256=counting_parameters_sha256,
         toolchain_lock_sha256=toolchain.identity.lock_sha256,
-        builder_sha256=BUILDER_SHA256,
+        builder_source_sha256=BUILDER_SOURCE_SHA256, builder_sha256=BUILDER_SHA256,
         gc_sha256=asset_hashes["gc_wig"], map_sha256=asset_hashes["map_wig"],
         centromere_sha256=asset_hashes["centromere"],
     )
@@ -326,6 +330,8 @@ def binding_for(
         raise _problem("the selected cohort has no qualified PoN build record", "Rebuild the cohort with a verified panel")
     if (provenance.reference_sha256 != reference_sha256
             or provenance.aligner_identity != aligner_identity
+            or provenance.builder_source_sha256 != BUILDER_SOURCE_SHA256
+            or provenance.builder_sha256 != BUILDER_SHA256
             or provenance.toolchain_lock_sha256 != toolchain_lock_sha256
             or provenance.counting_parameters_sha256 != counting_parameters_sha256
             or provenance.gc_sha256 != gc_sha256
@@ -365,4 +371,4 @@ def require_grid(selection: PonSelection, actual_grid_sha256: str) -> None:
         raise _problem("the selected PoN grid differs from the current readCounter grid", "Use the matching inputs or rebuild the cohort")
 
 
-__all__ = ["BUILDER_SHA256", "MIN_PON_N", "PonBuild", "PonInput", "PonSelection", "binding_for", "build_panels", "require_grid"]
+__all__ = ["BUILDER_SOURCE_SHA256", "BUILDER_SHA256", "MIN_PON_N", "PonBuild", "PonInput", "PonSelection", "binding_for", "build_panels", "require_grid"]

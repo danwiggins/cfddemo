@@ -76,6 +76,7 @@ class CohortPon(BaseModel):
     grid_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
     counting_parameters_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
     toolchain_lock_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
+    builder_source_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
     builder_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
     gc_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
     map_sha256: str = Field(pattern=SHA256_PATTERN.pattern)
