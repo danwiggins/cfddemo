@@ -134,6 +134,11 @@ def test_cohort_reads_recorded_effective_identity_without_runtime_probe(
     add_sample(store, "healthy", source_id)
     generation = build_cohort(store, "healthy")
     assert [result.parameters_sha256 for result in generation.members[0].results] == [identity]
+    if name == "cell-origin":
+        attempt = store.selected_attempt(input_id, name, identity)
+        assert attempt is not None
+        (attempt / "execution_plan.json").write_text(json.dumps({**plan, "platform": "illumina"}))
+        assert build_cohort(store, "healthy").members[0].results == ()
     if name == "methylbert":
         attempt = store.selected_attempt(input_id, name, identity)
         assert attempt is not None
