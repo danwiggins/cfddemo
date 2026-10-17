@@ -28,6 +28,7 @@
     route: { name: "home" },
     loading: true,
     runLogLines: new Map(),
+    staleRunLogCleared: false,
   };
   window.TracebackLab = { state, LENSES, h, render, chart, dataTable, fmt };
 
@@ -436,9 +437,10 @@
         over_4096_lines: "log over 4,096 lines", malformed_or_empty: "log malformed or empty",
         latest_run_pointer_unavailable: "latest-run pointer unavailable" }[logIssue.reason] || "log unavailable");
       if (state.generationAtLoad === null) state.generationAtLoad = status.generation;
-      if (status.generation > state.generationAtLoad) {
+      if (status.generation > state.generationAtLoad && !state.staleRunLogCleared) {
         state.runLogLines.clear();
         document.querySelectorAll("[data-run-log-line]").forEach((node) => node.replaceChildren());
+        state.staleRunLogCleared = true;
       }
       if (status.active) {
         const minutes = Math.max(0, Math.round((Date.now() - Date.parse(status.active.started_utc)) / 60000));
