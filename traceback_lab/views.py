@@ -41,6 +41,15 @@ def selected_results(
     store: LabStore, input_id: str, identities: Mapping[str, str] | None = None,
     *, issues: dict[str, set[str]] | None = None,
 ) -> dict[str, ResultEnvelope]:
+    """Return only validated selected results; never fall back past an invalid selection."""
+
+    return _selected_results_with_unreadable(store, input_id, identities, issues=issues)[0]
+
+
+def _selected_results_with_unreadable(
+    store: LabStore, input_id: str, identities: Mapping[str, str] | None = None,
+    *, issues: dict[str, set[str]] | None = None,
+) -> tuple[dict[str, ResultEnvelope], set[str], set[str], dict[str, str]]:
     """The selected result per algorithm for one input.
 
     Without ``identities`` the latest published execution identity wins; with them (a
@@ -52,12 +61,12 @@ def selected_results(
     """
 
     base = store.results_dir / input_id
-    out: dict[str, tuple[int | None, ResultEnvelope]] = {}
+    out: dict[str, tuple[int | None, ResultEnvelope, str]] = {}
     ambiguous: set[str] = set()
-    unreadable: set[str] = set()
     stale: set[str] = set()
+    invalid_orders: dict[str, int | None] = {}
     if not base.is_dir():
-        return {}
+        return {}, set(), set(), {}
     for algorithm_dir in sorted(base.iterdir()):
         if not algorithm_dir.is_dir():
             continue
@@ -76,7 +85,7 @@ def selected_results(
                     stale.add(algorithm_dir.name)
                 continue
             try:
-                selected = store.selected_result_with_order(
+                selected = store.selected_result_with_attempt_and_order(
                     input_id, algorithm_dir.name, identity_dir.name,
                 )
             except (OSError, ValueError):
@@ -90,21 +99,35 @@ def selected_results(
                     continue
                 except OSError:
                     pass
-                unreadable.add(algorithm_dir.name)
+                order = store.selection_order_hint(input_id, algorithm_dir.name, identity_dir.name)
+                if algorithm_dir.name not in invalid_orders:
+                    invalid_orders[algorithm_dir.name] = order
+                elif order is None or invalid_orders[algorithm_dir.name] is None:
+                    invalid_orders[algorithm_dir.name] = None
+                else:
+                    invalid_orders[algorithm_dir.name] = max(invalid_orders[algorithm_dir.name], order)
                 continue
-            envelope, order = selected
+            attempt_id, envelope, order = selected
             current = out.get(algorithm_dir.name)
             if current is None or (order is not None and (current[0] is None or order > current[0])):
-                out[algorithm_dir.name] = (order, envelope)
+                out[algorithm_dir.name] = (order, envelope, attempt_id)
                 ambiguous.discard(algorithm_dir.name)
             elif order == current[0]:
                 ambiguous.add(algorithm_dir.name)
+    unreadable = {
+        algorithm_id for algorithm_id, order in invalid_orders.items()
+        if (order is None or algorithm_id not in out or out[algorithm_id][0] is None
+            or order >= out[algorithm_id][0])
+    }
     if issues is not None:
         issues["unreadable"] = unreadable
         issues["ambiguous"] = ambiguous - unreadable
         issues["stale"] = stale - out.keys()
     return {
-        key: value for key, (_, value) in out.items()
+        key: value for key, (_, value, _) in out.items()
+        if key not in ambiguous and key not in unreadable
+    }, unreadable, ambiguous - unreadable, {
+        key: attempt_id for key, (_, _, attempt_id) in out.items()
         if key not in ambiguous and key not in unreadable
     }
 
@@ -120,6 +143,7 @@ class InputView:
     unreadable: set[str] = field(default_factory=set)
     ambiguous: set[str] = field(default_factory=set)
     stale: set[str] = field(default_factory=set)
+    attempt_ids: dict[str, str] = field(default_factory=dict)
 
     def depth_x(self) -> float | None:
         for envelope in self.results.values():
@@ -158,42 +182,92 @@ def load_sample(store: LabStore, source_id: str) -> SampleView | None:
     platform_unverified = platform == "unknown"
     legacy_not_ont = (isinstance(manifest, Mapping) and manifest.get("kind") == "prealigned"
                       and "platform" not in manifest and platform == "illumina")
+    algorithms = load_registry()
     supported: set[str] | None = None
     if platform_unverified:
         supported = set()
     elif legacy_not_ont:
-        supported = {algorithm.id for algorithm in load_registry() if "illumina" in algorithm.requires.platforms}
+        supported = {algorithm.id for algorithm in algorithms if "illumina" in algorithm.requires.platforms}
     skip_message = (
         "Stored input platform cannot be verified against its BAM; restore the registered input before viewing results"
         if platform_unverified else
         "Legacy result lacks verified ONT provenance; rerun or repair this sample"
     )
+    current_cn_version = next(
+        (algorithm.version for algorithm in algorithms if algorithm.id == "copy-number"), None,
+    )
 
     def visible_results(
         input_id: str, identities: Mapping[str, str] | None = None,
         *, issues: dict[str, set[str]] | None = None,
-    ) -> dict[str, ResultEnvelope]:
-        selected = selected_results(store, input_id, identities, issues=issues)
-        if supported is None:
-            return selected
-        return {
-            algorithm_id: envelope if algorithm_id in supported else ResultEnvelope(
+    ) -> tuple[dict[str, ResultEnvelope], set[str], set[str], dict[str, str]]:
+        selected, unreadable, ambiguous, attempts = _selected_results_with_unreadable(
+            store, input_id, identities, issues=issues,
+        )
+        old_cn = selected.get("copy-number")
+        superseded_cn = (old_cn is not None and old_cn.status == "ok" and (current_cn_version is None
+                         or old_cn.algorithm_version != current_cn_version))
+        superseded_ids = {"copy-number"} if superseded_cn else set()
+        for algorithm in algorithms:
+            dependent = selected.get(algorithm.id)
+            if ("copy-number" not in algorithm.upstream or dependent is None
+                    or dependent.status != "ok" or superseded_cn):
+                continue
+            if old_cn is None or old_cn.status != "ok" or current_cn_version is None:
+                superseded_ids.add(algorithm.id)
+                continue
+            consumed = store.selected_upstream_selections(
+                input_id, algorithm.id, dependent.provenance.parameters_sha256,
+            )
+            copy_number = next((item for item in consumed or () if item["algorithm_id"] == "copy-number"), None)
+            if copy_number is None:
+                superseded_ids.add(algorithm.id)
+                continue
+            selected_cn_attempt = store.selected_attempt(
+                input_id, "copy-number", old_cn.provenance.parameters_sha256,
+            )
+            upstream = store.read_result(
+                copy_number["input_id"], "copy-number", copy_number["parameters_sha256"],
+            )
+            if (upstream is None or upstream.algorithm_version != current_cn_version
+                    or copy_number["input_id"] != input_id
+                    or copy_number["parameters_sha256"] != old_cn.provenance.parameters_sha256
+                    or selected_cn_attempt is None
+                    or copy_number["attempt_id"] != selected_cn_attempt.name):
+                superseded_ids.add(algorithm.id)
+        while True:
+            added = {
+                algorithm.id for algorithm in algorithms
+                if algorithm.id in selected and any(upstream in superseded_ids for upstream in algorithm.upstream)
+            } - superseded_ids
+            if not added:
+                break
+            superseded_ids.update(added)
+
+        def visible(algorithm_id: str, envelope: ResultEnvelope) -> ResultEnvelope:
+            if supported is not None and algorithm_id not in supported:
+                reason, message = "platform", skip_message
+            elif algorithm_id in superseded_ids and envelope.status == "ok":
+                reason = "superseded_method"
+                message = "Selected copy-number method or its consumed provenance is not current; rerun this input"
+            else:
+                return envelope
+            return ResultEnvelope(
                 algorithm_id=envelope.algorithm_id,
                 algorithm_version=envelope.algorithm_version,
-                status="skipped",
-                skip_reason="platform",
-                skip_message=skip_message,
+                status="skipped", skip_reason=reason, skip_message=message,
                 provenance=envelope.provenance,
             )
+
+        visible_selected = {
+            algorithm_id: visible(algorithm_id, envelope)
             for algorithm_id, envelope in selected.items()
         }
+        return visible_selected, unreadable, ambiguous, attempts
 
-    full_issues: dict[str, set[str]] = {}
-    full = InputView(
-        "full", full_input, None, {}, visible_results(full_input, issues=full_issues),
-        unreadable=full_issues.get("unreadable", set()),
-        ambiguous=full_issues.get("ambiguous", set()),
-    )
+    full_results, unreadable, ambiguous, attempts = visible_results(full_input)
+    full = InputView("full", full_input, None, {}, full_results, unreadable=unreadable,
+                     ambiguous=ambiguous, attempt_ids=attempts)
     identities = {alg: envelope.provenance.parameters_sha256 for alg, envelope in full.results.items()}
     derived = []
     for entry in record.get("derived", []):
@@ -201,16 +275,18 @@ def load_sample(store: LabStore, source_id: str) -> SampleView | None:
             continue
         fraction = 0.5 if entry["transform"] == "split" else float(entry["parameters"].get("fraction", 1.0))
         issues: dict[str, set[str]] = {}
+        derived_results, derived_unreadable, derived_ambiguous, derived_attempts = visible_results(
+            entry["input_id"], identities, issues=issues,
+        )
         derived.append(
             InputView(
                 entry["label"],
                 entry["input_id"],
                 entry["transform"],
                 entry.get("parameters", {}),
-                visible_results(entry["input_id"], identities, issues=issues),
+                derived_results,
                 fraction=fraction if entry["transform"] in ("downsample", "split") else 1.0,
-                unreadable=issues.get("unreadable", set()),
-                ambiguous=issues.get("ambiguous", set()),
+                unreadable=derived_unreadable, ambiguous=derived_ambiguous, attempt_ids=derived_attempts,
                 stale=issues.get("stale", set()),
             )
         )
