@@ -346,7 +346,8 @@ def test_builder_recomputes_each_loo_before_selecting_generation(tmp_path: Path,
         loo_asset_sha256s={source_id: f"{index:064x}" for index, source_id in enumerate(sources, 101)},
         reference_sha256=f"{900:064x}", aligner_identity="minimap2 2.28; samtools 1.20",
         grid_sha256="b" * 64, counting_parameters_sha256="c" * 64,
-        toolchain_lock_sha256="d" * 64, builder_sha256="e" * 64,
+        toolchain_lock_sha256="d" * 64, builder_source_sha256="e" * 64,
+        builder_sha256="3" * 64, validator_sha256="4" * 64,
         gc_sha256="f" * 64, map_sha256="1" * 64, centromere_sha256="2" * 64,
     )
     monkeypatch.setattr(pon, "build_panels", lambda *_: build)
@@ -378,7 +379,8 @@ def test_failed_member_recompute_keeps_previous_generation(tmp_path: Path, monke
         loo_asset_sha256s={source_id: f"{index:064x}" for index, source_id in enumerate(sources, 101)},
         reference_sha256=f"{900:064x}", aligner_identity="minimap2 2.28; samtools 1.20",
         grid_sha256="b" * 64, counting_parameters_sha256="c" * 64,
-        toolchain_lock_sha256="d" * 64, builder_sha256="e" * 64,
+        toolchain_lock_sha256="d" * 64, builder_source_sha256="e" * 64,
+        builder_sha256="3" * 64, validator_sha256="4" * 64,
         gc_sha256="f" * 64, map_sha256="1" * 64, centromere_sha256="2" * 64,
     )
     monkeypatch.setattr(pon, "build_panels", lambda *_: build)
