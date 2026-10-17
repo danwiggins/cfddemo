@@ -73,11 +73,12 @@ def test_low_memory_warning_is_advisory_in_run_and_dry_run(lab_world, capsys, mo
     monkeypatch.setattr(doctor, "_ram", lambda: 8 * doctor.GIB)
     argv = ("run", str(lab_world["chunks"]), "--root", str(lab_world["root"]), "--mmi", str(shared_mmi))
     code, human, _ = _lab(capsys, *argv, "--dry-run")
-    assert code == 0 and "Less than 16 GiB" in human
+    assert code == 0 and "TBX-LAB-025: Less than 16 GiB" in human
     code, dry = _json(capsys, *argv, "--dry-run")
-    assert code == 0 and dry["data"]["warnings"][0]["kind"] == "low_memory"
+    assert code == 0 and [warning["code"] for warning in dry["data"]["warnings"]] == ["TBX-LAB-025"]
     code, human, _ = _lab(capsys, *argv)
     assert code == 0 and human.count("Less than 16 GiB") == 1
+    assert "TBX-LAB-025: Less than 16 GiB" in human
     assert "Use a machine with at least 16 GiB RAM" in human
     code, payload = _json(capsys, *argv)
     assert code == 0

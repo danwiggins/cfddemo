@@ -291,7 +291,7 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
                             "warnings": [memory_warning] if memory_warning else []}
     lines = [f"ROOT      {store.root}"]
     if memory_warning:
-        lines.append(f"WARN      {memory_warning['summary']}")
+        lines.append(f"WARN      {memory_warning['code']}: {memory_warning['summary']}")
         lines.append(f"          {memory_warning['fix']}")
     if len(args.inputs) == 1 and _is_stored(args.inputs[0]):
         source_id = resolve_sample(store, args.inputs[0])
@@ -384,7 +384,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
             )
             lines = [f"ROOT      {store.root}", "EXAMPLE   not generated yet: generated and aligned on first run (~200k reads, under a minute)"]
             if memory_warning:
-                lines.append(f"WARN      {memory_warning['summary']}")
+                lines.append(f"WARN      {memory_warning['code']}: {memory_warning['summary']}")
                 lines.append(f"          {memory_warning['fix']}")
             return EXIT_OK, _with_human(payload, lines, replace_data=True)
         # Generation and registration happen under the writer lock (below).
@@ -418,7 +418,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                 memory_warning = _memory_warning()
                 if memory_warning:
                     warnings.append(memory_warning)
-                    progress(f"WARN {memory_warning['summary']}")
+                    progress(f"WARN {memory_warning['code']}: {memory_warning['summary']}")
                     progress(f"     {memory_warning['fix']}")
                 example = False
                 if stored:
