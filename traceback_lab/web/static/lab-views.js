@@ -745,9 +745,52 @@
     const more = [];
     for (const id of ["end-motifs", "delfi-ratio", "long-tail", "mtdna"]) {
       const other = algo(sample, id);
-      if (other) more.push(h("section", { class: "panel" }, h("h2", {}, id), other.status === "ok"
-        ? h("table", { class: "data-table" }, h("tbody", {}, ...other.metrics.filter((m) => m.value === null || typeof m.value !== "object").map((m) => h("tr", {}, h("th", { scope: "row" }, m.label), h("td", {}, fmt(m.value, m.unit))))))
-        : absent(other, id), id === "end-motifs" || id === "delfi-ratio" ? flagPill("LEGAL") : ""));
+      if (!other) continue;
+      const panel = h("section", { class: "panel" }, h("h2", {}, id),
+        id === "end-motifs" || id === "delfi-ratio" ? flagPill("LEGAL") : "");
+      if (other.status !== "ok") {
+        panel.append(absent(other, id));
+      } else {
+        panel.append(...context(sample, id, new Set()), h("table", { class: "data-table" },
+          h("tbody", {}, ...other.metrics.filter((m) => m.value === null || typeof m.value !== "object")
+            .map((m) => h("tr", {}, h("th", { scope: "row" }, m.label), h("td", {}, fmt(m.value, m.unit)))))));
+        if (id === "end-motifs") {
+          const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading end-motif frequencies…"));
+          panel.append(h("p", { class: "help" }, "Aligned-reference 4-mers at both fragment ends; all 256 motifs are in the data table."), slot);
+          artifact(sample, id, "motif-freq").then((data) => {
+            if (!Array.isArray(data.motif) || data.motif.length !== 256 ||
+                !Array.isArray(data.count) || data.count.length !== 256 ||
+                !Array.isArray(data.freq) || data.freq.length !== 256) throw new Error("motif panel dimensions invalid");
+            const rows = data.motif.map((motif, i) => [motif, data.count[i], data.freq[i]]);
+            const top = [...rows].sort((a, b) => b[2] - a[2] || a[0].localeCompare(b[0])).slice(0, 16);
+            slot.replaceWith(chart("Sixteen most frequent aligned-end 4-mers; fraction of counted ends.", {
+              grid: { left: 60, right: 20, top: 20, bottom: 45 },
+              xAxis: { type: "category", name: "4-mer", data: top.map((row) => row[0]), axisLabel: { rotate: 45 } },
+              yAxis: { type: "value", name: "fraction", min: 0 },
+              series: [{ type: "bar", data: top.map((row) => row[2]), itemStyle: { color: "#1f5f8b" } }],
+            }, dataTable("All 256 aligned-end 4-mers", ["4-mer", "Count", "Fraction"], rows)));
+          }).catch((e) => slot.replaceWith(h("p", { class: "problem" }, `End-motif chart unavailable (${e.message}).`)));
+        }
+        if (id === "delfi-ratio") {
+          const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading short/long ratio track…"));
+          panel.append(h("p", { class: "help" }, "5 Mb genomic bins; short (100–150 bp) divided by long (151–220 bp), median-centred. No GC correction or classifier."), slot);
+          artifact(sample, id, "ratio-track").then((data) => {
+            if (!Array.isArray(data.bins) || data.bin_bp !== 5000000 || data.median_ratio_removed !== true) {
+              throw new Error("ratio track contract invalid");
+            }
+            const labels = data.bins.map((b) => `${b.contig}:${(b.start / 1e6).toFixed(0)} Mb`);
+            const values = data.bins.map((b) => b.centred);
+            slot.replaceWith(chart(`Median-centred short/long ratio across ${data.bins.length} genomic bins; gaps have no long fragments.`, {
+              grid: { left: 65, right: 20, top: 20, bottom: 45 },
+              xAxis: { type: "category", name: "5 Mb bin (genome order)", data: labels, axisLabel: { show: false } },
+              yAxis: { type: "value", name: "centred ratio" },
+              series: [{ type: "line", showSymbol: false, connectNulls: false, data: values, lineStyle: { color: "#1f5f8b" } }],
+            }, dataTable("DELFI-style 5 Mb bins", ["Contig", "Start (bp)", "Short", "Long", "Ratio", "Median-centred ratio"],
+              data.bins.map((b) => [b.contig, b.start, b.short, b.long, b.ratio, b.centred]))));
+          }).catch((e) => slot.replaceWith(h("p", { class: "problem" }, `Short/long ratio track unavailable (${e.message}).`)));
+        }
+      }
+      more.push(panel);
     }
     return [section, ...more, ...breakpointMotifSignals(sample)];
   }
