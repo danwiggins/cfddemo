@@ -140,7 +140,8 @@ def test_sample_pair_selector_overlay_and_table_fallback(tmp_path, monkeypatch) 
     from traceback_lab.web.server import RunningLabServer
 
     monkeypatch.setattr(web_api.LabApi, "samples", lambda self: {"samples": [
-        {"id12": SOURCE_A[:12], "example": False}, {"id12": SOURCE_B[:12], "example": False},
+        {"id12": SOURCE_A[:12], "run_utc": "", "depth_x": 1.0, "example": False},
+        {"id12": SOURCE_B[:12], "run_utc": "", "depth_x": 1.0, "example": False},
     ], "root_has_runs": True})
     monkeypatch.setattr(web_api.LabApi, "sample", lambda self, id12: {
         "found": True, "id12": id12, "algorithms": [], "catalog": [], "licenses": [],
