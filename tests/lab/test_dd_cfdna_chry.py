@@ -53,12 +53,26 @@ def _file(tmp_path: Path, *, status: str = "operator_verified", **changes) -> tu
     return path, hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _stored_input(store: LabStore, *, source_id: str = SOURCE,
+                  reference_sha256: str = REFERENCE) -> None:
+    store.ensure()
+    directory = store.inputs_dir / INPUT
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "manifest.json").write_text(json.dumps({
+        "input_id": INPUT, "source_id": source_id,
+        "reference_sha256": reference_sha256,
+    }))
+
+
 def test_registration_is_input_scoped_immutable_and_cli_inspectable(tmp_path: Path, capsys) -> None:
     path, digest = _file(tmp_path, calibration_source="private study label")
     original = path.read_bytes()
     store = LabStore(tmp_path / "root")
     with pytest.raises(DonorContractError, match="expected"):
         register_contract(store, path, "0" * 64)
+    with pytest.raises(DonorContractError, match="stored input manifest"):
+        register_contract(store, path, digest)
+    _stored_input(store)
     assert lab_main(["donor", "register", "--file", str(path), "--sha256", digest,
                      "--root", str(store.root), "--json"]) == 0
     data = json.loads(capsys.readouterr().out)
@@ -80,9 +94,26 @@ def test_registration_is_input_scoped_immutable_and_cli_inspectable(tmp_path: Pa
         register_contract(store, path, digest)
 
 
+@pytest.mark.parametrize("manifest_change", [
+    {"source_id": "d" * 64}, {"reference_sha256": "e" * 64},
+])
+def test_registration_refuses_wrong_stored_input_binding(
+    tmp_path: Path, manifest_change: dict,
+) -> None:
+    store = LabStore(tmp_path / "root")
+    _stored_input(store, **manifest_change)
+    path, digest = _file(tmp_path)
+    with pytest.raises(DonorContractError, match="does not match stored input provenance"):
+        register_contract(store, path, digest)
+    assert not (store.lab / "assets" / "dd-cfdna-chry" / INPUT).exists()
+    _stored_input(store)
+    assert register_contract(store, path, digest).manifest_sha256 == digest
+
+
 def test_registration_publish_failure_is_structured_and_path_free(tmp_path: Path, monkeypatch, capsys) -> None:
     path, digest = _file(tmp_path)
     root = tmp_path / "root"
+    _stored_input(LabStore(root))
     def fail_publish(*_args, **_kwargs):
         raise OSError(f"private path: {path}")
     monkeypatch.setattr(LabStore, "publish_directory", fail_publish)
@@ -99,6 +130,7 @@ def test_nested_registration_json_refuses_without_aborting_planning(
     tmp_path: Path, filename: str,
 ) -> None:
     store = LabStore(tmp_path / "root")
+    _stored_input(store)
     path, digest = _file(tmp_path)
     contract = register_contract(store, path, digest)
     registration = store.lab / "assets" / "dd-cfdna-chry" / INPUT
@@ -129,6 +161,7 @@ def test_contract_refuses_unverified_assertions_and_invalid_calibration(tmp_path
 
 def test_synthetic_calibration_skips_and_verified_mechanics_use_nonpar_y(tmp_path: Path, monkeypatch) -> None:
     store = LabStore(tmp_path / "root")
+    _stored_input(store)
     path, digest = _file(tmp_path, status="synthetic")
     with pytest.raises(DonorContractError, match="--allow-synthetic"):
         register_contract(store, path, digest)
@@ -158,6 +191,7 @@ def test_synthetic_calibration_skips_and_verified_mechanics_use_nonpar_y(tmp_pat
     # Exercise the registered path with an attested synthetic fixture. This
     # proves plumbing only; the fixture is not a biological verification.
     verified_root = LabStore(tmp_path / "verified")
+    _stored_input(verified_root)
     path, digest = _file(tmp_path, status="operator_verified")
     verified = register_contract(verified_root, path, digest)
     verified_ctx = replace(ctx, root=verified_root.root,
@@ -178,6 +212,7 @@ def test_synthetic_calibration_skips_and_verified_mechanics_use_nonpar_y(tmp_pat
 
 def test_run_rejects_consumed_contract_outside_planned_identity(tmp_path: Path, monkeypatch) -> None:
     store = LabStore(tmp_path / "root")
+    _stored_input(store)
     path, digest = _file(tmp_path)
     contract_a = register_contract(store, path, digest)
     contract_b = replace(contract_a, manifest_sha256="b" * 64)
@@ -225,6 +260,7 @@ def test_real_bam_summary_and_worker_obey_d21_and_par_boundaries(tmp_path: Path)
     ]
     ctx = context_for(tmp_path, contigs, reads)
     store = LabStore(tmp_path)
+    _stored_input(store)
     path, digest = _file(tmp_path, min_depth_x=0.001,
                          female_background_y_per_million=100_000,
                          male_full_donor_y_per_million=300_000)
@@ -249,6 +285,7 @@ def test_real_bam_summary_and_worker_obey_d21_and_par_boundaries(tmp_path: Path)
 def test_derived_donor_skip_publishes_through_runner(tmp_path: Path) -> None:
     store = LabStore(tmp_path / "root")
     store.ensure()
+    _stored_input(store)
     path, digest = _file(tmp_path)
     contract = register_contract(store, path, digest)
     run_id = new_run_id()
