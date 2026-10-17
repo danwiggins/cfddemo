@@ -39,6 +39,14 @@ _TIER_ORDER = {"PROVEN": 0, "NEWER": 1, "SPECULATIVE": 2, None: 3}
 def selected_results(
     store: LabStore, input_id: str, identities: Mapping[str, str] | None = None
 ) -> dict[str, ResultEnvelope]:
+    """Return only validated selected results; never fall back past an invalid selection."""
+
+    return _selected_results_with_unreadable(store, input_id, identities)[0]
+
+
+def _selected_results_with_unreadable(
+    store: LabStore, input_id: str, identities: Mapping[str, str] | None = None
+) -> tuple[dict[str, ResultEnvelope], set[str], set[str], dict[str, str]]:
     """The selected result per algorithm for one input.
 
     Without ``identities`` the latest published execution identity wins; with them (a
@@ -50,11 +58,11 @@ def selected_results(
     """
 
     base = store.results_dir / input_id
-    out: dict[str, tuple[int | None, ResultEnvelope]] = {}
+    out: dict[str, tuple[int | None, ResultEnvelope, str]] = {}
     ambiguous: set[str] = set()
     unreadable: set[str] = set()
     if not base.is_dir():
-        return {}
+        return {}, set(), set(), {}
     for algorithm_dir in sorted(base.iterdir()):
         if not algorithm_dir.is_dir():
             continue
@@ -65,7 +73,7 @@ def selected_results(
             if wanted is not None and identity_dir.name != wanted:
                 continue
             try:
-                selected = store.selected_result_with_order(
+                selected = store.selected_result_with_attempt_and_order(
                     input_id, algorithm_dir.name, identity_dir.name,
                 )
             except (OSError, ValueError):
@@ -81,15 +89,18 @@ def selected_results(
                     pass
                 unreadable.add(algorithm_dir.name)
                 continue
-            envelope, order = selected
+            attempt_id, envelope, order = selected
             current = out.get(algorithm_dir.name)
             if current is None or (order is not None and (current[0] is None or order > current[0])):
-                out[algorithm_dir.name] = (order, envelope)
+                out[algorithm_dir.name] = (order, envelope, attempt_id)
                 ambiguous.discard(algorithm_dir.name)
             elif order == current[0]:
                 ambiguous.add(algorithm_dir.name)
     return {
-        key: value for key, (_, value) in out.items()
+        key: value for key, (_, value, _) in out.items()
+        if key not in ambiguous and key not in unreadable
+    }, unreadable, ambiguous - unreadable, {
+        key: attempt_id for key, (_, _, attempt_id) in out.items()
         if key not in ambiguous and key not in unreadable
     }
 
@@ -102,6 +113,9 @@ class InputView:
     parameters: Mapping[str, Any]
     results: dict[str, ResultEnvelope]
     fraction: float = 1.0
+    unreadable: set[str] = field(default_factory=set)
+    ambiguous: set[str] = field(default_factory=set)
+    attempt_ids: dict[str, str] = field(default_factory=dict)
 
     def depth_x(self) -> float | None:
         for envelope in self.results.values():
@@ -151,37 +165,45 @@ def load_sample(store: LabStore, source_id: str) -> SampleView | None:
         "Legacy result lacks verified ONT provenance; rerun or repair this sample"
     )
 
-    def visible_results(input_id: str, identities: Mapping[str, str] | None = None) -> dict[str, ResultEnvelope]:
-        selected = selected_results(store, input_id, identities)
-        if supported is None:
-            return selected
-        return {
-            algorithm_id: envelope if algorithm_id in supported else ResultEnvelope(
-                algorithm_id=envelope.algorithm_id,
-                algorithm_version=envelope.algorithm_version,
-                status="skipped",
-                skip_reason="platform",
-                skip_message=skip_message,
-                provenance=envelope.provenance,
-            )
-            for algorithm_id, envelope in selected.items()
-        }
+    def visible_results(
+        input_id: str, identities: Mapping[str, str] | None = None,
+    ) -> tuple[dict[str, ResultEnvelope], set[str], set[str], dict[str, str]]:
+        selected, unreadable, ambiguous, attempts = _selected_results_with_unreadable(store, input_id, identities)
+        if supported is not None:
+            selected = {
+                algorithm_id: envelope if algorithm_id in supported else ResultEnvelope(
+                    algorithm_id=envelope.algorithm_id,
+                    algorithm_version=envelope.algorithm_version,
+                    status="skipped",
+                    skip_reason="platform",
+                    skip_message=skip_message,
+                    provenance=envelope.provenance,
+                )
+                for algorithm_id, envelope in selected.items()
+            }
+        return selected, unreadable, ambiguous, attempts
 
-    full = InputView("full", full_input, None, {}, visible_results(full_input))
+    full_results, unreadable, ambiguous, attempts = visible_results(full_input)
+    full = InputView("full", full_input, None, {}, full_results, unreadable=unreadable,
+                     ambiguous=ambiguous, attempt_ids=attempts)
     identities = {alg: envelope.provenance.parameters_sha256 for alg, envelope in full.results.items()}
     derived = []
     for entry in record.get("derived", []):
         if entry.get("parent_input_id") != full_input:
             continue
         fraction = 0.5 if entry["transform"] == "split" else float(entry["parameters"].get("fraction", 1.0))
+        derived_results, derived_unreadable, derived_ambiguous, derived_attempts = visible_results(
+            entry["input_id"], identities,
+        )
         derived.append(
             InputView(
                 entry["label"],
                 entry["input_id"],
                 entry["transform"],
                 entry.get("parameters", {}),
-                visible_results(entry["input_id"], identities),
+                derived_results,
                 fraction=fraction if entry["transform"] in ("downsample", "split") else 1.0,
+                unreadable=derived_unreadable, ambiguous=derived_ambiguous, attempt_ids=derived_attempts,
             )
         )
     try:
@@ -239,6 +261,10 @@ def cell_state(
 ) -> dict[str, Any]:
     envelope = view.results.get(algorithm_id)
     if envelope is None:
+        if algorithm_id in view.unreadable:
+            return {"state": "unavailable", "reason": "result unreadable"}
+        if algorithm_id in view.ambiguous:
+            return {"state": "unavailable", "reason": "result selection ambiguous"}
         if view is not full:
             parent = full.results.get(algorithm_id)
             if parent is not None and parent.status == "skipped" and parent.skip_reason == "platform":
