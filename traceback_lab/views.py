@@ -24,6 +24,7 @@ from typing import Any
 from .envelope import ResultEnvelope
 from .ingest import id12_for, input_manifest, source_record
 from .interpretation.engine import Library, classify, load_library
+from .platforms import for_input
 from .problems import LabProblem
 from .registry import load_registry
 from .sample_metadata import sex_assertion, sex_concordance
@@ -131,7 +132,92 @@ def load_sample(store: LabStore, source_id: str) -> SampleView | None:
     full_input = next((entry["input_id"] for entry in inputs if input_manifest(store, entry["input_id"])), None)
     if full_input is None:
         return None
-    full = InputView("full", full_input, None, {}, selected_results(store, full_input))
+    manifest = input_manifest(store, full_input) or {}
+    try:
+        platform = for_input(manifest, store.inputs_dir / full_input / "aligned.bam")
+    except (OSError, ValueError):
+        platform = "unknown"
+    platform_unverified = platform == "unknown"
+    legacy_not_ont = (isinstance(manifest, Mapping) and manifest.get("kind") == "prealigned"
+                      and "platform" not in manifest and platform == "illumina")
+    algorithms = load_registry()
+    supported: set[str] | None = None
+    if platform_unverified:
+        supported = set()
+    elif legacy_not_ont:
+        supported = {algorithm.id for algorithm in algorithms if "illumina" in algorithm.requires.platforms}
+    skip_message = (
+        "Stored input platform cannot be verified against its BAM; restore the registered input before viewing results"
+        if platform_unverified else
+        "Legacy result lacks verified ONT provenance; rerun or repair this sample"
+    )
+    current_cn_version = next(
+        (algorithm.version for algorithm in algorithms if algorithm.id == "copy-number"), None,
+    )
+
+    def visible_results(input_id: str, identities: Mapping[str, str] | None = None) -> dict[str, ResultEnvelope]:
+        selected = selected_results(store, input_id, identities)
+        old_cn = selected.get("copy-number")
+        superseded_cn = (old_cn is not None and old_cn.status == "ok" and (current_cn_version is None
+                         or old_cn.algorithm_version != current_cn_version))
+        superseded_ids = {"copy-number"} if superseded_cn else set()
+        for algorithm in algorithms:
+            dependent = selected.get(algorithm.id)
+            if ("copy-number" not in algorithm.upstream or dependent is None
+                    or dependent.status != "ok" or superseded_cn):
+                continue
+            if old_cn is None or old_cn.status != "ok" or current_cn_version is None:
+                superseded_ids.add(algorithm.id)
+                continue
+            consumed = store.selected_upstream_selections(
+                input_id, algorithm.id, dependent.provenance.parameters_sha256,
+            )
+            copy_number = next((item for item in consumed or () if item["algorithm_id"] == "copy-number"), None)
+            if copy_number is None:
+                superseded_ids.add(algorithm.id)
+                continue
+            selected_cn_attempt = store.selected_attempt(
+                input_id, "copy-number", old_cn.provenance.parameters_sha256,
+            )
+            upstream = store.read_result(
+                copy_number["input_id"], "copy-number", copy_number["parameters_sha256"],
+            )
+            if (upstream is None or upstream.algorithm_version != current_cn_version
+                    or copy_number["input_id"] != input_id
+                    or copy_number["parameters_sha256"] != old_cn.provenance.parameters_sha256
+                    or selected_cn_attempt is None
+                    or copy_number["attempt_id"] != selected_cn_attempt.name):
+                superseded_ids.add(algorithm.id)
+        while True:
+            added = {
+                algorithm.id for algorithm in algorithms
+                if algorithm.id in selected and any(upstream in superseded_ids for upstream in algorithm.upstream)
+            } - superseded_ids
+            if not added:
+                break
+            superseded_ids.update(added)
+
+        def visible(algorithm_id: str, envelope: ResultEnvelope) -> ResultEnvelope:
+            if supported is not None and algorithm_id not in supported:
+                reason, message = "platform", skip_message
+            elif algorithm_id in superseded_ids and envelope.status == "ok":
+                reason = "superseded_method"
+                message = "Selected copy-number method or its consumed provenance is not current; rerun this input"
+            else:
+                return envelope
+            return ResultEnvelope(
+                algorithm_id=envelope.algorithm_id,
+                algorithm_version=envelope.algorithm_version,
+                status="skipped", skip_reason=reason, skip_message=message,
+                provenance=envelope.provenance,
+            )
+
+        return {
+            algorithm_id: visible(algorithm_id, envelope)
+            for algorithm_id, envelope in selected.items()
+        }
+
+    full = InputView("full", full_input, None, {}, visible_results(full_input))
     identities = {alg: envelope.provenance.parameters_sha256 for alg, envelope in full.results.items()}
     derived = []
     for entry in record.get("derived", []):
@@ -144,7 +230,7 @@ def load_sample(store: LabStore, source_id: str) -> SampleView | None:
                 entry["input_id"],
                 entry["transform"],
                 entry.get("parameters", {}),
-                selected_results(store, entry["input_id"], identities),
+                visible_results(entry["input_id"], identities),
                 fraction=fraction if entry["transform"] in ("downsample", "split") else 1.0,
             )
         )
@@ -203,6 +289,10 @@ def cell_state(
 ) -> dict[str, Any]:
     envelope = view.results.get(algorithm_id)
     if envelope is None:
+        if view is not full:
+            parent = full.results.get(algorithm_id)
+            if parent is not None and parent.status == "skipped" and parent.skip_reason == "platform":
+                return {"state": "skipped", "reason": "platform"}
         return {"state": None}
     if envelope.status == "failed":
         return {"state": "failed", "reason": envelope.failure.first_line if envelope.failure else None}

@@ -6,7 +6,7 @@ Formulas follow Appendix A of the spec, computed from the read summary
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -14,7 +14,7 @@ from typing import Any
 import numpy as np
 
 from ..read_summary import ReadSummary
-from ..registry import AlgorithmOutput, InputContext
+from ..registry import AlgorithmOutput, InputContext, Requirements
 from ._base import Base, load_summary, metric, ratio
 
 WINDOW = 1_000_000
@@ -134,6 +134,7 @@ def gc_bias_slope(summary: ReadSummary, rows: np.ndarray, fasta: str | None) -> 
 
 @dataclass
 class BamQc(Base):
+    requires: Requirements = field(default_factory=lambda: Requirements(platforms=frozenset({"ont", "illumina"})))
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
         summary, mask = load_summary(ctx)
         flag = summary.column("flag")

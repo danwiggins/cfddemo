@@ -8,8 +8,8 @@ result's own attempt directory and no component is a symlink.
 
 from __future__ import annotations
 
-import json
 import heapq
+import json
 import math
 import os
 import re
@@ -22,7 +22,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from ..cohort_contracts import CohortGeneration, CohortMember, MetricProjection, project_metric
-from ..cohorts import list_cohorts, member_from_store, read_current
+from ..cohorts import list_cohorts, member_for_generation_or_independent, member_from_store, pon_dependent_algorithms, read_current
 from ..file_access import open_regular_no_follow
 from ..identity import resolve_prefix, shortest_unique_prefixes
 from ..ingest import source_ids, source_record
@@ -43,7 +43,7 @@ from ..problems import LabProblem
 from ..store import LabStore, summarize_run
 from .. import views
 
-_LOGGED_SAMPLE_COMMANDS = frozenset({"run", "simulate cna", "simulate split"})
+_LOGGED_SAMPLE_COMMANDS = frozenset({"run", "simulate cna", "simulate split", "cohort build"})
 
 
 def _recovery_problem(problem: LabProblem) -> dict[str, str]:
@@ -51,6 +51,18 @@ def _recovery_problem(problem: LabProblem) -> dict[str, str]:
 
     return {"code": problem.code, "summary": problem.summary,
             "cause": problem.cause, "fix": problem.fix, "docs": problem.docs}
+
+
+def _pon_dependent_algorithms() -> set[str]:
+    return pon_dependent_algorithms()
+
+
+def _cohort_target(
+    store: LabStore, generation: CohortGeneration, source_id: str,
+) -> tuple[CohortMember, LabProblem | None]:
+    """Keep independent cohort metrics when only the PoN tools are missing."""
+
+    return member_for_generation_or_independent(store, generation, source_id)
 
 
 class LibraryHolder:
@@ -371,7 +383,7 @@ class LabApi:
         if generation is None:
             return None, None, "not_built", None
         try:
-            target = member_from_store(self.store, source_id)
+            target, pon_problem = _cohort_target(self.store, generation, source_id)
         except LabProblem as error:
             return generation, None, "target_unavailable", _recovery_problem(error)
         except ValueError:
@@ -382,7 +394,7 @@ class LabApi:
             error = LabProblem("TBX-LAB-017", cause="sample results changed while its cohort reference was loading",
                                fix="Reload the sample to pin its current full input")
             return generation, None, "stale_target", _recovery_problem(error)
-        return generation, target, "ready", None
+        return generation, target, "ready", _recovery_problem(pon_problem) if pon_problem else None
 
     @staticmethod
     def _interpret_sample_envelope(
@@ -724,7 +736,7 @@ class LabApi:
         if sample.example:
             return {**base, "state": "example_unscorable", "metrics": [], "unscored": []}
         try:
-            target = member_from_store(self.store, source_id)
+            target, pon_problem = _cohort_target(self.store, generation, source_id)
         except LabProblem as problem:
             if problem.code == "TBX-LAB-021":
                 return {**base, "state": "example_unscorable", "metrics": [], "unscored": []}
@@ -741,12 +753,13 @@ class LabApi:
             return {**base, "state": "target_unavailable", "metrics": [], "unscored": [],
                     "problem": _recovery_problem(problem)}
         # Both reads must describe the same full input. A newer run may become
-        # current between load_sample and member_from_store while retaining the
+        # current between load_sample and member_for_generation while retaining the
         # same algorithm parameter hash; comparing its compatibility key with
         # the older envelope would mix two sample snapshots.
         if target.source_id != source_id or target.input_id != sample.full.input_id:
             return {**base, "state": "stale_target", "metrics": [], "unscored": []}
         current = {result.algorithm_id: result for result in target.results}
+        pon_dependent = _pon_dependent_algorithms() if pon_problem else set()
         library = self.libraries.get()
         rows = []
         unscored = []
@@ -771,7 +784,8 @@ class LabApi:
             target_result = current.get(algorithm_id)
             if target_result is None or target_result.parameters_sha256 != envelope.provenance.parameters_sha256:
                 unscored.append({"algorithm_id": algorithm_id, "status": "incompatible",
-                                 "reason": "current target result unavailable"})
+                                 "reason": ("panel of normals unavailable" if algorithm_id in pon_dependent
+                                            else "current target result unavailable")})
                 continue
             projections = {}
             comparison_entries = dict(library.entries)
@@ -820,6 +834,7 @@ class LabApi:
         for member in generation.members:
             aligners[member.aligner_identity] = aligners.get(member.aligner_identity, 0) + 1
         return {**base, "state": "ready", "target_aligner": target.aligner_identity,
+                "pon_problem": _recovery_problem(pon_problem) if pon_problem else None,
                 "aligner_counts": dict(sorted(aligners.items())),
                 "metrics": rows, "unscored": unscored}
 
