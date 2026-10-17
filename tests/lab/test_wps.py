@@ -5,14 +5,28 @@ from __future__ import annotations
 import io
 import hashlib
 import json
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from traceback_lab.algorithms import wps
 from traceback_lab.algorithms.wps import HALF, WINDOW, WPS, chromosome_track, score_centres
+from traceback_lab.envelope import ResultEnvelope, provenance
 from traceback_lab.interpretation.engine import load_library
-from traceback_lab.registry import InputContext, Ready, Skip, load_registry
+from traceback_lab.registry import InputContext, Ready, Skip, context_to_json, load_registry
+from traceback_lab.store import LabStore
+from traceback_lab.worker import main as worker_main
+
+
+def _summary_context(tmp_path, *, depth: float | None = 10.0) -> InputContext:
+    summary = tmp_path / "summary" / "columns"
+    summary.mkdir(parents=True, exist_ok=True)
+    (summary / "meta.json").write_text(json.dumps({"contigs": ["chr1"], "lengths": [1200]}))
+    return InputContext(root=tmp_path, source_id="a" * 64, input_id="b" * 64,
+                        reference_id="hg38", reference_sha256="c" * 64,
+                        input_dir=tmp_path, approx_depth_x=depth,
+                        extras={"upstream": {"read-summary": str(summary.parent)}})
 
 
 def _naive(starts: np.ndarray, ends: np.ndarray, lo: int, hi: int) -> list[int]:
@@ -53,20 +67,26 @@ def test_genome_track_is_chunk_invariant_and_filters_size_and_bounds() -> None:
             assert mean[index] == np.float32(expected[selected].mean())
 
 
-def test_wps_depth_gate_requires_known_ten_x(tmp_path) -> None:
-    ctx = InputContext(root=tmp_path, source_id="a" * 64, input_id="b" * 64,
-                       reference_id="hg38", reference_sha256="c" * 64,
-                       input_dir=tmp_path)
+def test_wps_depth_gate_requires_known_ten_x(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(wps.shutil, "disk_usage", lambda path: SimpleNamespace(free=20 * 1024**3))
+    ctx = _summary_context(tmp_path, depth=None)
     assert isinstance(WPS.preflight(ctx), Skip)
-    ctx = InputContext(root=tmp_path, source_id="a" * 64, input_id="b" * 64,
-                       reference_id="hg38", reference_sha256="c" * 64,
-                       input_dir=tmp_path, approx_depth_x=10.0)
+    ctx = _summary_context(tmp_path)
     assert isinstance(WPS.preflight(ctx), Ready)
     paired = InputContext(root=tmp_path, source_id="a" * 64, input_id="b" * 64,
                           reference_id="hg38", reference_sha256="c" * 64,
                           input_dir=tmp_path, platform="illumina-paired-end", approx_depth_x=10.0)
     assert WPS.preflight(paired) == Skip(
-        "unsupported_platform", "long-fragment WPS needs single-molecule ONT aligned spans")
+        "platform", "long-fragment WPS needs single-molecule ONT aligned spans")
+
+
+def test_wps_disk_gate_uses_summary_contig_lengths(tmp_path, monkeypatch) -> None:
+    ctx = _summary_context(tmp_path)
+    required = (4 * 1200 * 11 + 9) // 10 + wps.DISK_MARGIN_BYTES
+    monkeypatch.setattr(wps.shutil, "disk_usage", lambda path: SimpleNamespace(free=required - 1))
+    assert WPS.preflight(ctx).reason_code == "disk"
+    monkeypatch.setattr(wps.shutil, "disk_usage", lambda path: SimpleNamespace(free=required))
+    assert isinstance(WPS.preflight(ctx), Ready)
 
 
 @pytest.mark.parametrize("valid_fragments", [True, False])
@@ -91,9 +111,7 @@ def test_wps_registry_and_algorithm_output(tmp_path, monkeypatch, valid_fragment
     original_track = wps.chromosome_track
     monkeypatch.setattr(wps, "chromosome_track",
                         lambda *args, **kwargs: original_track(*args, chunk_bp=137, **kwargs))
-    ctx = InputContext(root=tmp_path, source_id="a" * 64, input_id="b" * 64,
-                       reference_id="hg38", reference_sha256="c" * 64,
-                       input_dir=tmp_path, approx_depth_x=10.0)
+    ctx = _summary_context(tmp_path)
     result = WPS.run(ctx, tmp_path)
     with np.load(io.BytesIO(result.artifacts["wps_track.npz"])) as track:
         expected, counts = chromosome_track(Summary.data["start"], Summary.data["end"], 1200)
@@ -119,3 +137,53 @@ def test_wps_registry_and_algorithm_output(tmp_path, monkeypatch, valid_fragment
     assert exact == _naive(source_starts, source_ends, HALF, 1200 - HALF + 1)
     assert any(algorithm.id == "wps" for algorithm in load_registry())
     assert load_library().entry("wps", "mean_wps") is not None
+
+
+def test_wps_worker_exact_chunks_survive_store_publication(tmp_path, monkeypatch) -> None:
+    class Summary:
+        contigs = ["chr1"]
+        lengths = [1200]
+
+        def eligible(self, *, contigs):
+            return np.ones(3, dtype=bool)
+
+        def column(self, name):
+            return {"contig": np.zeros(3, dtype=np.int16),
+                    "start": np.asarray([100, 250, 500]),
+                    "end": np.asarray([220, 410, 680])}[name]
+
+    monkeypatch.setattr(wps, "load_summary", lambda ctx: (Summary(), None))
+    original_track = wps.chromosome_track
+    monkeypatch.setattr(wps, "chromosome_track",
+                        lambda *args, **kwargs: original_track(*args, chunk_bp=137, **kwargs))
+    ctx = _summary_context(tmp_path)
+    request = tmp_path / "request.json"
+    scratch = tmp_path / "scratch"
+    request.write_text(json.dumps({"entry": "wps:WPS", "context": context_to_json(ctx),
+                                   "out_dir": str(scratch)}))
+    assert worker_main([str(request)]) == 0
+    output = json.loads((scratch / "output.json").read_bytes())
+    identity = "d" * 64
+    envelope = ResultEnvelope.model_validate({
+        "algorithm_id": "wps", "algorithm_version": WPS.version, "status": "ok",
+        "provenance": provenance(tool="traceback_lab.test", parameters_sha256=identity,
+                                 source_id=ctx.source_id, input_id=ctx.input_id,
+                                 reference_id=ctx.reference_id),
+        "metrics": output["metrics"], "panels": output["panels"],
+    })
+    store = LabStore(tmp_path / "store")
+    store.ensure()
+    store.publish_result(envelope, input_id=ctx.input_id, artifacts_dir=scratch / "artifacts")
+    published = store.selected_artifacts(ctx.input_id, "wps", identity)
+    assert published is not None
+    assert not (scratch / "artifacts").exists()
+    assert (published / "wps_track.npz").is_file()
+    index = json.loads((published / "wps_exact_index.json").read_bytes())
+    assert len(index["chunks"]) > 1
+    assert index["chunks"][0]["start"] == HALF
+    assert index["chunks"][-1]["stop"] == 1200 - HALF + 1
+    for chunk in index["chunks"]:
+        target = published / chunk["path"]
+        assert hashlib.sha256(target.read_bytes()).hexdigest() == chunk["sha256"]
+        with np.load(target) as data:
+            assert data["score"].size == chunk["stop"] - chunk["start"]

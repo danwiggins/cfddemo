@@ -11,6 +11,7 @@ from __future__ import annotations
 import io
 import hashlib
 import json
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -26,6 +27,7 @@ FRAGMENT_RANGE = (120, 180)
 BIN = 1_000
 CHUNK = 1_000_000
 MIN_DEPTH_X = 10.0
+DISK_MARGIN_BYTES = 2 * 1024**3
 AUTOSOMES = frozenset(f"chr{number}" for number in range(1, 23))
 
 
@@ -109,11 +111,36 @@ class Wps(Base):
 
     def preflight(self, ctx: InputContext) -> Ready | Skip:
         if ctx.platform != "ont":
-            return Skip("unsupported_platform", "long-fragment WPS needs single-molecule ONT aligned spans")
+            return Skip("platform", "long-fragment WPS needs single-molecule ONT aligned spans")
         if ctx.reference_id != "hg38":
             return Skip("reference", "long-fragment WPS needs hg38 coordinates")
         if ctx.approx_depth_x is None or ctx.approx_depth_x < MIN_DEPTH_X:
             return Skip("depth", "long-fragment WPS needs at least 10x approximate autosomal depth")
+        upstream = ctx.extras.get("upstream", {}).get("read-summary")
+        if not upstream:
+            return Skip("upstream", "long-fragment WPS needs the read-summary output")
+        try:
+            metadata = json.loads((Path(upstream) / "columns" / "meta.json").read_bytes())
+            contigs = metadata["contigs"]
+            lengths = metadata["lengths"]
+            if len(contigs) != len(lengths):
+                raise ValueError("contig lengths do not match")
+            autosomal_bp = sum(int(length) for name, length in zip(contigs, lengths)
+                               if name in AUTOSOMES)
+            if autosomal_bp <= 0 or any(int(length) <= 0 for length in lengths):
+                raise ValueError("invalid contig length")
+        except (OSError, ValueError, KeyError, TypeError):
+            return Skip("upstream", "long-fragment WPS needs valid read-summary contig lengths")
+        # int32 exact scores occupy four bytes per valid centre before compression.
+        # Allow 10% for chunk/preview overhead and 2 GiB for other scratch use.
+        required = (4 * autosomal_bp * 11 + 9) // 10 + DISK_MARGIN_BYTES
+        volume = ctx.root
+        while not volume.exists() and volume != volume.parent:
+            volume = volume.parent
+        free = shutil.disk_usage(volume).free
+        if free < required:
+            return Skip("disk", f"long-fragment WPS needs {required / 1024**3:.1f} GiB free "
+                        f"on the lab volume; {free / 1024**3:.1f} GiB available")
         return Ready()
 
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
