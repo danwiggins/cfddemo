@@ -134,14 +134,26 @@ def load_sample(store: LabStore, source_id: str) -> SampleView | None:
         return None
     manifest = input_manifest(store, full_input) or {}
     legacy_not_ont = False
+    platform_unverified = False
     if manifest.get("kind") == "prealigned" and "platform" not in manifest:
         try:
             legacy_not_ont = for_input(manifest, store.inputs_dir / full_input / "aligned.bam") != "ont"
         except (OSError, ValueError):
             legacy_not_ont = True
-    supported = (
-        {algorithm.id for algorithm in load_registry() if "illumina" in algorithm.requires.platforms}
-        if legacy_not_ont else None
+    elif "platform" in manifest:
+        try:
+            for_input(manifest, store.inputs_dir / full_input / "aligned.bam")
+        except (OSError, ValueError):
+            platform_unverified = True
+    supported: set[str] | None = None
+    if platform_unverified:
+        supported = set()
+    elif legacy_not_ont:
+        supported = {algorithm.id for algorithm in load_registry() if "illumina" in algorithm.requires.platforms}
+    skip_message = (
+        "Stored input platform does not match its BAM; restore the registered input before viewing results"
+        if platform_unverified else
+        "Legacy result lacks verified ONT provenance; rerun or repair this sample"
     )
 
     def visible_results(input_id: str, identities: Mapping[str, str] | None = None) -> dict[str, ResultEnvelope]:
@@ -154,7 +166,7 @@ def load_sample(store: LabStore, source_id: str) -> SampleView | None:
                 algorithm_version=envelope.algorithm_version,
                 status="skipped",
                 skip_reason="platform",
-                skip_message="Legacy result lacks verified ONT provenance; rerun or repair this sample",
+                skip_message=skip_message,
                 provenance=envelope.provenance,
             )
             for algorithm_id, envelope in selected.items()

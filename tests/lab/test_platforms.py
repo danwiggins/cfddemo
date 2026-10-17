@@ -241,6 +241,10 @@ def test_prealigned_writer_requires_one_bam_even_when_one_declares_ont(tmp_path:
 def test_stored_platform_mismatch_is_same_typed_refusal(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], dry_run: bool, tamper: str,
 ) -> None:
+    from traceback_lab.ingest import source_ids
+    from traceback_lab.store import LabStore
+    from traceback_lab.views import load_sample
+
     root, bam_path = _prealigned_world(tmp_path, ("ILLUMINA",))
     code = signed_cli.main([
         "lab", "run", str(bam_path), "--root", str(root), "--reference", "hg38",
@@ -264,6 +268,11 @@ def test_stored_platform_mismatch_is_same_typed_refusal(
     assert payload["data"]["code"] == "TBX-LAB-024"
     assert payload["data"]["input_id"] == input_id
     assert "fresh ROOT" in payload["data"]["fix"]
+    store = LabStore(root)
+    sample = load_sample(store, source_ids(store)[0])
+    assert sample is not None and sample.full.results
+    assert all(result.status == "skipped" and result.skip_reason == "platform"
+               for result in sample.full.results.values())
 
 
 def test_cohort_refuses_mismatched_stored_platform(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
