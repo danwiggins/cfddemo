@@ -16,9 +16,15 @@ from typing import Any
 from traceback_runner.cli import _local_envelope, _result, _with_human
 
 from . import registry
+from .identity import SHA256_PATTERN, aligned_input_id, prealigned_input_id
 from .ingest import (
+    EXAMPLE_REFERENCE_ID,
+    GIB,
     AlignedInput,
     ChunkSet,
+    align,
+    aligner_argv_identity,
+    cached_sha256,
     collect_paths,
     disk_budget,
     ensure_mmi,
@@ -29,27 +35,26 @@ from .ingest import (
     inspect_chunks,
     is_sample_reference,
     mmi_path,
-    align,
+    record_source_sex,
     require_budget,
     resolve_reference,
     resolve_sample,
-    record_source_sex,
     source_record,
     write_source,
-    aligner_argv_identity,
-    cached_sha256,
-    GIB,
-    EXAMPLE_REFERENCE_ID,
 )
-from .identity import SHA256_PATTERN, aligned_input_id, prealigned_input_id
 from .platforms import for_input, from_rg_lines
 from .problems import (
-    EXIT_OK, EXIT_PARTIAL, EXIT_USAGE, LabProblem, problem_lines, problem_payload,
+    EXIT_OK,
+    EXIT_PARTIAL,
+    EXIT_USAGE,
+    LabProblem,
+    problem_lines,
+    problem_payload,
 )
 from .registry import execution_identity
 from .runner import DEFAULT_TIMEOUT_S, RunTarget, StepResult, run_plan
-from .scrub import Scrubber
 from .sample_metadata import with_sex_assertion
+from .scrub import Scrubber
 from .store import LabStore, new_run_id
 from .tools import find_minimap2, find_samtools, require_aligner_tools
 
@@ -338,6 +343,30 @@ def _aligner_warning(change: dict[str, Any], low: float, high: float) -> dict[st
     }
 
 
+def _memory_warning() -> dict[str, Any] | None:
+    from .doctor import MIN_RAM, _ram
+
+    try:
+        physical_ram = _ram()
+    except Exception:  # noqa: BLE001 - an advisory probe must never abort a run
+        return None
+    if physical_ram is None or physical_ram >= MIN_RAM:
+        return None
+    recommended_gib = MIN_RAM // GIB
+    physical_gib = physical_ram / GIB
+    return {
+        "kind": "low_memory",
+        "code": "TBX-LAB-025",
+        "cause": f"physical RAM is {physical_gib:g} GiB, below the {recommended_gib} GiB alignment recommendation",
+        "retryable": False,
+        "docs": "docs/LAB-GUIDE.md#tbx-lab-025",
+        "summary": f"Less than {recommended_gib} GiB of physical RAM detected; alignment may fail or be slow",
+        "physical_ram_bytes": physical_ram,
+        "recommended_bytes": MIN_RAM,
+        "fix": f"Use a machine with at least {recommended_gib} GiB RAM for a full hg38 alignment",
+    }
+
+
 def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str], None]) -> tuple[int, dict[str, Any]]:
     store.check_version()
     from .pon_consumer import require_built_cohort
@@ -349,8 +378,13 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
         {"algorithm_id": item.algorithm.id, "upstream": item.upstream_only, "decision": "decided after alignment"}
         for item in items
     ]
-    data: dict[str, Any] = {"root": str(store.root), "dry_run": True, "plan": plan_rows}
+    memory_warning = _memory_warning()
+    data: dict[str, Any] = {"root": str(store.root), "dry_run": True, "plan": plan_rows,
+                            "warnings": [memory_warning] if memory_warning else []}
     lines = [f"ROOT      {store.root}"]
+    if memory_warning:
+        lines.append(f"WARN      {memory_warning['code']}: {memory_warning['summary']}")
+        lines.append(f"          {memory_warning['fix']}")
     alignment_required = False
 
     def mark_platform_skips(platform: str) -> None:
@@ -539,13 +573,19 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
 
         store.check_version()
         if args.dry_run and not prepared(store.root):
+            memory_warning = _memory_warning()
             payload = _local_envelope(
                 _result("lab run", "ok", "dry run: nothing written", data={
                     "root": str(store.root), "dry_run": True, "example": True,
                     "alignment": "example not generated yet: generated and aligned on first run (~200k reads, under a minute)",
+                    "warnings": [memory_warning] if memory_warning else [],
                 })
             )
-            return EXIT_OK, _with_human(payload, [f"ROOT      {store.root}", "EXAMPLE   not generated yet: generated and aligned on first run (~200k reads, under a minute)"], replace_data=True)
+            lines = [f"ROOT      {store.root}", "EXAMPLE   not generated yet: generated and aligned on first run (~200k reads, under a minute)"]
+            if memory_warning:
+                lines.append(f"WARN      {memory_warning['code']}: {memory_warning['summary']}")
+                lines.append(f"          {memory_warning['fix']}")
+            return EXIT_OK, _with_human(payload, lines, replace_data=True)
         # Generation and registration happen under the writer lock (below).
         args.inputs = [str(example_dir(store.root) / "chunks")]
         args.reference_id = EXAMPLE_REFERENCE_ID
@@ -574,6 +614,11 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                 stored = len(args.inputs) == 1 and _is_stored(args.inputs[0])
                 chunkset: ChunkSet | None = None
                 warnings: list[dict[str, Any]] = []
+                memory_warning = _memory_warning()
+                if memory_warning:
+                    warnings.append(memory_warning)
+                    progress(f"WARN {memory_warning['code']}: {memory_warning['summary']}")
+                    progress(f"     {memory_warning['fix']}")
                 example = False
                 if stored:
                     source_id = resolve_sample(store, args.inputs[0])
@@ -830,7 +875,7 @@ def _pid() -> int:
 
 
 def _duration(seconds: float) -> str:
-    seconds = int(round(seconds))
+    seconds = round(seconds)
     if seconds < 60:
         return f"{seconds}s"
     minutes, seconds = divmod(seconds, 60)
@@ -868,6 +913,13 @@ def _skip_remedy(algorithm_id: str, reason: str, root: Path) -> dict[str, Any] |
             "traceback", "lab", "asset", "add", "pmd", "--file",
             "YOUR_LOCAL_PMD_coordinates_hg38.bed.gz", "--source-label",
             "Zhou-2018-operator-supplied", "--terms", "unknown", "--root", str(root),
+        ]
+    elif reason == "missing_asset" and algorithm_id == "meth-tf":
+        asset = "compatible tumour/healthy methylation marker reference"
+        argv = [
+            "traceback", "lab", "asset", "add", "meth-tf-reference", "--file",
+            "YOUR_LOCAL_MARKER_REFERENCE.json", "--source-label", "operator-marker-panel",
+            "--terms", "unknown", "--root", str(root),
         ]
     else:
         return None
@@ -972,6 +1024,8 @@ def _summary(
         lines.append(f"FAILED  {result.algorithm_id}: {result.first_line}")
         lines.append(f"        details: traceback lab runs {run_id} --step {result.algorithm_id}")
     for warning in warnings:
+        if warning.get("kind") == "low_memory":
+            continue  # already shown before alignment, including the next action
         lines.append(f"WARN    {warning['summary']}")
         lines.extend(problem_lines(LabProblem(
             warning["code"], cause=warning["cause"], fix=warning["fix"],

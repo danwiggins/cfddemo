@@ -71,6 +71,7 @@ ALGORITHMS: tuple[str, ...] = (
     "frag_x_meth:FRAG_X_METH",
     "fetal_fraction:FETAL_FRACTION",
     "fetal_fraction_chry:FETAL_FRACTION_CHRY",
+    "meth_tf:METH_TF",
     "epi_clock:EPI_CLOCK",
 )
 
@@ -312,7 +313,9 @@ def plan(
             name = unknown[0]
             close = difflib.get_close_matches(name, list(by_id), n=1, cutoff=0.6)
             hint = f"Did you mean {close[0]}? " if close else ""
-            from .problems import LabProblem  # lazy: keeps worker start-up off the signed CLI import
+            from .problems import (
+                LabProblem,  # lazy: keeps worker start-up off the signed CLI import
+            )
 
             raise LabProblem(
                 "TBX-LAB-001",
@@ -345,11 +348,11 @@ def plan(
 
 __all__ = [
     "ALGORITHMS",
-    "Algorithm",
-    "AlgorithmOutput",
     "CONSUMES",
     "COSTS",
     "FAMILIES",
+    "Algorithm",
+    "AlgorithmOutput",
     "InputContext",
     "PlanItem",
     "Ready",
@@ -362,7 +365,7 @@ __all__ = [
     "intermediate_ids",
     "load_entry",
     "load_registry",
-    "registry_entries",
     "plan",
+    "registry_entries",
     "validate_algorithm",
 ]

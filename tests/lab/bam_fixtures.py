@@ -31,11 +31,17 @@ class Read:
 
 
 def write_bam(
-    path: Path, contigs: Sequence[tuple[str, int]], reads: Iterable[Read], *, platform: str | None = None,
+    path: Path, contigs: Sequence[tuple[str, int]], reads: Iterable[Read],
+    *, platform: str | None = None, modbase_model: str | None = None,
 ) -> Path:
     header = {"HD": {"VN": "1.6", "SO": "coordinate"}, "SQ": [{"SN": name, "LN": length} for name, length in contigs]}
-    if platform is not None:
-        header["RG"] = [{"ID": "synthetic", "PL": platform}]
+    if platform is not None or modbase_model is not None:
+        read_group = {"ID": "synthetic"}
+        if platform is not None:
+            read_group["PL"] = platform
+        if modbase_model is not None:
+            read_group["DS"] = f"basecall_model=synthetic modbase_models={modbase_model}"
+        header["RG"] = [read_group]
     names = [name for name, _ in contigs]
     unsorted = path.with_suffix(".unsorted.bam")
     with pysam.AlignmentFile(str(unsorted), "wb", header=header) as out:
@@ -60,7 +66,7 @@ def write_bam(
                 record.set_tag("MN", read.mn if read.mn is not None else len(read.sequence), value_type="i")
             for key, value in read.tags.items():
                 record.set_tag(key, value)
-            if platform is not None and "RG" not in read.tags:
+            if (platform is not None or modbase_model is not None) and "RG" not in read.tags:
                 record.set_tag("RG", "synthetic")
             out.write(record)
     pysam.sort("-o", str(path), str(unsorted))
@@ -77,6 +83,7 @@ def context_for(
     derived: dict[str, object] | None = None,
     fasta: Path | None = None,
     eligible_reads: int | None = None,
+    modbase_model: str | None = None,
 ) -> InputContext:
     """An InputContext over a fresh aligned BAM and its read summary."""
 
@@ -84,7 +91,7 @@ def context_for(
     input_dir.mkdir(parents=True, exist_ok=True)
     bam = input_dir / "aligned.bam"
     if not bam.exists():
-        write_bam(bam, contigs, reads)
+        write_bam(bam, contigs, reads, modbase_model=modbase_model)
         write_summary(bam, base / "read-summary" / "columns")
     extras: dict[str, object] = {"upstream": {"read-summary": str(base / "read-summary")}}
     if fasta is not None:
