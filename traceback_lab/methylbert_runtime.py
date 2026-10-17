@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 from traceback_runner.contained_process import run_contained
 
 from .methylbert_bundle import Bundle
+from .methylbert_gpu_probe import probe_cuda
 
 
 PINNED_UPSTREAM_COMMIT = "f82f83b0bc20e2af1441795536ec9f338fbbb3e7"
@@ -33,14 +34,17 @@ MAX_CODE_FILE_BYTES = 8 * 1024 * 1024
 MAX_CODE_TOTAL_BYTES = 64 * 1024 * 1024
 AGGREGATE_SCHEMA = "traceback.methylbert-aggregate.v1"
 CHILD_ENV_KEYS = frozenset({
-    "PATH", "SYSTEMROOT", "LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES",
+    "PATH", "SYSTEMROOT", "LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER",
     "HOME", "TMPDIR", "TMP", "TEMP", "HF_HOME", "HF_HUB_OFFLINE",
     "HF_DATASETS_OFFLINE", "TRANSFORMERS_OFFLINE", "TOKENIZERS_PARALLELISM", "NO_PROXY",
 })
-NUMERICAL_PACKAGES = ("torch", "transformers", "numpy", "pandas", "scipy", "scikit-learn", "pysam")
+NUMERICAL_PACKAGES = (
+    "torch", "transformers", "tokenizers", "safetensors", "huggingface-hub",
+    "numpy", "pandas", "scipy", "scikit-learn", "pysam",
+)
 
 
-def numerical_runtime_identity(*, probe_gpu: bool) -> dict[str, Any]:
+def numerical_runtime_identity(*, probe_gpu: bool, isolated_gpu: bool = False) -> dict[str, Any]:
     """Key numerical dependencies without importing Torch for an absent model."""
 
     versions: dict[str, str | None] = {}
@@ -51,29 +55,45 @@ def numerical_runtime_identity(*, probe_gpu: bool) -> dict[str, Any]:
             versions[name] = None
     cuda: dict[str, Any] | None = None
     if probe_gpu:
-        try:
-            import torch
-
-            available = bool(torch.cuda.is_available())
-            count = torch.cuda.device_count() if available else 0
-            cuda = {"available": available and count > 0, "torch_cuda": torch.version.cuda,
-                    "device_count": count}
-            if available:
-                cuda.update({
-                    "devices": [
-                        {"name": torch.cuda.get_device_name(index),
-                         "capability": list(torch.cuda.get_device_capability(index))}
-                        for index in range(count)
-                    ],
-                    "cudnn": torch.backends.cudnn.version(),
-                })
-        except (ImportError, OSError, RuntimeError):
-            cuda = {"available": False, "torch_cuda": None}
+        if isolated_gpu:
+            result = run_contained(
+                [sys.executable, "-I", str(Path(__file__).with_name("methylbert_gpu_probe.py"))],
+                env=os.environ, cwd=Path(__file__).resolve().parent,
+                timeout_seconds=30, log_limit_bytes=8 * 1024,
+            )
+            try:
+                cuda = json.loads(result.stdout) if result.succeeded and not result.stdout_truncated else None
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                cuda = None
+            if not isinstance(cuda, dict):
+                cuda = {"available": False, "torch_cuda": None, "device_count": 0}
+        else:
+            cuda = probe_cuda()
     return {"python": sys.version.split()[0], "packages": versions, "cuda": cuda}
 
 
 class RuntimeRefusal(ValueError):
     """Model, input, environment, or aggregate result violates the contract."""
+
+
+def apply_precision_flags(expected: object) -> None:
+    """Restore selected Torch precision settings after model-package imports."""
+
+    cuda = expected.get("cuda") if isinstance(expected, dict) else None
+    if not isinstance(cuda, dict):
+        raise RuntimeRefusal("MethylBERT selected precision settings are missing")
+    booleans = ("matmul_allow_tf32", "cudnn_allow_tf32", "cudnn_benchmark")
+    if any(type(cuda.get(key)) is not bool for key in booleans):
+        raise RuntimeRefusal("MethylBERT selected precision settings are invalid")
+    precision = cuda.get("float32_matmul_precision")
+    if precision not in {"highest", "high", "medium"}:
+        raise RuntimeRefusal("MethylBERT selected matmul precision is invalid")
+    import torch
+
+    torch.set_float32_matmul_precision(precision)
+    torch.backends.cuda.matmul.allow_tf32 = cuda["matmul_allow_tf32"]
+    torch.backends.cudnn.allow_tf32 = cuda["cudnn_allow_tf32"]
+    torch.backends.cudnn.benchmark = cuda["cudnn_benchmark"]
 
 
 def require_numerical_runtime(expected: object) -> dict[str, Any]:

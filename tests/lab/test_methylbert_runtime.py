@@ -38,10 +38,15 @@ def test_numerical_runtime_identity_is_lightweight_until_a_model_needs_cuda(monk
         version=SimpleNamespace(cuda="12.4"),
         cuda=SimpleNamespace(
             is_available=lambda: True, device_count=lambda: len(visible),
+            current_device=lambda: 0,
             get_device_name=lambda index: visible[index],
             get_device_capability=lambda index: (8, 6 + index),
         ),
-        backends=SimpleNamespace(cudnn=SimpleNamespace(version=lambda: 90100)),
+        backends=SimpleNamespace(
+            cuda=SimpleNamespace(matmul=SimpleNamespace(allow_tf32=False)),
+            cudnn=SimpleNamespace(version=lambda: 90100, allow_tf32=True, benchmark=False),
+        ),
+        get_float32_matmul_precision=lambda: "highest",
     )
     monkeypatch.setitem(sys.modules, "torch", torch)
     without_model = runtime.numerical_runtime_identity(probe_gpu=False)
@@ -50,7 +55,10 @@ def test_numerical_runtime_identity_is_lightweight_until_a_model_needs_cuda(monk
     with_model = runtime.numerical_runtime_identity(probe_gpu=True)
     assert with_model["cuda"] == {
         "available": True, "torch_cuda": "12.4", "device_count": 1,
+        "current_device": 0,
         "devices": [{"name": "fixture GPU 0", "capability": [8, 6]}], "cudnn": 90100,
+        "matmul_allow_tf32": False, "cudnn_allow_tf32": True,
+        "cudnn_benchmark": False, "float32_matmul_precision": "highest",
     }
     visible.append("fixture GPU 1")
     two_devices = runtime.numerical_runtime_identity(probe_gpu=True)
@@ -68,6 +76,48 @@ def test_child_runtime_guard_refuses_a_changed_numerical_package(monkeypatch):
     })
     with pytest.raises(runtime.RuntimeRefusal, match="numerical runtime differs"):
         runtime.require_numerical_runtime(expected)
+
+
+def test_parent_gpu_identity_uses_a_bounded_process_without_importing_cuda(monkeypatch):
+    monkeypatch.setenv("CUDA_DEVICE_ORDER", "PCI_BUS_ID")
+    monkeypatch.setattr(runtime, "probe_cuda", lambda: pytest.fail("parent initialized CUDA"))
+    seen = {}
+    cuda = {"available": True, "torch_cuda": "12.4", "device_count": 1}
+
+    def contained(argv, **kwargs):
+        seen.update({"argv": argv, **kwargs})
+        output = json.dumps(cuda).encode()
+        return ContainedResult(tuple(argv), "exited", 0, 0.1, output, b"", len(output), 0, False, False)
+
+    monkeypatch.setattr(runtime, "run_contained", contained)
+    actual = runtime.numerical_runtime_identity(probe_gpu=True, isolated_gpu=True)
+    assert actual["cuda"] == cuda
+    assert seen["argv"][1] == "-I"
+    assert seen["argv"][2].endswith("methylbert_gpu_probe.py")
+    assert seen["env"]["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID"
+    assert seen["timeout_seconds"] == 30
+    assert seen["log_limit_bytes"] == 8 * 1024
+
+
+def test_child_restores_selected_precision_after_model_import(monkeypatch):
+    precision = []
+    matmul = SimpleNamespace(allow_tf32=True)
+    cudnn = SimpleNamespace(allow_tf32=False, benchmark=True)
+    torch = SimpleNamespace(
+        set_float32_matmul_precision=precision.append,
+        backends=SimpleNamespace(cuda=SimpleNamespace(matmul=matmul), cudnn=cudnn),
+    )
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    expected = {"cuda": {
+        "float32_matmul_precision": "highest", "matmul_allow_tf32": False,
+        "cudnn_allow_tf32": True, "cudnn_benchmark": False,
+    }}
+    runtime.apply_precision_flags(expected)
+    assert precision == ["highest"]
+    assert matmul.allow_tf32 is False
+    assert cudnn.allow_tf32 is True and cudnn.benchmark is False
+    with pytest.raises(runtime.RuntimeRefusal, match="invalid"):
+        runtime.apply_precision_flags({"cuda": {**expected["cuda"], "cudnn_benchmark": "false"}})
 
 
 def test_install_identity_requires_pinned_git_source_and_hashes_record_listed_code(tmp_path, monkeypatch):

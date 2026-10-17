@@ -32,6 +32,7 @@ from ._records import eligible_record, name_predicate
 from .cell_origin import header_model
 
 _CANONICAL = re.compile(r"^chr(?:[1-9]|1[0-9]|2[0-2]|X|Y)$")
+_EXECUTION_CODE_FILES = ("methylbert_child.py", "methylbert_runtime.py", "methylbert_gpu_probe.py")
 
 
 def _digest(path: Path) -> str:
@@ -40,6 +41,11 @@ def _digest(path: Path) -> str:
         while block := stream.read(16 << 20):
             value.update(block)
     return value.hexdigest()
+
+
+def _execution_code_sha256s() -> dict[str, str]:
+    directory = Path(__file__).resolve().parents[1]
+    return {name: _digest(directory / name) for name in _EXECUTION_CODE_FILES}
 
 
 def _sha(text: object) -> str | None:
@@ -84,7 +90,9 @@ def _write_eligible_bam(source: Path, destination: Path, ctx: InputContext) -> i
 def _offline_env(scratch: Path) -> dict[str, str]:
     """No inherited Python search path, proxy, or model-hub network setting."""
 
-    env = {name: os.environ[name] for name in ("PATH", "SYSTEMROOT", "LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES")
+    env = {name: os.environ[name] for name in (
+        "PATH", "SYSTEMROOT", "LD_LIBRARY_PATH", "CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER",
+    )
            if name in os.environ}
     env.update({
         "HOME": str(scratch), "TMPDIR": str(scratch), "TMP": str(scratch), "TEMP": str(scratch),
@@ -122,8 +130,8 @@ class Methylbert(Base):
                 "bundle_sha256": ctx.extras.get("methylbert_bundle_sha256"),
                 "code_sha256": ctx.extras.get("methylbert_code_sha256"),
                 "min_classified_reads": ctx.extras.get("methylbert_min_classified_reads"),
-                "numerical_runtime": numerical_runtime_identity(probe_gpu=probe_gpu),
-                "child_sha256": _digest(Path(__file__).resolve().parents[1] / "methylbert_child.py")}
+                "numerical_runtime": numerical_runtime_identity(probe_gpu=probe_gpu, isolated_gpu=True),
+                "execution_code_sha256s": _execution_code_sha256s()}
 
     def preflight(self, ctx: InputContext) -> Ready | Skip:
         if ctx.example:
@@ -167,14 +175,10 @@ class Methylbert(Base):
             if directory.exists() or directory.is_symlink():
                 raise RuntimeError("registered MethylBERT bundle failed integrity verification") from exc
             return Skip("missing_asset", f"the trusted MethylBERT bundle is unavailable: {type(exc).__name__}")
-        try:
-            import torch
-            gpu = bool(torch.cuda.is_available())
-        except (ImportError, OSError, RuntimeError):
-            gpu = False
+        runtime = numerical_runtime_identity(probe_gpu=True, isolated_gpu=True)
+        gpu = bool(runtime["cuda"] and runtime["cuda"]["available"])
         if not gpu:
             return Skip("missing_gpu", "MethylBERT needs a usable CUDA GPU")
-        runtime = numerical_runtime_identity(probe_gpu=True)
         if runtime["cuda"] is None or not runtime["cuda"]["available"]:
             return Skip("missing_gpu", "MethylBERT CUDA device could not be identified")
         if any(version is None for version in runtime["packages"].values()):
@@ -201,9 +205,9 @@ class Methylbert(Base):
             raise RuntimeError("the registered reference FASTA changed since input alignment")
         child = Path(__file__).resolve().parents[1] / "methylbert_child.py"
         planned = ctx.extras.get("planned_parameters", {})
-        if _digest(child) != planned.get("child_sha256"):
-            raise RuntimeError("MethylBERT child code changed since execution identity was selected")
-        if numerical_runtime_identity(probe_gpu=True) != planned.get("numerical_runtime"):
+        if _execution_code_sha256s() != planned.get("execution_code_sha256s"):
+            raise RuntimeError("MethylBERT execution code changed since execution identity was selected")
+        if numerical_runtime_identity(probe_gpu=True, isolated_gpu=True) != planned.get("numerical_runtime"):
             raise RuntimeError("MethylBERT numerical runtime changed since execution identity was selected")
         with tempfile.TemporaryDirectory(prefix="methylbert-", dir=out.parent) as private_name:
             private = Path(private_name)
@@ -234,7 +238,7 @@ class Methylbert(Base):
                 raise RuntimeError("MethylBERT classified-read support is below the qualified floor")
         provenance = {
             "bundle_sha256": bundle_sha, "installed_code_sha256": code_sha,
-            "child_sha256": planned["child_sha256"],
+            "execution_code_sha256s": planned["execution_code_sha256s"],
             "numerical_runtime": planned["numerical_runtime"],
             "reference_sha256": ctx.reference_sha256, "model_id": bundle.model_id,
             "n_mers": bundle.n_mers, "seq_len": bundle.seq_len,
