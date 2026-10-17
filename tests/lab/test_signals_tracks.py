@@ -32,7 +32,10 @@ def test_end_motif_and_delfi_tracks_have_charts_and_complete_tables(tmp_path, mo
     sample = {
         "found": True, "id12": id12, "source_id": source_id,
         "algorithms": [algorithm("end-motifs", "ccca_fraction"), algorithm("delfi-ratio", "ratio_sd")],
-        "catalog": [], "licenses": [], "cohort_n": 0, "cohort_version": None,
+        "catalog": [{"algorithm_id": algorithm_id, "tier": "NEWER", "license_ids": ["shared"]}
+                    for algorithm_id in ("end-motifs", "delfi-ratio")],
+        "licenses": [{"license_id": "shared", "headline": "Research-only method", "body": "Synthetic fixture license."}],
+        "cohort_n": 0, "cohort_version": None,
         "excluded_chunks": [],
     }
     motifs = [a + b + c + d for a in "ACGT" for b in "ACGT" for c in "ACGT" for d in "ACGT"]
@@ -75,4 +78,5 @@ def test_end_motif_and_delfi_tracks_have_charts_and_complete_tables(tmp_path, mo
     assert "No GC correction or classifier" in dom
     assert "chr1" in dom and "chr2" in dom
     assert dom.count('data-rendered="1"') >= 2
+    assert dom.count('id="license-shared"') == 1
     assert "data-csp-violations=\"0\"" in dom

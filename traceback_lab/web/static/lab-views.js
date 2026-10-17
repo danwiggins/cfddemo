@@ -694,14 +694,14 @@
     return out;
   }
 
-  function breakpointMotifSignals(sample) {
+  function breakpointMotifSignals(sample, seen) {
     const a = algo(sample, "breakpoint-motifs");
     if (!a) return [];
     const section = h("section", { class: "panel" }, h("h2", {}, "CpG-proximal aligned ends"), flagPill("LEGAL"));
     if (a.status !== "ok") return [section, absent(a, "breakpoint-motifs")];
     section.append(
       h("p", {}, "These are aligned-reference-span start and end−1 contexts; physical cleavage sites are not established by this BAM. Near and far 4-mer counts exclude invalid or off-contig contexts."),
-      ...context(sample, "breakpoint-motifs", new Set()),
+      ...context(sample, "breakpoint-motifs", seen),
     );
     const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading 4-mer counts…"));
     section.append(slot);
@@ -730,13 +730,14 @@
 
   function fragmentSignals(sample) {
     const a = algo(sample, "fragment-size");
+    const seen = new Set();
     const section = h("section", { class: "panel" }, h("h2", {}, "Size density"));
     if (!a || a.status !== "ok") {
       section.append(absent(a, "fragment-size"));
     } else {
       const slot = h("div", {}, h("p", {}, "Loading…"));
       const short = a.metrics.find((m) => m.metric_id === "short_fraction_lt150");
-      section.append(h("p", { class: "help" }, `No size-density cohort band yet; 167 bp marked. Short-fragment reference: ${cohortReadiness(sample, short ? [short] : [])}.`), ...context(sample, "fragment-size", new Set()), slot);
+      section.append(h("p", { class: "help" }, `No size-density cohort band yet; 167 bp marked. Short-fragment reference: ${cohortReadiness(sample, short ? [short] : [])}.`), ...context(sample, "fragment-size", seen), slot);
       artifact(sample, "fragment-size", "size-density").then((data) => {
         const points = data.span_bp.map((x, i) => [x, data.count[i]]).filter((p) => p[0] >= 50 && p[0] <= 700);
         slot.replaceWith(chart("Aligned-span density, 50 to 700 bp, with 167 bp marked.", {
@@ -754,7 +755,7 @@
       if (other.status !== "ok") {
         panel.append(absent(other, id));
       } else {
-        panel.append(...context(sample, id, new Set()), h("table", { class: "data-table" },
+        panel.append(...context(sample, id, seen), h("table", { class: "data-table" },
           h("tbody", {}, ...other.metrics.filter((m) => m.value === null || typeof m.value !== "object")
             .map((m) => h("tr", {}, h("th", { scope: "row" }, m.label), h("td", {}, fmt(m.value, m.unit)))))));
         if (id === "end-motifs") {
@@ -795,7 +796,7 @@
       }
       more.push(panel);
     }
-    return [section, ...more, ...breakpointMotifSignals(sample)];
+    return [section, ...more, ...breakpointMotifSignals(sample, seen)];
   }
 
   function copyNumberSignals(sample) {
