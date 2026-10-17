@@ -85,6 +85,8 @@ def test_low_memory_warning_is_advisory_in_run_and_dry_run(lab_world, capsys, mo
     assert len(low_memory) == 1
     (warning,) = low_memory
     assert warning["kind"] == "low_memory"
+    assert warning["code"] == "TBX-LAB-024"
+    assert warning["cause"] and warning["docs"].endswith("#tbx-lab-024")
     assert warning["physical_ram_bytes"] == 8 * doctor.GIB
     assert warning["recommended_bytes"] == doctor.MIN_RAM
     assert warning["fix"]
@@ -92,6 +94,34 @@ def test_low_memory_warning_is_advisory_in_run_and_dry_run(lab_world, capsys, mo
         monkeypatch.setattr(doctor, "_ram", lambda detected=detected: detected)
         code, dry = _json(capsys, *argv, "--dry-run")
         assert code == 0 and dry["data"]["warnings"] == []
+    def failed_probe():
+        raise OSError("RAM query unavailable")
+
+    monkeypatch.setattr(doctor, "_ram", failed_probe)
+    code, dry = _json(capsys, *argv, "--dry-run")
+    assert code == 0 and dry["data"]["warnings"] == []
+
+
+def test_lab_run_missing_ichor_skips_with_install_command(lab_world, capsys, monkeypatch, shared_mmi) -> None:
+    from traceback_lab.algorithms import copy_number
+
+    monkeypatch.setattr(registry, "ALGORITHMS", ("read_summary:READ_SUMMARY", "copy_number:COPY_NUMBER"))
+    monkeypatch.setattr(copy_number, "toolchain_or_none", lambda: None)
+    code, payload = _json(capsys, "run", str(lab_world["chunks"]), "--root", str(lab_world["root"]),
+                          "--mmi", str(shared_mmi))
+    assert code == 0, payload
+    data = payload["data"]
+    copy_number_step = next(step for step in data["steps"] if step["algorithm_id"] == "copy-number")
+    assert (copy_number_step["status"], copy_number_step["skip_reason"]) == ("skipped", "missing_toolchain")
+    assert data["remediations"] == [{
+        "algorithm_id": "copy-number", "reason": "missing_toolchain", "asset": "ichor",
+        "command": "traceback toolchain install ichor",
+        "argv": ["traceback", "toolchain", "install", "ichor"],
+    }]
+    human_code, human, _ = _lab(capsys, "run", "latest", "--root", str(lab_world["root"]),
+                                "--mmi", str(shared_mmi))
+    assert human_code == 0
+    assert "SKIP    copy-number skipped (missing_toolchain): ichor: traceback toolchain install ichor" in human
 
 
 def test_run_aligns_publishes_and_reruns_from_cache(lab_world, capsys, monkeypatch) -> None:
@@ -261,11 +291,16 @@ def test_failed_algorithm_exits_8_with_scrubbed_stderr_and_rerun_recomputes_only
     assert "FAILED  copy-number:" in out
     assert "details: traceback lab runs" in out
     assert "1 skipped (depth: instability)" in out and "1 skipped (upstream: tf-concordance)" in out
+    for label in ("CODE", "CAUSE", "FIX", "RETRYABLE", "DOCS"):
+        assert any(line.startswith(label) for line in out.splitlines()), label
+    assert "CODE       TBX-LAB-016" in out
     code, payload = _json(capsys, *argv)
     assert code == 8
     data = payload["data"]
     assert payload["status"] == "partial_failure"
     assert data["code"] == "TBX-LAB-016" and data["docs"].endswith("#tbx-lab-016")
+    assert "copy-number" in data["cause"] and data["fix"]
+    assert isinstance(data["retryable"], bool)
     assert data["counts"] == {"ok": 2, "skipped": {"depth": 1, "upstream": 1}, "failed": 1}
     steps = {step["algorithm_id"]: step for step in data["steps"]}
     assert steps["fragment-size"]["cached"] and not steps["copy-number"]["cached"]
@@ -503,15 +538,34 @@ def test_aligner_version_change_warns_and_realigns(lab_world, capsys, monkeypatc
     argv = ("run", str(lab_world["chunks"]), "--root", str(root), "--mmi", str(shared_mmi))
     code, first = _json(capsys, *argv)
     assert code == 0
+    first_input = first["data"]["sample"]["input_id"]
+    before_inputs = {p.name for p in LabStore(root).inputs_dir.iterdir() if p.is_dir()}
     fakes = lab_world["tmp"] / "fakes"
     _fake_tool(fakes, "minimap2", f'if [ "$1" = "--version" ]; then echo "2.99-r9999"; exit 0; fi\nexec {MINIMAP2} "$@"\n')
     _path_with(monkeypatch, fakes)
+    code, human, _ = _lab(capsys, *argv)
+    assert code == 0
+    for label in ("CODE", "CAUSE", "FIX", "RETRYABLE", "DOCS"):
+        assert any(line.startswith(label) for line in human.splitlines()), label
+    assert "CODE       TBX-LAB-019" in human
+    assert "2.99-r9999" in human
+    progress_lines = human.splitlines()
+    warning_line = next(i for i, line in enumerate(progress_lines) if line.startswith("WARN TBX-LAB-019"))
+    aligned_line = next(i for i, line in enumerate(progress_lines) if line.startswith("align") and "done" in line)
+    assert warning_line < aligned_line
+    new_inputs = {p.name for p in LabStore(root).inputs_dir.iterdir() if p.is_dir()} - before_inputs
+    assert len(new_inputs) == 1
+    (second_input,) = new_inputs
+    _fake_tool(fakes, "minimap2", f'if [ "$1" = "--version" ]; then echo "2.98-r9998"; exit 0; fi\nexec {MINIMAP2} "$@"\n')
     code, second = _json(capsys, *argv)
     assert code == 0
     assert second["data"]["sample"]["source_id"] == first["data"]["sample"]["source_id"]
-    assert second["data"]["sample"]["input_id"] != first["data"]["sample"]["input_id"]
+    assert second["data"]["sample"]["input_id"] not in {first_input, second_input}
     (warning,) = [row for row in second["data"]["warnings"] if row.get("code") == "TBX-LAB-019"]
-    assert warning["code"] == "TBX-LAB-019" and warning["new"]["minimap2"] == "2.99-r9999"
+    assert warning["code"] == "TBX-LAB-019" and warning["new"]["minimap2"] == "2.98-r9998"
+    assert warning["cause"] and warning["fix"]
+    assert isinstance(warning["retryable"], bool)
+    assert warning["docs"] == "docs/LAB-GUIDE.md#tbx-lab-019"
 
 
 def test_prealigned_bam_is_ingested(lab_world, capsys, monkeypatch, shared_mmi) -> None:

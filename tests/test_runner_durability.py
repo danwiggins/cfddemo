@@ -9,6 +9,7 @@ import sqlite3
 import stat
 import threading
 import time
+from contextlib import nullcontext
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Condition, Event
@@ -1316,10 +1317,10 @@ def test_store_pins_no_sidecar_before_its_anchor_exists(
     # recreates them with new inodes.  B must not have pinned A's sidecars.
     first, job_id = _submitted_store(tmp_path)
     wal = Path(f"{first.path}-wal")
-    # Keep the old inode allocated after SQLite unlinks the WAL; otherwise the
-    # filesystem may immediately reuse its number for the replacement file.
-    with wal.open("rb") as original_wal:
-        before = os.fstat(original_wal.fileno()).st_ino
+    # On POSIX, keep the old inode allocated after SQLite unlinks the WAL;
+    # Windows file handles can prevent that unlink, so check recreation there.
+    with (wal.open("rb") if os.name != "nt" else nullcontext()) as original_wal:
+        before = os.fstat(original_wal.fileno()).st_ino if original_wal else None
         other: list[sqlite3.Connection] = []
         real_connect = JobStore._connect
 
@@ -1331,7 +1332,9 @@ def test_store_pins_no_sidecar_before_its_anchor_exists(
                 recreated = sqlite3.connect(first.path, check_same_thread=False)
                 recreated.execute("SELECT count(*) FROM jobs").fetchall()
                 other.append(recreated)
-                assert wal.exists() and wal.stat().st_ino != before
+                assert wal.exists()
+                if before is not None:
+                    assert wal.stat().st_ino != before
             return real_connect(self, anchor=anchor)
 
         monkeypatch.setattr(JobStore, "_connect", connect)

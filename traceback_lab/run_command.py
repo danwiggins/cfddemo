@@ -257,15 +257,24 @@ def _aligner_warning(change: dict[str, Any], low: float, high: float) -> dict[st
 def _memory_warning() -> dict[str, Any] | None:
     from .doctor import MIN_RAM, _ram
 
-    physical_ram = _ram()
+    try:
+        physical_ram = _ram()
+    except Exception:  # noqa: BLE001 - an advisory probe must never abort a run
+        return None
     if physical_ram is None or physical_ram >= MIN_RAM:
         return None
+    recommended_gib = MIN_RAM // GIB
+    physical_gib = physical_ram / GIB
     return {
         "kind": "low_memory",
-        "summary": "Less than 16 GiB of physical RAM detected; alignment may fail or be slow",
+        "code": "TBX-LAB-024",
+        "cause": f"physical RAM is {physical_gib:g} GiB, below the {recommended_gib} GiB alignment recommendation",
+        "retryable": False,
+        "docs": "docs/LAB-GUIDE.md#tbx-lab-024",
+        "summary": f"Less than {recommended_gib} GiB of physical RAM detected; alignment may fail or be slow",
         "physical_ram_bytes": physical_ram,
         "recommended_bytes": MIN_RAM,
-        "fix": "Use a machine with at least 16 GiB RAM for a full hg38 alignment",
+        "fix": f"Use a machine with at least {recommended_gib} GiB RAM for a full hg38 alignment",
     }
 
 
