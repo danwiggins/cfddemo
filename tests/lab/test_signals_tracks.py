@@ -20,6 +20,9 @@ def test_end_motif_and_delfi_tracks_have_charts_and_complete_tables(tmp_path, mo
     def algorithm(algorithm_id: str, metric_id: str) -> dict:
         return {
             "algorithm_id": algorithm_id, "status": "ok", "hidden": False,
+            "provenance": {"tool": "fixture", "tool_version": "1", "parameters_sha256": "a" * 64,
+                           "input_id": "b" * 64, "source_id": source_id,
+                           "reference_id": "synthetic", "timestamp_utc": "2026-10-16T00:00:00Z"},
             "metrics": [{
                 "metric_id": metric_id, "label": metric_id, "value": 0.2,
                 "unit": "fraction", "state": "no_reference", "reason": "none_published",
@@ -61,11 +64,15 @@ def test_end_motif_and_delfi_tracks_have_charts_and_complete_tables(tmp_path, mo
             f"--user-data-dir={profile}", "--window-size=1280,800",
             server.issue_link() + f"&route=/sample/{id12}/signals",
         ], profile, ok=lambda page: 'data-ready="1"' in page and
-            "All 256 aligned-end 4-mers" in page and "DELFI-style 5 Mb bins" in page, timeout=60)
+            "All 256 aligned-end 4-mers" in page and "DELFI-style 5 Mb bins" in page and
+            page.count('data-rendered="1"') >= 2, timeout=60)
 
+    assert "All 256 aligned-end 4-mers" in dom, dom[-3000:]
+    assert "DELFI-style 5 Mb bins" in dom, dom[-3000:]
     assert "Sixteen most frequent aligned-end 4-mers" in dom
     assert "AAAA" in dom and "TTTT" in dom
     assert "Median-centred short/long ratio" in dom
     assert "No GC correction or classifier" in dom
     assert "chr1" in dom and "chr2" in dom
+    assert dom.count('data-rendered="1"') >= 2
     assert "data-csp-violations=\"0\"" in dom
