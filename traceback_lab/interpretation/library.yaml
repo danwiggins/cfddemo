@@ -216,10 +216,10 @@ entries:
     min_depth_x: null
     reference: {kind: none}
     performance: null
-    performance_missing_reason: "QC measure: sum of eligible read spans / genome length; overlapping paired mates and duplicate-marked reads are counted"
+    performance_missing_reason: "QC measure: sum of eligible read spans / genome length; duplicate-marked reads are excluded, but overlapping paired mates each contribute"
     meaning_high: "More measurements may clear their depth requirement; platform and other gates still apply."
     meaning_low: "Fewer measurements clear their depth requirement; see the depth curve."
-    confounders: ["flow-cell yield", "input cfDNA mass", "overlapping paired mates and duplicate-marked reads inflate short-read aligned-base depth relative to unique molecule coverage"]
+    confounders: ["flow-cell yield", "input cfDNA mass", "overlapping paired mates inflate short-read aligned-base depth relative to physical coverage"]
     next_steps:
       analytical: ["Use the depth curve to see what more sequencing would add"]
       clinical_setting: null
@@ -241,9 +241,9 @@ entries:
     reference: {kind: none}
     performance: null
     performance_missing_reason: "QC count"
-    meaning_high: "More reads pass the common eligibility filter; paired mates and duplicate-marked reads each count, and algorithms still apply their own platform and input gates."
+    meaning_high: "More reads pass the common eligibility filter; duplicate-marked reads are excluded, paired mates each count, and algorithms still apply their own platform and input gates."
     meaning_low: "Few reads pass the common eligibility filter; see platform-specific support requirements."
-    confounders: ["mapping quality", "chimeras", "paired mates and duplicate-marked reads count separately"]
+    confounders: ["mapping quality", "chimeras", "paired mates count separately when both are eligible"]
     next_steps:
       analytical: ["Compare with the index count (an upper bound)"]
       clinical_setting: null
