@@ -61,7 +61,10 @@ def test_sample_view_marks_old_copy_number_and_instability_as_superseded(tmp_pat
             assert selected_results(store, selected_input)[algorithm_id].status == "ok"
 
 
-def test_sample_view_follows_instability_consumed_v1_after_copy_number_v2(tmp_path: Path) -> None:
+@pytest.mark.parametrize("record_upstream", [False, True])
+def test_sample_view_follows_instability_consumed_v1_after_copy_number_v2(
+    tmp_path: Path, record_upstream: bool,
+) -> None:
     store = LabStore(tmp_path)
     source_id = _sample(store, 1)
     input_id = f"{101:064x}"
@@ -82,7 +85,7 @@ def test_sample_view_follows_instability_consumed_v1_after_copy_number_v2(tmp_pa
         upstream_selections=[{
             "algorithm_id": "copy-number", "input_id": input_id,
             "parameters_sha256": old_identity, "attempt_id": old_attempt,
-        }],
+        }] if record_upstream else None,
     )
     store.publish_result(result("copy-number", "2", current_identity), input_id=input_id)
     view = load_sample(store, source_id)
