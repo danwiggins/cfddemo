@@ -48,7 +48,8 @@ def test_stored_platform_must_match_bam_header(tmp_path: Path) -> None:
               "RG": [{"ID": "one", "PL": "ILLUMINA"}]}
     with pysam.AlignmentFile(str(bam_path), "wb", header=header):
         pass
-    assert for_input({"kind": "prealigned"}, bam_path) == "illumina"
+    with pytest.raises(ValueError, match="differs"):
+        for_input({"kind": "prealigned"}, bam_path)
     assert for_input({"kind": "prealigned", "platform": "illumina"}, bam_path) == "illumina"
     with pytest.raises(ValueError, match="differs"):
         for_input({"kind": "prealigned", "platform": "ont"}, bam_path)
@@ -142,6 +143,21 @@ def test_prealigned_writer_refuses_unknown_platform_before_publishing(tmp_path: 
     with pytest.raises(LabProblem, match="TBX-LAB-024"):
         ingest_prealigned(store, chunkset, reference)
     assert not store.inputs_dir.exists() or not list(store.inputs_dir.iterdir())
+
+
+def test_prealigned_writer_requires_one_bam_even_when_one_declares_ont(tmp_path: Path) -> None:
+    from traceback_lab.ingest import Chunk, ChunkSet, ingest_prealigned, resolve_reference
+    from traceback_lab.problems import LabProblem
+    from traceback_lab.store import LabStore
+
+    root, bam_path = _prealigned_world(tmp_path, ("ONT",))
+    store = LabStore(root)
+    chunks = ChunkSet([
+        Chunk(bam_path, bam_path.name, 1, 1, rg_lines=("@RG\tID:one\tPL:ONT",)),
+        Chunk(bam_path, "other.bam", 2, 1),
+    ])
+    with pytest.raises(LabProblem, match="TBX-LAB-009"):
+        ingest_prealigned(store, chunks, resolve_reference(root, "hg38"))
 
 
 @pytest.mark.parametrize("tamper", ["platform", "kind"])
