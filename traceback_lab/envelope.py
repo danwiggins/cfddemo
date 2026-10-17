@@ -40,7 +40,6 @@ SKIP_REASONS: tuple[str, ...] = (
     "input_kind",
     "reference",
     "upstream",
-    "input_kind",
     "unqualified_support",
     "missing_gpu",
     "model_not_ready",
