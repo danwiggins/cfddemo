@@ -158,20 +158,23 @@ def load_sample(store: LabStore, source_id: str) -> SampleView | None:
     def visible_results(input_id: str, identities: Mapping[str, str] | None = None) -> dict[str, ResultEnvelope]:
         selected = selected_results(store, input_id, identities)
         old_cn = selected.get("copy-number")
-        superseded_cn = (old_cn is not None and current_cn_version == "2"
-                         and old_cn.algorithm_version == "1")
+        superseded_cn = (old_cn is not None and current_cn_version is not None
+                         and old_cn.algorithm_version != current_cn_version)
         superseded_ids = {"copy-number"} if superseded_cn else set()
         instability = selected.get("instability")
-        if instability is not None and current_cn_version is not None and not superseded_cn:
+        if instability is not None and old_cn is not None and current_cn_version is not None and not superseded_cn:
             consumed = store.selected_upstream_selections(
                 input_id, "instability", instability.provenance.parameters_sha256,
             )
-            for item in consumed or ():
-                if item["algorithm_id"] == "copy-number":
-                    upstream = store.read_result(item["input_id"], "copy-number", item["parameters_sha256"])
-                    if upstream is not None and upstream.algorithm_version == "1":
-                        superseded_ids.add("instability")
-                    break
+            copy_number = next((item for item in consumed or () if item["algorithm_id"] == "copy-number"), None)
+            if copy_number is None:
+                superseded_ids.add("instability")
+            else:
+                upstream = store.read_result(
+                    copy_number["input_id"], "copy-number", copy_number["parameters_sha256"],
+                )
+                if upstream is None or upstream.algorithm_version != current_cn_version:
+                    superseded_ids.add("instability")
         while True:
             added = {
                 algorithm.id for algorithm in algorithms
@@ -186,7 +189,7 @@ def load_sample(store: LabStore, source_id: str) -> SampleView | None:
                 reason, message = "platform", skip_message
             elif algorithm_id in superseded_ids:
                 reason = "superseded_method"
-                message = "Selected copy-number method predates the signed counted-read floor; rerun this input"
+                message = "Selected copy-number method or its consumed provenance is not current; rerun this input"
             else:
                 return envelope
             return ResultEnvelope(
