@@ -71,6 +71,17 @@ def split_specs() -> list[DerivedSpec]:
     return [split("A"), split("B")]
 
 
+def derived_plan_items(items: Sequence[PlanItem], transform: str) -> list[PlanItem]:
+    """Run ordinary dependencies per derived input; reuse only row-mask stores."""
+
+    reusable = intermediate_ids([item.algorithm for item in items])
+    runnable = [
+        item for item in items
+        if item.algorithm.consumes in DERIVED_CONSUMES and item.algorithm.id not in reusable
+    ]
+    return [item for item in runnable if item.algorithm.consumes == "counting_bam"] if transform == "cna" else runnable
+
+
 def run_derived(
     store: LabStore,
     lock: WriterLock | None,
@@ -101,11 +112,7 @@ def run_derived(
     # run on a derived input: their parent output is reused through the row
     # mask (D33), and a re-decode of a derived BAM would index different rows.
     # Other full-BAM consumers (cell-origin) get a transient BAM.
-    intermediates = intermediate_ids([item.algorithm for item in items])
-    runnable = [
-        item for item in items
-        if item.algorithm.consumes in DERIVED_CONSUMES and item.algorithm.id not in intermediates
-    ]
+    runnable = derived_plan_items(items, "downsample")
     summary = None
     if read_summary is not None and read_summary.artifacts_dir:
         try:
@@ -183,11 +190,7 @@ def run_derived(
             approx_depth_x=stamp["approx_depth_x"],
             index_mapped_upper_bound=None,
         )
-        chosen = (
-            [entry for entry in runnable if entry.algorithm.consumes == "counting_bam"]
-            if spec.transform == "cna"
-            else runnable
-        )
+        chosen = derived_plan_items(items, spec.transform)
         results = run_plan(
             store,
             lock,

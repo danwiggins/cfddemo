@@ -145,7 +145,7 @@ def test_problem_table_exit_codes() -> None:
     assert PROBLEMS["TBX-LAB-015"].exit_code == 6
     assert PROBLEMS["TBX-LAB-016"].exit_code == 8
     assert PROBLEMS["TBX-LAB-019"].exit_code == 0
-    assert len(PROBLEMS) == 22
+    assert len(PROBLEMS) == 23
 
 
 def test_usage_errors_keep_the_json_contract(tmp_path: Path, capsys) -> None:

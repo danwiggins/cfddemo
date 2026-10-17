@@ -392,6 +392,7 @@ class LabApi:
             "run_utc": max((entry.get("used_utc", "") for entry in record.get("inputs", [])), default=""),
             "depth": next((env.depth.model_dump() for env in sample.full.results.values() if env.depth), None),
             "excluded_chunks": record.get("excluded", []),
+            "preanalytic_sex": views.sex_check_view(sample),
             "interpretation_version": library.version,
             "cohort_version": generation.version_id if generation else None,
             "cohort_kind": generation.kind if generation else None,
