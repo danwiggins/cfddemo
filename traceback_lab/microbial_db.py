@@ -76,15 +76,15 @@ def _file_receipt(path: Path) -> dict[str, int]:
             return _stat_receipt(info)
         finally:
             os.close(descriptor)
-    except OSError as exc:
-        raise MicrobialDbError("database file is missing or unsafe") from exc
+    except OSError:
+        raise MicrobialDbError("database file is missing or unsafe") from None
 
 
 def _digest_file(path: Path) -> tuple[str, dict[str, int]]:
     try:
         descriptor = open_regular_no_follow(path)
-    except OSError as exc:
-        raise MicrobialDbError("database file is missing or unsafe") from exc
+    except OSError:
+        raise MicrobialDbError("database file is missing or unsafe") from None
     digest = hashlib.sha256()
     try:
         before = os.fstat(descriptor)
@@ -100,6 +100,8 @@ def _digest_file(path: Path) -> tuple[str, dict[str, int]]:
         path_after = path.lstat()
         if (path_after.st_dev, path_after.st_ino) != (before.st_dev, before.st_ino):
             raise MicrobialDbError("database file changed during verification")
+    except OSError:
+        raise MicrobialDbError("database file could not be verified") from None
     finally:
         os.close(descriptor)
     return digest.hexdigest(), _stat_receipt(after)
@@ -124,8 +126,8 @@ def inspect_database(store: LabStore, *, verify_bytes: bool = True) -> Microbial
         if len(raw) > 4096:
             raise ValueError("manifest too large")
         data = json.loads(raw)
-    except (OSError, ValueError, AssetError) as exc:
-        raise MicrobialDbError("microbial database registration is unreadable") from exc
+    except (OSError, ValueError, AssetError):
+        raise MicrobialDbError("microbial database registration is unreadable") from None
     if not isinstance(data, dict) or data.get("schema") not in (SCHEMA, LEGACY_SCHEMA):
         raise MicrobialDbError("microbial database registration is invalid")
     legacy = data["schema"] == LEGACY_SCHEMA
@@ -161,8 +163,8 @@ def inspect_database(store: LabStore, *, verify_bytes: bool = True) -> Microbial
             if receipts != data["file_stats"]:
                 raise MicrobialDbReceiptChanged("registered database files changed since byte verification")
             files = data["files"]
-    except (OSError, AssetError) as exc:
-        raise MicrobialDbError("registered database files are unavailable or unsafe") from exc
+    except (OSError, AssetError):
+        raise MicrobialDbError("registered database files are unavailable or unsafe") from None
     bundle = hashlib.sha256(canonical_json_bytes({"read_length": data["read_length"], "files": files})).hexdigest()
     if files != data["files"] or bundle != data["sha256"]:
         raise MicrobialDbError("registered database bytes changed")
@@ -182,14 +184,14 @@ def register_database(store: LabStore, directory: Path, read_length: int, source
         checked = {name: _digest_file(_regular_source(directory / name)) for name in names}
         files = {name: item[0] for name, item in checked.items()}
         file_stats = {name: item[1] for name, item in checked.items()}
-    except (OSError, AssetError) as exc:
-        raise MicrobialDbError("database directory must contain regular Kraken2 and Bracken files") from exc
+    except (OSError, AssetError):
+        raise MicrobialDbError("database directory must contain regular Kraken2 and Bracken files") from None
     bundle = hashlib.sha256(canonical_json_bytes({"read_length": read_length, "files": files})).hexdigest()
     destination = _directory(store)
     try:
         _check_contained(store, destination)
-    except AssetError as exc:
-        raise MicrobialDbError("database registration path is unsafe") from exc
+    except AssetError:
+        raise MicrobialDbError("database registration path is unsafe") from None
     if destination.exists() or destination.is_symlink():
         existing = inspect_database(store)
         if existing.sha256 != bundle or existing.source_label != source_label:
@@ -203,8 +205,8 @@ def register_database(store: LabStore, directory: Path, read_length: int, source
                 "schema": SCHEMA, "directory": str(directory), "read_length": read_length,
                 "source_label": source_label, "files": files, "file_stats": file_stats, "sha256": bundle,
             }))
-        except OSError as exc:
-            raise MicrobialDbError("database registration could not be updated") from exc
+        except OSError:
+            raise MicrobialDbError("database registration could not be updated") from None
         return inspect_database(store, verify_bytes=False)
 
     def build(staging: Path) -> None:
