@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from traceback_lab import cohorts
 from traceback_lab.cohort_contracts import CohortGeneration, CohortMember, CohortResult
 from traceback_lab.cohorts import CohortListing
 from traceback_lab.envelope import Metric, ResultEnvelope, provenance
@@ -49,7 +50,7 @@ def test_compare_pins_one_generation_and_gates_after_leave_one_out(
     generation = CohortGeneration(cohort_id="healthy", version=7, kind=kind, members=members)
     reads = []
     monkeypatch.setattr(web_api, "read_current", lambda store, cohort_id: (reads.append(cohort_id), generation)[1])
-    monkeypatch.setattr(web_api, "member_from_store", lambda store, source_id: members[0])
+    monkeypatch.setattr(cohorts, "member_for_generation", lambda store, generation, source_id: members[0])
     envelope = ResultEnvelope(
         algorithm_id="fragment-size", algorithm_version="1", status="ok",
         provenance=provenance(
@@ -137,7 +138,7 @@ def test_compare_rejects_changed_full_input_or_source(
         aligner_identity="minimap2 2.28; samtools 1.20",
         results=(_result(target_source, 101.0),),
     )
-    monkeypatch.setattr(web_api, "member_from_store", lambda store, source_id: target)
+    monkeypatch.setattr(cohorts, "member_for_generation", lambda store, generation, source_id: target)
     api = web_api.LabApi(LabStore(tmp_path))
     monkeypatch.setattr(api, "_resolve", lambda id12: (_TARGET, []))
     monkeypatch.setattr(api, "_id12s", lambda: {_TARGET: _TARGET[:12]})
@@ -259,9 +260,9 @@ def test_compare_target_unavailable_has_no_metrics(tmp_path, monkeypatch) -> Non
         "TBX-LAB-020", cause="stored source record is malformed",
         fix="Restore the source record matching its filename before cohort add/build",
     )
-    def unavailable(store, source_id):
+    def unavailable(store, generation, source_id):
         raise problem
-    monkeypatch.setattr(web_api, "member_from_store", unavailable)
+    monkeypatch.setattr(cohorts, "member_for_generation", unavailable)
     api = web_api.LabApi(LabStore(tmp_path))
     monkeypatch.setattr(api, "_resolve", lambda id12: (_TARGET, []))
     monkeypatch.setattr(api, "_id12s", lambda: {_TARGET: _TARGET[:12]})
