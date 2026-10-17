@@ -789,6 +789,16 @@
             if (!Array.isArray(data.bins) || data.bin_bp !== 5000000 || data.median_ratio_removed !== true) {
               throw new Error("ratio track contract invalid");
             }
+            if (data.bins.length > 1024 || data.bins.some((bin) =>
+              !bin || typeof bin.contig !== "string" || !/^(?:chr)?(?:[1-9]|1[0-9]|2[0-2])$/.test(bin.contig) ||
+              !Number.isSafeInteger(bin.start) || bin.start < 0 || bin.start % data.bin_bp !== 0 ||
+              !Number.isSafeInteger(bin.short) || bin.short < 0 ||
+              !Number.isSafeInteger(bin.long) || bin.long < 0 ||
+              (bin.long === 0
+                ? bin.ratio !== null || bin.centred !== null
+                : !Number.isFinite(bin.ratio) || bin.ratio < 0 || !Number.isFinite(bin.centred)))) {
+              throw new Error("ratio track bin values invalid");
+            }
             const labels = data.bins.map((b) => `${b.contig}:${(b.start / 1e6).toFixed(0)} Mb`);
             const values = data.bins.map((b) => b.centred);
             slot.replaceWith(chart(`Median-centred short/long ratio across ${data.bins.length} genomic bins; gaps have no long fragments.`, {
