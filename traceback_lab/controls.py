@@ -112,7 +112,8 @@ def run_derived(
     # run on a derived input: their parent output is reused through the row
     # mask (D33), and a re-decode of a derived BAM would index different rows.
     # Other full-BAM consumers (cell-origin) get a transient BAM.
-    runnable = derived_plan_items(items, "downsample")
+    runnable = [item for item in derived_plan_items(items, "downsample")
+                if parent.platform in item.algorithm.requires.platforms]
     summary = None
     if read_summary is not None and read_summary.artifacts_dir:
         try:
@@ -155,6 +156,7 @@ def run_derived(
             input_dir=parent.input_dir,
             reference_id=parent.reference_id,
             reference_sha256=parent.reference_sha256,
+            platform=parent.platform,
             label=spec.label(),
             derived=mask_spec,
             example=parent.example,
@@ -190,6 +192,8 @@ def run_derived(
             approx_depth_x=stamp["approx_depth_x"],
             index_mapped_upper_bound=None,
         )
+        # Keep unsupported requested algorithms in the derived plan. run_plan
+        # publishes their platform skips so the depth curve shows a labelled gap.
         chosen = derived_plan_items(items, spec.transform)
         results = run_plan(
             store,

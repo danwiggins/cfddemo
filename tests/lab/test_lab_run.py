@@ -491,6 +491,39 @@ def test_stored_dry_run_uses_selected_depth_without_writing(
     assert "INPUT     unknown (stored chunk record incomplete) · excluded [4]" in incomplete_human
 
 
+def test_stored_illumina_dry_run_uses_platform_bound_read_summary(
+    tmp_path: Path, capsys, monkeypatch,
+) -> None:
+    from tests.lab.test_platforms import _prealigned_world
+    from traceback_lab.algorithms.read_summary import READ_SUMMARY
+    from traceback_lab.registry import execution_identity
+
+    root, bam = _prealigned_world(tmp_path, ("ILLUMINA",))
+    monkeypatch.setattr(registry, "ALGORITHMS", ("read_summary:READ_SUMMARY",))
+    code, first = _json(capsys, "run", str(bam), "--root", str(root),
+                        "--reference", "hg38", "--only", "read-summary")
+    assert code == 0, first
+    store = LabStore(root)
+    input_id = first["data"]["sample"]["input_id"]
+    manifest = json.loads((store.inputs_dir / input_id / "manifest.json").read_bytes())
+    identity = execution_identity(
+        READ_SUMMARY, reference_sha256=manifest["reference_sha256"], platform="illumina",
+    )
+    selected = store.read_result(input_id, "read-summary", identity)
+    assert selected is not None and selected.status == "ok"
+    eligible = next(metric.value for metric in selected.metrics if metric.metric_id == "eligible_reads")
+
+    dry_code, dry = _json(capsys, "run", "latest", "--root", str(root),
+                          "--only", "read-summary", "--dry-run")
+    assert dry_code == 0, dry
+    assert dry["data"]["sample"]["platform"] == "illumina"
+    assert dry["data"]["eligible_reads"] == eligible
+    assert dry["data"]["plan"] == [{
+        "algorithm_id": "read-summary", "upstream": False,
+        "decision": "reused (selected result)",
+    }]
+
+
 def test_second_writer_is_refused(lab_world, capsys, monkeypatch) -> None:
     _registry(monkeypatch)
     store = LabStore(lab_world["root"])
