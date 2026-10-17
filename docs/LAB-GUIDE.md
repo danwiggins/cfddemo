@@ -194,7 +194,8 @@ registered hg38 reference, run the normal Lab command:
 
 ```bash
 traceback lab run YOUR_LOCAL_aligned_illumina.bam \
-  --reference hg38 --root R
+  --reference hg38 --only short-read-fragment-size \
+  --no-downsample --no-controls --root R
 ```
 
 Every BAM read group must declare `PL:ILLUMINA`. This declaration is recorded
