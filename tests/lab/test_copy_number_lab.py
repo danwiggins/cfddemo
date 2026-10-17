@@ -112,6 +112,31 @@ def test_no_pon_run_uses_the_counted_read_floor_in_its_identity(tmp_path: Path, 
     assert len(seen) == 1
 
 
+def test_old_no_pon_result_cannot_satisfy_the_corrected_identity(tmp_path: Path, monkeypatch) -> None:
+    from traceback_lab.algorithms import copy_number as cn_module
+    from traceback_lab.envelope import ResultEnvelope, provenance
+    from traceback_lab.registry import execution_identity
+
+    algorithm = cn_module.COPY_NUMBER
+    current = execution_identity(algorithm, reference_sha256="c" * 64)
+    monkeypatch.setattr(algorithm, "version", "1")
+    old = execution_identity(algorithm, reference_sha256="c" * 64)
+    monkeypatch.setattr(algorithm, "version", "2")
+    assert old != current
+
+    store = LabStore(tmp_path)
+    store.ensure()
+    store.publish_result(ResultEnvelope(
+        algorithm_id="copy-number", algorithm_version="1", status="ok",
+        provenance=provenance(tool="fixture", parameters_sha256=old,
+                              source_id="a" * 64, input_id="b" * 64,
+                              reference_id="ref", timestamp_utc="2026-10-15T00:00:00Z"),
+        metrics=[],
+    ), input_id="b" * 64)
+    assert store.read_result("b" * 64, "copy-number", old) is not None
+    assert store.read_result("b" * 64, "copy-number", current) is None
+
+
 # ------------------------------------------------------------ derived inputs
 LENGTH = 2_000_000
 
