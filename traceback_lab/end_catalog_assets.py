@@ -77,6 +77,7 @@ def _parse_rows(raw: bytes, *, preferred: bool) -> dict[str, np.ndarray] | tuple
     rows: dict[str, list[int]] = {}
     ends: dict[str, list[int]] = {}
     prior: tuple[int, int] | None = None
+    labels_at_position: set[str] = set()
     try:
         lines = raw.decode("ascii").splitlines()
         for line in lines:
@@ -98,10 +99,15 @@ def _parse_rows(raw: bytes, *, preferred: bool) -> dict[str, np.ndarray] | tuple
             else:
                 position = (start + end) // 2
             key = (int(chrom[3:]), position)
-            if prior is not None and key <= prior:
+            if prior is not None and key < prior:
+                raise ValueError
+            if key != prior:
+                labels_at_position.clear()
+            if key == prior and (not preferred or fields[3] in labels_at_position):
                 raise ValueError
             prior = key
             if preferred:
+                labels_at_position.add(fields[3])
                 (rows if fields[3] == "U" else ends).setdefault(chrom, []).append(position)
             else:
                 values = rows.setdefault(chrom, [])
@@ -196,6 +202,9 @@ def register_end_catalogues(
         "preferred_source": preferred_source, "terms": terms, "license_id": license_id,
     }
     data["identity"] = hashlib.sha256(_canonical(data)).hexdigest()
+    encoded = _canonical(data)
+    if len(encoded) > MAX_MANIFEST_BYTES:
+        raise EndCatalogueError("end catalogue registration exceeds its size limit")
     location = _location(root)
     if any(parent.is_symlink() for parent in (root, location.parent.parent.parent, location.parent.parent, location.parent)):
         raise EndCatalogueError("Lab asset directory contains a symlink")
@@ -204,7 +213,7 @@ def register_end_catalogues(
         descriptor, temporary = tempfile.mkstemp(prefix=".aligned-ends-", dir=location.parent)
         try:
             with os.fdopen(descriptor, "wb") as stream:
-                stream.write(_canonical(data))
+                stream.write(encoded)
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, location)

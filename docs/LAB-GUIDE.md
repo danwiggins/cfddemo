@@ -224,6 +224,11 @@ midpoint, and centers must be more than 200 bp apart so ±100 bp profiles do
 not overlap. The preferred-end file is sorted BED4 with one-base intervals
 and `U` or `D` in column four. `U` means the lower-coordinate aligned end;
 `D` means the higher-coordinate aligned end. Both files use chr1–chr22 and
+numeric chromosome order, contain no header or extra columns, and must each
+be at most 64 MiB. Filter raw peak files to these columns and autosomes,
+then sort and thin centers before registration; the Lab does not silently
+discard overlapping peaks or convert genome builds. A U and D site may share
+one coordinate, but duplicate sites in the same direction are rejected. Both files
 must identify their provenance outside the file, including source accession,
 release, assembly, coordinate convention and terms. The Lab validates and
 rehashes their exact bytes. It neither downloads nor redistributes them.
@@ -243,7 +248,9 @@ The result measures raw `D−U` end counts in [−70, −50) bp and `U−D` in
 [50, 70) bp around pinned centers. It also reports the fraction of valid
 aligned ends exactly matching the pinned U/D site catalogue; this is a
 support count, not de novo site discovery or enrichment against a calibrated
-background. Both are ONT aligned-span proxies, not confirmed physical
+background. The raw count difference scales with depth, eligible-region count
+and end coverage; it is null when no aligned ends fall in its measurement
+windows. Both are ONT aligned-span proxies, not confirmed physical
 cleavage positions. The [OCF study](https://pubmed.ncbi.nlm.nih.gov/30808726/)
 used tissue-specific short-read open-chromatin signals, while the
 [size-tagged preferred-end study](https://www.pnas.org/doi/10.1073/pnas.1804134115)

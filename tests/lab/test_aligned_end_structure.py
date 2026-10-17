@@ -11,6 +11,7 @@ import pytest
 
 from traceback_lab.algorithms.aligned_end_structure import ALIGNED_END_STRUCTURE
 from traceback_lab.cli import build_parser
+from traceback_lab import end_catalog_assets
 from traceback_lab.end_catalog_assets import EndCatalogueError, inspect_end_catalogues, register_end_catalogues
 from traceback_lab.read_summary import COLUMNS, SCHEMA
 from traceback_lab.registry import InputContext, PlanItem, Ready, registry_entries
@@ -71,12 +72,13 @@ def test_exact_ocf_like_sign_and_preferred_end_support(tmp_path: Path) -> None:
     output = ALIGNED_END_STRUCTURE.run(ctx, tmp_path / "out")
     metrics = {item["metric_id"]: item for item in output.metrics}
     assert metrics["ocf_like_end_asymmetry"]["value"] == -2
-    assert metrics["ocf_like_end_asymmetry"]["n"] == 1
+    assert metrics["ocf_like_end_asymmetry"]["n"] == 2
     assert metrics["preferred_end_support_fraction"]["value"] == 1.0
     assert metrics["preferred_end_support_fraction"]["n"] == 2
     artifact = json.loads(output.artifacts["aligned_end_structure.json"])
     assert artifact["u_count"][40] == 1 and artifact["d_count"][160] == 1
     assert artifact["ocf_like_left"] == -1 and artifact["ocf_like_right"] == -1
+    assert artifact["ocf_like_measurement_ends"] == 2
     assert artifact["valid_molecules"] == 1 and artifact["preferred_u_hits"] == 1
     assert artifact["preferred_d_hits"] == 1
     assert artifact["observed_depth_x"] == 10.0
@@ -102,11 +104,29 @@ def test_no_usable_catalogue_coordinates_are_unscorable_not_zero(tmp_path: Path)
     assert artifact["eligible_centers"] == 0 and artifact["eligible_preferred_sites"] == 0
 
 
+def test_profile_ends_outside_measurement_windows_are_unscorable(tmp_path: Path) -> None:
+    root, _, _ = _catalogues(tmp_path)
+    summary_parent = tmp_path / "read-summary"
+    _summary(summary_parent)
+    columns = summary_parent / "columns"
+    np.asarray([400, 400, 400], dtype=COLUMNS["start"]).tofile(columns / "start.bin")
+    np.asarray([601, 601, 601], dtype=COLUMNS["end"]).tofile(columns / "end.bin")
+    output = ALIGNED_END_STRUCTURE.run(_context(root, summary_parent), tmp_path / "out")
+    metric = next(item for item in output.metrics if item["metric_id"] == "ocf_like_end_asymmetry")
+    assert metric["value"] is None and metric["n"] == 0
+    artifact = json.loads(output.artifacts["aligned_end_structure.json"])
+    assert artifact["u_count"][0] == 1 and artifact["d_count"][200] == 1
+    assert artifact["ocf_like_measurement_ends"] == 0
+
+
 def test_depth_full_input_and_pinned_asset_gates(tmp_path: Path) -> None:
     root, centers, _ = _catalogues(tmp_path)
     summary_parent = tmp_path / "read-summary"
     assert ALIGNED_END_STRUCTURE.preflight(_context(root, summary_parent, depth=9.99)).reason_code == "depth"
     assert isinstance(ALIGNED_END_STRUCTURE.preflight(_context(root, summary_parent, depth=10.0)), Ready)
+    (root / "input" / "manifest.json").write_text(json.dumps({"kind": "prealigned"}), encoding="utf-8")
+    assert ALIGNED_END_STRUCTURE.preflight(_context(root, summary_parent)).reason_code == "input_kind"
+    (root / "input" / "manifest.json").write_text(json.dumps({"kind": "aligned"}), encoding="utf-8")
     assert ALIGNED_END_STRUCTURE.preflight(_context(root, summary_parent, derived={"transform": "split", "half": "A"})).reason_code == "derived_input"
     assert ALIGNED_END_STRUCTURE.preflight(_context(root, summary_parent, example=True)).reason_code == "example_reference"
     old_identity = inspect_end_catalogues(root).identity
@@ -135,6 +155,53 @@ def test_bad_centers_do_not_replace_pinned_registration(tmp_path: Path, bad: str
                                 centers_source="synthetic-centers-v1", preferred_source="synthetic-sites-v1",
                                 terms="unknown", license_id=None)
     assert registration.read_bytes() == original
+
+
+def test_oversized_registration_does_not_replace_pinned_manifest(tmp_path: Path, monkeypatch) -> None:
+    root, centers, preferred = _catalogues(tmp_path)
+    registration = root / "lab" / "assets" / "aligned-ends" / "registration.json"
+    original = registration.read_bytes()
+    monkeypatch.setattr(end_catalog_assets, "MAX_MANIFEST_BYTES", len(original))
+    with pytest.raises(EndCatalogueError, match="size limit"):
+        register_end_catalogues(root, centers=centers, preferred=preferred,
+                                source_label="longer synthetic hg38 end catalogues",
+                                centers_source="synthetic-centers-v1", preferred_source="synthetic-sites-v1",
+                                terms="unknown", license_id=None)
+    assert registration.read_bytes() == original
+
+
+def test_same_coordinate_can_have_distinct_preferred_end_directions(tmp_path: Path) -> None:
+    root, centers, preferred = _catalogues(tmp_path)
+    preferred.write_text("chr1\t440\t441\tU\nchr1\t440\t441\tD\n", encoding="ascii")
+    registered = register_end_catalogues(root, centers=centers, preferred=preferred,
+                                         source_label="synthetic hg38 end catalogues",
+                                         centers_source="synthetic-centers-v1", preferred_source="synthetic-sites-v2",
+                                         terms="unknown", license_id=None)
+    assert registered.preferred_count == 2
+    preferred.write_text("chr1\t440\t441\tU\nchr1\t440\t441\tU\n", encoding="ascii")
+    with pytest.raises(EndCatalogueError, match="sorted"):
+        register_end_catalogues(root, centers=centers, preferred=preferred,
+                                source_label="synthetic hg38 end catalogues",
+                                centers_source="synthetic-centers-v1", preferred_source="synthetic-sites-v2",
+                                terms="unknown", license_id=None)
+
+
+def test_reregistered_catalogue_cannot_run_under_old_execution_identity(tmp_path: Path) -> None:
+    root, centers, preferred = _catalogues(tmp_path)
+    old_identity = inspect_end_catalogues(root).identity
+    centers.write_text("chr1\t690\t710\n", encoding="ascii")
+    register_end_catalogues(root, centers=centers, preferred=preferred,
+                            source_label="synthetic hg38 end catalogues",
+                            centers_source="synthetic-centers-v2", preferred_source="synthetic-sites-v1",
+                            terms="unknown", license_id=None)
+    summary_parent = tmp_path / "read-summary"
+    _summary(summary_parent)
+    ctx = _context(root, summary_parent, extras={
+        "upstream": {"read-summary": str(summary_parent)},
+        "execution_asset_sha256s": [old_identity],
+    })
+    with pytest.raises(EndCatalogueError, match="execution identity"):
+        ALIGNED_END_STRUCTURE.run(ctx, tmp_path / "out")
 
 
 def test_registration_rejects_symlink_and_path_label(tmp_path: Path) -> None:

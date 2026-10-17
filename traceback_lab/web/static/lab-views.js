@@ -741,11 +741,11 @@
       const rows = data.offset_bp.map((bp, i) => [bp, data.u_count[i], data.d_count[i]]);
       slot.replaceWith(h("div", {},
         h("p", {}, `Observed eligible depth: ${fmt(data.observed_depth_x)}x; valid molecules: ${fmt(data.valid_molecules)}; eligible centers: ${fmt(data.eligible_centers)} of ${fmt(data.catalogue_centers)}; eligible pinned sites: ${fmt(data.eligible_preferred_sites)} of ${fmt(data.catalogue_preferred_sites)}.`),
-        h("p", {}, `OCF-like left/right contributions: ${fmt(data.ocf_like_left)} / ${fmt(data.ocf_like_right)} end-count differences. Exact preferred-site U/D hits: ${fmt(data.preferred_u_hits)} / ${fmt(data.preferred_d_hits)} of ${fmt(data.valid_ends)} valid ends.`),
+        h("p", {}, `OCF-like left/right contributions: ${fmt(data.ocf_like_left)} / ${fmt(data.ocf_like_right)} end-count differences from ${fmt(data.ocf_like_measurement_ends)} ends in the measurement windows. Exact preferred-site U/D hits: ${fmt(data.preferred_u_hits)} / ${fmt(data.preferred_d_hits)} of ${fmt(data.valid_ends)} valid ends.`),
         chart("Upstream and downstream aligned-end counts around pinned hg38 centers.", {
           grid: { left: 55, right: 20, top: 20, bottom: 40 },
           xAxis: { type: "value", name: "bp from center", min: -100, max: 100 },
-          yAxis: { type: "value", name: "ends" },
+          yAxis: { type: "value", name: "raw ends (not depth-normalized)" },
           series: [
             { type: "line", name: "U", showSymbol: false, data: rows.map((row) => [row[0], row[1]]) },
             { type: "line", name: "D", showSymbol: false, data: rows.map((row) => [row[0], row[2]]) },

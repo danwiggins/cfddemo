@@ -196,13 +196,14 @@ def run_plan(
             if name in done
         ]
         assets_of = getattr(algorithm, "asset_sha256s", None)
+        asset_digests = assets_of(store.root) if callable(assets_of) else ()
         identity = execution_identity(
             algorithm,
             reference_sha256=target.reference_sha256,
             upstream=upstream,
             # Consumed assets enter the execution identity (D19), so a
             # re-registered asset never reuses an older result.
-            asset_sha256s=assets_of(store.root) if callable(assets_of) else (),
+            asset_sha256s=asset_digests,
         )
         step = algorithm.id if target.label == "full" else f"{algorithm.id}@{target.label}"
         existing = store.read_result(target.input_id, algorithm.id, identity)
@@ -225,6 +226,7 @@ def run_plan(
             if progress:
                 progress(f"{step:<24} ok (cached)")
             continue
+        target.extras["execution_asset_sha256s"] = list(asset_digests)
         target.extras["upstream"] = {
             name: done[name].artifacts_dir
             for name in algorithm.upstream

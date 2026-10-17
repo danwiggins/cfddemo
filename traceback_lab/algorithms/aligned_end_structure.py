@@ -59,7 +59,7 @@ class AlignedEndStructure(Base):
         "profile_offsets": [-RADIUS, RADIUS],
         "end_coordinates": "start_and_end_minus_one_0_based",
         "preferred_support": "exact_U_or_D_catalogue_coordinate_per_valid_end",
-        "filter": "D21 autosomal primary MAPQ20 nonduplicate QC-pass; one ONT record per molecule",
+        "filter": f"D21 autosomal primary MAPQ{MIN_MAPQ} exclude-flags-{FLAG_EXCLUDE}; one ONT record per molecule",
     })
 
     def asset_sha256s(self, root: Path) -> list[str]:
@@ -81,8 +81,7 @@ class AlignedEndStructure(Base):
             return Skip("input_kind", "aligned-end structure requires a stored native ONT alignment")
         if not isinstance(manifest, dict) or manifest.get("kind") != "aligned":
             return Skip("input_kind", "aligned-end structure requires a native ONT alignment")
-        if getattr(ctx, "platform", "ont") != "ont":
-            return Skip("platform", "aligned-end structure requires a native ONT alignment")
+        # Only the native ONT aligner publishes kind=aligned; imported BAMs are prealigned.
         if ctx.approx_depth_x is None or not np.isfinite(ctx.approx_depth_x) or ctx.approx_depth_x < MIN_DEPTH_X:
             return Skip("depth", "aligned-end structure needs at least 10x observed eligible depth")
         try:
@@ -94,6 +93,9 @@ class AlignedEndStructure(Base):
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
         del out
         catalogues = inspect_end_catalogues(ctx.root)
+        expected = ctx.extras.get("execution_asset_sha256s")
+        if expected is not None and expected != [catalogues.identity]:
+            raise EndCatalogueError("pinned end catalogues changed after execution identity was set")
         summary, mask = load_summary(ctx)
         names = summary.contigs
         lengths = summary.lengths
@@ -148,7 +150,9 @@ class AlignedEndStructure(Base):
         # Original OCF direction; these are ONT aligned-end proxies, so use an explicit OCF-like name.
         left = int((d_counts[30:50] - u_counts[30:50]).sum())
         right = int((u_counts[150:170] - d_counts[150:170]).sum())
-        ocf_like = left + right if valid_centers and int(u_counts.sum() + d_counts.sum()) else None
+        measurement_ends = int(u_counts[30:50].sum() + d_counts[30:50].sum()
+                               + u_counts[150:170].sum() + d_counts[150:170].sum())
+        ocf_like = left + right if valid_centers and measurement_ends else None
         ends_total = 2 * valid_molecules
         artifact = {
             "schema": "traceback.lab.aligned-end-structure.v1",
@@ -160,6 +164,7 @@ class AlignedEndStructure(Base):
             "offset_bp": list(range(-RADIUS, RADIUS + 1)),
             "u_count": u_counts.tolist(), "d_count": d_counts.tolist(),
             "ocf_like_left": left, "ocf_like_right": right,
+            "ocf_like_measurement_ends": measurement_ends,
             "catalogue_centers": catalogues.center_count, "eligible_centers": valid_centers,
             "catalogue_preferred_sites": catalogues.preferred_count,
             "eligible_preferred_sites": valid_preferred_sites,
@@ -168,7 +173,7 @@ class AlignedEndStructure(Base):
         }
         return AlgorithmOutput(
             metrics=[
-                metric("ocf_like_end_asymmetry", ocf_like, unit="end-count difference", n=valid_centers),
+                metric("ocf_like_end_asymmetry", ocf_like, unit="end-count difference", n=measurement_ends),
                 metric("preferred_end_support_fraction", ratio(u_hits + d_hits, ends_total)
                        if valid_preferred_sites else None,
                        unit="fraction", n=ends_total),
