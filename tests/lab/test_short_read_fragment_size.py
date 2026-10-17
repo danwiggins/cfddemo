@@ -133,7 +133,7 @@ def test_preflight_requires_prealigned_declared_illumina(
     assert decision.reason_code == reason
 
 
-def test_input_kind_skip_is_published_by_real_runner(tmp_path: Path) -> None:
+def test_platform_skip_is_published_by_real_runner(tmp_path: Path) -> None:
     store = LabStore(tmp_path / "root")
     store.ensure()
     input_dir = tmp_path / "input"
@@ -149,10 +149,10 @@ def test_input_kind_skip_is_published_by_real_runner(tmp_path: Path) -> None:
         {"short-read-fragment-size": "traceback_lab.algorithms.short_read_fragment_size:SHORT_READ_FRAGMENT_SIZE"},
         run_id=run_id, scrubber=Scrubber(root=store.root),
     )[0]
-    assert result.status == "skipped" and result.skip_reason == "input_kind"
+    assert result.status == "skipped" and result.skip_reason == "platform"
     stored = store.read_result(target.input_id, result.algorithm_id, result.parameters_sha256)
-    assert stored is not None and stored.status == "skipped" and stored.skip_reason == "input_kind"
-    assert any(event["event"] == "step_end" and event["skip_reason"] == "input_kind" for event in log.events())
+    assert stored is not None and stored.status == "skipped" and stored.skip_reason == "platform"
+    assert any(event["event"] == "step_end" and event["skip_reason"] == "platform" for event in log.events())
 
 
 def test_derived_pair_selection_uses_read_name_predicate(tmp_path: Path) -> None:
