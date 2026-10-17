@@ -121,7 +121,7 @@ def profile_for_sample(store: LabStore, sample: SampleView, generation: CohortGe
                 "taxa": []}
     if (envelope.provenance.source_id != sample.source_id or envelope.provenance.input_id != sample.full.input_id
             or envelope.provenance.parameters_sha256 != expected):
-        return {"state": "stale", "reason": "Microbial result is not current for this input and toolchain; rerun it",
+        return {"state": "stale", "reason": "Microbial input or pinned toolchain differs; restore the pinned environment or rerun under the current one",
                 "taxa": []}
     artifacts = store.selected_artifacts(sample.full.input_id, "microbial", expected)
     profile = _read_profile(artifacts / "microbial_profile.json") if artifacts else None

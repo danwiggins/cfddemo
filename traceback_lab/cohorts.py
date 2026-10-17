@@ -21,7 +21,7 @@ from pydantic import ValidationError
 from traceback_runner.serialization import canonical_json_bytes
 
 from .cohort_contracts import CohortGeneration, CohortMember, CohortResult, MetricProjection, project_metric
-from .identity import SHA256_PATTERN, cohort_compat_key
+from .identity import SHA256_PATTERN, canonical_sha256, cohort_compat_key
 from .ingest import resolve_sample, source_ids
 from .problems import LabProblem
 from .registry import execution_identity, load_registry
@@ -357,9 +357,10 @@ def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) 
             per_sample_asset_keys=("pon_asset_sha256",),
         )
         if algorithm.id == "microbial":
-            # The registered DB bytes enter execution identity, but not the
-            # generic cohort key. Never pool microbial profiles from two DBs.
-            compat = chosen.provenance.parameters_sha256
+            # Preserve the aligner match in the generic key and also pin the
+            # exact DB/tool/upstream execution identity for this method.
+            compat = canonical_sha256({"cohort": compat,
+                                       "execution": chosen.provenance.parameters_sha256})
         found.append(CohortResult(
             algorithm_id=algorithm.id, parameters_sha256=chosen.provenance.parameters_sha256,
             cohort_compat_key=compat, metrics=metrics,

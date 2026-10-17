@@ -62,10 +62,11 @@ def _tool(name: str) -> tuple[str, str] | None:
     return path, hashlib.sha256(canonical_json_bytes(hashes)).hexdigest()
 
 
-def _report_lineages(path: Path, candidates: int) -> tuple[dict[int, str], int, int]:
+def _report_lineages(path: Path, candidates: int) -> tuple[dict[int, str], int, int, bool]:
     lineages: dict[int, str] = {}
     stack: list[tuple[int, str | None]] = []
     root_count = unclassified = 0
+    species_present = False
     seen: set[int] = set()
     with path.open("rt", encoding="utf-8") as stream:
         for index, line in enumerate(stream):
@@ -87,6 +88,8 @@ def _report_lineages(path: Path, candidates: int) -> tuple[dict[int, str], int, 
                 continue
             if taxid == 1:
                 root_count = clade
+            if fields[3] == "S" and clade > 0:
+                species_present = True
             raw_name = fields[5]
             indent = len(raw_name) - len(raw_name.lstrip(" "))
             while stack and stack[-1][0] >= indent:
@@ -98,7 +101,7 @@ def _report_lineages(path: Path, candidates: int) -> tuple[dict[int, str], int, 
             stack.append((indent, category))
     if root_count + unclassified != candidates:
         raise RuntimeError("Kraken2 report does not account for submitted reads")
-    return lineages, root_count, unclassified
+    return lineages, root_count, unclassified, species_present
 
 
 def _bracken_species(path: Path, lineages: dict[int, str], denominator: int) -> tuple[list[dict[str, Any]], float, int]:
@@ -194,7 +197,7 @@ class Microbial(Base):
         from ..store import LabStore
 
         try:
-            return [inspect_database(LabStore(root)).sha256]
+            return [inspect_database(LabStore(root), verify_bytes=False).sha256]
         except MicrobialDbError:
             return []
 
@@ -206,9 +209,9 @@ class Microbial(Base):
         if shutil.which("kraken2") is None or shutil.which("bracken") is None:
             return Skip("missing_toolchain", "Kraken2 and Bracken must be installed")
         if _tool("kraken2") is None or _tool("bracken") is None:
-            return Skip("missing_toolchain", "Kraken2/Bracken launchers lack the upstream source-install helpers required for reproducible execution")
+            return Skip("missing_toolchain", "Kraken2/Bracken launchers, upstream helpers, and Bracken's python interpreter are required")
         try:
-            inspect_database(LabStore(ctx.root))
+            inspect_database(LabStore(ctx.root), verify_bytes=False)
         except MicrobialDbError:
             return Skip("missing_asset", "register a pinned Kraken2/Bracken database")
         if not (ctx.input_dir / "aligned.bam").is_file():
@@ -261,8 +264,8 @@ class Microbial(Base):
                 )
                 if kraken_run.returncode != 0:
                     raise RuntimeError("Kraken2 classification failed")
-                lineages, classified, unclassified = _report_lineages(report, candidates)
-                if classified:
+                lineages, classified, unclassified, species_present = _report_lineages(report, candidates)
+                if classified and species_present:
                     bracken_run = subprocess.run(
                         [bracken[0], "-d", str(database.directory), "-i", str(report), "-o", str(abundance),
                          "-r", str(database.read_length), "-l", "S", "-t", "1"],

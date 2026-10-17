@@ -80,7 +80,11 @@ def test_production_cohort_snapshot_excludes_unassayable_and_changed_db(tmp_path
         ), input_id=input_id)
     selected = cohorts._selected_results(store, input_id, manifest)
     assert [result.algorithm_id for result in selected] == ["read-summary", "microbial"]
-    assert selected[1].cohort_compat_key == microbial_identity
+    assert selected[1].cohort_compat_key != microbial_identity
+    aligned = {**manifest, "kind": "aligned", "tools": {"minimap2": "one", "samtools": "one"},
+               "mmi_sha256": "e" * 64, "aligner_argv": ["minimap2"]}
+    assert (cohorts._selected_results(store, input_id, aligned)[1].cohort_compat_key
+            != selected[1].cohort_compat_key)
 
     db_digest[0] = "e" * 64
     assert [result.algorithm_id for result in cohorts._selected_results(store, input_id, manifest)] == ["read-summary"]
@@ -147,12 +151,22 @@ def _profile_with_nonzero_exclusions(tmp_path: Path, monkeypatch) -> dict:
     from traceback_lab import microbial_view as view
 
     store = LabStore(tmp_path / "measure")
-    source, input_id, identity = "a" * 64, "b" * 64, "c" * 64
-    prov = provenance(tool="fixture", parameters_sha256=identity, source_id=source,
-                      input_id=input_id, reference_id="ref")
-    summary = ResultEnvelope(algorithm_id="read-summary", algorithm_version="1", status="ok", provenance=prov)
+    source, input_id, summary_identity = "a" * 64, "b" * 64, "c" * 64
+    monkeypatch.setattr(algorithm, "_tool", lambda name: (name, "e" * 64))
+    monkeypatch.setattr(view, "_tool", lambda name: (name, "e" * 64))
+    identity = execution_identity(
+        algorithm.MICROBIAL, reference_sha256="f" * 64, asset_sha256s=["d" * 64],
+        upstream=[{"algorithm_id": "read-summary", "parameters_sha256": summary_identity}],
+    )
+    summary_prov = provenance(tool="fixture", parameters_sha256=summary_identity, source_id=source,
+                              input_id=input_id, reference_id="ref")
+    measured_prov = provenance(tool="fixture", parameters_sha256=identity, source_id=source,
+                               input_id=input_id, reference_id="ref")
+    summary = ResultEnvelope(algorithm_id="read-summary", algorithm_version="1", status="ok",
+                             provenance=summary_prov)
     measured = ResultEnvelope(algorithm_id="microbial", algorithm_version="3", status="ok",
-                              provenance=prov, metrics=[Metric(metric_id="microbial_rpm_primary", value=500_000.0)])
+                              provenance=measured_prov,
+                              metrics=[Metric(metric_id="microbial_rpm_primary", value=500_000.0)])
     sample = SampleView(source, source[:12], False,
                         InputView("full", input_id, None, {}, {"read-summary": summary, "microbial": measured}))
     artifacts = tmp_path / "artifacts"
@@ -164,11 +178,9 @@ def _profile_with_nonzero_exclusions(tmp_path: Path, monkeypatch) -> dict:
         "too_short_unmapped_reads": 3, "missing_sequence_unmapped_reads": 2,
         "omitted_taxa": 0, "taxa": [],
     }))
-    monkeypatch.setattr(view, "_tool", lambda name: (name, "e" * 64))
     monkeypatch.setattr(view, "inspect_database", lambda _store, **_kwargs: SimpleNamespace(
         sha256="d" * 64, source_label="anonymous synthetic database", read_length=75))
     monkeypatch.setattr(view, "resolve_reference", lambda *_args, **_kwargs: SimpleNamespace(sha256="f" * 64))
-    monkeypatch.setattr(view, "execution_identity", lambda *_args, **_kwargs: identity)
     monkeypatch.setattr(store, "selected_artifacts", lambda *_args: artifacts)
     return profile_for_sample(store, sample, None, None, "not_built")
 
@@ -228,6 +240,17 @@ def test_same_bytes_at_different_database_directory_are_refused(tmp_path) -> Non
     with store.writer("microbial db add", "r-20261016-0001-aabb", step="database"):
         with pytest.raises(MicrobialDbError, match="different directory"):
             register_database(store, alternate, 75, "synthetic database")
+
+
+def test_symlinked_database_directory_is_refused_before_publication(tmp_path) -> None:
+    _, directory = _database(tmp_path)
+    linked = tmp_path / "db-link"
+    linked.symlink_to(directory, target_is_directory=True)
+    fresh = LabStore(tmp_path / "new-root")
+    with fresh.writer("microbial db add", "r-20261016-0004-aabb", step="database"):
+        with pytest.raises(MicrobialDbError, match="resolved directory"):
+            register_database(fresh, linked, 75, "synthetic database")
+    assert not (fresh.lab / "assets" / "microbial-db").exists()
 
 
 def test_legacy_registration_upgrades_by_full_verification(tmp_path) -> None:
@@ -301,7 +324,7 @@ def test_installed_launcher_without_required_helpers_has_actionable_skip(tmp_pat
     ctx = InputContext(tmp_path, "a" * 64, "b" * 64, "ref", "c" * 64, tmp_path)
     result = algorithm.MICROBIAL.preflight(ctx)
     assert result.reason_code == "missing_toolchain"
-    assert "upstream source-install helpers" in result.message
+    assert "upstream helpers" in result.message
 
 
 def test_report_lineage_excludes_human_and_unknown_taxa(tmp_path) -> None:
@@ -314,8 +337,9 @@ def test_report_lineage_excludes_human_and_unknown_taxa(tmp_path) -> None:
         "0.00\t1\t0\tD\t2759\t  Eukaryota\n"
         "0.00\t1\t1\tS\t9606\t    Homo sapiens\n"
     )
-    lineages, classified, unclassified = algorithm._report_lineages(report, 3)
+    lineages, classified, unclassified, species_present = algorithm._report_lineages(report, 3)
     assert (classified, unclassified) == (2, 1)
+    assert species_present
     assert lineages[123] == "bacteria"
     assert 9606 not in lineages
 
@@ -445,6 +469,41 @@ def test_all_unclassified_candidates_yield_zero_without_bracken(tmp_path, monkey
     assert metrics["microbial_rpm_primary"] == 0
     assert metrics["unclassified_candidate_reads"] == 1
     assert b"private-name" not in output.artifacts["microbial_profile.json"]
+
+
+def test_classified_above_species_level_yields_zero_without_bracken(tmp_path, monkeypatch) -> None:
+    store, _ = _database(tmp_path)
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    read = pysam.AlignedSegment()
+    read.query_name = "private-name"
+    read.query_sequence = "A" * 75
+    read.flag = 4
+    read.reference_id = -1
+    read.reference_start = -1
+    with pysam.AlignmentFile(input_dir / "aligned.bam", "wb",
+                             header={"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 1000}]}) as stream:
+        stream.write(read)
+    monkeypatch.setattr(algorithm, "_tool", lambda name: (name, "a" * 64))
+    calls = []
+
+    def fake_run(argv, **_kwargs):
+        calls.append(argv)
+        assert "--report" in argv, "Bracken cannot estimate absent species rows"
+        Path(argv[argv.index("--report") + 1]).write_text(
+            "0.00\t0\t0\tU\t0\tunclassified\n"
+            "100.00\t1\t0\tR\t1\troot\n"
+            "100.00\t1\t0\tD\t2\t  Bacteria\n"
+            "100.00\t1\t1\tG\t123\t    Candidate genus\n")
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(algorithm.subprocess, "run", fake_run)
+    ctx = InputContext(store.root, "a" * 64, "b" * 64, "ref", "c" * 64, input_dir)
+    output = algorithm.MICROBIAL.run(ctx, tmp_path / "out")
+    metrics = {row["metric_id"]: row["value"] for row in output.metrics}
+    assert len(calls) == 1
+    assert metrics["classified_candidate_reads"] == 1
+    assert metrics["microbial_rpm_primary"] == 0
 
 
 def test_run_refuses_changed_planned_database_or_tool(tmp_path, monkeypatch) -> None:

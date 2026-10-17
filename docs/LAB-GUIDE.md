@@ -248,8 +248,8 @@ publishes the bundle SHA-256 and source label. The registration requires
 `database<READ_LENGTH>mers.kmer_distrib`. The Bracken read length must be
 75–500 bases. An altered or missing file makes the measurement unavailable.
 Registration records a bounded file-stat receipt for the sample page. The page
-checks that receipt without streaming the large database; execution planning
-and the worker verify the complete file bytes before and after classification.
+and execution planning check that receipt without streaming the large database;
+the worker verifies complete file bytes before and after classification.
 If the database is moved, register it as a new Lab root; this registration
 will not silently switch to another directory with identical bytes.
 An older registration without a page receipt can be refreshed in place with
@@ -273,10 +273,16 @@ Bacteria, Archaea, Viruses, and Fungi are shown as estimated reads per million
 denominator reads; human and other non-microbial taxa are excluded. At most
 256 species are displayed, with an omitted-taxon count. Read names and Kraken
 per-read assignments remain transient and are not published.
+The worker briefly writes candidate unmapped sequence in a private Lab scratch
+directory. Normal completion removes it; a crash or abrupt power loss can leave
+scratch files for an operator to inspect and remove under the Lab root.
 An input with no primary QC-passing non-duplicate reads has no microbial rate
 or cohort comparison. If unmapped reads exist but all are too short or lack
 sequence, the rate and cohort comparison are also unavailable. An input with
 only confidently human-mapped reads has a measured zero candidate burden.
+Kraken classifications above species level without any species row yield a zero
+Bracken species estimate; that does not mean the candidate read is biologically
+non-microbial. The QC panel keeps the classified-read count visible.
 The QC panel counts missing-sequence unmapped reads separately from short reads.
 
 The profile is speculative and marked **PRIVACY**. A compatible healthy-v1

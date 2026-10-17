@@ -166,6 +166,8 @@ def register_database(store: LabStore, directory: Path, read_length: int, source
         raise MicrobialDbError("source label must be a short description, not a path")
     names = _files(read_length)
     directory = Path(os.path.abspath(directory))
+    if directory.is_symlink():
+        raise MicrobialDbError("database directory symlinks are unsafe; register the resolved directory")
     try:
         checked = {name: _digest_file(_regular_source(directory / name)) for name in names}
         files = {name: item[0] for name, item in checked.items()}
@@ -181,7 +183,7 @@ def register_database(store: LabStore, directory: Path, read_length: int, source
     if destination.exists() or destination.is_symlink():
         existing = inspect_database(store)
         if existing.sha256 != bundle or existing.source_label != source_label:
-            raise MicrobialDbError("a different microbial database is already registered")
+            raise MicrobialDbError("different database bytes or source label are already registered")
         if existing.directory != directory:
             raise MicrobialDbError("the same database bytes are already registered at a different directory")
         from .store import write_atomic
@@ -193,7 +195,7 @@ def register_database(store: LabStore, directory: Path, read_length: int, source
             }))
         except OSError as exc:
             raise MicrobialDbError("database registration could not be updated") from exc
-        return inspect_database(store)
+        return inspect_database(store, verify_bytes=False)
 
     def build(staging: Path) -> None:
         (staging / "manifest.json").write_bytes(canonical_json_bytes({
@@ -202,4 +204,4 @@ def register_database(store: LabStore, directory: Path, read_length: int, source
         }))
 
     store.publish_directory(destination.parent, destination.name, build)
-    return inspect_database(store)
+    return inspect_database(store, verify_bytes=False)

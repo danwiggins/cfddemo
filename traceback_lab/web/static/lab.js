@@ -348,7 +348,9 @@
               h("td", {}, row.category), h("td", {}, fmt(row.rpm_primary)),
               h("td", {}, row.cohort_p975 === null ? `unavailable (n=${row.cohort_n})` : fmt(row.cohort_p975)),
               h("td", {}, row.above_cohort_p975 === null ? "no cohort reference" : row.above_cohort_p975 ? "above cohort percentile" : "at or below cohort percentile"))))))
-          : h("p", {}, "No candidate microbial taxa are available in this profile.")));
+          : h("p", {}, microbial.microbial_rpm_primary === 0
+            ? "Measured zero candidate microbial taxa under this database and read-length policy."
+            : "No candidate microbial taxa are displayed in this profile.")));
     }
     const health = sample.library_health;
     out.push(h("section", { class: "panel" }, h("h2", {}, "Library health"),
