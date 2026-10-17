@@ -68,10 +68,7 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install samtools minimap2
 
-      - name: Sync locked environment
-        run: uv sync --frozen
-
-      - name: Verify literal guide setup command
+      - name: Sync environment with literal guide command
         run: |
           uv sync
           git diff --exit-code -- uv.lock

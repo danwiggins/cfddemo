@@ -117,6 +117,7 @@ def test_serve_step_reaches_the_landing_with_curve_repeatability_and_example_pil
     """The guide's own serve command, launched as a process (BROWSER=true keeps --open headless)."""
 
     import os
+    import signal
     import subprocess
 
     from tests.lab.test_lab_server import _chrome
@@ -126,6 +127,7 @@ def test_serve_step_reaches_the_landing_with_curve_repeatability_and_example_pil
     process = subprocess.Popen(
         argv,
         cwd=REPO, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, text=True,
+        start_new_session=os.name != "nt",
     )
     try:
         lines = [process.stdout.readline().strip() for _ in range(2)]
@@ -141,8 +143,24 @@ def test_serve_step_reaches_the_landing_with_curve_repeatability_and_example_pil
             ok=lambda d: 'data-ready="1"' in d and "Depth → utility" in d,
         )
     finally:
-        process.terminate()
-        process.wait(timeout=20)
+        if process.poll() is None:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=10)
+            else:
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+        try:
+            process.wait(timeout=20)
+        except subprocess.TimeoutExpired:
+            if os.name == "nt":
+                process.kill()
+            else:
+                os.killpg(process.pid, signal.SIGKILL)
+            process.wait(timeout=5)
+        process.stdout.close()
     body = _body(dom)
     assert body["csp-violations"] == "0"
     assert "Depth → utility" in dom and 'class="curve-grid"' in dom
