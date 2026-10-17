@@ -22,6 +22,7 @@ from typing import Any
 import pysam
 
 from ..fetal_contract import FetalContractError, inspect_contract
+from ..derived_calibration import calibrated_input_id
 from ..file_access import open_regular_no_follow
 from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip, ToolPin
 from ._base import Base, metric
@@ -300,7 +301,11 @@ class FetalFraction(Base):
         from ..store import LabStore
 
         try:
-            contract = inspect_contract(LabStore(root), input_id)
+            store = LabStore(root)
+            parent = calibrated_input_id(store, input_id)
+            if parent is None:
+                return []
+            contract = inspect_contract(store, parent)
             runtime = _rscript()
             package_sha = _nipter_package_sha(runtime[0]) if runtime else None
             return [contract.manifest_sha256, contract.control_sha256, SCRIPT_SHA256,
@@ -312,12 +317,18 @@ class FetalFraction(Base):
         decision = super().preflight(ctx)
         if isinstance(decision, Skip):
             return decision
-        if ctx.derived is not None:
-            return Skip("unsupported_input", "NIPTeR requires the full aligned prenatal input")
+        if ctx.eligible_reads is None:
+            return Skip("depth", "prenatal read count is unavailable")
+        if ctx.derived is not None and ctx.derived.get("transform") not in ("downsample", "split"):
+            return Skip("unsupported_input", "NIPTeR supports only selected read subsets")
         from ..store import LabStore
 
+        store = LabStore(ctx.root)
+        parent = calibrated_input_id(store, ctx.input_id, ctx.derived)
+        if parent is None or (ctx.derived is None) != (parent == ctx.input_id):
+            return Skip("unsupported_input", "derived prenatal input has no verified calibrated parent")
         try:
-            contract = inspect_contract(LabStore(ctx.root), ctx.input_id)
+            contract = inspect_contract(store, parent)
         except FetalContractError as exc:
             return Skip("missing_asset", f"verified prenatal control unavailable: {exc}")
         if contract.source_id != ctx.source_id or contract.reference_sha256 != ctx.reference_sha256:
@@ -338,9 +349,11 @@ class FetalFraction(Base):
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
         from ..store import LabStore
 
-        contract = inspect_contract(LabStore(ctx.root), ctx.input_id)
-        if ctx.derived is not None:
-            raise RuntimeError("NIPTeR requires the full prenatal input")
+        store = LabStore(ctx.root)
+        parent = calibrated_input_id(store, ctx.input_id, ctx.derived)
+        if parent is None or (ctx.derived is None) != (parent == ctx.input_id):
+            raise RuntimeError("prenatal derived input has no verified calibrated parent")
+        contract = inspect_contract(store, parent)
         if contract.source_id != ctx.source_id or contract.reference_sha256 != ctx.reference_sha256:
             raise RuntimeError("prenatal assertion or reference changed after preflight")
         runtime = _rscript()
@@ -359,9 +372,18 @@ class FetalFraction(Base):
         script.write_bytes(R_CODE.encode("utf-8"))
         try:
             with tempfile.TemporaryDirectory(prefix="nipter-private-", dir=out.parent) as private:
-                control_snapshot = _stage_control(contract.control_path, contract.control_sha256, Path(private))
+                private_dir = Path(private)
+                control_snapshot = _stage_control(contract.control_path, contract.control_sha256, private_dir)
+                sample_bam = ctx.input_dir / "aligned.bam"
+                if ctx.derived is not None:
+                    from .cell_origin import write_transient_bam
+
+                    sample_bam = private_dir / "selected.bam"
+                    write_transient_bam(ctx.input_dir / "aligned.bam", sample_bam, dict(ctx.derived))
+                    if not _compatible_bam_layout(sample_bam):
+                        raise RuntimeError("selected prenatal BAM layout changed after preflight")
                 completed = _run_bounded_r(
-                    [str(runtime[0]), "--vanilla", str(script), str(ctx.input_dir / "aligned.bam"),
+                    [str(runtime[0]), "--vanilla", str(script), str(sample_bam),
                      str(control_snapshot), str(contract.control_n)],
                     cwd=out, timeout_seconds=900, log_limit_bytes=4096,
                 )

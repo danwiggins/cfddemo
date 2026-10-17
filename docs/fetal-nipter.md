@@ -50,9 +50,18 @@ the exact manifest with `traceback lab fetal register --file CONTRACT.json
 --root ROOT` rehashes the contract and RDS without displaying the external
 path. Registration for an input is immutable.
 
-The adapter requires at least two million eligible reads, the full aligned
+The adapter requires at least two million eligible reads, an aligned parent
 input, matching source/input/reference IDs, a coordinate-sorted canonical
 hg38 BAM, the verified control RDS, and R 4.4.0 or newer with NIPTeR 1.0.2.
+For deterministic downsample and split controls, the derived manifest must
+verify against the calibrated parent, and the selected input itself must pass
+the eligible-read gate. The adapter copies the selected parent BAM records into
+a transient worker-private BAM and bins that subset with NIPTeR. It compares
+the selected sample against the same independent, pinned control group; the
+control samples are not selected by the patient's read names. The selected
+BAM and private control snapshot are removed after success, failure, or outer
+timeout. Synthetic CNA spikes and other transforms remain unsupported. These
+controls measure sampling variability, not clinical z-score accuracy.
 The resolved Rscript executable file (which may be a launcher), the installed `NIPTeR`, `sets`, `Rsamtools`, and `S4Vectors`
 package files, R adapter code, contract, and RDS digests enter the execution
 identity. The underlying R runtime and other R dependencies are not byte-pinned;
