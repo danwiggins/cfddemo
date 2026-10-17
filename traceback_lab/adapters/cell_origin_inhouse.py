@@ -10,8 +10,11 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Sequence
 
-from evidence_inspector.cell_origin_models import DigestArtifact, MarkerCountRow, NnlsRowScale
+from evidence_inspector.cell_origin_models import (
+    DigestArtifact, FragmentMarkerObservation, MarkerCountRow, NnlsRowScale,
+)
 from evidence_inspector.cell_origin_pipeline import (
     PipelineConfig,
     _filtered_atlas,
@@ -45,6 +48,12 @@ def _digest(path: Path) -> str:
         for block in iter(lambda: stream.read(16 << 20), b""):
             digest.update(block)
     return digest.hexdigest()
+
+
+def _classified_fragment_count(observations: Sequence[FragmentMarkerObservation]) -> int:
+    """Count molecules once even when one overlaps several atlas markers."""
+
+    return len({observation.fragment_digest for observation in observations})
 
 
 def compute_inhouse(
@@ -94,7 +103,7 @@ def compute_inhouse(
     if diagnostics.partial_input or diagnostics.excluded_oversized_groups:
         raise ValueError("cell-origin fragment-marker groups exceed the locked cap")
     rows = classified.marker_counts
-    classified_fragments = sum(row.u_count + row.m_count for row in rows)
+    classified_fragments = _classified_fragment_count(classified.observations)
     if (not rows or classified_fragments < parameters.min_classified_fragments
             or len(rows) < parameters.min_observed_markers):
         raise ValueError("cell-origin classified fragment and marker floors are not met")
