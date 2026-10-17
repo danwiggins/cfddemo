@@ -751,7 +751,8 @@
           h("td", {}, ref.kind === "none" || !ref.kind ? "none" : `${ref.kind}${ref.source ? ": " + ref.source : ""}`)));
       }
     }
-    out.push(h("div", { class: "table-wrap" }, h("table", { class: "data-table" },
+    out.push(h("div", { class: "table-wrap", tabindex: "0", role: "region",
+      "aria-label": "Every number with its provenance" }, h("table", { class: "data-table" },
       h("caption", {}, "Every number with its provenance"),
       h("thead", {}, h("tr", {}, ...["Metric", "Value", "Tool", "Provenance stamp (parameters sha256)", "Input", "Reference", "Computed (UTC)", "License", "Citation", "Range source"].map((t) => h("th", { scope: "col" }, t)))),
       h("tbody", {}, ...rows))));

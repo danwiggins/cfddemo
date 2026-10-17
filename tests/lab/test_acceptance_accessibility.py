@@ -136,6 +136,100 @@ def test_wide_methods_table_stays_inside_its_wrapper(size, tmp_path) -> None:
     assert 'data-page-overflow="false"' in dom
 
 
+@needs_chrome
+@pytest.mark.parametrize("size", ["1280,800", "1024,768", "768,1024", "360,740"])
+def test_revealed_controls_and_each_signals_tab_keep_target_and_page_bounds(size, tmp_path) -> None:
+    """Audit the rendered states omitted by the default-route geometry pass."""
+
+    routes = ("home", "findings", "trust-qc", "stability", "signals", "compare", "body-map",
+              "agreement", "evidence", "methods")
+    headings = {"home": f"Traceback Lab — {ID12}", "findings": "Findings",
+                "trust-qc": "Trust / QC", "stability": "Stability",
+                "signals": "Signals", "compare": "Compare", "body-map": "Body map",
+                "agreement": "Agreement", "evidence": "Evidence", "methods": "Methods"}
+    with _server(tmp_path, _sample()) as server:
+        profile = tmp_path / "browser-profile"
+
+        def interact(command, evaluate) -> None:
+            command("Page.bringToFront")
+            states = []
+
+            def audit(label: str) -> None:
+                result = evaluate("""(() => {
+                  const visible = (el) => { const style = getComputedStyle(el);
+                    return el.getClientRects().length > 0 && style.display !== 'none'
+                      && style.visibility !== 'hidden'; };
+                  return {
+                    width: document.documentElement.clientWidth,
+                    scrollWidth: document.documentElement.scrollWidth,
+                    small: [...document.querySelectorAll('a[href], button, select, summary, input, [tabindex], .table-wrap')]
+                      .filter((el) => (el.tabIndex >= 0 ||
+                        (el.matches('.table-wrap') && el.scrollWidth > el.clientWidth + 1)) && visible(el)).flatMap((el) => {
+                        const rect = el.getBoundingClientRect();
+                        return rect.width < 43.5 || rect.height < 43.5
+                          ? [`${el.tagName.toLowerCase()} ${el.textContent.trim().slice(0, 28)} ${Math.round(rect.width)}x${Math.round(rect.height)}`]
+                          : []; }),
+                  };
+                })()""")
+                assert result["scrollWidth"] <= result["width"] + 1, (size, label, result)
+                assert not result["small"], (size, label, result["small"])
+                states.append(label)
+
+            def reveal_all() -> None:
+                evaluate("""(() => { for (const button of document.querySelectorAll('#main button[aria-controls]')) {
+                    const target = document.getElementById(button.getAttribute('aria-controls'));
+                    if (target?.hidden && button.getClientRects().length) button.click();
+                  }
+                  for (const details of document.querySelectorAll('#main details'))
+                  details.open = true; })()""")
+                time.sleep(0.05)
+
+            for route in routes:
+                path = "/" if route == "home" else f"/sample/{ID12}/{route}"
+                evaluate(f"location.hash = '#{path}'")
+                for _ in range(60):
+                    if evaluate(f"document.querySelector('#main h1')?.textContent.trim() === {json.dumps(headings[route])}"):
+                        break
+                    time.sleep(0.05)
+                else:
+                    pytest.fail(f"{size}: {route} did not render")
+                if route == "home":
+                    for _ in range(60):
+                        if evaluate("document.querySelector('#clia-full')?.children.length > 0"):
+                            break
+                        time.sleep(0.05)
+                    else:
+                        pytest.fail(f"{size}: CLIA copy did not load")
+                time.sleep(0.05)
+                if route == "signals":
+                    for label in ("Fragmentomics", "Copy number", "Methylation"):
+                        selected = evaluate(f"""(() => {{ const tab = [...document.querySelectorAll('#main .subtab')]
+                          .find((item) => item.textContent === {json.dumps(label)});
+                          tab?.click(); return tab?.getAttribute('aria-pressed'); }})()""")
+                        assert selected == "true", (size, label)
+                        audit(f"signals/{label}")
+                        reveal_all()
+                        audit(f"signals/{label}/revealed")
+                else:
+                    reveal_all()
+                    audit(f"{route}/revealed")
+
+            evaluate("document.getElementById('key-button').focus()")
+            _key(command, "Enter", "Enter", 13)
+            assert evaluate("document.getElementById('key-dialog').open")
+            audit("key-dialog/open")
+            _key(command, "Escape", "Escape", 27)
+            assert len(states) == len(routes) - 1 + 3 * 2 + 1, states
+
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", f"--window-size={size}",
+             server.issue_link() + f"&route=/sample/{ID12}/findings"],
+            profile, ok=lambda d: 'data-ready="1"' in d and 'class="finding-card"' in d,
+            interact=interact, timeout=180,
+        )
+
+
 def _key(command, key: str, code: str, virtual: int) -> None:
     args = {"key": key, "code": code, "windowsVirtualKeyCode": virtual, "nativeVirtualKeyCode": virtual}
     if virtual in (13, 32):
@@ -371,14 +465,14 @@ def test_keyboard_traversal_and_revealed_controls_on_every_sample_route(tmp_path
                 assert evaluate("document.activeElement === document.querySelector('#main h1')"), route
                 time.sleep(0.1)
                 evaluate("document.querySelector('.skip-link').focus()")
-                expected = evaluate("""(() => [...document.querySelectorAll('a[href], button, select, summary, input')]
+                expected = evaluate("""(() => [...document.querySelectorAll('a[href], button, select, summary, input, [tabindex]')]
                   .flatMap((el, index) => el.tabIndex >= 0 && !el.disabled && el.getClientRects().length
                     && getComputedStyle(el).visibility !== 'hidden' ? [index] : []))()""")
                 assert len(expected) >= 2, route
                 for next_index in expected[1:]:
                     _key(command, "Tab", "Tab", 9)
                     state = evaluate("""(() => { const active = document.activeElement;
-                      return {index: [...document.querySelectorAll('a[href], button, select, summary, input')].indexOf(active),
+                      return {index: [...document.querySelectorAll('a[href], button, select, summary, input, [tabindex]')].indexOf(active),
                         visible: active.matches(':focus-visible'), outline: getComputedStyle(active).outlineWidth}; })()""")
                     assert state["index"] == next_index and state["visible"], (route, state)
                     assert float(state["outline"].removesuffix("px")) >= 3, (route, state)
@@ -401,6 +495,119 @@ def test_keyboard_traversal_and_revealed_controls_on_every_sample_route(tmp_path
                     if revealed["hasControl"]:
                         _key(command, "Tab", "Tab", 9)
                         assert evaluate("document.activeElement.closest('details')?.open === true"), route
+
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/findings"],
+            profile, ok=lambda d: 'data-ready="1"' in d and 'class="finding-card"' in d,
+            interact=interact, timeout=240,
+        )
+
+
+@needs_chrome
+def test_keyboard_walk_reaches_every_revealed_control_and_signals_subtab(tmp_path) -> None:
+    """Open every disclosure by key, then walk its controls in document order."""
+
+    routes = {"home": f"Traceback Lab — {ID12}", "findings": "Findings",
+              "trust-qc": "Trust / QC", "stability": "Stability",
+              "signals": "Signals", "compare": "Compare", "body-map": "Body map",
+              "agreement": "Agreement", "evidence": "Evidence", "methods": "Methods"}
+    with _server(tmp_path, _sample()) as server:
+        profile = tmp_path / "browser-profile"
+
+        def interact(command, evaluate) -> None:
+            command("Page.bringToFront")
+            walked = []
+
+            def reveal_all(label: str) -> None:
+                controls = evaluate("""(() => [...document.querySelectorAll('#main button[aria-controls]')]
+                  .flatMap((button, index) => { const target = document.getElementById(button.getAttribute('aria-controls'));
+                    return target?.hidden && button.getClientRects().length ? [index] : []; }))()""")
+                for index in controls:
+                    button = f"document.querySelectorAll('#main button[aria-controls]')[{index}]"
+                    evaluate(f"{button}.focus()")
+                    _key(command, "Enter", "Enter", 13)
+                    assert evaluate(f"!document.getElementById({button}.getAttribute('aria-controls')).hidden"), (label, index)
+                count = evaluate("document.querySelectorAll('#main details > summary').length")
+                for index in range(count):
+                    state = evaluate(f"""(() => {{ const summary = document.querySelectorAll('#main details > summary')[{index}];
+                      if (!summary.getClientRects().length) return {{hidden: true}};
+                      summary.focus(); return {{open: summary.parentElement.open}}; }})()""")
+                    assert not state.get("hidden"), (label, index)
+                    if not state["open"]:
+                        _key(command, "Enter", "Enter", 13)
+                        assert evaluate(f"document.querySelectorAll('#main details > summary')[{index}].parentElement.open"), (label, index)
+
+            def walk(label: str) -> None:
+                evaluate("document.querySelector('.skip-link').focus()")
+                expected = evaluate("""(() => [...document.querySelectorAll('a[href], button, select, summary, input, [tabindex], .table-wrap')]
+                  .flatMap((el, index) => (el.tabIndex >= 0 || (el.matches('.table-wrap') && el.scrollWidth > el.clientWidth + 1))
+                    && !el.disabled && el.getClientRects().length
+                    && getComputedStyle(el).visibility !== 'hidden' ? [index] : []))()""")
+                assert len(expected) >= 2, label
+                for next_index in expected[1:]:
+                    _key(command, "Tab", "Tab", 9)
+                    state = evaluate("""(() => { const active = document.activeElement;
+                      return {index: [...document.querySelectorAll('a[href], button, select, summary, input, [tabindex], .table-wrap')].indexOf(active),
+                        tag: active.tagName, id: active.id, html: active.outerHTML.slice(0, 180),
+                        visible: active.matches(':focus-visible'), outline: getComputedStyle(active).outlineWidth}; })()""")
+                    if state["index"] != next_index or not state["visible"]:
+                        skipped = evaluate(f"""document.querySelectorAll('a[href], button, select, summary, input, [tabindex], .table-wrap')[{next_index}].outerHTML.slice(0, 180)""")
+                        pytest.fail(f"{label}: expected {next_index} {skipped}; got {state}")
+                    assert float(state["outline"].removesuffix("px")) >= 3, (label, state)
+                walked.append((label, len(expected)))
+
+            for route, heading in routes.items():
+                path = "/" if route == "home" else f"/sample/{ID12}/{route}"
+                evaluate(f"location.hash = '#{path}'")
+                for _ in range(60):
+                    if evaluate(f"document.querySelector('#main h1')?.textContent.trim() === {json.dumps(heading)}"):
+                        break
+                    time.sleep(0.05)
+                else:
+                    pytest.fail(f"{route} did not render")
+                if route == "home":
+                    for _ in range(60):
+                        if evaluate("document.querySelector('#clia-full')?.children.length > 0"):
+                            break
+                        time.sleep(0.05)
+                    else:
+                        pytest.fail("CLIA copy did not load")
+                time.sleep(0.05)
+                if route == "signals":
+                    for label in ("Fragmentomics", "Copy number", "Methylation"):
+                        tab = f"[...document.querySelectorAll('#main .subtab')].find((el) => el.textContent === {json.dumps(label)})"
+                        evaluate(f"{tab}.focus()")
+                        _key(command, "Enter", "Enter", 13)
+                        assert evaluate(f"{tab}.getAttribute('aria-pressed') === 'true'"), label
+                        reveal_all(label)
+                        walk(f"signals/{label}/revealed")
+                else:
+                    reveal_all(route)
+                    walk(f"{route}/revealed")
+
+            evaluate("document.getElementById('key-button').focus()")
+            _key(command, "Enter", "Enter", 13)
+            assert evaluate("document.getElementById('key-dialog').open")
+            expected_dialog = evaluate("""(() => [...document.querySelectorAll('#key-dialog a[href], #key-dialog button, #key-dialog input')]
+              .filter((el) => !el.disabled && el.getClientRects().length).map((el) => el.id || el.textContent.trim()))()""")
+            visited = set()
+            for _ in range(len(expected_dialog) + 2):
+                state = evaluate("""(() => { const active = document.activeElement;
+                  return {inside: !!active.closest('#key-dialog'), id: active.id || active.textContent.trim(),
+                    visible: active.matches(':focus-visible'), outline: getComputedStyle(active).outlineWidth}; })()""")
+                if not state["inside"]:
+                    _key(command, "Tab", "Tab", 9)
+                    continue
+                assert state["visible"], state
+                assert float(state["outline"].removesuffix("px")) >= 3, state
+                visited.add(state["id"])
+                if set(expected_dialog) <= visited:
+                    break
+                _key(command, "Tab", "Tab", 9)
+            assert set(expected_dialog) <= visited, (expected_dialog, visited)
+            _key(command, "Escape", "Escape", 27)
+            assert len(walked) == len(routes) - 1 + 3, walked
 
         _dom_cdp(
             [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
