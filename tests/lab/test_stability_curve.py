@@ -57,6 +57,7 @@ def test_absolute_needs_a_tolerance() -> None:
 
 def test_deviation_and_band_units() -> None:
     assert deviation(R, 110.0, 100.0) == (10.0, "percent")
+    assert deviation(R, 10**400, 100.0) == (None, "none")
     assert deviation(A, 170, 167) == (3, "unit")
     assert deviation(R, 0.1, 0.0) == (0.1, "unit")  # full value 0: relative undefined
     assert deviation(S, 500, 1000, 0.5) == (0.0, "percent")
@@ -256,6 +257,8 @@ def test_split_half_missingness_keeps_each_status_visible() -> None:
     assert status(view, "fragment-size", "mode_bp", float("nan"), spec) == {
         "state": "ok", "reason": None, "value": 105, "deviation": None, "unit": "none",
     }
+    view.results["fragment-size"] = SimpleNamespace(status="ok", metrics=[metric(10**400)])
+    assert status(view, "fragment-size", "mode_bp", 100, spec)["state"] == "not_interpretable"
 
 
 def test_repeatability_preserves_raw_splits_without_inventing_a_verdict() -> None:
