@@ -189,6 +189,28 @@ def test_g_minus_cpg_and_flagless_implicit_calls_match_modkit(tmp_path: Path) ->
                 }
 
 
+def test_minus_cpg_outside_reference_is_counted_without_fetching_negative_interval(tmp_path: Path) -> None:
+    fasta = tmp_path / "reference.fa"
+    fasta.write_text(">chr1\nGAAA\n", encoding="ascii")
+    pysam.faidx(str(fasta))
+    bam = tmp_path / "aligned.bam"
+    with pysam.AlignmentFile(str(bam), "wb", header={"SQ": [{"SN": "chr1", "LN": 4}]}) as writer:
+        read = pysam.AlignedSegment(writer.header)
+        read.query_name = "start-g-minus"
+        read.query_sequence = "GAAA"
+        read.reference_id = 0
+        read.reference_start = 0
+        read.mapping_quality = 60
+        read.cigarstring = "4M"
+        read.set_tag("MM", "G-m?,0;")
+        read.set_tag("ML", array.array("B", [250]))
+        assert mmml_extract._reference_sites(read)[0][0][0] == -1
+        writer.write(read)
+    result = extract_cpg_calls(bam, fasta, maximum_calls=1, filter_threshold=0.9)
+    assert result.calls == ()
+    assert result.non_reference_cpg == 1
+
+
 def test_extraction_cap_refuses_before_unbounded_growth(tmp_path: Path) -> None:
     bam, fasta = _write_input(tmp_path)
     with pytest.raises(ValueError, match="locked cap"):

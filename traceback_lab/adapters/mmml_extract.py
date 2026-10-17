@@ -131,6 +131,9 @@ def extract_cpg_calls(
             ).hexdigest()
             chromosome = record.reference_name
             for position0, reverse, channels in sites:
+                if position0 < 0 or position0 + 1 >= fasta.get_reference_length(chromosome):
+                    non_reference += 1
+                    continue
                 if include_regions is not None and not include_regions.overlaps(
                     chromosome, position0 + reverse, position0 + reverse + 1
                 ):
