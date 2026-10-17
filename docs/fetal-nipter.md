@@ -6,7 +6,8 @@ NIPTeR does not include a fetal-fraction estimator. No aneuploidy call,
 screen-positive cutoff, or clinical reassurance is produced. Short-read NIPT
 evidence does not qualify this ONT cfDNA transfer.
 
-The operator supplies an input-scoped JSON contract and an existing NIPTeR
+After ingesting the input, the operator supplies an input-scoped JSON contract
+and an existing NIPTeR
 `NIPTControlGroup` RDS, prepared from euploid pregnancy samples on a matched
 sequencing, alignment, reference, binning, and library protocol. The Lab keeps
 the registered source RDS outside its root and pins its exact bytes; the operator is responsible
@@ -48,7 +49,8 @@ admission checks, not clinical validation thresholds. The operator registers
 the exact manifest with `traceback lab fetal register --file CONTRACT.json
 --sha256 HEX_SHA256 --root ROOT`; `traceback lab fetal inspect INPUT_ID
 --root ROOT` rehashes the contract and RDS without displaying the external
-path. Registration for an input is immutable.
+path. Registration checks the stored input ID, source ID, and reference SHA-256
+before reserving the immutable slot. Registration for an input is immutable.
 
 The adapter requires at least two million eligible reads, the full aligned
 input, matching source/input/reference IDs, a coordinate-sorted canonical

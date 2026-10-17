@@ -127,6 +127,7 @@ def test_planning_and_preflight_package_probes_kill_launcher_descendants(
 ) -> None:
     path, digest, _ = _contract(tmp_path)
     store = LabStore(tmp_path / "root")
+    _stored_input(store)
     register_contract(store, path, digest)
     marker, pids = tmp_path / "ticks", tmp_path / "pids"
     child = tmp_path / "ticker.py"
@@ -184,11 +185,25 @@ def _contract(tmp_path: Path, *, control_n: int = 20, sex: str = "unknown") -> t
     return path, hashlib.sha256(path.read_bytes()).hexdigest(), control
 
 
+def _stored_input(store: LabStore, *, source_id: str = SOURCE,
+                  reference_sha256: str = REFERENCE) -> None:
+    store.ensure()
+    directory = store.inputs_dir / INPUT
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / "manifest.json").write_text(json.dumps({
+        "input_id": INPUT, "source_id": source_id,
+        "reference_sha256": reference_sha256,
+    }))
+
+
 def test_contract_is_immutable_and_rehashes_external_control(tmp_path: Path) -> None:
     path, digest, control = _contract(tmp_path)
     store = LabStore(tmp_path / "root")
     with pytest.raises(FetalContractError, match="expected contract SHA"):
         register_contract(store, path, "x")
+    with pytest.raises(FetalContractError, match="stored input manifest"):
+        register_contract(store, path, digest)
+    _stored_input(store)
     registered = register_contract(store, path, digest)
     assert registered == inspect_contract(store, INPUT)
     assert register_contract(store, path, digest) == registered
@@ -200,6 +215,7 @@ def test_contract_is_immutable_and_rehashes_external_control(tmp_path: Path) -> 
 def test_fetal_cli_register_and_inspect_keep_external_path_private(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     path, digest, control = _contract(tmp_path)
     root = tmp_path / "root"
+    _stored_input(LabStore(root))
     assert lab_main(["fetal", "register", "--file", str(path), "--sha256", digest,
                      "--root", str(root), "--json"]) == 0
     registered = json.loads(capsys.readouterr().out)
@@ -209,6 +225,22 @@ def test_fetal_cli_register_and_inspect_keep_external_path_private(tmp_path: Pat
     inspected = json.loads(capsys.readouterr().out)
     assert inspected["data"]["control_n"] == 20
     assert str(control) not in json.dumps(inspected)
+
+
+@pytest.mark.parametrize("manifest_change", [
+    {"source_id": "d" * 64}, {"reference_sha256": "e" * 64},
+])
+def test_prenatal_registration_refuses_wrong_stored_input_binding(
+    tmp_path: Path, manifest_change: dict,
+) -> None:
+    store = LabStore(tmp_path / "root")
+    _stored_input(store, **manifest_change)
+    path, digest, _ = _contract(tmp_path)
+    with pytest.raises(FetalContractError, match="does not match stored input provenance"):
+        register_contract(store, path, digest)
+    assert not (store.lab / "assets" / "fetal-fraction" / INPUT).exists()
+    _stored_input(store)
+    assert register_contract(store, path, digest).manifest_sha256 == digest
 
 
 @pytest.mark.parametrize("edit", [
@@ -231,6 +263,7 @@ def test_contract_rejects_missing_attestation_or_unsupported_model(tmp_path: Pat
 def test_nipter_preflight_and_synthetic_adapter_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path, digest, control = _contract(tmp_path)
     store = LabStore(tmp_path / "root")
+    _stored_input(store)
     contract = register_contract(store, path, digest)
     runtime = tmp_path / "Rscript"
     runtime.write_bytes(b"synthetic executable stand-in")
