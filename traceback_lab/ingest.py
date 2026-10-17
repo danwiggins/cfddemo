@@ -838,6 +838,11 @@ def ingest_prealigned(
 ) -> AlignedInput:
     """Copy one already-aligned BAM into the store and index it."""
 
+    if len(chunkset.chunks) != 1:
+        raise LabProblem(
+            "TBX-LAB-009", cause="prealigned input must contain exactly one BAM",
+            fix="Pass one aligned BAM, or unaligned chunks for Lab alignment",
+        )
     chunk = chunkset.chunks[0]
     check_sq(chunk, reference)
     source_id = chunkset.source_id
@@ -918,13 +923,15 @@ def write_source(
     stored = source_record(store, aligned.source_id) or {}
     previous = with_sex_assertion(stored, declared_sex)
     assertion_added = previous is not stored
+    platform = aligned.manifest.get("platform")
+    if platform is None:
+        platform = from_rg_lines(chunkset.rg_lines) if aligned.manifest.get("kind") == "prealigned" else "ont"
     inputs = [entry for entry in previous.get("inputs", []) if entry.get("input_id") != aligned.input_id]
     inputs.append(
         {
             "input_id": aligned.input_id,
             "kind": aligned.manifest.get("kind"),
-            "platform": (from_rg_lines(chunkset.rg_lines)
-                         if aligned.manifest.get("kind") == "prealigned" else "ont"),
+            "platform": platform,
             "tools": aligned.manifest.get("tools"),
             "reference_id": aligned.manifest.get("reference_id"),
             "used_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

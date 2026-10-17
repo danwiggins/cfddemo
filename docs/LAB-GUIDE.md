@@ -255,6 +255,9 @@ source before ingesting it. The Lab does not infer ONT from an absent value.
 Previously stored Lab-aligned inputs without read groups remain readable only
 when their manifest pins the historical `map-ont` alignment recipe; a new
 input still needs an explicit platform declaration.
+Stored prealigned manifests without a platform field still read the BAM's
+unanimous platform declaration. Re-ingest short reads to record an Illumina
+input identity for new results and cohorts.
 
 **PMD asset.** `pmd-score` needs an operator-supplied Zhou 2018 hg38
 common-PMD BED.gz file. The repository does not ship or download it; its
@@ -539,6 +542,8 @@ unanimously declare `PL:ONT` or `PL:ILLUMINA`; align Illumina reads externally
 before supplying the BAM. For a damaged or mismatched stored input, restore
 that input from a known-good backup or re-ingest the original BAM under a fresh
 ROOT. Reusing the same ROOT does not replace an existing input manifest.
+Rewriting a BAM header changes its source identity; remove an unrecoverable
+member from its cohort before rebuilding that cohort.
 
 ## Adding an algorithm
 
