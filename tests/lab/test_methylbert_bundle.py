@@ -1,0 +1,269 @@
+"""A model bundle is checked before a trusted pickle can enter private scratch."""
+
+from __future__ import annotations
+
+import hashlib
+import io
+import json
+import os
+import sys
+import tarfile
+from pathlib import Path
+
+import pytest
+
+import traceback_lab.methylbert_bundle as bundle_module
+import traceback_lab.methylbert_assets as assets_module
+from traceback_lab.assets import AssetError
+from traceback_lab.methylbert_assets import (
+    MethylbertPublishUncertain, copy_methylbert_bundle, inspect_methylbert_bundle,
+    register_methylbert_bundle,
+)
+from traceback_lab.methylbert_bundle import MAX_ARCHIVE_BYTES, BundleError, REQUIRED_FILES, SCHEMA, unpack_bundle, verify_bundle
+from traceback_lab.store import LabStore
+
+
+def _bundle(path, *, bad_digest=False, extra=False, link=False, model_id="test-tumour-normal", manifest_bytes=None):
+    files = {name: f"fixture {name}".encode() for name in REQUIRED_FILES}
+    manifest = {
+        "schema": SCHEMA, "model_id": model_id, "upstream_commit": "a" * 40,
+        "source": "synthetic fixture", "terms": "test-only", "reference_sha256": "b" * 64,
+        "n_mers": 3, "seq_len": 150,
+        "files": {name: hashlib.sha256(body).hexdigest() for name, body in files.items()},
+    }
+    if bad_digest:
+        manifest["files"]["train_seq.csv"] = "0" * 64
+    files["bundle.json"] = manifest_bytes if manifest_bytes is not None else json.dumps(manifest).encode()
+    if extra:
+        files["../escape"] = b"not allowed"
+    with tarfile.open(path, mode="w:") as archive:
+        for name, body in files.items():
+            member = tarfile.TarInfo(name)
+            if link and name == "train_seq.csv":
+                member.type = tarfile.SYMTYPE
+                member.linkname = "../escape"
+            else:
+                member.size = len(body)
+            archive.addfile(member, None if member.issym() else io.BytesIO(body))
+    return files
+
+
+def test_bundle_verifies_all_files_before_private_copy(tmp_path):
+    archive = tmp_path / "model.tar"
+    files = _bundle(archive)
+    bundle = verify_bundle(archive)
+    assert bundle.model_id == "test-tumour-normal"
+    destination = tmp_path / "private"
+    assert unpack_bundle(archive, destination) == bundle
+    for name in REQUIRED_FILES:
+        assert (destination / name).read_bytes() == files[name]
+    assert not (destination / "bundle.json").exists()
+    with pytest.raises(BundleError, match="must not exist"):
+        unpack_bundle(archive, destination)
+
+
+def test_bundle_registers_by_digest_then_reverifies_worker_copy(tmp_path):
+    archive = tmp_path / "model.tar"
+    _bundle(archive)
+    store = LabStore(tmp_path / "root")
+    record = register_methylbert_bundle(
+        store, archive, source_label="fixture", terms="restricted",
+    )
+    assert record.file == store.lab / "assets" / "methylbert-bundle" / record.sha256 / "model.tar"
+    assert inspect_methylbert_bundle(store, record.sha256) == record
+    assert register_methylbert_bundle(
+        store, archive, source_label="fixture", terms="restricted",
+    ) == record
+    with pytest.raises(AssetError, match="different provenance"):
+        register_methylbert_bundle(store, archive, source_label="other", terms="restricted")
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    copy = copy_methylbert_bundle(store, record.sha256, scratch / "model.tar")
+    assert unpack_bundle(copy, scratch / "model").model_id == "test-tumour-normal"
+    record.file.write_bytes(b"changed")
+    with pytest.raises(AssetError, match="differs from registration"):
+        inspect_methylbert_bundle(store, record.sha256)
+
+
+def test_registration_refuses_malformed_bundle_before_publication(tmp_path):
+    archive = tmp_path / "model.tar"
+    _bundle(archive, bad_digest=True)
+    store = LabStore(tmp_path / "root")
+    with pytest.raises(AssetError, match="malformed"):
+        register_methylbert_bundle(store, archive, source_label="fixture", terms="restricted")
+    assert not (store.lab / "assets" / "methylbert-bundle").exists()
+
+
+def test_registration_and_consumer_share_the_bundle_size_cap(tmp_path):
+    archive = tmp_path / "oversized.tar"
+    with archive.open("wb") as stream:
+        stream.truncate(MAX_ARCHIVE_BYTES + 1)
+    with pytest.raises(AssetError, match="size cap"):
+        register_methylbert_bundle(
+            LabStore(tmp_path / "root"), archive, source_label="fixture", terms="restricted",
+        )
+
+
+def test_lab_asset_command_registers_and_inspects_bundle(tmp_path, capsys):
+    from traceback_runner import cli
+
+    archive = tmp_path / "model.tar"
+    _bundle(archive)
+    root = tmp_path / "root"
+    code = cli.main([
+        "lab", "asset", "add", "methylbert-bundle", "--file", str(archive),
+        "--source-label", "synthetic fixture", "--terms", "restricted",
+        "--root", str(root), "--json",
+    ])
+    added = json.loads(capsys.readouterr().out)
+    assert code == 0
+    digest = added["data"]["asset"]["sha256"]
+    assert added["data"]["asset"]["kind"] == "methylbert-bundle"
+    code = cli.main([
+        "lab", "asset", "inspect", "methylbert-bundle", "--sha256", digest,
+        "--root", str(root), "--json",
+    ])
+    inspected = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert inspected["data"]["asset"] == added["data"]["asset"]
+
+
+def test_uncertain_publication_retains_digest_for_inspection(tmp_path, monkeypatch):
+    archive = tmp_path / "model.tar"
+    _bundle(archive)
+    store = LabStore(tmp_path / "root")
+    publish = store.publish_directory
+
+    def fail_after_publish(parent, name, build):
+        publish(parent, name, build)
+        raise OSError("injected durability failure")
+
+    monkeypatch.setattr(store, "publish_directory", fail_after_publish)
+    with pytest.raises(MethylbertPublishUncertain) as raised:
+        register_methylbert_bundle(
+            store, archive, source_label="fixture", terms="restricted",
+        )
+    assert inspect_methylbert_bundle(store, raised.value.sha256).sha256 == raised.value.sha256
+
+
+def test_post_publish_inspection_failure_retains_digest(tmp_path, monkeypatch):
+    archive = tmp_path / "model.tar"
+    _bundle(archive)
+    store = LabStore(tmp_path / "root")
+
+    def fail_inspection(*_):
+        raise AssetError("injected read failure")
+
+    monkeypatch.setattr(assets_module, "inspect_methylbert_bundle", fail_inspection)
+    with pytest.raises(MethylbertPublishUncertain) as raised:
+        register_methylbert_bundle(store, archive, source_label="fixture", terms="restricted")
+    assert raised.value.sha256 == hashlib.sha256(archive.read_bytes()).hexdigest()
+    assert (store.lab / "assets" / "methylbert-bundle" / raised.value.sha256 / "model.tar").exists()
+
+
+def test_deep_json_is_reported_as_bundle_or_asset_error(tmp_path):
+    archive = tmp_path / "deep.tar"
+    _bundle(archive, manifest_bytes=b"[" * 3000)
+    with pytest.raises(BundleError, match="valid UTF-8 JSON"):
+        verify_bundle(archive)
+
+    valid = tmp_path / "valid.tar"
+    _bundle(valid)
+    store = LabStore(tmp_path / "root")
+    record = register_methylbert_bundle(store, valid, source_label="fixture", terms="restricted")
+    (record.file.parent / "manifest.json").write_bytes(b"[" * 3000)
+    with pytest.raises(AssetError, match="registration manifest is invalid"):
+        inspect_methylbert_bundle(store, record.sha256)
+
+
+@pytest.mark.parametrize("damage,message", [
+    ("bad_digest", "differs"), ("extra", "missing, extra"), ("link", "regular files"),
+])
+def test_bundle_rejects_bad_hash_membership_and_links(tmp_path, damage, message):
+    archive = tmp_path / "model.tar"
+    _bundle(archive, **{damage: True})
+    with pytest.raises(BundleError, match=message):
+        verify_bundle(archive)
+
+
+def test_many_headers_are_rejected_before_unbounded_tar_parsing(tmp_path, monkeypatch):
+    archive = tmp_path / "many.tar"
+    with tarfile.open(archive, mode="w:") as output:
+        for name in sorted(REQUIRED_FILES | {"bundle.json"}):
+            member = tarfile.TarInfo(name)
+            member.size = 1
+            output.addfile(member, io.BytesIO(b"x"))
+        for number in range(2000):
+            body = b"x"
+            member = tarfile.TarInfo(f"extra-{number}")
+            member.size = len(body)
+            output.addfile(member, io.BytesIO(body))
+    parsed = 0
+    original = tarfile.TarInfo.frombuf
+
+    def counted(*args, **kwargs):
+        nonlocal parsed
+        parsed += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(tarfile.TarInfo, "frombuf", counted)
+    monkeypatch.setattr(bundle_module.tarfile, "open", lambda *args, **kwargs: pytest.fail(
+        "tarfile must not parse beyond the raw header bound",
+    ))
+    with pytest.raises(BundleError, match="missing, extra"):
+        verify_bundle(archive)
+    assert parsed == 8
+
+
+def test_pax_extension_is_rejected_before_tarfile_parsing(tmp_path, monkeypatch):
+    archive = tmp_path / "pax.tar"
+    with tarfile.open(archive, mode="w:", format=tarfile.PAX_FORMAT) as output:
+        member = tarfile.TarInfo("bundle.json")
+        member.pax_headers = {"comment": "extended metadata"}
+        member.size = 1
+        output.addfile(member, io.BytesIO(b"x"))
+    monkeypatch.setattr(bundle_module.tarfile, "open", lambda *args, **kwargs: pytest.fail(
+        "PAX data must be rejected by the raw scanner",
+    ))
+    with pytest.raises(BundleError):
+        verify_bundle(archive)
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows does not permit replacing an open TAR")
+def test_private_copy_uses_verified_open_archive_when_path_is_replaced(tmp_path, monkeypatch):
+    archive = tmp_path / "model.tar"
+    replacement = tmp_path / "replacement.tar"
+    files = _bundle(archive)
+    _bundle(replacement, model_id="replacement-model")
+    original = bundle_module._verified_members
+
+    def swap_after_verification(open_archive):
+        result = original(open_archive)
+        os.replace(replacement, archive)
+        return result
+
+    monkeypatch.setattr(bundle_module, "_verified_members", swap_after_verification)
+    destination = tmp_path / "private"
+    assert unpack_bundle(archive, destination).model_id == "test-tumour-normal"
+    assert (destination / "train_seq.csv").read_bytes() == files["train_seq.csv"]
+    monkeypatch.setattr(bundle_module, "_verified_members", original)
+    assert verify_bundle(archive).model_id == "replacement-model"
+
+
+def test_private_copy_failure_removes_partial_destination(tmp_path, monkeypatch):
+    archive = tmp_path / "model.tar"
+    _bundle(archive)
+    destination = tmp_path / "private"
+    original = bundle_module._sha256
+
+    def fail_after_copy(stream, size):
+        if getattr(stream, "name", None) and destination in Path(stream.name).parents:
+            raise OSError("injected private copy failure")
+        return original(stream, size)
+
+    monkeypatch.setattr(bundle_module, "_sha256", fail_after_copy)
+    with pytest.raises(BundleError, match="private copy failed"):
+        unpack_bundle(archive, destination)
+    assert not destination.exists()
+    monkeypatch.setattr(bundle_module, "_sha256", original)
+    assert unpack_bundle(archive, destination).model_id == "test-tumour-normal"

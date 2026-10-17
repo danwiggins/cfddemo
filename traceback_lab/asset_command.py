@@ -11,6 +11,7 @@ from typing import Any
 from traceback_runner.cli import _local_envelope, _result, _with_human
 
 from .assets import AssetError, AssetPublishUncertain, add_asset, inspect_asset
+from .methylbert_assets import MethylbertPublishUncertain, inspect_methylbert_bundle, register_methylbert_bundle
 from .problems import EXIT_BLOCKED, EXIT_OK
 from .store import LabStore, new_run_id
 from .viral_assets import add_viral_reference, inspect_viral_reference
@@ -20,7 +21,7 @@ def add_asset_parser(commands: Any, common: Callable[[argparse.ArgumentParser], 
     asset = commands.add_parser("asset", help="register or inspect local Lab assets")
     actions = asset.add_subparsers(dest="asset_action", required=True)
     add = actions.add_parser("add", help="register operator-supplied pinned bytes")
-    add.add_argument("kind", choices=("pmd", "tss-annotation", "viral-fasta"))
+    add.add_argument("kind", choices=("pmd", "tss-annotation", "methylbert-bundle", "viral-fasta"))
     add.add_argument("--file", type=Path, required=True, help="local pinned asset file")
     add.add_argument("--targets", type=Path, help="viral-fasta TSV: contig, virus, accession")
     add.add_argument(
@@ -32,7 +33,8 @@ def add_asset_parser(commands: Any, common: Callable[[argparse.ArgumentParser], 
     common(add)
     add.set_defaults(handler=_add)
     inspect = actions.add_parser("inspect", help="rehash and describe a local asset")
-    inspect.add_argument("kind", choices=("pmd", "tss-annotation", "viral-fasta"))
+    inspect.add_argument("kind", choices=("pmd", "tss-annotation", "methylbert-bundle", "viral-fasta"))
+    inspect.add_argument("--sha256", help="registered MethylBERT bundle digest")
     common(inspect)
     inspect.set_defaults(handler=_inspect)
     ends = actions.add_parser("end-catalogues-register", help="pin hg38 open-chromatin centers and preferred-end sites")
@@ -60,7 +62,14 @@ def _add(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]
     store.check_version()
     try:
         with store.writer("asset add", new_run_id(), step=args.kind):
-            if args.kind == "viral-fasta":
+            if args.kind == "methylbert-bundle":
+                if getattr(args, "targets", None) is not None:
+                    raise AssetError("only viral-fasta accepts --targets")
+                record = register_methylbert_bundle(
+                    store, args.file, source_label=args.source_label,
+                    terms=args.terms, license_id=args.license_id,
+                )
+            elif args.kind == "viral-fasta":
                 if getattr(args, "targets", None) is None:
                     raise AssetError("viral-fasta needs --targets TSV")
                 record = add_viral_reference(
@@ -75,9 +84,12 @@ def _add(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]
                     source_label=args.source_label, terms=args.terms, license_id=args.license_id,
                 )
     except AssetPublishUncertain as exc:
+        command = ["traceback", "lab", "asset", "inspect", args.kind, "--root", str(store.root)]
+        if isinstance(exc, MethylbertPublishUncertain):
+            command.extend(["--sha256", exc.sha256])
         payload = _result_payload(
             "lab asset add", "blocked", "Asset registration incomplete; inspect before retry", store,
-            {"kind": args.kind, "cause": str(exc), "fix": shlex.join(["traceback", "lab", "asset", "inspect", args.kind, "--root", str(store.root)])},
+            {"kind": args.kind, "cause": str(exc), "fix": shlex.join(command)},
         )
         return EXIT_BLOCKED, _with_human(payload, [f"ASSET   {args.kind}", f"INCOMPLETE {exc}"])
     except AssetError as exc:
@@ -104,7 +116,14 @@ def _add(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]
 def _inspect(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]]:
     store.check_version()
     try:
-        record = inspect_viral_reference(store) if args.kind == "viral-fasta" else inspect_asset(store, args.kind)
+        if args.kind == "methylbert-bundle":
+            if not args.sha256:
+                raise AssetError("MethylBERT bundle inspection needs --sha256")
+            record = inspect_methylbert_bundle(store, args.sha256)
+        else:
+            if args.sha256:
+                raise AssetError("--sha256 is only for methylbert-bundle")
+            record = inspect_viral_reference(store) if args.kind == "viral-fasta" else inspect_asset(store, args.kind)
     except AssetError as exc:
         payload = _result_payload(
             "lab asset inspect", "blocked", "Asset unavailable", store,
