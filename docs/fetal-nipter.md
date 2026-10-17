@@ -51,10 +51,13 @@ the exact manifest with `traceback lab fetal register --file CONTRACT.json
 path. Registration for an input is immutable.
 
 The adapter requires at least two million eligible reads, the full aligned
-input, matching source/input/reference IDs, the verified control RDS, and an
-installed Rscript with NIPTeR 1.0.2. The Rscript binary, exact installed
-NIPTeR, `sets`, `Rsamtools`, and `S4Vectors` package files, R adapter code,
-contract, and RDS digests enter the execution identity. A missing or changed
+input, matching source/input/reference IDs, a coordinate-sorted canonical
+hg38 BAM, the verified control RDS, and an installed Rscript with NIPTeR 1.0.2.
+The Rscript binary, the installed `NIPTeR`, `sets`, `Rsamtools`, and `S4Vectors`
+package files, R adapter code, contract, and RDS digests enter the execution
+identity. Other R dependencies are not byte-pinned. At execution the Lab
+copies the exact verified RDS bytes into a private scratch file that R reads;
+the copy is removed after the adapter returns. A missing or changed
 prerequisite leaves the method unavailable. The z-scores have no ONT-matched
 reference range or clinical cutoff. Input-scoped prenatal control identities
 are not pooled into a generic healthy-cohort reference. A separate, validated fetal-fraction

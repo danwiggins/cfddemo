@@ -3,9 +3,9 @@
 # callout (>= 20px bold) once per route, pills elsewhere.
 version: 0.1.0
 licenses:
-  nipter-lgpl3:
-    headline: "LGPL-3: NIPTeR prenatal analysis"
-    body: "NIPTeR runs as a separate R process. Its LGPL-3 terms and the control cohort's data rights require independent review."
+  nipter-lgpl:
+    headline: "LGPL: NIPTeR prenatal analysis"
+    body: "The installed NIPTeR 1.0.2 DESCRIPTION says GNU Lesser General Public License without a version. NIPTeR runs as a separate R process; its license terms and the control cohort's data rights require independent review."
     url: "https://github.com/molgenis/NIPTeR"
   modkit-ont-public:
     headline: "RESEARCH-ONLY: modkit"

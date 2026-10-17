@@ -52,7 +52,7 @@ def _payload(command: str, status: str, summary: str, store: LabStore, data: dic
 def _public(contract: Any) -> dict[str, Any]:
     # Neither the control file path nor sample names belong in CLI output.
     return {"input_id": contract.input_id, "source_id": contract.source_id,
-            "reference_sha256": contract.reference_sha256, "fetal_sex": contract.fetal_sex,
+            "reference_sha256": contract.reference_sha256,
             "control_sha256": contract.control_sha256, "control_n": contract.control_n,
             "nipter_version": contract.nipter_version,
             "manifest_sha256": contract.manifest_sha256}

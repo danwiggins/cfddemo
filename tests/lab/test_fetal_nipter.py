@@ -147,6 +147,8 @@ def test_nipter_preflight_and_synthetic_adapter_output(tmp_path: Path, monkeypat
         **{**ctx.__dict__, "extras": {"planned_asset_sha256s": []}})).reason_code == "missing_asset"
     def fake_r_process(argv, **kwargs):
         assert Path(argv[2]).read_bytes() == fetal.R_CODE.encode("utf-8")
+        assert Path(argv[4]).read_bytes() == control.read_bytes()
+        assert Path(argv[4]) != control
         assert kwargs["log_limit_bytes"] == 4096
         assert kwargs["timeout_seconds"] == 900
         return SimpleNamespace(outcome="exited", returncode=0,
@@ -157,6 +159,7 @@ def test_nipter_preflight_and_synthetic_adapter_output(tmp_path: Path, monkeypat
     assert values == {"fetal_fraction": None, "trisomy_13_z": 0.5,
                       "trisomy_18_z": -0.25, "trisomy_21_z": 1.75}
     assert not (tmp_path / "out" / "nipter-z.R").exists()
+    assert not list((tmp_path / "out").glob("nipter-control-*.rds"))
     control.write_bytes(b"changed")
     assert isinstance(fetal.FETAL_FRACTION.preflight(ctx), Skip)
     with pytest.raises(FetalContractError):
@@ -167,6 +170,14 @@ def test_nipter_preflight_and_synthetic_adapter_output(tmp_path: Path, monkeypat
 def test_nipter_output_parser_refuses_incomplete_or_nonfinite_values(output: str) -> None:
     with pytest.raises(RuntimeError):
         fetal._parse_z_output(output)
+
+
+def test_nipter_control_snapshot_rejects_changed_bytes_without_retaining_copy(tmp_path: Path) -> None:
+    control = tmp_path / "control.rds"
+    control.write_bytes(b"private synthetic RDS stand-in")
+    with pytest.raises(RuntimeError, match="changed during snapshot"):
+        fetal._stage_control(control, "0" * 64, tmp_path)
+    assert not list(tmp_path.glob("nipter-control-*.rds"))
 
 
 def test_derived_prenatal_skip_publishes_through_runner(tmp_path: Path) -> None:
@@ -235,12 +246,17 @@ def test_nipter_requires_canonical_hg38_bam_header(tmp_path: Path) -> None:
     lengths = [248_956_422] + [1_000_000] * 22 + [57_227_415]
     path = tmp_path / "aligned.bam"
     def write() -> None:
-        with pysam.AlignmentFile(str(path), "wb", header={"HD": {"VN": "1.6"},
+        with pysam.AlignmentFile(str(path), "wb", header={"HD": {"VN": "1.6", "SO": "coordinate"},
                                                         "SQ": [{"SN": name, "LN": length}
                                                                for name, length in zip(names, lengths)]}):
             pass
     write()
     assert fetal._compatible_bam_layout(path)
+    with pysam.AlignmentFile(str(path), "wb", header={"HD": {"VN": "1.6", "SO": "unsorted"},
+                                                  "SQ": [{"SN": name, "LN": length}
+                                                         for name, length in zip(names, lengths)]}):
+        pass
+    assert not fetal._compatible_bam_layout(path)
     names[1], names[2] = names[2], names[1]
     write()
     assert not fetal._compatible_bam_layout(path)
