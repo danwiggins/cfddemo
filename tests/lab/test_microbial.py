@@ -264,6 +264,13 @@ def test_production_cohort_snapshot_excludes_unassayable_and_changed_db(tmp_path
         upstream=[{"algorithm_id": "read-summary", "parameters_sha256": summary_identity}],
         tool_pins=[pin.identity() for pin in pins],
     )
+
+    def consumed_summary() -> list[dict[str, str]]:
+        selected = store.selected_attempt(input_id, "read-summary", summary_identity)
+        assert selected is not None
+        return [{"algorithm_id": "read-summary", "input_id": input_id,
+                 "parameters_sha256": summary_identity, "attempt_id": selected.name}]
+
     for item, identity in ((summary, summary_identity), (microbial, microbial_identity)):
         store.publish_result(ResultEnvelope(
             algorithm_id=item.id, algorithm_version=item.version, status="ok",
@@ -274,7 +281,8 @@ def test_production_cohort_snapshot_excludes_unassayable_and_changed_db(tmp_path
                       Metric(metric_id="too_short_unmapped_reads", value=0),
                       Metric(metric_id="missing_sequence_unmapped_reads", value=0),
                       Metric(metric_id="microbial_rpm_primary", value=0.0)] if item.id == "microbial" else []),
-        ), input_id=input_id)
+        ), input_id=input_id,
+           upstream_selections=consumed_summary() if item.id == "microbial" else None)
     selected = cohorts._selected_results(store, input_id, manifest)
     assert [result.algorithm_id for result in selected] == ["read-summary", "microbial"]
     assert selected[1].cohort_compat_key != microbial_identity
@@ -299,7 +307,7 @@ def test_production_cohort_snapshot_excludes_unassayable_and_changed_db(tmp_path
                  Metric(metric_id="too_short_unmapped_reads", value=0),
                  Metric(metric_id="missing_sequence_unmapped_reads", value=0),
                  Metric(metric_id="microbial_rpm_primary", value=0.0)],
-    ), input_id=input_id)
+    ), input_id=input_id, upstream_selections=consumed_summary())
     changed = cohorts._selected_results(store, input_id, manifest)[1]
     assert changed.parameters_sha256 == new_identity
     assert changed.cohort_compat_key != selected[1].cohort_compat_key
@@ -316,7 +324,7 @@ def test_production_cohort_snapshot_excludes_unassayable_and_changed_db(tmp_path
                  Metric(metric_id="too_short_unmapped_reads", value=2),
                  Metric(metric_id="missing_sequence_unmapped_reads", value=0),
                  Metric(metric_id="microbial_rpm_primary", value=0.0)],
-    ), input_id=input_id)
+    ), input_id=input_id, upstream_selections=consumed_summary())
     assert [result.algorithm_id for result in cohorts._selected_results(store, input_id, manifest)] == ["read-summary"]
 
 
