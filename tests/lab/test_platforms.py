@@ -57,6 +57,13 @@ def test_stored_platform_must_match_bam_header(tmp_path: Path) -> None:
         for_input({"kind": "aligned", "platform": "ont"}, bam_path)
 
 
+def test_duplicate_platform_tags_are_unknown() -> None:
+    from traceback_lab.platforms import from_rg_lines
+
+    assert from_rg_lines(["@RG\tID:one\tPL:ONT\tPL:ILLUMINA"]) == "unknown"
+    assert from_rg_lines(["@RG\tID:one\tPL:ILLUMINA\tPL:ONT"]) == "unknown"
+
+
 def test_legacy_illumina_source_record_keeps_header_platform(tmp_path: Path) -> None:
     from traceback_lab.ingest import write_source
     from traceback_lab.store import LabStore

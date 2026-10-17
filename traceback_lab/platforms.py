@@ -23,8 +23,11 @@ def from_rg_lines(lines: Iterable[str]) -> Platform:
         if not line.startswith("@RG\t"):
             continue
         seen = True
-        fields = dict(part.split(":", 1) for part in line.split("\t")[1:] if ":" in part)
-        value = fields.get("PL", "").upper()
+        platform_tags = [part[3:] for part in line.split("\t")[1:] if part.startswith("PL:")]
+        if len(platform_tags) != 1:
+            declared.add("unknown")
+            continue
+        value = platform_tags[0].upper()
         if value in {"ONT", "OXFORD_NANOPORE"}:
             declared.add("ont")
         elif value == "ILLUMINA":
