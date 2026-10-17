@@ -900,13 +900,8 @@ entries:
     min_depth_x: null
     reference: {kind: none}
     qc_band: {direction: higher_is_better, pass: 0.95, warn: 0.50}
-    performance:
-      kind: depth_threshold
-      value: "Cell-type proportions held from full depth down to 0.2x (about 2.5M aligned fragments) and degraded at 0.05x and below (under 700,000 aligned fragments); one ONT study"
-      platform: ONT
-      depth: "0.05-0.2x"
-      source: "Katsman 2022, Genome Biol"
-    performance_missing_reason: null
+    performance: null
+    performance_missing_reason: "No published depth-performance validation is cited for this MM-tagged-read QC measure"
     meaning_high: "Methylation calls are present on nearly every read."
     meaning_low: "Many reads lack modified-base calls: basecalled without a modbase model, or tags dropped during alignment."
     confounders: ["basecaller configuration", "tags dropped by an aligner without -y"]
@@ -917,8 +912,8 @@ entries:
     flags: []
     headline: true
     stability: {kind: proportion}
-    citations: ["doi:10.1186/s13059-022-02710-1"]
-    citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "PMC9283844 full text: 'From full depth down to 0.2x (about 2.5M aligned fragments), all samples were dominated by the expected cell types'; 'significantly degraded at 0.05x coverage and below (corresponding to less than 700,000 aligned fragments)'. These thresholds are for cell-type deconvolution quality. QC bands are provisional team defaults (not from literature)."}
+    citations: []
+    citation_checked: {by: "S1 primary-source audit", date: "2026-10-17", note: "No performance citation displayed. Katsman 2022 Fig. 1A-C tests cell-type deconvolution depth, not MM-tagged-read QC. QC bands are provisional team defaults (not from literature)."}
 
   - algorithm_id: modbase-qc
     metric_id: mod_codes
