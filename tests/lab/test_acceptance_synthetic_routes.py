@@ -531,10 +531,21 @@ def test_loading_copy_while_synthetic_listing_is_in_flight(tmp_path) -> None:
 def test_empty_copy_and_complete_example_commands(tmp_path) -> None:
     with _server(tmp_path, _sample()) as server:
         server.app.api.samples = lambda: {"samples": [], "root_has_runs": False}
-        dom = _dom(server, tmp_path / "browser", route="/")
+        server.app.api.sample = lambda _id12: {"found": False, "candidates": []}
+        dom = _dom(server, tmp_path / "home", route="/",
+                   want=lambda page: "FLAG: LEGAL — verify" in page)
+        unknown = _dom(server, tmp_path / "unknown", route=f"/sample/{ID12}/findings",
+                       want=lambda page: "Unknown sample" in page)
+        about = _dom(server, tmp_path / "clia", route="/about/clia",
+                     want=lambda page: "What CLIA is." in page)
+    assert '<section class="clia-panel"' in dom
+    assert "What CLIA means for this demo" in dom and dom.count("FLAG: LEGAL — verify") == 2
     assert "No Lab runs under this server's ROOT" in dom
     assert "traceback lab doctor" in dom and "traceback lab run --example" in dom
     assert "traceback lab run &lt;chunk dir&gt;" in dom
+    assert f"No Lab sample matches {ID12}" in unknown and "No Lab runs under" not in unknown
+    assert "What CLIA is." in about and "42 CFR 493.3(b)(2)" in about
+    assert "No Lab runs under" not in about
 
 
 @needs_chrome
