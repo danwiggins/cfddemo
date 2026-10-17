@@ -17,7 +17,7 @@ from traceback_lab.adapters.griffin_run import count_d21_pairs
 from traceback_lab.algorithms.griffin import GRIFFIN
 from traceback_lab.griffin_assets import GriffinAssetError, inspect_griffin_assets, register_griffin_assets
 from traceback_lab.problems import EXIT_BLOCKED
-from traceback_lab.registry import InputContext, PlanItem, Skip, execution_identity
+from traceback_lab.registry import InputContext, PlanItem, Ready, Skip, execution_identity
 from traceback_lab.runner import RunTarget, run_plan
 from traceback_lab.scrub import Scrubber
 from traceback_lab.store import LabStore, new_run_id
@@ -408,6 +408,7 @@ def test_derived_split_counts_selected_pairs_and_uses_transient_bam(
     import pysam
     import traceback_lab.algorithms.griffin as module
     from traceback_lab.algorithms.cell_origin import derived_name_predicate
+    from traceback_lab.derived import split
 
     root, _ = _registered(tmp_path, monkeypatch)
     registered = inspect_griffin_assets(root)
@@ -451,10 +452,13 @@ def test_derived_split_counts_selected_pairs_and_uses_transient_bam(
                 reference_id="hg38", reference_sha256=hashlib.sha256(reference.read_bytes()).hexdigest(),
                 input_dir=input_dir, platform="illumina", eligible_reads=5_000_000,
                 extras={"reference_fasta": str(reference)})
-    a = InputContext(**base, derived={"transform": "split", "half": "A"})
-    b = InputContext(**base, derived={"transform": "split", "half": "B"})
+    a = InputContext(**{**base, "input_id": split("A").input_id(base["input_id"])},
+                     derived={"transform": "split", "half": "A"})
+    b = InputContext(**{**base, "input_id": split("B").input_id(base["input_id"])},
+                     derived={"transform": "split", "half": "B"})
+    assert a.input_id != b.input_id
     decision = module.GRIFFIN.preflight(a)
-    assert decision.__class__.__name__ == "Ready", decision
+    assert isinstance(decision, Ready), decision
     assert module.GRIFFIN.preflight(b).reason_code == "depth"
 
     def fake_workflow(config: object) -> tuple[GriffinProfile, ...]:
@@ -494,12 +498,22 @@ def test_derived_split_counts_selected_pairs_and_uses_transient_bam(
 
 
 def test_derived_name_selection_validates_and_nests_downsamples() -> None:
+    import numpy as np
     from traceback_lab.algorithms.cell_origin import derived_name_predicate
+    from traceback_lab.read_summary import DS_SALT, SPLIT_SALT, downsample_mask, h64, split_mask
 
     half = derived_name_predicate({"transform": "downsample", "fraction": 0.5})
     quarter = derived_name_predicate({"transform": "downsample", "fraction": 0.25})
     names = [f"pair{index}" for index in range(100)]
     assert {name for name in names if quarter(name)} < {name for name in names if half(name)}
+    for fraction in (0.25, 0.5):
+        keep = derived_name_predicate({"transform": "downsample", "fraction": fraction})
+        hashes = np.asarray([h64(DS_SALT, name) for name in names], dtype=np.uint64)
+        assert [keep(name) for name in names] == downsample_mask(hashes, fraction).tolist()
+    for letter in ("A", "B"):
+        keep = derived_name_predicate({"transform": "split", "half": letter})
+        hashes = np.asarray([h64(SPLIT_SALT, name) for name in names], dtype=np.uint64)
+        assert [keep(name) for name in names] == split_mask(hashes, letter).tolist()
     with pytest.raises(ValueError):
         derived_name_predicate({"transform": "split", "half": "invalid"})
     with pytest.raises(ValueError):

@@ -91,10 +91,15 @@ class Griffin(Base):
             return Skip("missing_toolchain", "Griffin requires tested Snakemake 5.19.2")
         if not registration_available(ctx.root):
             return Skip("missing_asset", "Griffin assets are not registered or registration is unsafe")
+        keep_name = None
+        if ctx.derived is not None:
+            try:
+                keep_name = derived_name_predicate(dict(ctx.derived))
+            except (ValueError, KeyError, TypeError):
+                return Skip("derived_input", "Griffin requires a valid downsample or split read-name selection")
         try:
             bam = ctx.input_dir / "aligned.bam"
-            if ctx.derived is not None:
-                keep_name = derived_name_predicate(dict(ctx.derived))
+            if keep_name is not None:
                 pairs = count_d21_pairs(bam, keep_name)
                 if pairs < MIN_ELIGIBLE_AUTOSOMAL_PAIRS:
                     return Skip("depth", f"Griffin needs {MIN_ELIGIBLE_AUTOSOMAL_PAIRS:,} eligible autosomal pairs; this selection has {pairs:,}")
@@ -104,12 +109,10 @@ class Griffin(Base):
                 pairs = count_d21_pairs(bam)
         except OSError:
             return Skip("input_unavailable", "Griffin could not read aligned BAM; inspect the Lab input and retry")
-        except (ValueError, KeyError, TypeError) as exc:
+        except ValueError as exc:
             message = str(exc)
             if message == "Griffin requires canonical hg38 autosomes":
                 return Skip("reference", message)
-            if ctx.derived is not None and message not in _SAFE_BAM_VALIDATION_MESSAGES:
-                return Skip("derived_input", "Griffin requires a valid downsample or split read-name selection")
             return Skip("platform", message if message in _SAFE_BAM_VALIDATION_MESSAGES else
                         "Griffin could not validate the aligned BAM for paired-end Illumina input")
         if profile_reads == 0:
@@ -139,6 +142,8 @@ class Griffin(Base):
             if ctx.derived is not None:
                 bam = Path(directory) / "selected.bam"
                 write_transient_bam(ctx.input_dir / "aligned.bam", bam, dict(ctx.derived))
+                if _require_paired_input(bam) == 0:
+                    raise RuntimeError("selected Griffin BAM has no qualifying 100–200 bp fragments")
             pairs = count_d21_pairs(bam)
             if pairs < MIN_ELIGIBLE_AUTOSOMAL_PAIRS:
                 raise RuntimeError("Griffin pair count fell below the required 5M after preflight")

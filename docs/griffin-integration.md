@@ -81,7 +81,7 @@ the profile panel. The primary registered TF list supplies the scalar
 and split controls use the shared read-name selection to create a temporary
 paired BAM; the selected records must still contain at least 5M D21 eligible
 autosomal pairs, and the temporary BAM is removed after the workflow. Native
-ONT, example, and CNA-derived inputs skip explicitly. No arbitrary TF activity
+ONT, example, and other derived transforms (including CNA) skip explicitly. No arbitrary TF activity
 or diagnostic threshold is asserted.
 
 Both complete pinned Snakemake workflows have run in an isolated synthetic
