@@ -297,6 +297,8 @@ Bacteria, Archaea, Viruses, and Fungi are shown as estimated reads per million
 denominator reads; human and other non-microbial taxa are excluded. At most
 256 species are displayed, with an omitted-taxon count. Read names and Kraken
 per-read assignments remain transient and are not published.
+The headline microbial estimate includes accepted species beyond the 256
+displayed rows, so it need not equal the sum of the visible table.
 The worker briefly writes candidate unmapped sequence in a private Lab scratch
 directory, up to 512 MiB. Larger candidate sets are sent in full to Kraken2
 through a pipe; the partial staged file is removed first. Kraken's per-read
@@ -328,15 +330,15 @@ duplicate-flagged and QC-fail primaries but excluding secondary and
 supplementary records, then runs
 minimap2 separately against an operator-supplied viral FASTA, and reports
 EBV/HPV/HBV aligned reads per million human-unmapped primaries. The count is
-null if that denominator is zero. A read with reported primary or secondary
+null if that denominator is zero.
 The microbial panel's viral taxa use Bracken estimates from QC-passing,
 non-duplicate unmapped reads long enough for its registered read length and
 divide by all QC-passing, non-duplicate primaries. `viral-reads` instead uses
 the side-reference alignments and divides by human-unmapped primaries,
 including QC-fail and duplicate-flagged reads. Their rates can differ or one
 can be zero while the other is nonzero; do not compare them as matching assays.
-A read with reported primary or secondary
-alignments to more than one virus group is excluded from all groups; multiple
+A read with reported primary or secondary alignments to more than one virus
+group is excluded from all groups; multiple
 primary alignments within one group count once. The side alignment explicitly
 retains up to 100 secondary alignments per read at minimap2's 0.8 score ratio;
 bundles with many near-identical contigs can still hide cross-group alternatives.
