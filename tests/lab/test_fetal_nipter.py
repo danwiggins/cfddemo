@@ -91,6 +91,7 @@ def test_nipter_preflight_and_synthetic_adapter_output(tmp_path: Path, monkeypat
     binary_sha = hashlib.sha256(runtime.read_bytes()).hexdigest()
     monkeypatch.setattr(fetal, "_rscript", lambda: (runtime, binary_sha))
     monkeypatch.setattr(fetal, "_nipter_package_sha", lambda path: "e" * 64)
+    monkeypatch.setattr(fetal, "_compatible_bam_layout", lambda path: True)
     assets = [contract.manifest_sha256, contract.control_sha256, fetal.SCRIPT_SHA256, binary_sha, "e" * 64]
     input_dir = tmp_path / "input"
     input_dir.mkdir()
@@ -123,12 +124,16 @@ def test_nipter_output_parser_refuses_incomplete_or_nonfinite_values(output: str
 
 
 def test_installed_nipter_package_files_are_exactly_pinned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    package = tmp_path / "NIPTeR"
-    package.mkdir()
-    helper = package / "R-code"
+    packages = [tmp_path / name for name in ("NIPTeR", "sets", "Rsamtools", "S4Vectors")]
+    for package in packages:
+        package.mkdir()
+        (package / "DESCRIPTION").write_bytes(b"installed package")
+    helper = packages[1] / "R-code"
     helper.write_bytes(b"first")
+    lines = "\n".join(f"{version}\t{package}" for version, package in
+                      zip(("1.0.2", "1.0-25", "2.22.0", "0.44.0"), packages))
     monkeypatch.setattr(fetal.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(
-        returncode=0, stdout=f"1.0.2\t{package}"))
+        returncode=0, stdout=lines))
     original = fetal._nipter_package_sha(tmp_path / "Rscript")
     assert original is not None
     helper.write_bytes(b"second")
@@ -136,3 +141,25 @@ def test_installed_nipter_package_files_are_exactly_pinned(tmp_path: Path, monke
     helper.unlink()
     helper.symlink_to(tmp_path / "outside")
     assert fetal._nipter_package_sha(tmp_path / "Rscript") is None
+
+
+def test_nipter_requires_canonical_hg38_bam_header(tmp_path: Path) -> None:
+    import pysam
+
+    names = [f"chr{chrom}" for chrom in range(1, 23)] + ["chrX", "chrY"]
+    lengths = [248_956_422] + [1_000_000] * 22 + [57_227_415]
+    path = tmp_path / "aligned.bam"
+    def write() -> None:
+        with pysam.AlignmentFile(str(path), "wb", header={"HD": {"VN": "1.6"},
+                                                        "SQ": [{"SN": name, "LN": length}
+                                                               for name, length in zip(names, lengths)]}):
+            pass
+    write()
+    assert fetal._compatible_bam_layout(path)
+    names[1], names[2] = names[2], names[1]
+    write()
+    assert not fetal._compatible_bam_layout(path)
+    names[1], names[2] = names[2], names[1]
+    lengths[23] -= 1
+    write()
+    assert not fetal._compatible_bam_layout(path)

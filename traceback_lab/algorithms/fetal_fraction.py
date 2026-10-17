@@ -16,6 +16,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import pysam
+
 from ..fetal_contract import FetalContractError, inspect_contract
 from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip, ToolPin
 from ._base import Base, metric
@@ -42,6 +44,16 @@ for (chrom in c(13L, 18L, 21L)) {
 }
 '''
 SCRIPT_SHA256 = hashlib.sha256(R_CODE.encode()).hexdigest()
+_CONTIGS = tuple(f"chr{chrom}" for chrom in range(1, 23)) + ("chrX", "chrY")
+
+
+def _compatible_bam_layout(path: Path) -> bool:
+    try:
+        with pysam.AlignmentFile(str(path), "rb") as bam:
+            return (tuple(bam.references[:24]) == _CONTIGS
+                    and bam.lengths[0] == 248_956_422 and bam.lengths[23] == 57_227_415)
+    except (OSError, ValueError, IndexError):
+        return False
 
 
 def _rscript() -> tuple[Path, str] | None:
@@ -62,41 +74,47 @@ def _rscript() -> tuple[Path, str] | None:
 
 
 def _nipter_package_sha(rscript: Path) -> str | None:
+    packages = ("NIPTeR", "sets", "Rsamtools", "S4Vectors")
     try:
         result = subprocess.run(
             [str(rscript), "--vanilla", "-e",
-             "cat(as.character(packageVersion('NIPTeR')), system.file(package='NIPTeR'), sep='\\t')"],
+             "for (p in c('NIPTeR','sets','Rsamtools','S4Vectors')) { "
+             "cat(as.character(packageVersion(p)), system.file(package=p), sep='\\t'); "
+             "cat('\\n') }"],
             capture_output=True, text=True, timeout=20, check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
-    fields = result.stdout.strip().split("\t")
-    if result.returncode != 0 or len(fields) != 2 or fields[0] != "1.0.2":
+    lines = [line.split("\t") for line in result.stdout.splitlines()]
+    if (result.returncode != 0 or len(lines) != len(packages)
+            or any(len(line) != 2 for line in lines) or lines[0][0] != "1.0.2"):
         return None
     try:
-        package = Path(fields[1])
-        if package.is_symlink() or not package.is_dir():
-            return None
         digest = hashlib.sha256()
         total = 0
         files = 0
-        for path in sorted(package.rglob("*")):
-            info = path.lstat()
-            if stat.S_ISLNK(info.st_mode):
+        for name, (version, directory) in zip(packages, lines):
+            package = Path(directory)
+            if not version or not package.is_absolute() or package.is_symlink() or not package.is_dir():
                 return None
-            if stat.S_ISDIR(info.st_mode):
-                continue
-            if not stat.S_ISREG(info.st_mode):
-                return None
-            total += info.st_size
-            files += 1
-            if total > (256 << 20) or files > 10000:
-                return None
-            digest.update(path.relative_to(package).as_posix().encode() + b"\0")
-            with path.open("rb") as stream:
-                while block := stream.read(1 << 20):
-                    digest.update(block)
-            digest.update(b"\0")
+            digest.update(name.encode() + b"\0" + version.encode() + b"\0")
+            for path in sorted(package.rglob("*")):
+                info = path.lstat()
+                if stat.S_ISLNK(info.st_mode):
+                    return None
+                if stat.S_ISDIR(info.st_mode):
+                    continue
+                if not stat.S_ISREG(info.st_mode):
+                    return None
+                total += info.st_size
+                files += 1
+                if total > (256 << 20) or files > 10000:
+                    return None
+                digest.update(path.relative_to(package).as_posix().encode() + b"\0")
+                with path.open("rb") as stream:
+                    while block := stream.read(1 << 20):
+                        digest.update(block)
+                digest.update(b"\0")
         return digest.hexdigest() if files else None
     except OSError:
         return None
@@ -166,6 +184,8 @@ class FetalFraction(Base):
         expected = {contract.manifest_sha256, contract.control_sha256, SCRIPT_SHA256, runtime[1], package_sha}
         if not expected.issubset(set(ctx.extras.get("planned_asset_sha256s", ()))):
             return Skip("missing_asset", "prenatal control or Rscript changed after result identity was planned")
+        if not _compatible_bam_layout(ctx.input_dir / "aligned.bam"):
+            return Skip("reference", "NIPTeR requires canonical hg38 chr1-22,X,Y BAM layout")
         return Ready()
 
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
@@ -181,6 +201,8 @@ class FetalFraction(Base):
         expected = {contract.manifest_sha256, contract.control_sha256, SCRIPT_SHA256, runtime[1], package_sha}
         if not expected.issubset(set(ctx.extras.get("planned_asset_sha256s", ()))):
             raise RuntimeError("prenatal control or Rscript changed after preflight")
+        if not _compatible_bam_layout(ctx.input_dir / "aligned.bam"):
+            raise RuntimeError("NIPTeR BAM reference layout changed after preflight")
         out.mkdir(parents=True, exist_ok=True)
         script = out / "nipter-z.R"
         script.write_text(R_CODE, encoding="utf-8")

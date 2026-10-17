@@ -17,7 +17,9 @@ The current adapter uses uncorrected, combined-strand 50 kb NIPTeR bins and
 rejects a control RDS with a different correction or strand layout. Its own
 eligibility gate counts Lab reads; NIPTeR performs its package-defined BAM
 binning, so the operator must verify equivalent filtering in the control and
-test sample before treating z-scores as comparable.
+test sample before treating z-scores as comparable. The BAM must have canonical
+hg38 `chr1`–`chr22`, `chrX`, `chrY` order and hg38 chr1/chrY lengths because
+NIPTeR's binning assumes chromosome order.
 
 ```json
 {
@@ -49,7 +51,7 @@ path. Registration for an input is immutable.
 The adapter requires at least two million eligible reads, the full aligned
 input, matching source/input/reference IDs, the verified control RDS, and an
 installed Rscript with NIPTeR 1.0.2. The Rscript binary, exact installed
-NIPTeR package files, R adapter code,
+NIPTeR, `sets`, `Rsamtools`, and `S4Vectors` package files, R adapter code,
 contract, and RDS digests enter the execution identity. A missing or changed
 prerequisite leaves the method unavailable. The z-scores have no ONT-matched
 reference range or clinical cutoff. Input-scoped prenatal control identities
