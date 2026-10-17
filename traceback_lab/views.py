@@ -380,6 +380,14 @@ def stability_panels(sample: SampleView, library: Library | None = None) -> list
                 if point["state"] != "ok_usable":
                     break
                 usable_to = point["fraction"]
+            if usable_to is not None:
+                verdict_text = f"usable to {usable_to:g}"
+            elif not downs:
+                verdict_text = "not measured below full depth"
+            elif any(point["state"] == "ok_unstable" for point in points if point["fraction"] < 1.0):
+                verdict_text = "unstable below full depth"
+            else:
+                verdict_text = "no usable measurement below full depth"
             panels.append(
                 {
                     "algorithm_id": algorithm_id,
@@ -390,7 +398,7 @@ def stability_panels(sample: SampleView, library: Library | None = None) -> list
                     "points": points,
                     "split": split,
                     "split_status": split_status,
-                    "verdict": f"usable to {usable_to:g}" if usable_to is not None else "not measured below full depth" if not downs else "unstable below full depth",
+                    "verdict": verdict_text,
                 }
             )
     panels.sort(key=lambda panel: (not panel["headline"], order.index(panel["algorithm_id"])))

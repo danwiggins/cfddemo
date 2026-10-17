@@ -113,6 +113,7 @@ def test_default_run_builds_the_curve_and_controls(default_run) -> None:
                           if p["algorithm_id"] == "fragment-size" and p["metric_id"] == "mode_bp")
     assert no_verdict["split"]["stable"] is None
     assert no_verdict["split"]["deviation_a"] is None
+    assert no_verdict["verdict"] == "no usable measurement below full depth"
     assert no_verdict["split"]["relative_abs_diff"] >= 0
     assert views.repeatability([no_verdict])["no_verdict_metrics"] == 1
     assert all(no_verdict["split_status"][half]["state"] == "ok" for half in ("A", "B"))
@@ -289,6 +290,7 @@ def test_split_half_missingness_keeps_each_status_visible() -> None:
     view.results["fragment-size"] = SimpleNamespace(status="failed")
     assert status(view, "fragment-size", "mode_bp", 100, spec)["state"] == "failed"
 
+
     view.results["fragment-size"] = SimpleNamespace(status="ok", metrics=[metric(None)])
     assert status(view, "fragment-size", "mode_bp", 100, spec)["state"] == "not_interpretable"
     view.results["fragment-size"] = SimpleNamespace(status="ok", metrics=[metric(float("nan"))])
@@ -302,6 +304,18 @@ def test_split_half_missingness_keeps_each_status_visible() -> None:
     }
     view.results["fragment-size"] = SimpleNamespace(status="ok", metrics=[metric(10**400)])
     assert status(view, "fragment-size", "mode_bp", 100, spec)["state"] == "not_interpretable"
+
+
+def test_missing_downsample_does_not_claim_instability() -> None:
+    metric = SimpleNamespace(metric_id="mode_bp", value=167.0, n=None, ci=None, ci_level=None)
+    full = views.InputView("full", "a" * 64, None, {}, {
+        "fragment-size": SimpleNamespace(status="ok", metrics=[metric], depth=None),
+    })
+    down = views.InputView("0.5", "b" * 64, "downsample", {"fraction": 0.5}, {}, 0.5)
+    sample = views.SampleView("c" * 64, "c" * 12, False, full, [down])
+    panel = next(panel for panel in views.stability_panels(sample)
+                 if panel["algorithm_id"] == "fragment-size" and panel["metric_id"] == "mode_bp")
+    assert panel["verdict"] == "no usable measurement below full depth"
 
 
 def test_repeatability_preserves_raw_splits_without_inventing_a_verdict() -> None:
