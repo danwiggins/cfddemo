@@ -29,6 +29,12 @@ INPUT = "b" * 64
 REFERENCE = "c" * 64
 
 
+def test_donor_counting_protocol_refuses_shared_constant_drift(monkeypatch) -> None:
+    assert donor._protocol_matches()
+    monkeypatch.setattr(donor, "MIN_MAPQ", 21)
+    assert not donor._protocol_matches()
+
+
 def _file(tmp_path: Path, *, status: str = "operator_verified", **changes) -> tuple[Path, str]:
     data = {"schema": "traceback.lab.dd-cfdna-contract.v1", "source_id": SOURCE,
             "input_id": INPUT, "reference_sha256": REFERENCE,

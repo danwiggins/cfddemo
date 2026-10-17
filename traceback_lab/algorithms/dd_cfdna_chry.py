@@ -17,6 +17,16 @@ from .sex_check import HG38_CHRY_LENGTH, HG38_CHRY_PARS
 
 _EXPECTED_CONTIGS = tuple(f"chr{chrom}" for chrom in range(1, 23)) + ("chrX", "chrY")
 _HG38_CHR1_LENGTH = 248_956_422
+_D21_MIN_MAPQ = 20
+_D21_FLAG_EXCLUDE = 0x4 | 0x100 | 0x200 | 0x400 | 0x800
+_D21_PARS = ((10_000, 2_781_479), (56_887_902, 57_217_415))
+
+
+def _protocol_matches() -> bool:
+    """Reject a pinned calibration if shared counting semantics change."""
+
+    return (MIN_MAPQ == _D21_MIN_MAPQ and FLAG_EXCLUDE == _D21_FLAG_EXCLUDE
+            and HG38_CHRY_PARS == _D21_PARS)
 
 
 def _fraction(y_reads: int, eligible_reads: int, contract: DonorContract) -> float | None:
@@ -78,6 +88,8 @@ class DonorDerivedChrY(Base):
             return decision
         if ctx.derived is not None:
             return Skip("unsupported_input", "donor calibration applies to the full input")
+        if not _protocol_matches():
+            return Skip("unsupported_input", "donor chrY counting protocol has changed")
         from ..store import LabStore
 
         try:
