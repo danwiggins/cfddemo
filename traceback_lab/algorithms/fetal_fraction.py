@@ -9,14 +9,16 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
 import stat
 import shutil
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import pysam
+
+from traceback_runner.contained_process import ContainedProcessError, run_contained
 
 from ..fetal_contract import FetalContractError, inspect_contract
 from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip, ToolPin
@@ -76,16 +78,19 @@ def _rscript() -> tuple[Path, str] | None:
 def _nipter_package_sha(rscript: Path) -> str | None:
     packages = ("NIPTeR", "sets", "Rsamtools", "S4Vectors")
     try:
-        result = subprocess.run(
+        result = run_contained(
             [str(rscript), "--vanilla", "-e",
              "for (p in c('NIPTeR','sets','Rsamtools','S4Vectors')) { "
              "cat(as.character(packageVersion(p)), system.file(package=p), sep='\\t'); "
              "cat('\\n') }"],
-            capture_output=True, text=True, timeout=20, check=False,
+            env=os.environ, cwd=Path.cwd().resolve(), timeout_seconds=20,
+            log_limit_bytes=4096,
         )
-    except (OSError, subprocess.TimeoutExpired):
+    except (OSError, ContainedProcessError):
         return None
-    lines = [line.split("\t") for line in result.stdout.splitlines()]
+    if result.outcome != "exited" or result.stdout_truncated:
+        return None
+    lines = [line.split("\t") for line in result.stdout.decode("utf-8", errors="replace").splitlines()]
     if (result.returncode != 0 or len(lines) != len(packages)
             or any(len(line) != 2 for line in lines) or lines[0][0] != "1.0.2"):
         return None
@@ -184,6 +189,8 @@ class FetalFraction(Base):
         expected = {contract.manifest_sha256, contract.control_sha256, SCRIPT_SHA256, runtime[1], package_sha}
         if not expected.issubset(set(ctx.extras.get("planned_asset_sha256s", ()))):
             return Skip("missing_asset", "prenatal control or Rscript changed after result identity was planned")
+        if not (ctx.input_dir / "aligned.bam").is_file():
+            return Skip("upstream", "aligned prenatal input BAM is unavailable")
         if not _compatible_bam_layout(ctx.input_dir / "aligned.bam"):
             return Skip("reference", "NIPTeR requires canonical hg38 chr1-22,X,Y BAM layout")
         return Ready()
@@ -205,18 +212,20 @@ class FetalFraction(Base):
             raise RuntimeError("NIPTeR BAM reference layout changed after preflight")
         out.mkdir(parents=True, exist_ok=True)
         script = out / "nipter-z.R"
-        script.write_text(R_CODE, encoding="utf-8")
+        script.write_bytes(R_CODE.encode("utf-8"))
         try:
-            completed = subprocess.run(
+            completed = run_contained(
                 [str(runtime[0]), "--vanilla", str(script), str(ctx.input_dir / "aligned.bam"),
                  str(contract.control_path), str(contract.control_n)],
-                cwd=out, capture_output=True, text=True, timeout=900, check=False,
+                env=os.environ, cwd=out, timeout_seconds=900, log_limit_bytes=4096,
             )
+        except (OSError, ContainedProcessError) as exc:
+            raise RuntimeError("NIPTeR process could not start; inspect the registered toolchain") from exc
         finally:
             script.unlink(missing_ok=True)
-        if completed.returncode != 0:
+        if completed.outcome != "exited" or completed.returncode != 0 or completed.stdout_truncated:
             raise RuntimeError("NIPTeR trisomy calculation failed; inspect the registered control and toolchain")
-        values = _parse_z_output(completed.stdout)
+        values = _parse_z_output(completed.stdout.decode("utf-8", errors="replace"))
         if self.asset_sha256s_for_input(ctx.root, ctx.input_id) != list(ctx.extras["planned_asset_sha256s"]):
             raise RuntimeError("prenatal control or Rscript changed during execution")
         return AlgorithmOutput(metrics=[

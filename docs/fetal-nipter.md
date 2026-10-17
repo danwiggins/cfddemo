@@ -10,8 +10,10 @@ The operator supplies an input-scoped JSON contract and an existing NIPTeR
 `NIPTControlGroup` RDS, prepared from euploid pregnancy samples on a matched
 sequencing, alignment, reference, binning, and library protocol. The Lab keeps
 the RDS outside its root and pins its exact bytes; the operator is responsible
-for the cohort's provenance, rights, consent, and match. The contract contains
-no name, gestational date, or other direct patient identifier:
+for the cohort's provenance, rights, consent, and match. The operator must also
+keep names, gestational dates, and other patient identifiers out of the contract,
+including its free-text protocol label. The Lab does not attempt to detect them
+and does not echo that label in CLI output:
 
 The current adapter uses uncorrected, combined-strand 50 kb NIPTeR bins and
 rejects a control RDS with a different correction or strand layout. Its own

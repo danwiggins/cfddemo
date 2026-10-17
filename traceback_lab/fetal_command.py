@@ -37,7 +37,7 @@ def _public(contract: Any) -> dict[str, Any]:
     return {"input_id": contract.input_id, "source_id": contract.source_id,
             "reference_sha256": contract.reference_sha256, "fetal_sex": contract.fetal_sex,
             "control_sha256": contract.control_sha256, "control_n": contract.control_n,
-            "protocol_label": contract.protocol_label, "nipter_version": contract.nipter_version,
+            "nipter_version": contract.nipter_version,
             "manifest_sha256": contract.manifest_sha256}
 
 

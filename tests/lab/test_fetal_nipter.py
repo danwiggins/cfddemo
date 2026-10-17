@@ -98,6 +98,7 @@ def test_nipter_preflight_and_synthetic_adapter_output(tmp_path: Path, monkeypat
     assets = [contract.manifest_sha256, contract.control_sha256, fetal.SCRIPT_SHA256, binary_sha, "e" * 64]
     input_dir = tmp_path / "input"
     input_dir.mkdir()
+    (input_dir / "aligned.bam").write_bytes(b"synthetic BAM stand-in")
     ctx = InputContext(store.root, SOURCE, INPUT, "hg38", REFERENCE, input_dir,
                        eligible_reads=2_000_000, extras={"planned_asset_sha256s": assets})
     assert isinstance(fetal.FETAL_FRACTION.preflight(ctx), Ready)
@@ -107,8 +108,13 @@ def test_nipter_preflight_and_synthetic_adapter_output(tmp_path: Path, monkeypat
         **{**ctx.__dict__, "derived": {"transform": "split", "half": "A"}})).reason_code == "unsupported_input"
     assert fetal.FETAL_FRACTION.preflight(ctx.__class__(
         **{**ctx.__dict__, "extras": {"planned_asset_sha256s": []}})).reason_code == "missing_asset"
-    monkeypatch.setattr(fetal.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(
-        returncode=0, stdout="13\t0.5\n18\t-0.25\n21\t1.75\n"))
+    def fake_r_process(argv, **kwargs):
+        assert Path(argv[2]).read_bytes() == fetal.R_CODE.encode("utf-8")
+        assert kwargs["log_limit_bytes"] == 4096
+        assert kwargs["timeout_seconds"] == 900
+        return SimpleNamespace(outcome="exited", returncode=0,
+                               stdout=b"13\t0.5\n18\t-0.25\n21\t1.75\n", stdout_truncated=False)
+    monkeypatch.setattr(fetal, "run_contained", fake_r_process)
     output = fetal.FETAL_FRACTION.run(ctx, tmp_path / "out")
     values = {item["metric_id"]: item["value"] for item in output.metrics}
     assert values == {"fetal_fraction": None, "trisomy_13_z": 0.5,
@@ -152,8 +158,8 @@ def test_installed_nipter_package_files_are_exactly_pinned(tmp_path: Path, monke
     helper.write_bytes(b"first")
     lines = "\n".join(f"{version}\t{package}" for version, package in
                       zip(("1.0.2", "1.0-25", "2.22.0", "0.44.0"), packages))
-    monkeypatch.setattr(fetal.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(
-        returncode=0, stdout=lines))
+    monkeypatch.setattr(fetal, "run_contained", lambda *args, **kwargs: SimpleNamespace(
+        outcome="exited", returncode=0, stdout=lines.encode(), stdout_truncated=False))
     original = fetal._nipter_package_sha(tmp_path / "Rscript")
     assert original is not None
     helper.write_bytes(b"second")

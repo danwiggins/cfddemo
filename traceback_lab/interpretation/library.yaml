@@ -2697,31 +2697,48 @@ entries:
     headline: false
     stability: {kind: absolute, tolerance: 0.1}
     citations: [{doi: "10.1186/s12859-018-2557-8"}]
+    citation_checked: {by: "Lab NIPTeR method review", date: "2026-10-17", note: "Package workflow and paper reviewed; ONT transfer lacks matched validation."}
 
   - algorithm_id: fetal-fraction
     metric_id: trisomy_18_z
     label: "Chromosome 18 NIPTeR z-score"
     value_kind: signed
     tier: SPECULATIVE
+    origin_tier: PROVEN
+    origin_platform: "short-read prenatal cfDNA with a matched euploid NIPTeR control group"
+    min_depth_x: null
     reference: {kind: none}
     performance: null
     performance_missing_reason: "No ONT-matched clinical cutoff or validation"
+    meaning_high: "Higher chromosome 18 fraction relative to the registered control group."
+    meaning_low: "Lower chromosome 18 fraction relative to the registered control group."
+    confounders: ["control group mismatch", "GC bias", "mapping bias", "fetal fraction"]
+    next_steps: {analytical: ["Inspect control-group match and protocol"], clinical_setting: null}
     license_ids: [nipter-lgpl3]
     flags: [FDA, PRIVACY, LEGAL]
     headline: false
     stability: {kind: absolute, tolerance: 0.1}
     citations: [{doi: "10.1186/s12859-018-2557-8"}]
+    citation_checked: {by: "Lab NIPTeR method review", date: "2026-10-17", note: "Package workflow and paper reviewed; ONT transfer lacks matched validation."}
 
   - algorithm_id: fetal-fraction
     metric_id: trisomy_21_z
     label: "Chromosome 21 NIPTeR z-score"
     value_kind: signed
     tier: SPECULATIVE
+    origin_tier: PROVEN
+    origin_platform: "short-read prenatal cfDNA with a matched euploid NIPTeR control group"
+    min_depth_x: null
     reference: {kind: none}
     performance: null
     performance_missing_reason: "No ONT-matched clinical cutoff or validation"
+    meaning_high: "Higher chromosome 21 fraction relative to the registered control group."
+    meaning_low: "Lower chromosome 21 fraction relative to the registered control group."
+    confounders: ["control group mismatch", "GC bias", "mapping bias", "fetal fraction"]
+    next_steps: {analytical: ["Inspect control-group match and protocol"], clinical_setting: null}
     license_ids: [nipter-lgpl3]
     flags: [FDA, PRIVACY, LEGAL]
     headline: false
     stability: {kind: absolute, tolerance: 0.1}
     citations: [{doi: "10.1186/s12859-018-2557-8"}]
+    citation_checked: {by: "Lab NIPTeR method review", date: "2026-10-17", note: "Package workflow and paper reviewed; ONT transfer lacks matched validation."}
