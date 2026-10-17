@@ -450,6 +450,17 @@ def test_pinned_modkit_and_inhouse_marker_classes_match(world) -> None:
     )
 
 
+def test_classified_fragment_floor_counts_a_molecule_once_across_markers() -> None:
+    from traceback_lab.adapters.cell_origin_inhouse import _classified_fragment_count
+
+    observations = (
+        SimpleNamespace(fragment_digest="a" * 64, marker_id="marker-one"),
+        SimpleNamespace(fragment_digest="a" * 64, marker_id="marker-two"),
+        SimpleNamespace(fragment_digest="b" * 64, marker_id="marker-two"),
+    )
+    assert _classified_fragment_count(observations) == 2
+
+
 def test_transient_bam_for_a_split_half_is_a_subset(world) -> None:
     source = world["ctx"].input_dir / "aligned.bam"
     destination = world["tmp"] / "half.bam"
