@@ -44,7 +44,7 @@ def _public_provenance(manifest: dict[str, Any], raw_sha256: str,
     fields = (
         "status", "input_id", "upstream_commit", "reference_id", "platform",
         "eligible_autosomal_pairs", "minimum_eligible_autosomal_pairs",
-        "eligibility_source", "eligibility_predicate", "snakemake_version",
+        "eligibility_source", "eligibility_predicate", "site_list_input_rows", "snakemake_version",
         "registration_sha256", "gc_bias_sha256", "output_sha256", "profile_count",
     )
     public = {key: manifest[key] for key in fields if key in manifest}

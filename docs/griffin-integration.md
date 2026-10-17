@@ -38,9 +38,10 @@ the registered hg38 FASTA and its SHA-256, Griffin's
 reference assets (including mappability BigWig, exclusion BEDs and all
 15–500 bp genome GC-frequency tables), and high-mappability TF-site lists.
 Every supplied TF-site row must place an autosome from the workflow chromosome
-sizes in its named `Chrom` column. The attempt records input row counts, while Griffin may retain fewer
-sites after its own filtering. A complete status never implies zero site
-attrition or adequate fragment support at each site.
+sizes in its named `Chrom` column. The path-free published receipt records
+input row counts by site list, while each published profile records its retained
+site count. Griffin may retain fewer sites after filtering. A complete status
+never implies zero site attrition or adequate fragment support at each site.
 It requires the 5M D21 gate, a clean upstream checkout at the pinned commit,
 and a fresh per-input attempt directory with owner-only permissions. The adapter's `eligible_autosomal_pairs`
 input is a count of eligible autosomal **pairs**. The adapter independently
