@@ -23,6 +23,7 @@ from traceback_lab.scrub import Scrubber
 from traceback_lab.store import LabStore, new_run_id, summarize_run
 from traceback_lab.web.api import LabApi
 from traceback_lab.problems import LabProblem
+from traceback_lab.views import selected_results
 from tests.lab.test_cohort_store import _sample
 
 
@@ -539,6 +540,19 @@ def test_failed_member_recompute_keeps_previous_generation(
     monkeypatch.setattr(pon, "build_panels", lambda *_: build)
     before_runs = set(store.run_ids())
     attempted: list[str] = []
+    first_input = previous.members[0].input_id
+
+    def cn_result(identity: str) -> ResultEnvelope:
+        return ResultEnvelope(
+            algorithm_id="copy-number", algorithm_version="2", status="ok",
+            provenance=provenance(
+                tool="fixture", parameters_sha256=identity,
+                source_id=sources[0], input_id=first_input, reference_id="hg38",
+            ),
+        )
+
+    old_identity, pending_identity = "8" * 64, "9" * 64
+    store.publish_result(cn_result(old_identity), input_id=first_input)
 
     def fake_recompute(store, pending, source_id, **kwargs):
         member = next(item for item in pending.members if item.source_id == source_id)
@@ -548,6 +562,8 @@ def test_failed_member_recompute_keeps_previous_generation(
         if len(attempted) == 1:
             active = LabApi(store).status()["active"]
             assert active["source_id"] == source_id and active["input_id"] == member.input_id
+            store.publish_result(cn_result(pending_identity), input_id=first_input)
+            assert selected_results(store, first_input)["copy-number"].provenance.parameters_sha256 == pending_identity
         if len(attempted) == 2:
             raise error
         return member
@@ -556,6 +572,8 @@ def test_failed_member_recompute_keeps_previous_generation(
     with pytest.raises(type(error)):
         build_cohort(store, "healthy-v1")
     assert read_current(store, "healthy-v1") == previous
+    assert selected_results(store, first_input)["copy-number"].provenance.parameters_sha256 == old_identity
+    assert store.selected_attempt(first_input, "copy-number", pending_identity) is None
     assert attempted == list(sources[:2])
     run_ids = set(store.run_ids()) - before_runs
     assert len(run_ids) == 1
