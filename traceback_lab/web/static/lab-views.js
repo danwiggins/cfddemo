@@ -485,7 +485,7 @@
 
   function provenance(sample, algorithmId) {
     const a = sample.algorithms.find((x) => x.algorithm_id === algorithmId);
-    const p = a ? a.provenance : {};
+    const p = a && a.provenance ? a.provenance : {};
     return h("dl", {},
       ...["tool", "tool_version", "parameters_sha256", "input_id", "source_id", "reference_id", "timestamp_utc"].flatMap((k) => [h("dt", {}, k), h("dd", {}, p[k] || "—")]),
       h("dt", {}, "interpretation_version"), h("dd", {}, sample.interpretation_version),
@@ -663,7 +663,7 @@
       const label = `${panel.label}: ${panel.verdict}. Deviation from full depth: ${scaleLabel}${hasSplitHalf ? `; ${splitSummary}; ${splitVerdict}` : ""}.`;
       grid.append(h("figure", { class: "multiple" }, h("figcaption", {}, h("strong", {}, panel.label), ` — ${panel.verdict}`),
         svg("svg", { viewBox: `0 0 ${w} ${hgt}`, role: "img", "aria-label": label, class: "multiple-svg" }, svg("title", {}, label), ...marks),
-        h("p", { class: "help" }, unit === "none" ? "No validated stability deviation scale" : unit === "unit" ? "y: difference from full depth (metric's unit)" : "y: relative deviation from full depth, % (clipped ±50%)"),
+        h("p", { class: "help" }, unit === "none" ? "No validated stability deviation scale; numeric values are in the table." : unit === "unit" ? "y: difference from full depth (metric's unit)" : "y: relative deviation from full depth, % (clipped ±50%)"),
         hasSplitHalf ? h("p", { class: "help" }, `Split halves: ${splitSummary}. `,
           splitVerdict === "no split-half stability verdict" ? "No split-half stability verdict." : `Split-half verdict: ${splitVerdict}.`) : ""));
       for (const p of panel.points) tableRows.push([panel.label, `${p.fraction * 100}%`, p.value, p.deviation,
@@ -845,7 +845,7 @@
     return [section];
   }
 
-  function alignedEndSignals(sample) {
+  function alignedEndSignals(sample, seen) {
     const a = algo(sample, "aligned-end-structure");
     if (!a) return [];
     const section = h("section", { class: "panel" }, h("h2", {}, "Open-chromatin aligned ends"), flagPill("LEGAL"));
@@ -853,7 +853,7 @@
     section.append(h("p", { class: "help" },
       "Exploratory ONT aligned-span proxies, not physical cleavage validation, tissue-origin inference, or a clinical cutoff. The catalogues are pinned to hg38; published OCF and preferred-end studies used paired-end short reads."));
     const slot = h("div", {}, h("p", {}, "Loading pinned end counts…"));
-    section.append(...context(sample, "aligned-end-structure", new Set()), slot);
+    section.append(...context(sample, "aligned-end-structure", seen), slot);
     artifact(sample, "aligned-end-structure", "aligned-end-structure").then((data) => {
       const rows = data.offset_bp.map((bp, i) => [bp, data.u_count[i], data.d_count[i]]);
       const spans = data.aligned_span_length_bins_bp;
@@ -881,12 +881,12 @@
     return [section];
   }
 
-  function lionheartSignals(sample) {
+  function lionheartSignals(sample, seen) {
     const a = algo(sample, "lionheart");
     if (!a) return [];
     const section = h("section", { class: "panel" }, h("h2", {}, "LIONHEART cell-type scores"), flagPill("LEGAL"),
       h("p", {}, "Experimental ONT single-end extraction. Scores are sample-standardized correlations, not cell fractions or cancer predictions."),
-      ...context(sample, "lionheart", new Set()));
+      ...context(sample, "lionheart", seen));
     if (a.status !== "ok") return [section, absent(a, "lionheart")];
     const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading raw cell-type scores…"));
     section.append(slot);
@@ -1025,10 +1025,10 @@
       }
       more.push(panel);
     }
-    return [section, ...more, ...tssProfileSignals(sample), ...breakpointMotifSignals(sample, seen), ...griffinSignals(sample), ...alignedEndSignals(sample), ...finaletoolkitSignals(sample), ...lionheartSignals(sample)];
+    return [section, ...more, ...tssProfileSignals(sample, seen), ...breakpointMotifSignals(sample, seen), ...griffinSignals(sample, seen), ...alignedEndSignals(sample, seen), ...finaletoolkitSignals(sample, seen), ...lionheartSignals(sample, seen)];
   }
 
-  function griffinSignals(sample) {
+  function griffinSignals(sample, seen) {
     const a = algo(sample, "griffin");
     if (!a) return [];
     const section = h("section", { class: "panel" },
@@ -1036,7 +1036,7 @@
     if (a.status !== "ok") return [section, absent(a, "griffin")];
     section.append(h("p", { class: "help" }, "GC-corrected nucleosome protection from the pinned Griffin workflow on a compatible paired-end WGS BAM. The primary TF list is an operator-registered choice; this is not a TF expression call."));
     const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading Griffin profile…"));
-    section.append(...context(sample, "griffin", new Set()), slot);
+    section.append(...context(sample, "griffin", seen), slot);
     artifact(sample, "griffin", "tf-site-profile").then((data) => {
       const profiles = Array.isArray(data.profiles) ? data.profiles : [];
       const primary = profiles.find((profile) => profile.site_name === data.primary_site);
@@ -1061,13 +1061,13 @@
     return [section];
   }
 
-  function finaletoolkitSignals(sample) {
+  function finaletoolkitSignals(sample, seen) {
     const a = algo(sample, "finaletoolkit-xcheck");
     if (!a) return [];
     const section = h("section", { class: "panel" }, h("h2", {}, "FinaleToolkit paired-end cross-check"), flagPill("LEGAL"));
     if (a.status !== "ok") return [section, absent(a, "finaletoolkit-xcheck")];
     section.append(h("p", { class: "help" }, "Engineering parity on a verified paired-end Illumina BAM. Neither the single-end ONT results nor the published GC-corrected DELFI classifier are compared here."),
-      ...context(sample, "finaletoolkit-xcheck", new Set()));
+      ...context(sample, "finaletoolkit-xcheck", seen));
     const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading paired-end cross-check…"));
     section.append(slot);
     artifact(sample, "finaletoolkit-xcheck", "finaletoolkit-xcheck").then((data) => {
@@ -1094,7 +1094,7 @@
     return [section];
   }
 
-  function tssProfileSignals(sample) {
+  function tssProfileSignals(sample, seen) {
     const a = algo(sample, "tss-profile");
     if (!a) return [];
     const section = h("section", { class: "panel" }, h("h2", {}, "TSS coverage profile"));
@@ -1104,7 +1104,7 @@
     section.append(h("p", { class: "help" }, "GENCODE v46 protein-coding gene TSSs; 50 bp strand-oriented bins across ±1 kb, plotted at bin centres. Central −150 to +50 bp coverage divided by outer-flank coverage. Descriptive gene-set profile only; no expression call or clinical cutoff."),
       h("p", {}, `Central/flank ratio: ${ratio ? fmt(ratio.value, ratio.unit) : "—"}. ${ratio ? ratio.caption || "" : ""}`),
       ...flags.map((flag) => flagPill(flag)),
-      ...context(sample, "tss-profile", new Set()));
+      ...context(sample, "tss-profile", seen));
     const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading TSS coverage…"));
     section.append(slot);
     artifact(sample, "tss-profile", "tss-coverage").then((data) => {
