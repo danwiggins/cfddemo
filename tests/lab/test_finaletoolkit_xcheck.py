@@ -148,6 +148,18 @@ def test_invalid_launcher_is_missing_toolchain(tmp_path: Path, monkeypatch: pyte
     assert _tool() is None
 
 
+def test_preflight_does_not_publish_an_input_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import traceback_lab.algorithms.finaletoolkit_xcheck as module
+
+    ctx = _fixture(tmp_path / "DonorName_2026")
+    (ctx.input_dir / "manifest.json").unlink()
+    monkeypatch.setattr(module, "_tool", lambda: ("pinned-fixture", "e" * 64))
+    result = FINALETOOLKIT_XCHECK.preflight(ctx)
+    assert result.reason_code == "input_kind"
+    assert "DonorName_2026" not in result.message
+    assert str(ctx.input_dir) not in result.message
+
+
 def test_python_override_runs_the_attested_package() -> None:
     launcher = Path("/operator/bin/finaletoolkit")
     interpreter = Path("/operator/venv/bin/python")

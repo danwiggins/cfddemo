@@ -280,8 +280,10 @@ class FinaleToolkitXcheck(Base):
             return Skip("reference", "registered hg38 FASTA is unavailable")
         try:
             _inputs(ctx)
-        except (OSError, ValueError, KeyError) as exc:
-            return Skip("input_kind", str(exc))
+        except (OSError, ValueError, KeyError):
+            # Input/library exceptions can include the operator's local path,
+            # which must not enter a persisted skip or the Lab UI.
+            return Skip("input_kind", "FinaleToolkit needs a readable indexed prealigned Illumina BAM and matching registered FASTA")
         return Ready()
 
     def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
