@@ -378,6 +378,9 @@ length bins so that this difference can be assessed for each run.
 The artifact also records the strongest left-side D and right-side U peak
 offsets as clipping diagnostics; these are descriptive and do not validate
 the score's biological origin.
+The 201-position raw U/D profiles and exact preferred-site support are
+sample-level derivatives. Treat the artifact as sample-identifiable data,
+especially when registering a small or targeted catalogue.
 The reported 10x minimum is an input gate, not a validated adequacy threshold.
 The score has no validated stability tolerance or biological acceptance
 interval. Its headline placement is for Lab navigation and does not imply
