@@ -463,7 +463,8 @@ def test_listing_retries_when_source_inputs_change_after_snapshot(tmp_path, monk
     ("input_unavailable", "Latest completed input unavailable"),
     ("history_unavailable", "Completion history unavailable"),
 ))
-def test_recovery_home_keeps_clia_panel_first_and_disclosures(tmp_path, state, title) -> None:
+@pytest.mark.parametrize("route_kind", ("bare", "explicit"))
+def test_recovery_home_keeps_clia_panel_first_and_disclosures(tmp_path, state, title, route_kind) -> None:
     store = LabStore(tmp_path / "root")
     store.ensure()
     source, input_id = "a" * 64, "8" * 64
@@ -477,16 +478,67 @@ def test_recovery_home_keeps_clia_panel_first_and_disclosures(tmp_path, state, t
         else:
             (store.runs_dir / f"{run_id}.jsonl").unlink()
 
+    route = "/" if route_kind == "bare" else f"/?sample={source[:12]}"
+    expected_title = title if route_kind == "bare" else {
+        "no_completed": f"Traceback Lab — {source[:12]}",
+        "input_unavailable": "Completed input unavailable",
+        "history_unavailable": "Completion history unavailable",
+    }[state]
     with RunningLabServer(store) as server:
-        dom = _dom(server, tmp_path / "browser", route="/",
-                   want=lambda page: title in page and page.count("FLAG: LEGAL — verify") == 4)
+        dom = _dom(server, tmp_path / "browser", route=route,
+                   want=lambda page: expected_title in page and page.count("FLAG: LEGAL — verify") == 4)
     main = re.search(r"<main\b[^>]*>(.*?)</main>", dom, re.DOTALL)
     assert main is not None
     content = main.group(1)
     assert content.index("<h1") < content.index('<section class="clia-panel"')
-    assert content.index('<section class="clia-panel"') < content.index(source[:12])
+    assert content.index('<section class="clia-panel"') == content.index("<section")
+    assert content.count('<section class="clia-panel"') == 1
     assert "What CLIA means for this demo" in content
     assert 'aria-expanded="false"' in content
     assert 'aria-controls="clia-full"' in content
     assert 'class="clia-full" id="clia-full" hidden' in content
     assert 'href="#/about/clia"' in content
+
+
+@needs_chrome
+def test_unknown_home_keeps_clia_panel_without_adding_it_to_lens(tmp_path) -> None:
+    store = LabStore(tmp_path / "root")
+    store.ensure()
+    source, input_id = "a" * 64, "8" * 64
+    unknown = "b" * 12
+    _source(store, source, (input_id, "2026-10-17T10:00:00Z"))
+    with RunningLabServer(store) as server:
+        home = _dom(server, tmp_path / "home", route=f"/?sample={unknown}",
+                    want=lambda page: f"No Lab sample matches {unknown}" in page
+                    and page.count("FLAG: LEGAL — verify") == 4)
+        lens = _dom(server, tmp_path / "lens", route=f"/sample/{unknown}/findings",
+                    want=lambda page: f"No Lab sample matches {unknown}" in page)
+    home_main = re.search(r"<main\b[^>]*>(.*?)</main>", home, re.DOTALL)
+    lens_main = re.search(r"<main\b[^>]*>(.*?)</main>", lens, re.DOTALL)
+    assert home_main is not None and lens_main is not None
+    assert home_main.group(1).index('<section class="clia-panel"') == home_main.group(1).index("<section")
+    assert home_main.group(1).count('<section class="clia-panel"') == 1
+    assert '<section class="clia-panel"' not in lens_main.group(1)
+
+
+@needs_chrome
+@pytest.mark.parametrize("state", ("input_unavailable", "history_unavailable"))
+def test_unavailable_lens_does_not_gain_landing_panel(tmp_path, state) -> None:
+    store = LabStore(tmp_path / "root")
+    store.ensure()
+    source, input_id = "a" * 64, "8" * 64
+    run_id = "r-20261017-1000-abcd"
+    _source(store, source, (input_id, "2026-10-17T10:00:00Z"))
+    _run(store, run_id, source, input_id, "2026-10-17T10:00:00Z")
+    record_completion(store, run_id, source, input_id)
+    if state == "input_unavailable":
+        (store.inputs_dir / input_id / "manifest.json").unlink()
+    else:
+        (store.runs_dir / f"{run_id}.jsonl").unlink()
+
+    with RunningLabServer(store) as server:
+        dom = _dom(server, tmp_path / "browser", route=f"/sample/{source[:12]}/findings",
+                   want=lambda page: f"Sample {source[:12]} exists" in page)
+    main = re.search(r"<main\b[^>]*>(.*?)</main>", dom, re.DOTALL)
+    assert main is not None
+    assert '<section class="clia-panel"' not in main.group(1)

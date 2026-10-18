@@ -283,20 +283,23 @@
     const sample = state.sample;
     if (route.name === "unknown" || !sample || !sample.found) {
       const shown = route.id12 || (sample && sample.id12) || "";
-      main.append(h("h1", { class: "view-title" }, "Unknown sample"),
-        h("p", {}, `No Lab sample matches ${shown}. `, h("a", { href: "#/" }, "Back to Lab home")));
+      main.append(h("h1", { class: "view-title" }, "Unknown sample"));
+      if (route.name === "home") main.append(window.TracebackLabViews.landingCliaPanel());
+      main.append(h("p", {}, `No Lab sample matches ${shown}. `, h("a", { href: "#/" }, "Back to Lab home")));
       if (sample && sample.candidates && sample.candidates.length) main.append(h("p", {}, `Candidates: ${sample.candidates.join(", ")}`));
       return;
     }
     if (sample.state === "completed_input_unavailable") {
-      main.append(h("h1", { class: "view-title" }, "Completed input unavailable"),
-        h("p", { class: "problem" }, `Sample ${sample.id12} exists, but its completed run's primary input cannot be read. Restore that input or rerun the sample.`),
+      main.append(h("h1", { class: "view-title" }, "Completed input unavailable"));
+      if (route.name === "home") main.append(window.TracebackLabViews.landingCliaPanel());
+      main.append(h("p", { class: "problem" }, `Sample ${sample.id12} exists, but its completed run's primary input cannot be read. Restore that input or rerun the sample.`),
         h("p", {}, h("a", { href: "#/" }, "Back to Lab home")));
       return;
     }
     if (sample.state === "completion_history_unavailable") {
-      main.append(h("h1", { class: "view-title" }, "Completion history unavailable"),
-        h("p", { class: "problem" }, `Sample ${sample.id12} exists, but its recorded completion cannot be verified. Restore its run log or rerun the sample.`),
+      main.append(h("h1", { class: "view-title" }, "Completion history unavailable"));
+      if (route.name === "home") main.append(window.TracebackLabViews.landingCliaPanel());
+      main.append(h("p", { class: "problem" }, `Sample ${sample.id12} exists, but its recorded completion cannot be verified. Restore its run log or rerun the sample.`),
         h("p", {}, h("a", { href: "#/" }, "Back to Lab home")));
       return;
     }
