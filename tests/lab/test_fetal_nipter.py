@@ -247,6 +247,30 @@ def test_prenatal_cli_refuses_duplicate_attestation_before_publication(
     assert not (store.lab / "assets" / "fetal-fraction" / INPUT).exists()
 
 
+def test_prenatal_cli_reports_uncertain_publication_and_inspect_recovers(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path, digest, control = _contract(tmp_path)
+    store = LabStore(tmp_path / "root")
+    _stored_input(store)
+    publish = LabStore.publish_directory
+
+    def publish_then_fail(self: LabStore, parent: Path, name: str, build) -> Path:
+        published = publish(self, parent, name, build)
+        raise OSError(f"private fsync failure after publishing {published}")
+
+    monkeypatch.setattr(LabStore, "publish_directory", publish_then_fail)
+    assert lab_main(["fetal", "register", "--file", str(path), "--sha256", digest,
+                     "--root", str(store.root), "--json"]) == 3
+    response = json.loads(capsys.readouterr().out)
+    assert response["status"] == "blocked"
+    assert response["summary"] == "Prenatal contract publication uncertain"
+    assert "inspect registration before retrying" in response["data"]["cause"]
+    assert str(path) not in json.dumps(response)
+    assert str(control) not in json.dumps(response)
+    assert inspect_contract(store, INPUT).manifest_sha256 == digest
+
+
 @pytest.mark.parametrize("manifest_change", [
     {"source_id": "d" * 64}, {"reference_sha256": "e" * 64},
 ])

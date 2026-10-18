@@ -36,6 +36,10 @@ class FetalContractError(ValueError):
     """A prenatal assertion or control group is absent, altered, or invalid."""
 
 
+class FetalContractPublishUncertain(FetalContractError):
+    """The contract may be visible despite a publication I/O failure."""
+
+
 @dataclass(frozen=True)
 class FetalContract:
     source_id: str
@@ -190,5 +194,10 @@ def register_contract(store: LabStore, source: Path, expected_sha256: str) -> Fe
         (staging / "receipt.json").write_bytes(canonical_json_bytes(
             {"schema": SCHEMA, "sha256": contract.manifest_sha256}))
 
-    store.publish_directory(directory.parent, directory.name, build)
+    try:
+        store.publish_directory(directory.parent, directory.name, build)
+    except OSError:
+        raise FetalContractPublishUncertain(
+            "prenatal publication outcome is uncertain; inspect registration before retrying"
+        ) from None
     return inspect_contract(store, contract.input_id)

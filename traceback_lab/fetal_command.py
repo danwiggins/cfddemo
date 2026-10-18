@@ -9,7 +9,9 @@ from typing import Any
 
 from traceback_runner.cli import _local_envelope, _result, _with_human
 
-from .fetal_contract import FetalContractError, inspect_contract, register_contract
+from .fetal_contract import (
+    FetalContractError, FetalContractPublishUncertain, inspect_contract, register_contract,
+)
 from .fetal_chry_contract import (
     COUNTING_PROTOCOL, FetalChrYContractError, inspect_contract as inspect_chry_contract,
     register_contract as register_chry_contract,
@@ -63,6 +65,10 @@ def _register(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str,
     try:
         with store.writer("fetal register", new_run_id(), step="fetal-fraction"):
             contract = register_contract(store, args.file, args.sha256)
+    except FetalContractPublishUncertain as exc:
+        payload = _payload("lab fetal register", "blocked", "Prenatal contract publication uncertain", store,
+                           {"cause": str(exc)})
+        return EXIT_BLOCKED, _with_human(payload, [f"BLOCKED {exc}"])
     except FetalContractError as exc:
         payload = _payload("lab fetal register", "blocked", "Prenatal contract not registered", store,
                            {"cause": str(exc)})
