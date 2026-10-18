@@ -56,7 +56,7 @@ from .registry import execution_identity
 from .runner import DEFAULT_TIMEOUT_S, RunTarget, StepResult, run_plan
 from .sample_metadata import with_sex_assertion
 from .scrub import Scrubber
-from .store import LabStore, new_run_id
+from .store import LabStore, ResultOrderUnavailable, SelectionSnapshotChanged, new_run_id
 from .tools import find_minimap2, find_samtools, require_aligner_tools
 
 ALIGN_TIMEOUT_S = 48 * 3600.0
@@ -377,6 +377,29 @@ def _memory_warning_lines(warning: dict[str, Any]) -> list[str]:
     ]
 
 
+def _dry_run_read_summary(store: LabStore, input_id: str, identity: str) -> Any:
+    """Read one selected summary without crossing a cohort selector change."""
+
+    for _ in range(3):
+        try:
+            with store.selection_read_context():
+                return store.read_result(input_id, "read-summary", identity)
+        except SelectionSnapshotChanged:
+            continue
+        except ResultOrderUnavailable as exc:
+            raise LabProblem(
+                "TBX-LAB-022",
+                cause="the selected read-summary or cohort selection metadata is unreadable",
+                fix="Restore the affected selection metadata from a known-good backup, then retry the dry run",
+            ) from exc
+    raise LabProblem(
+        "TBX-LAB-012",
+        summary="Selected result changed during dry run",
+        cause="a concurrent cohort update changed the selected read-summary during this preview",
+        fix="Retry the dry run after the cohort update finishes",
+    )
+
+
 def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str], None]) -> tuple[int, dict[str, Any]]:
     store.check_version()
     from .pon_consumer import require_built_cohort, require_cohort_input
@@ -464,7 +487,7 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
                 summary, reference_sha256=reference_sha256,
                 platform=platform if platform != "ont" else None,
             )
-            selected = store.read_result(aligned.input_id, summary.id, identity)
+            selected = _dry_run_read_summary(store, aligned.input_id, identity)
             if selected is not None and selected.status == "ok":
                 plan_rows[next(index for index, item in enumerate(items) if item.algorithm.id == "read-summary")][
                     "decision"

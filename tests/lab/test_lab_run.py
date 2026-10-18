@@ -16,6 +16,7 @@ import sys
 import textwrap
 import time
 from pathlib import Path
+from threading import Event, Thread
 from types import SimpleNamespace
 
 import pysam
@@ -414,6 +415,102 @@ def test_dry_run_writes_nothing_and_ignores_the_lock(lab_world, capsys, monkeypa
     assert data["plan"][0]["algorithm_id"] == "read-summary"
     assert data["budget"]["required_bytes"] > 0
     assert len(before) <= len(snapshot)
+
+
+def test_stored_dry_run_retries_concurrent_cohort_selection_without_writing(
+    lab_world, capsys, monkeypatch, shared_mmi,
+) -> None:
+    from traceback_lab.cli import build_parser
+    from traceback_lab.store import new_run_id
+
+    _registry(monkeypatch, "SUMMARY")
+    root = lab_world["root"]
+    code, first = _json(
+        capsys, "run", str(lab_world["chunks"]), "--root", str(root),
+        "--mmi", str(shared_mmi), "--only", "read-summary",
+    )
+    assert code == 0, first
+    args = build_parser().parse_args([
+        "run", "latest", "--root", str(root), "--only", "read-summary", "--dry-run",
+    ])
+    store = LabStore(root)
+    original_read = LabStore.read_result
+    read_started = Event()
+    writer_done = Event()
+    calls = 0
+
+    def read_during_publication(current_store, input_id, algorithm_id, identity):
+        nonlocal calls
+        selected = original_read(current_store, input_id, algorithm_id, identity)
+        calls += 1
+        if calls == 1:
+            read_started.set()
+            assert writer_done.wait(10)
+        return selected
+
+    monkeypatch.setattr(LabStore, "read_result", read_during_publication)
+    results = []
+    errors = []
+
+    def preview() -> None:
+        try:
+            results.append(run_module._dry_run(args, LabStore(root), lambda _line: None))
+        except BaseException as exc:
+            errors.append(exc)
+
+    def snapshot() -> dict[str, bytes | None]:
+        return {
+            str(path.relative_to(root)): path.read_bytes() if path.is_file() else None
+            for path in root.rglob("*")
+            if path.is_file() or path.is_dir()
+        }
+
+    with store.writer("cohort build", new_run_id()):
+        before = snapshot()
+        thread = Thread(target=preview, daemon=True)
+        thread.start()
+        assert read_started.wait(10)
+        store.bump_cohort_selection_epoch()
+        writer_done.set()
+        thread.join(10)
+        assert not thread.is_alive()  # The preview never waits for the writer lock.
+        after = snapshot()
+        before.pop("lab/cohort-selection-epoch", None)
+        after.pop("lab/cohort-selection-epoch", None)
+        assert after == before  # Only the test writer changed ROOT.
+    assert not errors
+    assert calls == 2
+    assert results[0][0] == 0
+    assert results[0][1]["data"]["plan"][0]["decision"] == "reused (selected result)"
+
+
+@pytest.mark.parametrize("problem", ["changing", "unreadable"])
+def test_dry_run_selected_summary_reports_actionable_unavailability(problem) -> None:
+    from contextlib import contextmanager
+
+    from traceback_lab.problems import LabProblem
+    from traceback_lab.store import ResultOrderUnavailable, SelectionSnapshotChanged
+
+    class UnstableStore:
+        reads = 0
+
+        @contextmanager
+        def selection_read_context(self):
+            if problem == "unreadable":
+                raise ResultOrderUnavailable("invalid cohort selection journal")
+            yield
+            raise SelectionSnapshotChanged("cohort selection changed")
+
+        def read_result(self, *_args):
+            self.reads += 1
+            return None
+
+    store = UnstableStore()
+    with pytest.raises(LabProblem) as caught:
+        run_module._dry_run_read_summary(store, "a" * 64, "b" * 64)
+    assert caught.value.code == ("TBX-LAB-012" if problem == "changing" else "TBX-LAB-022")
+    assert ("Retry" if problem == "changing" else "Restore") in caught.value.fix
+    assert store.reads == (3 if problem == "changing" else 0)
 
 
 def test_stored_dry_run_uses_selected_depth_without_writing(
