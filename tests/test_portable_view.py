@@ -7,6 +7,7 @@ import errno
 import hashlib
 import os
 import stat
+import sys
 import tracemalloc
 from pathlib import Path
 from typing import ClassVar
@@ -482,6 +483,246 @@ def test_publication_is_atomic_no_overwrite_and_verifiable(
         )
 
 
+def test_exclusive_rename_keeps_only_private_root_writable_until_publication(
+    integrated_request: PortableViewBuildRequest,
+    trust_context: PortableTrustContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, table = build_portable_view(integrated_request, trust_context=trust_context)
+    destination = tmp_path / "artifact"
+    original_rename = portable.rename_directory_exclusive_at
+    observed = False
+
+    def inspect_rename(parent_fd: int, source: str, target: str) -> None:
+        nonlocal observed
+        assert stat.S_IMODE(os.stat(source, dir_fd=parent_fd).st_mode) == 0o700
+        stage_fd = os.open(source, os.O_RDONLY, dir_fd=parent_fd)
+        try:
+            for name in portable._FILES:
+                assert stat.S_IMODE(os.stat(name, dir_fd=stage_fd).st_mode) == 0o400
+        finally:
+            os.close(stage_fd)
+        original_rename(parent_fd, source, target)
+        assert stat.S_IMODE(os.stat(target, dir_fd=parent_fd).st_mode) == 0o700
+        observed = True
+
+    monkeypatch.setattr(portable, "rename_directory_exclusive_at", inspect_rename)
+    publish_portable_view(
+        destination,
+        view=view,
+        accessible_table=table,
+        trust_context=trust_context,
+        source_identity_verifier=lambda: view.source_identities,
+    )
+    assert observed
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o500
+    verify_portable_view(destination, trust_context=trust_context)
+
+
+@pytest.mark.skipif(
+    not sys.platform.startswith("linux"),
+    reason="real setgid inheritance is a Linux filesystem case",
+)
+def test_setgid_parent_stage_is_private_before_rename_and_publish_is_sealed(
+    integrated_request: PortableViewBuildRequest,
+    trust_context: PortableTrustContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view, table = build_portable_view(integrated_request, trust_context=trust_context)
+    parent = tmp_path / "setgid-parent"
+    parent.mkdir()
+    os.chown(parent, -1, os.getegid())
+    parent.chmod(0o2700)
+    assert stat.S_IMODE(parent.stat().st_mode) == 0o2700
+    destination = parent / "artifact"
+    original_stage_name = portable._stage_name
+    original_rename = portable.rename_directory_exclusive_at
+    saw_inherited_stage = False
+    saw_private_rename = False
+
+    def observe_inherited_stage(parent_fd: int, destination_name: str) -> str:
+        nonlocal saw_inherited_stage
+        name = original_stage_name(parent_fd, destination_name)
+        stage_fd = os.open(name, os.O_RDONLY, dir_fd=parent_fd)
+        try:
+            # Linux actually inherits the parent's setgid bit on mkdir.
+            assert stat.S_IMODE(os.fstat(stage_fd).st_mode) == 0o2700
+            saw_inherited_stage = True
+        finally:
+            os.close(stage_fd)
+        return name
+
+    def inspect_rename(parent_fd: int, source: str, target: str) -> None:
+        nonlocal saw_private_rename
+        assert stat.S_IMODE(os.stat(source, dir_fd=parent_fd).st_mode) == 0o700
+        stage_fd = os.open(source, os.O_RDONLY, dir_fd=parent_fd)
+        try:
+            for name in portable._FILES:
+                assert stat.S_IMODE(os.stat(name, dir_fd=stage_fd).st_mode) == 0o400
+        finally:
+            os.close(stage_fd)
+        original_rename(parent_fd, source, target)
+        saw_private_rename = True
+
+    monkeypatch.setattr(portable, "_stage_name", observe_inherited_stage)
+    monkeypatch.setattr(portable, "rename_directory_exclusive_at", inspect_rename)
+    published = publish_portable_view(
+        destination,
+        view=view,
+        accessible_table=table,
+        trust_context=trust_context,
+        source_identity_verifier=lambda: view.source_identities,
+    )
+    assert saw_inherited_stage and saw_private_rename
+    assert stat.S_IMODE(parent.stat().st_mode) == 0o2700
+    assert {path.name for path in parent.iterdir()} == {"artifact"}
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o500
+    assert {path.name for path in destination.iterdir()} == set(portable._FILES)
+    assert all(stat.S_IMODE(path.stat().st_mode) == 0o400 for path in destination.iterdir())
+    assert published.snapshot == verify_portable_view(destination, trust_context=trust_context)
+    before = {path.name: path.read_bytes() for path in destination.iterdir()}
+    with pytest.raises(PortableViewConflictError):
+        publish_portable_view(
+            destination,
+            view=view,
+            accessible_table=table,
+            trust_context=trust_context,
+            source_identity_verifier=lambda: view.source_identities,
+        )
+    assert {path.name: path.read_bytes() for path in destination.iterdir()} == before
+    assert stat.S_IMODE(parent.stat().st_mode) == 0o2700
+    assert {path.name for path in parent.iterdir()} == {"artifact"}
+
+
+@pytest.mark.parametrize("failure", ["chmod", "fsync"])
+def test_postrename_root_seal_failure_quarantines_owned_directory(
+    integrated_request: PortableViewBuildRequest,
+    trust_context: PortableTrustContext,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    view, table = build_portable_view(integrated_request, trust_context=trust_context)
+    destination = tmp_path / "artifact"
+    original_rename = portable.rename_directory_exclusive_at
+    original_fchmod = portable.os.fchmod
+    original_fsync = portable.os.fsync
+    installed = False
+
+    def mark_installed(parent_fd: int, source: str, target: str) -> None:
+        nonlocal installed
+        original_rename(parent_fd, source, target)
+        if target == destination.name:
+            installed = True
+
+    def fail_chmod(descriptor: int, mode: int) -> None:
+        if installed and failure == "chmod" and mode == 0o500:
+            raise OSError(errno.EIO, "root seal failed")
+        original_fchmod(descriptor, mode)
+
+    def fail_fsync(descriptor: int) -> None:
+        metadata = os.fstat(descriptor)
+        if (
+            installed
+            and failure == "fsync"
+            and stat.S_ISDIR(metadata.st_mode)
+            and stat.S_IMODE(metadata.st_mode) == 0o500
+        ):
+            raise OSError(errno.EIO, "root sync failed")
+        original_fsync(descriptor)
+
+    monkeypatch.setattr(portable, "rename_directory_exclusive_at", mark_installed)
+    monkeypatch.setattr(portable.os, "fchmod", fail_chmod)
+    monkeypatch.setattr(portable.os, "fsync", fail_fsync)
+    with pytest.raises(PortableViewStorageError):
+        publish_portable_view(
+            destination,
+            view=view,
+            accessible_table=table,
+            trust_context=trust_context,
+            source_identity_verifier=lambda: view.source_identities,
+        )
+    assert installed
+    assert not destination.exists()
+    assert not list(tmp_path.glob(".artifact.invalid.*"))
+    assert not list(tmp_path.glob(".artifact.*"))
+
+
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="process crash requires POSIX fork")
+def test_process_death_after_rename_leaves_unsealed_unverifiable_destination(
+    integrated_request: PortableViewBuildRequest,
+    trust_context: PortableTrustContext,
+    tmp_path: Path,
+) -> None:
+    view, table = build_portable_view(integrated_request, trust_context=trust_context)
+    destination = tmp_path / "artifact"
+    child = os.fork()
+    if child == 0:
+        original_rename = portable.rename_directory_exclusive_at
+
+        def crash_after_rename(parent_fd: int, source: str, target: str) -> None:
+            original_rename(parent_fd, source, target)
+            if target == destination.name:
+                os._exit(83)
+
+        portable.rename_directory_exclusive_at = crash_after_rename
+        try:
+            publish_portable_view(
+                destination,
+                view=view,
+                accessible_table=table,
+                trust_context=trust_context,
+                source_identity_verifier=lambda: view.source_identities,
+            )
+        except BaseException:
+            os._exit(84)
+        os._exit(85)
+
+    _, status = os.waitpid(child, 0)
+    assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 83
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o700
+    assert {path.name for path in destination.iterdir()} == set(portable._FILES)
+    assert all(stat.S_IMODE(path.stat().st_mode) == 0o400 for path in destination.iterdir())
+    original_inode = destination.stat().st_ino
+    with pytest.raises(PortableViewTamperError):
+        verify_portable_view(destination, trust_context=trust_context)
+
+    lock = tmp_path / ".artifact.publish.lock"
+    assert lock.is_file()
+    with pytest.raises(PortableViewConflictError):
+        publish_portable_view(
+            destination,
+            view=view,
+            accessible_table=table,
+            trust_context=trust_context,
+            source_identity_verifier=lambda: view.source_identities,
+        )
+    lock.unlink()
+    with pytest.raises(PortableViewConflictError):
+        publish_portable_view(
+            destination,
+            view=view,
+            accessible_table=table,
+            trust_context=trust_context,
+            source_identity_verifier=lambda: view.source_identities,
+        )
+    assert destination.stat().st_ino == original_inode
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o700
+    assert not list(tmp_path.glob(".artifact.*"))
+
+    fresh = tmp_path / "fresh"
+    publish_portable_view(
+        fresh,
+        view=view,
+        accessible_table=table,
+        trust_context=trust_context,
+        source_identity_verifier=lambda: view.source_identities,
+    )
+    verify_portable_view(fresh, trust_context=trust_context)
+
+
 def test_source_change_and_destination_race_fail_closed_without_stage_leaks(
     integrated_request: PortableViewBuildRequest,
     trust_context: PortableTrustContext,
@@ -876,8 +1117,11 @@ def test_verify_rechecks_named_root_and_rejects_swap(
         nonlocal swapped
         if not swapped:
             swapped = True
+            # Darwin requires the renamed source directory to be writable.
+            root.chmod(0o700)
             root.rename(moved)
-            root.mkdir()
+            moved.chmod(0o500)
+            root.mkdir(mode=0o500)
         return original(*args, **kwargs)
 
     monkeypatch.setattr(portable, "_parse_canonical", swap_then_parse)
