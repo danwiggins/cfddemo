@@ -1488,6 +1488,21 @@ class LabStore:
         info = os.stat(real)
         return f"{real}\0{info.st_size}\0{info.st_mtime_ns}"
 
+    @staticmethod
+    def strong_hash_cache_key(path: Path) -> str:
+        """MMI cache key: detect replacement and restored-mtime edits.
+
+        D11 chunk keys retain their existing compatibility; only an index
+        whose bytes enter an alignment identity uses this stronger key.
+        """
+
+        real = os.path.realpath(path)
+        info = os.stat(real)
+        return (
+            f"strong-v1\0{real}\0{info.st_dev}\0{info.st_ino}\0"
+            f"{info.st_size}\0{info.st_mtime_ns}\0{info.st_ctime_ns}"
+        )
+
     # -- run log (D22) ------------------------------------------------------
     def run_log(self, run_id: str) -> RunLog:
         return RunLog(self, run_id)
