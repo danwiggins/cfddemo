@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import errno
 import gc
 import json
 import os
 import sqlite3
 import stat
+import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -31,6 +34,7 @@ from traceback_runner.snapshots import (
     SnapshotViolation,
     capture_snapshot,
     input_tree_sha256,
+    verify_snapshot,
 )
 from traceback_runner.store import JobStore, StaleLease, StoreError, UnsupportedSchema
 
@@ -184,6 +188,203 @@ def test_snapshot_rejects_mutation_and_symlink(tmp_path: Path) -> None:
     (source / "escape.bin").symlink_to(outside)
     with pytest.raises(SnapshotViolation, match="symlinks are not accepted"):
         capture_snapshot(source, ["escape.bin"], tmp_path / "snapshots2")
+
+
+def test_nested_snapshot_renames_before_sealing_private_root(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    (source / "nested").mkdir(parents=True)
+    (source / "nested" / "input.bin").write_bytes(b"synthetic")
+    snapshot_root = tmp_path / "snapshots"
+    captured = capture_snapshot(source, ["nested/input.bin"], snapshot_root)
+
+    assert stat.S_IMODE(captured.path.stat().st_mode) == 0o555
+    assert stat.S_IMODE((captured.path / "nested").stat().st_mode) == 0o555
+    assert stat.S_IMODE((captured.path / "nested" / "input.bin").stat().st_mode) == 0o444
+    assert stat.S_IMODE((captured.path / "input-manifest.local.json").stat().st_mode) == 0o444
+    assert verify_snapshot(captured.path).content_sha256 == input_tree_sha256(source, ["nested/input.bin"])
+    assert list(snapshot_root.iterdir()) == [captured.path]
+
+
+def test_snapshot_rename_error_keeps_original_exception_and_cleans_nested_tree(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import traceback_runner.snapshots as snapshots
+
+    source = tmp_path / "source"
+    (source / "nested").mkdir(parents=True)
+    (source / "nested" / "input.bin").write_bytes(b"synthetic")
+    snapshot_root = tmp_path / "snapshots"
+
+    def refuse_rename(_source: Path, _destination: Path) -> None:
+        raise PermissionError(errno.EACCES, "rename refused")
+
+    monkeypatch.setattr(snapshots.os, "replace", refuse_rename)
+    with pytest.raises(PermissionError, match="rename refused"):
+        capture_snapshot(source, ["nested/input.bin"], snapshot_root)
+    assert list(snapshot_root.iterdir()) == []
+
+
+def test_snapshot_seal_error_after_rename_removes_unpublished_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import traceback_runner.snapshots as snapshots
+
+    source, files = _source(tmp_path)
+    snapshot_root = tmp_path / "snapshots"
+    original_chmod = Path.chmod
+
+    def refuse_final_seal(path: Path, mode: int, *args: object, **kwargs: object) -> None:
+        if path.parent == snapshot_root and not path.name.startswith(".") and mode == 0o555:
+            raise PermissionError(errno.EACCES, "root seal refused")
+        original_chmod(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(snapshots.Path, "chmod", refuse_final_seal)
+    with pytest.raises(PermissionError, match="root seal refused"):
+        capture_snapshot(source, files, snapshot_root, snapshot_id="pending")
+    assert list(snapshot_root.iterdir()) == []
+
+
+@pytest.mark.parametrize("recovery", ["resubmit", "source_free_recover"])
+def test_pending_rename_to_seal_snapshot_is_verified_before_attachment(
+    tmp_path: Path, recovery: str,
+) -> None:
+    source, files = _source(tmp_path)
+    request = _request(source, files)
+    state = tmp_path / "state"
+    script = """
+import os
+from pathlib import Path
+from tests.test_runner_durability import _request
+from traceback_runner import snapshots
+from traceback_runner.runner import Runner
+source, state = map(Path, __import__('sys').argv[1:])
+runner = Runner(state, synthetic_enabled=True)
+original_replace = snapshots.os.replace
+def crash_after_rename(temporary, destination):
+    original_replace(temporary, destination)
+    if Path(destination).parent == runner.snapshots_dir:
+        os._exit(77)
+snapshots.os.replace = crash_after_rename
+runner.submit(_request(source, ['input.bin']), source, ['input.bin'])
+"""
+    child = subprocess.run([sys.executable, "-c", script, str(source), str(state)],
+                           cwd=Path(__file__).resolve().parents[1], check=False, timeout=30)
+    assert child.returncode == 77
+    runner = Runner(state, synthetic_enabled=True)
+    pending = runner.store.submit(request)
+    assert pending.state == JobState.SNAPSHOTTING
+    captured_path = runner.snapshots_dir / pending.job_id
+    assert stat.S_IMODE(captured_path.stat().st_mode) == 0o700
+    assert stat.S_IMODE((captured_path / files[0]).stat().st_mode) == 0o444
+
+    if recovery == "resubmit":
+        job = Runner(state, synthetic_enabled=True).submit(request, source, files)
+        assert job.state == JobState.READY
+    else:
+        (source / files[0]).unlink()
+        recovered = Runner(state, synthetic_enabled=True)
+        recovered.recover(pending.job_id)
+        assert recovered.status(pending.job_id).state == JobState.READY
+    assert stat.S_IMODE(captured_path.stat().st_mode) == 0o555
+    assert verify_snapshot(captured_path).content_sha256 == request.input_tree_sha256_local
+
+
+def test_pending_sealed_snapshot_syncs_parent_before_attachment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import traceback_runner.snapshots as snapshots
+
+    source, files = _source(tmp_path)
+    request = _request(source, files)
+    state = tmp_path / "state"
+    script = """
+import os
+from pathlib import Path
+from tests.test_runner_durability import _request
+from traceback_runner import snapshots
+from traceback_runner.runner import Runner
+source, state = map(Path, __import__('sys').argv[1:])
+runner = Runner(state, synthetic_enabled=True)
+def crash_before_parent_sync(directory):
+    if directory == runner.snapshots_dir:
+        os._exit(78)
+snapshots._fsync_directory = crash_before_parent_sync
+runner.submit(_request(source, ['input.bin']), source, ['input.bin'])
+"""
+    child = subprocess.run([sys.executable, "-c", script, str(source), str(state)],
+                           cwd=Path(__file__).resolve().parents[1], check=False, timeout=30)
+    assert child.returncode == 78
+    runner = Runner(state, synthetic_enabled=True)
+    pending = runner.store.submit(request)
+    assert pending.state == JobState.SNAPSHOTTING
+    captured_path = runner.snapshots_dir / pending.job_id
+    assert stat.S_IMODE(captured_path.stat().st_mode) == 0o555
+    original_sync = snapshots._fsync_directory
+    synced: list[Path] = []
+
+    def record_parent_sync(directory: Path) -> None:
+        synced.append(directory)
+        original_sync(directory)
+
+    monkeypatch.setattr(snapshots, "_fsync_directory", record_parent_sync)
+    job = runner.submit(request, source, files)
+    assert job.state == JobState.READY
+    assert synced == [runner.snapshots_dir]
+    assert verify_snapshot(captured_path).content_sha256 == request.input_tree_sha256_local
+
+
+@pytest.mark.parametrize("changed", ["root", "directory", "file"])
+def test_pending_snapshot_rejects_altered_modes(
+    tmp_path: Path, changed: str,
+) -> None:
+    source = tmp_path / "source"
+    (source / "nested").mkdir(parents=True)
+    (source / "nested" / "input.bin").write_bytes(b"synthetic")
+    files = ["nested/input.bin"]
+    request = _request(source, files)
+    runner = Runner(tmp_path / "state", synthetic_enabled=True)
+    pending = runner.store.submit(request)
+    runner.store.transition(pending.job_id, JobState.SNAPSHOTTING, "capturing sealed input")
+    captured = capture_snapshot(source, files, runner.snapshots_dir, snapshot_id=pending.job_id)
+    captured.path.chmod(0o700)
+    if changed == "root":
+        captured.path.chmod(0o755)
+    elif changed == "directory":
+        (captured.path / "nested").chmod(0o755)
+    else:
+        (captured.path / "nested" / "input.bin").chmod(0o644)
+
+    with pytest.raises(SnapshotViolation, match="mode changed"):
+        runner.submit(request, source, files)
+    assert runner.status(pending.job_id).state == JobState.TERMINAL_FAILURE
+
+
+def test_pending_snapshot_rejects_replaced_file_symlink(tmp_path: Path) -> None:
+    source, files = _source(tmp_path)
+    request = _request(source, files)
+    runner = Runner(tmp_path / "state", synthetic_enabled=True)
+    pending = runner.store.submit(request)
+    runner.store.transition(pending.job_id, JobState.SNAPSHOTTING, "capturing sealed input")
+    captured = capture_snapshot(source, files, runner.snapshots_dir, snapshot_id=pending.job_id)
+    captured.path.chmod(0o700)
+    sealed_file = captured.path / files[0]
+    sealed_file.unlink()
+    sealed_file.symlink_to(source / files[0])
+
+    with pytest.raises(SnapshotViolation, match="symlink"):
+        runner.submit(request, source, files)
+    assert runner.status(pending.job_id).state == JobState.TERMINAL_FAILURE
+
+
+def test_attached_snapshot_rejects_writable_root(tmp_path: Path) -> None:
+    source, files = _source(tmp_path)
+    runner = Runner(tmp_path / "state", synthetic_enabled=True)
+    job = runner.submit(_request(source, files), source, files)
+    (runner.snapshots_dir / job.job_id).chmod(0o700)
+
+    with pytest.raises(SnapshotViolation, match="root mode changed"):
+        runner.execute(job.job_id, [_stage()], worker_id="worker")
+    assert runner.status(job.job_id).state == JobState.TERMINAL_FAILURE
 
 
 def test_stage_output_cannot_escape_attempt_through_symlink(tmp_path: Path) -> None:

@@ -105,8 +105,33 @@ def _same_file(before: os.stat_result, after: os.stat_result) -> bool:
 
 def _seal_tree(root: Path) -> None:
     for path in sorted(root.rglob("*"), reverse=True):
-        path.chmod(0o555 if path.is_dir() else 0o444)
-    root.chmod(0o555)
+        mode = path.lstat().st_mode
+        if stat.S_ISDIR(mode):
+            path.chmod(0o555)
+        elif stat.S_ISREG(mode):
+            path.chmod(0o444)
+        else:
+            raise SnapshotViolation("snapshot contains a non-regular entry")
+    # A non-writable directory cannot be renamed on some macOS filesystems.
+    # The private root stays 0700 until it reaches its final name.
+
+
+def _fsync_directory(directory: Path) -> None:
+    descriptor = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _discard_unpublished_tree(root: Path) -> None:
+    """Restore directory write bits before removing an unpublished tree."""
+
+    for path in root.rglob("*"):
+        if stat.S_ISDIR(path.lstat().st_mode):
+            path.chmod(0o700)
+    root.chmod(0o700)
+    shutil.rmtree(root)
 
 
 def capture_snapshot(
@@ -134,7 +159,9 @@ def capture_snapshot(
     temporary = snapshot_root / f".{identifier}.{uuid.uuid4().hex}.tmp"
     temporary.mkdir(mode=0o700)
     captured: list[SnapshotFile] = []
+    renamed = False
     try:
+        temporary.chmod(0o700)
         for name in names:
             source = root.joinpath(*PurePosixPath(name).parts)
             if source.is_symlink():
@@ -175,11 +202,9 @@ def capture_snapshot(
             os.fsync(handle.fileno())
         _seal_tree(temporary)
         os.replace(temporary, destination)
-        directory_fd = os.open(snapshot_root, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        renamed = True
+        destination.chmod(0o555)
+        _fsync_directory(snapshot_root)
         return InputSnapshot(
             snapshot_id=identifier,
             path=destination,
@@ -187,9 +212,13 @@ def capture_snapshot(
             content_sha256=content_sha256,
             manifest_sha256=hashlib.sha256(manifest_bytes).hexdigest(),
         )
-    except BaseException:
-        if temporary.exists():
-            shutil.rmtree(temporary)
+    except BaseException as original:
+        for path in (temporary, destination if renamed else None):
+            if path is not None and path.exists():
+                try:
+                    _discard_unpublished_tree(path)
+                except OSError as cleanup:
+                    original.add_note(f"snapshot cleanup failed: {type(cleanup).__name__}")
         raise
 
 
@@ -236,17 +265,26 @@ def input_tree_sha256(source_root: Path, relative_files: Iterable[str]) -> str:
 
 
 def verify_snapshot(
-    snapshot_path: Path, *, expected_manifest_sha256: str | None = None
+    snapshot_path: Path, *, expected_manifest_sha256: str | None = None,
+    _pending_root: bool = False,
 ) -> InputSnapshot:
     """Rehash every sealed byte and reconstruct a verified snapshot."""
 
-    if snapshot_path.is_symlink() or not snapshot_path.is_dir():
+    try:
+        root_mode = snapshot_path.lstat().st_mode
+    except OSError as exc:
+        raise SnapshotViolation("snapshot directory is missing or unsafe") from exc
+    if not stat.S_ISDIR(root_mode):
         raise SnapshotViolation("snapshot directory is missing or unsafe")
     manifest_path = snapshot_path / "input-manifest.local.json"
     try:
-        if manifest_path.is_symlink() or not manifest_path.is_file():
+        manifest_mode = manifest_path.lstat().st_mode
+        if not stat.S_ISREG(manifest_mode):
             raise SnapshotViolation("snapshot manifest is missing or unsafe")
-        raw = manifest_path.read_bytes()
+        with os.fdopen(os.open(manifest_path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)), "rb") as handle:
+            if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                raise SnapshotViolation("snapshot manifest is missing or unsafe")
+            raw = handle.read()
         payload = json.loads(raw)
         if not isinstance(payload, dict):
             raise SnapshotViolation("snapshot manifest must be an object")
@@ -260,6 +298,9 @@ def verify_snapshot(
         and manifest_sha256 != expected_manifest_sha256
     ):
         raise SnapshotViolation("snapshot manifest digest changed")
+    expected_root_mode = 0o700 if _pending_root else 0o555
+    if stat.S_IMODE(root_mode) != expected_root_mode:
+        raise SnapshotViolation("snapshot root mode changed")
     try:
         if payload.pop("schema_version") != "traceback.input-snapshot.v1":
             raise SnapshotViolation("unsupported snapshot schema")
@@ -295,14 +336,19 @@ def verify_snapshot(
         if parent.as_posix() != "."
     }
     actual_locators: set[str] = set()
+    observed_modes: list[tuple[Path, int]] = [(manifest_path, 0o444)]
     for path in snapshot_path.rglob("*"):
         relative = path.relative_to(snapshot_path).as_posix()
-        if path.is_symlink():
+        mode = path.lstat().st_mode
+        if stat.S_ISLNK(mode):
             raise SnapshotViolation(f"snapshot contains a symlink: {relative}")
-        if path.is_dir():
+        if stat.S_ISDIR(mode):
             if relative not in expected_directories:
                 raise SnapshotViolation("snapshot directory inventory changed")
-        elif path.is_file():
+            if stat.S_IMODE(mode) != 0o555:
+                raise SnapshotViolation("snapshot directory mode changed")
+        elif stat.S_ISREG(mode):
+            observed_modes.append((path, 0o444))
             if relative != "input-manifest.local.json":
                 actual_locators.add(relative)
         else:
@@ -313,14 +359,23 @@ def verify_snapshot(
     for item in files:
         relative = _safe_relative(item.relative_path)
         path = snapshot_path.joinpath(*relative.parts)
-        if not path.is_file() or path.is_symlink():
+        try:
+            file_mode = path.lstat().st_mode
+        except OSError as exc:
+            raise SnapshotViolation(f"snapshot file is missing or unsafe: {item.relative_path}") from exc
+        if not stat.S_ISREG(file_mode):
             raise SnapshotViolation(f"snapshot file is missing or unsafe: {item.relative_path}")
         digest = hashlib.sha256()
         size = 0
-        with path.open("rb") as handle:
-            while chunk := handle.read(1024 * 1024):
-                digest.update(chunk)
-                size += len(chunk)
+        try:
+            with os.fdopen(os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)), "rb") as handle:
+                if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                    raise SnapshotViolation(f"snapshot file is missing or unsafe: {item.relative_path}")
+                while chunk := handle.read(1024 * 1024):
+                    digest.update(chunk)
+                    size += len(chunk)
+        except OSError as exc:
+            raise SnapshotViolation(f"snapshot file is missing or unsafe: {item.relative_path}") from exc
         if size != item.size_bytes or digest.hexdigest() != item.sha256_local:
             raise SnapshotViolation(f"snapshot file digest changed: {item.relative_path}")
 
@@ -334,6 +389,10 @@ def verify_snapshot(
     ).hexdigest()
     if calculated_content != content_sha256:
         raise SnapshotViolation("snapshot content identity is inconsistent")
+    for path, expected_mode in observed_modes:
+        mode = path.lstat().st_mode
+        if not stat.S_ISREG(mode) or stat.S_IMODE(mode) != expected_mode:
+            raise SnapshotViolation("snapshot file mode changed")
     return InputSnapshot(
         snapshot_id=snapshot_id,
         path=snapshot_path,
@@ -341,3 +400,27 @@ def verify_snapshot(
         content_sha256=content_sha256,
         manifest_sha256=manifest_sha256,
     )
+
+
+def finish_pending_snapshot(snapshot_path: Path, expected_content_sha256: str) -> InputSnapshot:
+    """Finish only an unattached rename-to-seal snapshot after rehashing it."""
+
+    try:
+        mode = snapshot_path.lstat().st_mode
+    except OSError as exc:
+        raise SnapshotViolation("snapshot directory is missing or unsafe") from exc
+    if not stat.S_ISDIR(mode):
+        raise SnapshotViolation("snapshot directory is missing or unsafe")
+    if stat.S_IMODE(mode) == 0o555:
+        pending = verify_snapshot(snapshot_path)
+    elif stat.S_IMODE(mode) == 0o700:
+        pending = verify_snapshot(snapshot_path, _pending_root=True)
+    else:
+        raise SnapshotViolation("pending snapshot root mode changed")
+    if pending.content_sha256 != expected_content_sha256:
+        raise SnapshotViolation("captured input tree does not match JobRequest.input_tree_sha256_local")
+    if stat.S_IMODE(mode) == 0o700:
+        snapshot_path.chmod(0o555)
+    # The process may also have died after chmod(0555), before capture's fsync.
+    _fsync_directory(snapshot_path.parent)
+    return verify_snapshot(snapshot_path)
