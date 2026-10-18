@@ -24,8 +24,9 @@ Its bytes are pinned both before a build and at isolated R execution.
 `traceback_lab.pon_consumer` binds a selected immutable panel digest into
 copy-number's per-run execution identity and verifies the same selected bytes
 before worker publication. An explicit `--cohort` requires a built internal,
-protocol-matched cohort; an unbuilt default uses the no-PoN baseline. A
-protocol or toolchain mismatch suppresses the PoN-dependent method while
-independent cohort metrics can remain available. This source and its GPL terms
+protocol-matched cohort; an unbuilt default uses the no-PoN baseline. Run selection refuses a mismatched protocol. If the implicit built panel
+lacks required tools or method assets, copy number is skipped. Read-side
+cohort comparison may retain independently compatible metrics with a warning,
+while PoN-dependent results stay unavailable. This source and its GPL terms
 remain separate from signed runner release authority and scientific
 qualification.

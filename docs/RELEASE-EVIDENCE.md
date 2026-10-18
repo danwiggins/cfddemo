@@ -3,7 +3,7 @@
 Status: Sprint 02 development contract. Synthetic evidence only.
 
 Current boundary: `traceback_runner.product_gates` still fixes the local
-report's E12 release dependency to `unavailable_not_implemented` and release
+report's `e12_dependency_state` to `blocked_unavailable_not_implemented` and release
 controls to disabled, even though the protected longitudinal read model and
 browser routes exist in `evidence_inspector` and the local web surface. Those
 research features do not supply independent external-release authority.
