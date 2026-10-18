@@ -1250,6 +1250,14 @@ def _publish_sealed_object(
 
     temporary_fd = _open_directory_at(objects_fd, temporary.name)
     try:
+        observed_sha256, observed_manifest, _ = _copy_exact_bundle(
+            temporary_fd, None
+        )
+        if (
+            observed_sha256 != bundle_sha256
+            or observed_manifest != manifest_sha256
+        ):
+            raise CatalogFilesystemError("catalog bundle changed during import")
         _seal_bundle_descendants(temporary_fd)
         try:
             rename_directory_exclusive_at(objects_fd, temporary.name, object_name)
