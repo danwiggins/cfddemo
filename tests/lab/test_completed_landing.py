@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 
 import pytest
 
@@ -454,3 +455,38 @@ def test_listing_retries_when_source_inputs_change_after_snapshot(tmp_path, monk
     assert calls == 3
     assert listing["default_sample_id12"] == source[:12]
     assert listing["samples"][0].get("state") != "completed_input_unavailable"
+
+
+@needs_chrome
+@pytest.mark.parametrize("state,title", (
+    ("no_completed", "No completed Lab run yet"),
+    ("input_unavailable", "Latest completed input unavailable"),
+    ("history_unavailable", "Completion history unavailable"),
+))
+def test_recovery_home_keeps_clia_panel_first_and_disclosures(tmp_path, state, title) -> None:
+    store = LabStore(tmp_path / "root")
+    store.ensure()
+    source, input_id = "a" * 64, "8" * 64
+    _source(store, source, (input_id, "2026-10-17T10:00:00Z"))
+    if state != "no_completed":
+        run_id = "r-20261017-1000-abcd"
+        _run(store, run_id, source, input_id, "2026-10-17T10:00:00Z")
+        record_completion(store, run_id, source, input_id)
+        if state == "input_unavailable":
+            (store.inputs_dir / input_id / "manifest.json").unlink()
+        else:
+            (store.runs_dir / f"{run_id}.jsonl").unlink()
+
+    with RunningLabServer(store) as server:
+        dom = _dom(server, tmp_path / "browser", route="/",
+                   want=lambda page: title in page and page.count("FLAG: LEGAL — verify") == 4)
+    main = re.search(r"<main\b[^>]*>(.*?)</main>", dom, re.DOTALL)
+    assert main is not None
+    content = main.group(1)
+    assert content.index("<h1") < content.index('<section class="clia-panel"')
+    assert content.index('<section class="clia-panel"') < content.index(source[:12])
+    assert "What CLIA means for this demo" in content
+    assert 'aria-expanded="false"' in content
+    assert 'aria-controls="clia-full"' in content
+    assert 'class="clia-full" id="clia-full" hidden' in content
+    assert 'href="#/about/clia"' in content
