@@ -1125,14 +1125,15 @@ def test_existing_input_reruns_even_when_the_disk_is_now_short(lab_world, capsys
     assert _json(capsys, *argv)[0] == 0
 
 
-def _tiny_aligned_bam(lab_world) -> Path:
+def _tiny_aligned_bam(lab_world, *, read_group: dict | None = None) -> Path:
     with pysam.FastaFile(str(lab_world["fasta"])) as reference:
         contigs = [{"SN": name, "LN": length} for name, length in
                    zip(reference.references, reference.lengths)]
     bam = lab_world["tmp"] / "one-aligned.bam"
+    read_group = read_group or {"ID": "synthetic", "PL": "ONT"}
     header = pysam.AlignmentHeader.from_dict({
         "HD": {"VN": "1.6", "SO": "coordinate"}, "SQ": contigs,
-        "RG": [{"ID": "synthetic", "PL": "ONT"}],
+        "RG": [read_group],
     })
     with pysam.AlignmentFile(str(bam), "wb", header=header) as output:
         read = pysam.AlignedSegment(header)
@@ -1143,7 +1144,7 @@ def _tiny_aligned_bam(lab_world) -> Path:
         read.reference_start = 0
         read.mapping_quality = 60
         read.cigarstring = "100M"
-        read.set_tag("RG", "synthetic")
+        read.set_tag("RG", read_group["ID"])
         output.write(read)
     return bam
 
@@ -1203,6 +1204,107 @@ def test_prealigned_cold_hash_once_then_reuses_under_low_disk(lab_world, capsys,
     second_code, second = _json(capsys, *argv)
     assert second_code == 0, second
     assert hashed == first_hashes
+
+
+def test_prealigned_middle_capacity_does_not_hash_and_count_twice(lab_world, capsys, monkeypatch) -> None:
+    """A valid aligned BAM's cheap budget should use the aligned formula."""
+    from traceback_lab import ingest
+
+    _registry(monkeypatch, "SUMMARY")
+    root = lab_world["root"]
+    bam = _tiny_aligned_bam(lab_world)
+    reference = ingest.resolve_reference(root, "synth")
+    size = bam.stat().st_size
+    exact = ingest.disk_budget(
+        LabStore(root), ingest.ChunkSet([ingest.Chunk(bam, bam.name, None, size, aligned=True)]),
+        mmi_needed=False, fasta_bytes=0,
+    ).required
+    conservative = ingest.disk_budget(
+        LabStore(root), ingest.ChunkSet([ingest.Chunk(bam, bam.name, None, size)]),
+        mmi_needed=True, fasta_bytes=reference.loaded.source.fasta_size_bytes,
+    ).required
+    assert exact < conservative
+    free = (exact + conservative) // 2
+    monkeypatch.setattr(ingest.shutil, "disk_usage", lambda _path: SimpleNamespace(free=free))
+
+    hashes = []
+    counts = []
+    original_hash, original_count = ingest._sha256_file, ingest.count_records
+
+    def counted_hash(path):
+        hashes.append(path)
+        return original_hash(path)
+
+    def counted_records(path, *flags):
+        counts.append(path)
+        return original_count(path, *flags)
+
+    monkeypatch.setattr(ingest, "_sha256_file", counted_hash)
+    monkeypatch.setattr(ingest, "count_records", counted_records)
+    code, payload = _json(capsys, "run", str(bam), "--root", str(root))
+    assert code == 0, payload
+    assert hashes.count(bam) == 1
+    assert counts.count(bam) == 1
+
+
+def test_existing_mmi_middle_capacity_does_not_hash_chunks_twice(
+    lab_world, shared_mmi, capsys, monkeypatch,
+) -> None:
+    """An existing MMI removes the index reserve from the cheap bound."""
+    from traceback_lab import ingest
+
+    _registry(monkeypatch, "SUMMARY")
+    root = lab_world["root"]
+    paths = sorted(lab_world["chunks"].glob("*.bam"))
+    chunkset = ingest.ChunkSet([
+        ingest.Chunk(path, path.name, None, path.stat().st_size) for path in paths
+    ])
+    reference = ingest.resolve_reference(root, "synth")
+    exact = ingest.disk_budget(
+        LabStore(root), chunkset, mmi_needed=False,
+        fasta_bytes=reference.loaded.source.fasta_size_bytes,
+    ).required
+    conservative = ingest.disk_budget(
+        LabStore(root), chunkset, mmi_needed=True,
+        fasta_bytes=reference.loaded.source.fasta_size_bytes,
+    ).required
+    assert exact < conservative
+    free = (exact + conservative) // 2
+    monkeypatch.setattr(ingest.shutil, "disk_usage", lambda _path: SimpleNamespace(free=free))
+    original_hash = ingest._sha256_file
+    hashed = []
+
+    def counted(path):
+        hashed.append(path)
+        return original_hash(path)
+
+    monkeypatch.setattr(ingest, "_sha256_file", counted)
+    code, payload = _json(
+        capsys, "run", str(lab_world["chunks"]), "--root", str(root), "--mmi", str(shared_mmi),
+    )
+    assert code == 0, payload
+    assert all(hashed.count(path) == 1 for path in paths)
+    assert hashed.count(shared_mmi) == 1
+
+
+def test_malformed_single_chunk_with_skip_bad_uses_normal_ingest_error(lab_world, capsys) -> None:
+    bad = lab_world["tmp"] / "broken.bam"
+    bad.write_bytes(b"not a BAM")
+    code, payload = _json(
+        capsys, "run", str(bad), "--skip-bad-chunks", "--root", str(lab_world["root"]),
+    )
+    assert code == 3 and payload["data"]["code"] == "TBX-LAB-006"
+
+
+def test_mixed_aligned_and_unaligned_inputs_keep_ingest_refusal(lab_world, capsys) -> None:
+    unaligned = next(lab_world["chunks"].glob("*.bam"))
+    with pysam.AlignmentFile(str(unaligned), "rb", check_sq=False) as source:
+        read_group = source.header.to_dict()["RG"][0]
+    aligned = _tiny_aligned_bam(lab_world, read_group=read_group)
+    code, payload = _json(
+        capsys, "run", str(aligned), str(unaligned), "--root", str(lab_world["root"]),
+    )
+    assert code == 3 and payload["data"]["code"] == "TBX-LAB-009"
 
 
 def test_capacity_drop_after_read_only_preflight_is_checked_under_lock(lab_world, capsys, monkeypatch) -> None:
