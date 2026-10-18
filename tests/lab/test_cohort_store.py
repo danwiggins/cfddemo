@@ -16,6 +16,7 @@ from traceback_lab.ingest import resolve_sample
 from traceback_lab.problems import LabProblem
 from traceback_lab.registry import ToolPin, execution_identity
 from traceback_lab.store import MAX_EXECUTION_PLAN_BYTES, LabStore
+from traceback_lab.web.api import LabApi
 from traceback_runner import cli as signed_cli
 
 
@@ -977,6 +978,53 @@ def test_pon_input_selection_uses_only_verified_full_aligned_inputs(store: LabSt
     assert tuple(item.source_id for item in selected) == (aligned,)
     assert selected[0].bam_path == store.inputs_dir / _sha(101) / "aligned.bam"
     assert selected[0].reference_sha256 == _sha(900)
+
+
+def test_completed_input_projection_pins_prior_input_without_changing_build_selection(store: LabStore) -> None:
+    source_id = _sample(store, 1)
+    completed_input, active_input = _sha(101), _sha(201)
+    add_sample(store, "healthy-v1", source_id)
+    generation = build_cohort(store, "healthy-v1")
+    original = store.inputs_dir / completed_input
+    active = store.inputs_dir / active_input
+    active.mkdir(parents=True)
+    manifest = json.loads((original / "manifest.json").read_text())
+    manifest["input_id"] = active_input
+    (active / "manifest.json").write_text(json.dumps(manifest))
+    (active / "aligned.bam").write_bytes((original / "aligned.bam").read_bytes())
+    source_path = store.sources_dir / f"{source_id}.json"
+    record = json.loads(source_path.read_text())
+    record["inputs"].append({"input_id": active_input, "kind": "aligned",
+                             "used_utc": "2026-10-18T00:00:00Z"})
+    source_path.write_text(json.dumps(record))
+
+    assert cohorts.member_from_store(store, source_id).input_id == active_input
+    pinned = cohorts.member_from_store(store, source_id, input_id=completed_input)
+    assert pinned.input_id == completed_input
+    assert any(result.algorithm_id == "fragment-size" for result in pinned.results)
+    target, problem = cohorts.member_for_generation_or_independent(
+        store, generation, source_id, input_id=completed_input,
+    )
+    assert problem is None and target.input_id == completed_input
+    assert cohorts.member_for_generation_or_independent(store, generation, source_id)[0].input_id == active_input
+    run_id = "r-20261017-1000-abcd"
+    log = store.run_log(run_id)
+    log.append("run_start", command="run")
+    log.append("sample", source_id=source_id, input_id=completed_input)
+    log.append("run_end", status="ok", exit_code=0)
+    detail = LabApi(store).sample(source_id[:12])
+    assert detail["full_input_id"] == completed_input
+    assert detail["cohort_state"] == "ready"
+    peer_id = _sample(store, 2, value=110.0)
+    api = LabApi(store)
+    ids = api._id12s()
+    comparison = api.compare_samples(ids[source_id], ids[peer_id])
+    assert comparison["state"] == "ready"
+    with pytest.raises(LabProblem, match="TBX-LAB-020"):
+        cohorts.member_from_store(store, source_id, input_id=_sha(999))
+    (original / "manifest.json").unlink()
+    with pytest.raises(LabProblem, match="TBX-LAB-020"):
+        cohorts.member_from_store(store, source_id, input_id=completed_input)
 
 
 @pytest.mark.parametrize("location", ["sources_dir", "input_dir"])

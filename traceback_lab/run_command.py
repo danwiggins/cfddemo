@@ -17,13 +17,18 @@ from traceback_runner.cli import _local_envelope, _result, _with_human
 
 from . import registry
 from .cohort_command import _cohort_id
+from .completed_runs import record_completion
 from .identity import SHA256_PATTERN, aligned_input_id, prealigned_input_id
 from .ingest import (
     EXAMPLE_REFERENCE_ID,
     GIB,
     AlignedInput,
+    Budget,
+    Chunk,
     ChunkSet,
+    _existing_ancestor,
     _check_regular,
+    _read_header,
     align,
     aligner_argv_identity,
     cached_sha256,
@@ -615,7 +620,79 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
     return EXIT_OK, _with_human(payload, lines, replace_data=True)
 
 
+def _preflight_budget(args: argparse.Namespace, store: LabStore, *, example_needs_generation: bool) -> None:
+    """Refuse a known disk shortfall before the writer creates Lab bookkeeping.
+
+    The cheap bound avoids a second chunk hash on ordinary runs. A possible
+    shortfall gets the exact, read-only reuse and D30 check. The writer still
+    repeats validation under its lock because inputs and capacity can change.
+    """
+
+    if example_needs_generation:
+        from .doctor import EXAMPLE_BYTES
+
+        budget = Budget({"example": EXAMPLE_BYTES}, shutil.disk_usage(_existing_ancestor(store.root)).free)
+        require_budget(budget, "example")
+        return
+    if len(args.inputs) == 1 and _is_stored(args.inputs[0]):
+        return
+
+    paths = collect_paths(args.inputs)
+    reference = resolve_reference(store.root, args.reference_id, example=args.example)
+    # Reading one BAM header is cheap. Only one aligned BAM is valid; otherwise
+    # the unaligned formula bounds every accepted chunk without hashing it.
+    chunks = [Chunk(path=path, name=path.name, index=None, size=path.stat().st_size) for path in paths]
+    if len(chunks) == 1:
+        try:
+            _read_header(chunks[0])
+        except Exception:  # noqa: BLE001 - this optional probe must not replace the ingest error
+            # Let the normal ingestion path report a malformed BAM.
+            chunks[0].aligned = False
+    known_mmi = args.mmi if args.mmi is not None else mmi_path(store, reference)
+    upper = disk_budget(
+        store, ChunkSet(chunks), mmi_needed=not known_mmi.is_file(),
+        fasta_bytes=reference.loaded.source.fasta_size_bytes,
+    )
+    if upper.ok:
+        return
+
+    chunkset = inspect_chunks(paths, store, skip_bad_chunks=args.skip_bad_chunks, write_cache=False)
+    input_platform = _declared_platform(chunkset)
+    with_sex_assertion(source_record(store, chunkset.source_id) or {}, args.sex)
+    verify_reference_source(store, reference, write_cache=False)
+    if chunkset.aligned:
+        candidate = prealigned_input_id(
+            source_id=chunkset.source_id, reference_sha256=reference.sha256,
+            platform=input_platform,
+        )
+        if input_manifest(store, candidate) is not None:
+            return
+        require_budget(disk_budget(store, chunkset, mmi_needed=False, fasta_bytes=0), "ingest")
+        return
+
+    samtools, minimap2 = require_aligner_tools()
+    if known_mmi.is_file():
+        candidate = aligned_input_id(
+            source_id=chunkset.source_id,
+            reference_sha256=reference.sha256,
+            mmi_sha256=cached_sha256(store, known_mmi, write_cache=False),
+            minimap2_version=str(minimap2.version),
+            samtools_version=str(samtools.version),
+            aligner_argv=aligner_argv_identity(chunkset.rg_lines),
+        )
+        if input_manifest(store, candidate) is not None:
+            return
+    require_budget(
+        disk_budget(
+            store, chunkset, mmi_needed=not known_mmi.is_file(),
+            fasta_bytes=reference.loaded.source.fasta_size_bytes,
+        ),
+        "align",
+    )
+
+
 def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]]:
+    example_needs_generation = False
     if args.example:
         if args.cohort is not None:
             raise LabProblem(
@@ -633,7 +710,8 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
         from .example import example_dir, prepared
 
         store.check_version()
-        if args.dry_run and not prepared(store.root):
+        example_needs_generation = not prepared(store.root)
+        if args.dry_run and example_needs_generation:
             memory_warning = _memory_warning()
             payload = _local_envelope(
                 _result("lab run", "ok", "dry run: nothing written", data={
@@ -662,6 +740,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
     entries = registry.registry_entries()
     by_id = {alg.id: entry for entry, alg in entries}
     items = registry.plan([alg for _, alg in entries], only=_only(args.only), profile=args.profile)
+    _preflight_budget(args, store, example_needs_generation=example_needs_generation)
     run_id = new_run_id()
     started = time.monotonic()
     progress(f"ROOT  {store.root}")
@@ -857,7 +936,6 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     controls=controls["summary"], platform=target.platform,
                 )
                 log.append("run_end", status=payload["status"], exit_code=code)
-                return code, payload
             except KeyboardInterrupt:
                 current = lock.step
                 log.append("run_end", status="interrupted", exit_code=6, step=current)
@@ -884,6 +962,17 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
             except Exception as exc:
                 log.append("run_end", status="internal_error", exit_code=7, error=type(exc).__name__, step=lock.step)
                 raise
+            else:
+                # Terminal evidence is durable. An interrupt in this advisory
+                # publication must not append a second, false run_end.
+                try:
+                    record_completion(store, run_id, aligned.source_id, aligned.input_id)
+                except (OSError, KeyboardInterrupt):
+                    try:
+                        store.bump_generation()
+                    except (OSError, KeyboardInterrupt):
+                        pass
+                return code, payload
     finally:
         signal.signal(signal.SIGTERM, previous_term)
 

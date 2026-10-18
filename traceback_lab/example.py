@@ -74,9 +74,23 @@ def prepare(root: Path, *, reads_per_chunk: int = READS_PER_CHUNK) -> tuple[Path
 
 
 def prepared(root: Path) -> bool:
-    """True when the example chunks already exist (a dry run never writes)."""
+    """True when prepare need not generate or register example assets."""
 
-    return (example_dir(root) / "example.json").is_file() and len(list((example_dir(root) / "chunks").glob("*.bam"))) == CHUNKS
+    base = example_dir(root)
+    try:
+        marker = json.loads((base / "example.json").read_text())
+    except (FileNotFoundError, ValueError):
+        return False
+    expected = {
+        "schema": MARKER, "seed": SEED, "contig_length": CONTIG_LENGTH,
+        "reads_per_chunk": READS_PER_CHUNK, "chunks": CHUNKS,
+    }
+    return (
+        marker == expected
+        and (base / "reference.fa").is_file()
+        and len(list((base / "chunks").glob("*.bam"))) == CHUNKS
+        and EXAMPLE_REFERENCE_ID in list_reference_ids(root)
+    )
 
 
 def _sha256(path: Path) -> str:

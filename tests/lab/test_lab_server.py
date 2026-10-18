@@ -193,7 +193,7 @@ def test_missing_library_metric_is_counted_in_trust_qc(server, monkeypatch, tmp_
     })
     original = views.load_sample
     monkeypatch.setattr(api_module.views, "load_sample",
-                        lambda store, source: sample if source == source_id else original(store, source))
+                        lambda store, source, **kwargs: sample if source == source_id else original(store, source, **kwargs))
 
     payload = server.app.api.sample(sample.id12)
     assert payload["library_health"]["no_library_entry"] == 1
@@ -234,7 +234,7 @@ def _sample_with_unvalidated_wps(server, monkeypatch):
         # injected WPS measurement first so this fixture exercises its gate.
         view.results = {"wps": wps, **{key: result for key, result in view.results.items() if key != "wps"}}
     original = views.load_sample
-    monkeypatch.setattr(api_module.views, "load_sample", lambda store, source_id: sample if source_id == sample.source_id else original(store, source_id))
+    monkeypatch.setattr(api_module.views, "load_sample", lambda store, source_id, **kwargs: sample if source_id == sample.source_id else original(store, source_id, **kwargs))
     return sample.id12
 
 
@@ -272,8 +272,8 @@ def test_sample_api_explains_unavailable_somalier(server, monkeypatch) -> None:
 
     original = api_module.views.load_sample
 
-    def with_identity(store, source_id):
-        sample = original(store, source_id)
+    def with_identity(store, source_id, **kwargs):
+        sample = original(store, source_id, **kwargs)
         assert sample is not None
         provenance = next(iter(sample.full.results.values())).provenance
         sample.full.results["identity"] = ResultEnvelope(

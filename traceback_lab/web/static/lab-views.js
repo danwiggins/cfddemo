@@ -305,6 +305,8 @@
       h("thead", {}, h("tr", {}, ...["ID", "Run date", "Approx depth", "OK / skipped / failed", "Outside a reference", "Controls", ""].map((t) => h("th", { scope: "col" }, t)))),
       h("tbody", {}, ...rows.map((row) => h("tr", {},
         h("th", { scope: "row" }, h("a", { href: `#/sample/${row.id12}/findings` }, row.id12), row.example ? h("span", { class: "flag-pill example-pill" }, " EXAMPLE (synthetic)") : "",
+          row.state === "completed_input_unavailable" ? h("span", { class: "problem" }, " completed input unavailable") : "",
+          row.state === "completion_history_unavailable" ? h("span", { class: "problem" }, " completion history unavailable") : "",
           row.unreadable_results && row.unreadable_results.length ? h("span", { class: "problem" }, ` result unreadable (sample ${row.id12})`) : "",
           row.ambiguous_results && row.ambiguous_results.length ? h("span", { class: "problem" }, ` result selection ambiguous (sample ${row.id12})`) : "",
           row.malformed_result_selections ? h("span", { class: "problem" }, ` malformed result selection (sample ${row.id12})`) : ""),
@@ -314,7 +316,8 @@
         h("td", { class: "num" }, String(row.outside_reference),
           ["cohort_unavailable", "target_unavailable", "stale_target"].includes(row.cohort_state)
             ? h("span", { class: "problem" }, ` · cohort ${row.cohort_state.replace(/_/g, " ")}`) : ""),
-        h("td", {}, row.controls.spike === null ? "spike not run" : row.controls.spike ? "spike recovered ✓" : "spike not recovered"),
+        h("td", {}, ["completed_input_unavailable", "completion_history_unavailable"].includes(row.state) ? "unavailable"
+          : row.controls.spike === null ? "spike not run" : row.controls.spike ? "spike recovered ✓" : "spike not recovered"),
         h("td", {}, h("a", { href: `#/?sample=${row.id12}` }, "Show on landing"))))));
     return h("section", { class: "panel", "aria-labelledby": "samples-title" }, h("h2", { id: "samples-title" }, "Samples"), h("div", { class: "table-wrap" }, table));
   }

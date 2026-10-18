@@ -171,6 +171,61 @@ def _server(tmp_path, sample):
     return server
 
 
+@needs_chrome
+def test_landing_defaults_to_completed_run_with_newer_active_sample(tmp_path) -> None:
+    """The active sample stays selectable without displacing a completed run."""
+
+    completed = _sample()
+    active_id12 = "bbbbbbbbbbbb"
+    active = copy.deepcopy(completed)
+    active["id12"] = active_id12
+    active["source_id"] = "d" * 64
+    active["headline"] = {"sentence": "Active fixture has no completed results.", "unlock": None}
+    active["algorithms"] = []
+    active["catalog"] = []
+    active["defended"]["rows"] = []
+    active["curve"]["rows"] = []
+    active["stability"] = []
+    with _server(tmp_path, completed) as server:
+        completed_row = server.app.api.samples()["samples"][0]
+        active_row = {**completed_row, "id12": active_id12, "run_utc": "2026-10-18T00:00:00Z",
+                      "counts": {"ok": 0, "skipped": 0, "failed": 0}, "outside_reference": 0}
+        server.app.api.sample = lambda id12: copy.deepcopy({ID12: completed, active_id12: active}.get(
+            id12, {"found": False, "candidates": []}
+        ))
+        server.app.api.status = lambda: {
+            "generation": 2,
+            "active": {"run_id": "r-20261018-0000-abcd", "command": "run", "step": "bam-qc",
+                       "started_utc": "2026-10-18T00:00:00Z", "source_id": active["source_id"],
+                       "input_id": "e" * 64},
+            "interrupted": None,
+            "library": completed["library_health"],
+        }
+        for label, default_id12, route, expected, unavailable in (
+            ("completed", ID12, "/", ID12, False),
+            ("explicit-active", ID12, f"/?sample={active_id12}", active_id12, False),
+            ("no-completed", None, "/", None, False),
+            ("unavailable", None, "/", None, True),
+        ):
+            server.app.api.samples = lambda default_id12=default_id12: {
+                "samples": [active_row, completed_row], "default_sample_id12": default_id12,
+                "completed_input_unavailable": unavailable,
+                "root_has_runs": True,
+            }
+            dom = _dom(server, tmp_path / label, route=route,
+                       want=lambda page: ('Traceback Lab —' in page or 'No completed Lab run yet' in page
+                                          or 'Latest completed input unavailable' in page))
+            heading = re.search(r'<h1 class="visually-hidden"[^>]*>Traceback Lab — ([0-9a-f]+)</h1>', dom)
+            if expected is None:
+                assert heading is None and ("Latest completed input unavailable" if unavailable
+                                            else "No completed Lab run yet") in dom
+                assert f'href="#/?sample={active_id12}"' in dom
+                assert "Select a sample" in dom
+            else:
+                assert heading is not None and heading.group(1) == expected, label
+                assert f'href="#/sample/{active_id12}/findings"' in dom
+
+
 def test_disclosure_fixture_is_nonvacuous_and_registry_complete() -> None:
     sample = _sample()
     assert {a["algorithm_id"] for a in sample["algorithms"]} == set(REGISTRY)

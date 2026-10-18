@@ -380,7 +380,7 @@ def test_projection_target_uses_pinned_generation_selection(tmp_path: Path, monk
                 "tools": {"minimap2": "2.28", "samtools": "1.20"},
                 "mmi_sha256": "d" * 64, "aligner_argv": ["minimap2", "-ax", "map-ont"]}
     monkeypatch.setattr(cohorts, "_checked_source_record", lambda *_: {})
-    monkeypatch.setattr(cohorts, "_full_input", lambda *_: ("e" * 64, manifest))
+    monkeypatch.setattr(cohorts, "_full_input", lambda *_, **__: ("e" * 64, manifest))
     selected = object()
     calls = []
     monkeypatch.setattr(pon_consumer, "selection_for_generation", lambda *args, **kwargs: (
@@ -707,7 +707,7 @@ def test_member_recompute_runs_pinned_loo_chain_and_requires_success(
         "1" * 64, "2" * 64, "3" * 64, "4" * 64, "5" * 64, (), True,
     )
     monkeypatch.setattr(cohorts, "_checked_source_record", lambda *_: {})
-    monkeypatch.setattr(cohorts, "_full_input", lambda *_: (input_id, manifest))
+    monkeypatch.setattr(cohorts, "_full_input", lambda *_, **__: (input_id, manifest))
     monkeypatch.setattr(pon_consumer, "selection_for_generation", lambda *_, **__: selection)
     expected = object()
     monkeypatch.setattr(cohorts, "member_from_store", lambda *_, **kwargs: (

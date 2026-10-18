@@ -21,6 +21,9 @@
   ];
   const state = {
     samples: [],
+    defaultSampleId12: null,
+    completedInputUnavailable: false,
+    completionHistoryUnavailable: false,
     sample: null,
     generationAtLoad: null,
     lastStatus: null,
@@ -143,7 +146,7 @@
     const revision = ++state.navigationRevision;
     const requestedHash = location.hash || "#/";
     const route = parseRoute();
-    const target = route.id12 || (state.samples[0] && state.samples[0].id12) || null;
+    const target = route.id12 || (route.name === "home" ? state.defaultSampleId12 : null);
     const sample = route.name === "home" || route.name === "lens" ? await loadSample(target) : state.sample;
     if (revision !== state.navigationRevision || (location.hash || "#/") !== requestedHash) return;
     if (sample !== state.sample) state.runLogLines.clear();
@@ -178,9 +181,10 @@
   function renderSwitcher() {
     const select = document.getElementById("sample-switcher");
     select.replaceChildren(
+      ...(state.sample && state.sample.found ? [] : [h("option", { value: "", selected: true, disabled: true }, "Select a sample")]),
       ...state.samples.map((row) =>
         h("option", { value: row.id12, selected: state.sample && state.sample.id12 === row.id12 },
-          `${row.id12} · ${row.run_utc ? row.run_utc.slice(0, 10) : "—"} · ${row.depth_x !== null ? row.depth_x.toFixed(2) + "x" : "—"}${row.example ? " · EXAMPLE (synthetic)" : ""}`)
+          `${row.id12} · ${row.run_utc ? row.run_utc.slice(0, 10) : "—"} · ${row.depth_x !== null ? row.depth_x.toFixed(2) + "x" : "—"}${row.example ? " · EXAMPLE (synthetic)" : ""}${row.state === "completed_input_unavailable" ? " · completed input unavailable" : row.state === "completion_history_unavailable" ? " · completion history unavailable" : ""}`)
       )
     );
   }
@@ -207,7 +211,8 @@
 
   function renderNav() {
     const nav = document.getElementById("lenses");
-    const sample = state.sample && state.sample.found ? state.sample : null;
+    const sample = state.sample && state.sample.found && !["completed_input_unavailable", "completion_history_unavailable"].includes(state.sample.state)
+      ? state.sample : null;
     nav.replaceChildren();
     // Lens tabs belong to a sample's lens routes; the landing page has none (spec layout).
     nav.hidden = !sample || state.route.name !== "lens";
@@ -246,17 +251,56 @@
       } else main.append(h("section", { class: "panel loading-lens" }, h("p", {}, "Loading…")));
       return;
     }
+    if (route.name === "home" && !route.id12 && state.completionHistoryUnavailable) {
+      main.append(h("h1", { class: "view-title" }, "Completion history unavailable"),
+        window.TracebackLabViews.landingCliaPanel(),
+        h("p", { class: "problem" }, "The latest recorded completion cannot be verified. Restore its run log or rerun the sample before viewing a default result."),
+        h("ul", {}, ...state.samples.map((row) => h("li", {},
+          h("a", { href: `#/?sample=${row.id12}` }, row.id12)))));
+      return;
+    }
+    if (route.name === "home" && !route.id12 && state.completedInputUnavailable) {
+      main.append(h("h1", { class: "view-title" }, "Latest completed input unavailable"),
+        window.TracebackLabViews.landingCliaPanel(),
+        h("p", { class: "problem" }, "The latest completed run's primary input cannot be read. Restore that input or rerun the sample."),
+        h("ul", {}, ...state.samples.map((row) => h("li", {},
+          h("a", { href: `#/?sample=${row.id12}` }, row.id12)))));
+      return;
+    }
     if (!state.samples.length && route.name === "home") {
       main.append(...emptyState());
+      return;
+    }
+    if (route.name === "home" && !route.id12 && !state.defaultSampleId12) {
+      main.append(h("h1", { class: "view-title" }, "No completed Lab run yet"),
+        window.TracebackLabViews.landingCliaPanel(),
+        h("p", { class: "empty" }, "The registered samples below have no completed analysis run. A running or interrupted analysis can be opened explicitly."),
+        h("ul", {}, ...state.samples.map((row) => h("li", {},
+          h("a", { href: `#/?sample=${row.id12}` }, row.id12)))));
       return;
     }
     if (route.name === "clia" && window.TracebackLabViews && window.TracebackLabViews.clia) { main.append(...window.TracebackLabViews.clia()); return; }
     const sample = state.sample;
     if (route.name === "unknown" || !sample || !sample.found) {
       const shown = route.id12 || (sample && sample.id12) || "";
-      main.append(h("h1", { class: "view-title" }, "Unknown sample"),
-        h("p", {}, `No Lab sample matches ${shown}. `, h("a", { href: "#/" }, "Back to Lab home")));
+      main.append(h("h1", { class: "view-title" }, "Unknown sample"));
+      if (route.name === "home") main.append(window.TracebackLabViews.landingCliaPanel());
+      main.append(h("p", {}, `No Lab sample matches ${shown}. `, h("a", { href: "#/" }, "Back to Lab home")));
       if (sample && sample.candidates && sample.candidates.length) main.append(h("p", {}, `Candidates: ${sample.candidates.join(", ")}`));
+      return;
+    }
+    if (sample.state === "completed_input_unavailable") {
+      main.append(h("h1", { class: "view-title" }, "Completed input unavailable"));
+      if (route.name === "home") main.append(window.TracebackLabViews.landingCliaPanel());
+      main.append(h("p", { class: "problem" }, `Sample ${sample.id12} exists, but its completed run's primary input cannot be read. Restore that input or rerun the sample.`),
+        h("p", {}, h("a", { href: "#/" }, "Back to Lab home")));
+      return;
+    }
+    if (sample.state === "completion_history_unavailable") {
+      main.append(h("h1", { class: "view-title" }, "Completion history unavailable"));
+      if (route.name === "home") main.append(window.TracebackLabViews.landingCliaPanel());
+      main.append(h("p", { class: "problem" }, `Sample ${sample.id12} exists, but its recorded completion cannot be verified. Restore its run log or rerun the sample.`),
+        h("p", {}, h("a", { href: "#/" }, "Back to Lab home")));
       return;
     }
     const lens = route.name === "lens" ? route.lens : null;
@@ -268,8 +312,8 @@
           h("p", {}, `Provisional: this input excludes ${sample.excluded_chunks.length} truncated chunks; depth reflects the reads present.`),
           h("details", {}, h("summary", {}, `Excluded chunk indexes (${sample.excluded_chunks.length})`),
             h("p", {}, `Excluded chunk indexes: ${sample.excluded_chunks.join(", ")}.`)));
-        const heading = main.querySelector("h1");
-        if (heading) heading.after(notice); else main.prepend(notice);
+        const anchor = route.name === "home" ? main.querySelector(".clia-panel") : main.querySelector("h1");
+        if (anchor) anchor.after(notice); else main.prepend(notice);
       }
     };
     if (route.name === "home" && views.landing) { appendSample(views.landing(sample)); return; }
@@ -744,12 +788,27 @@
       await exchangeBootstrap();
       state.route = parseRoute();
       render();
+      const baselineController = new AbortController();
+      const baselineDeadline = setTimeout(() => baselineController.abort(), Math.max(100, POLL_MS * 0.8));
+      try {
+        const baseline = await api("/api/status", baselineController.signal);
+        state.generationAtLoad = baseline.generation;
+        state.lastStatus = baseline;
+      } catch (error) {
+        if (error.session) throw error;
+      } finally {
+        clearTimeout(baselineDeadline);
+      }
       const listing = await api("/api/samples");
       state.samples = listing.samples;
+      state.defaultSampleId12 = listing.default_sample_id12 !== undefined
+        ? listing.default_sample_id12 : (listing.samples[0] && listing.samples[0].id12) || null;
+      state.completedInputUnavailable = !!listing.completed_input_unavailable;
+      state.completionHistoryUnavailable = !!listing.completion_history_unavailable;
       state.loading = false;
       setStatus("");
-      await poll();
       await navigate();
+      await poll();
     } catch (error) {
       state.loading = false;
       setStatus("");
