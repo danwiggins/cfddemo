@@ -251,6 +251,31 @@ def test_writable_descendant_is_preserved_and_recovered_sibling_is_sealed(
     )
 
 
+def test_recovered_record_seals_copied_descendants_from_writable_source(tmp_path, capsys):
+    _, first = invoke(capsys, "demo", "--root", tmp_path)
+    original = tmp_path / first["data"]["bundle"]
+    runner = Runner(tmp_path / "runner", synthetic_enabled=True)
+    source = cli._signed_bundle_from_outputs(runner, first["data"]["job_id"])
+    source_file = next(path for path in source.rglob("*") if path.is_file())
+    source_file.chmod(0o644)
+    original_file = original / source_file.relative_to(source)
+    original_file.chmod(0o644)
+
+    code, second = invoke(capsys, "demo", "--root", tmp_path)
+    assert code == 0
+    recovered = tmp_path / second["data"]["bundle"]
+    assert recovered != original
+    assert stat.S_IMODE(source_file.lstat().st_mode) == 0o644
+    assert stat.S_IMODE(original_file.lstat().st_mode) == 0o644
+    assert stat.S_IMODE((recovered / source_file.relative_to(source)).lstat().st_mode) == 0o444
+    trust = load_development_trust((tmp_path / cli._TRUST_RELATIVE).read_bytes())
+    verify_bundle(recovered, trust)
+
+    code, third = invoke(capsys, "demo", "--root", tmp_path)
+    assert code == 0 and third["data"]["bundle"] == second["data"]["bundle"]
+    assert len(list((tmp_path / "records").iterdir())) == 2
+
+
 def test_matching_candidate_fsync_failure_propagates_without_sibling(tmp_path, capsys):
     _, first = invoke(capsys, "demo", "--root", tmp_path)
     published = tmp_path / first["data"]["bundle"]

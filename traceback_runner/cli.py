@@ -1149,11 +1149,16 @@ def _publish_verified_record(root: Path, verified: Any, source: Path) -> Path:
         if verify_bundle(staging, trust).manifest != verified.manifest:
             raise ValueError("copied record differs from verified source")
         for path in sorted(staging.rglob("*"), reverse=True):
-            if path.is_dir():
+            mode = path.lstat().st_mode
+            if stat.S_ISDIR(mode):
+                path.chmod(0o555)
                 _fsync_directory(path)
-            else:
+            elif stat.S_ISREG(mode):
+                path.chmod(0o444)
                 with path.open("rb") as handle:
                     os.fsync(handle.fileno())
+            else:
+                raise ValueError("copied record contains a non-file entry")
         _fsync_directory(staging)
         _rename_directory_exclusive(staging, destination)
         destination.chmod(0o555)
