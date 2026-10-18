@@ -2277,6 +2277,22 @@ def publish_portable_view(
             raise PortableViewStorageError(
                 "private staging could not be opened"
             ) from exc
+        try:
+            _same_directory_at(parent_fd, stage_name, stage_fd)
+            # A setgid parent can add 02000 despite mkdir(mode=0700). Normalize
+            # only the held private stage before creating any artifact files.
+            os.fchmod(stage_fd, 0o700)
+            _require_directory_mode(stage_fd, 0o700)
+        except PortableViewError:
+            raise
+        except PermissionError as exc:
+            raise PortableViewPermissionError(
+                "private staging permission denied"
+            ) from exc
+        except OSError as exc:
+            raise PortableViewStorageError(
+                "private staging mode could not be normalized"
+            ) from exc
         for relative_path in sorted(content):
             try:
                 descriptor = os.open(
