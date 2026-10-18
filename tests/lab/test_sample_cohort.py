@@ -79,7 +79,7 @@ def test_sample_lenses_pin_eligible_loo_reference(
         source_id=SOURCE, id12=SOURCE[:12], example=False,
         full=InputView("full", INPUT, None, {}, {"fragment-size": envelope}),
     )
-    monkeypatch.setattr(web_api.views, "load_sample", lambda store, source_id: sample)
+    monkeypatch.setattr(web_api.views, "load_sample", lambda store, source_id, **_: sample)
     monkeypatch.setattr(web_api.views, "stability_panels", lambda sample, library: [])
     monkeypatch.setattr(web_api.views, "depth_curve", lambda sample, library: {"rows": [], "downsampled": False})
     monkeypatch.setattr(web_api.views, "synthetic", lambda sample: [])
@@ -212,7 +212,7 @@ def test_unavailable_pon_keeps_independent_comparison_but_refuses_copy_number(
             "fragment-size": fragment, "copy-number": copy_number,
         }),
     )
-    monkeypatch.setattr(web_api.views, "load_sample", lambda store, source_id: sample)
+    monkeypatch.setattr(web_api.views, "load_sample", lambda store, source_id, **_: sample)
     api = web_api.LabApi(LabStore(tmp_path))
     monkeypatch.setattr(api, "_resolve", lambda id12: (SOURCE, []))
     monkeypatch.setattr(api, "_id12s", lambda: {SOURCE: SOURCE[:12]})
@@ -275,7 +275,7 @@ def test_sample_list_pins_one_generation_for_all_rows(tmp_path, monkeypatch) -> 
             source_id=source, id12=source[:12], example=False,
             full=InputView("full", input_id, None, {}, {"fragment-size": envelope}),
         )
-    monkeypatch.setattr(web_api.views, "load_sample", lambda store, source_id: samples[source_id])
+    monkeypatch.setattr(web_api.views, "load_sample", lambda store, source_id, **_: samples[source_id])
     monkeypatch.setattr(web_api.views, "synthetic", lambda sample: [])
     monkeypatch.setattr(web_api, "source_record", lambda store, source_id: {})
     api = web_api.LabApi(LabStore(tmp_path))
@@ -316,7 +316,7 @@ def test_unavailable_cohort_is_explicit_not_an_empty_healthy_reference(tmp_path,
     assert detail is not None and detail["code"] == "TBX-LAB-022"
     assert detail["fix"] == "Restore the generation or rebuild the cohort"
     monkeypatch.setattr(api, "_id12s", lambda: {SOURCE: SOURCE[:12]})
-    monkeypatch.setattr(web_api.views, "load_sample", lambda store, source_id: sample)
+    monkeypatch.setattr(web_api.views, "load_sample", lambda store, source_id, **_: sample)
     monkeypatch.setattr(web_api.views, "synthetic", lambda sample: [])
     monkeypatch.setattr(web_api, "source_record", lambda store, source_id: {})
     row = api.samples()["samples"][0]

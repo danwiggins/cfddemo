@@ -22,6 +22,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .. import views
+from ..completed_runs import completion_snapshot
 from ..cohort_contracts import CohortGeneration, CohortMember, MetricProjection, project_metric
 from ..cohort_density import project_density_band
 from ..cohorts import list_cohorts, member_for_generation_or_independent, member_from_store, pon_dependent_algorithms, read_current
@@ -573,16 +574,19 @@ class LabApi:
     def _samples_once(self) -> dict[str, Any]:
         library = self.libraries.get()
         cohort_snapshot = self._published_sample_cohort()
+        completion_index, completed = completion_snapshot(self.store)
         rows = []
         for source_id, id12 in self._id12s().items():
             record = source_record(self.store, source_id) or {}
-            sample = views.load_sample(self.store, source_id)
+            sample = views.load_sample(self.store, source_id, completion_index=completion_index)
             if sample is None:
                 continue
             generation, target, cohort_state, cohort_problem = self._sample_cohort(
                 source_id, sample, cohort_snapshot,
             )
-            used = max((entry.get("used_utc", "") for entry in record.get("inputs", [])), default="")
+            completed_for_row = completion_index.get(source_id)
+            used = (completed_for_row["completed_utc"] if completed_for_row else
+                    max((entry.get("used_utc", "") for entry in record.get("inputs", [])), default=""))
             counts = {"ok": 0, "skipped": 0, "failed": 0}
             outside = 0
             for envelope in sample.full.results.values():
@@ -618,7 +622,12 @@ class LabApi:
                 }
             )
         rows.sort(key=lambda row: row["run_utc"], reverse=True)
-        return {"samples": rows, "root_has_runs": bool(self.store.run_ids())}
+        default_id12 = self._id12s().get(completed["source_id"]) if completed else None
+        if default_id12 not in {row["id12"] for row in rows}:
+            default_id12 = None
+        return {"samples": rows, "default_sample_id12": default_id12,
+                "completed_input_unavailable": bool(completed and default_id12 is None),
+                "root_has_runs": bool(self.store.run_ids())}
 
     def _resolve(self, id12: str) -> tuple[str | None, list[str]]:
         mapping = self._id12s()

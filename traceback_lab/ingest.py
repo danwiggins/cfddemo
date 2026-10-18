@@ -991,6 +991,8 @@ def write_source(
     }
     if "operator_metadata" in previous:
         record["operator_metadata"] = previous["operator_metadata"]
+    if "last_completed_run" in previous:
+        record["last_completed_run"] = previous["last_completed_run"]
     write_atomic(store.sources_dir / f"{aligned.source_id}.json", canonical_json_bytes(record))
     if assertion_added:
         store.bump_generation()

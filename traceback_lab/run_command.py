@@ -17,6 +17,7 @@ from traceback_runner.cli import _local_envelope, _result, _with_human
 
 from . import registry
 from .cohort_command import _cohort_id
+from .completed_runs import record_completion
 from .identity import SHA256_PATTERN, aligned_input_id, prealigned_input_id
 from .ingest import (
     EXAMPLE_REFERENCE_ID,
@@ -857,6 +858,15 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     controls=controls["summary"], platform=target.platform,
                 )
                 log.append("run_end", status=payload["status"], exit_code=code)
+                try:
+                    record_completion(store, run_id, aligned.source_id, aligned.input_id)
+                except OSError:
+                    # The validated run log can rebuild either completion index.
+                    # Still notify an open browser when that index write fails.
+                    try:
+                        store.bump_generation()
+                    except OSError:
+                        pass
                 return code, payload
             except KeyboardInterrupt:
                 current = lock.step
