@@ -760,10 +760,11 @@ that default. A different registered sample can be opened explicitly with
 `#/?sample=<id12>`; selecting the same source during its rerun still shows
 that source's last completed primary input until the newer run completes. If
 no run has completed, the landing lists registered samples without selecting one.
-The displayed run date is the completed run's terminal timestamp. Results
-come from the currently selected immutable attempts for that completed input,
+For a completed run, the displayed date is its terminal timestamp. A sample
+without a recorded completion shows its latest input-use time instead. Results
+come from the currently selected immutable attempts for a completed input,
 so a later attempt selection can change shown metrics after Reload without
-changing the completed input or run date.
+changing that input or its completion date.
 If a completed run's primary input is missing, restore that input or rerun the
 sample. If recorded completion history cannot be verified because a run log is
 missing or unreadable, restore the log or rerun; the landing does not substitute
