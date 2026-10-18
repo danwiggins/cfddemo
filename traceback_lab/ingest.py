@@ -526,7 +526,7 @@ def mmi_path(store: LabStore, reference: Reference) -> Path:
     return store.lab / "refs" / f"{reference.sha256}.mmi"
 
 
-def cached_sha256(store: LabStore, path: Path) -> str:
+def cached_sha256(store: LabStore, path: Path, *, write_cache: bool = True) -> str:
     cache = store.load_hash_cache()
     key = store.strong_hash_cache_key(path)
     if key in cache and isinstance(cache[key].get("sha256"), str):
@@ -539,8 +539,9 @@ def cached_sha256(store: LabStore, path: Path) -> str:
             cause="minimap2 index changed while it was being hashed",
             fix="Restore the unchanged index or rebuild it from the registered reference",
         )
-    cache[key] = {"sha256": digest, "records": -1}
-    store.save_hash_cache(cache)
+    if write_cache:
+        cache[key] = {"sha256": digest, "records": -1}
+        store.save_hash_cache(cache)
     return digest
 
 
