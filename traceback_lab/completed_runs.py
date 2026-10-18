@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .file_access import open_regular_no_follow
-from .store import LabStore, canonical_json_bytes, write_atomic
+from .store import LabStore, SelectionSnapshotChanged, canonical_json_bytes, write_atomic
 
 _RUN = re.compile(r"r-\d{8}-\d{4}-[0-9a-f]{4,8}\Z")
 _HASH = re.compile(r"[0-9a-f]{64}\Z")
@@ -109,6 +109,25 @@ def _advisory_pointer(value: Any) -> dict[str, Any] | None:
             "completed_utc": utc, "completed_mtime_ns": mtime}
 
 
+def _unverified_claim(store: LabStore, claim: dict[str, Any],
+                      selected: dict[str, Any] | None) -> bool:
+    if selected is not None and (
+        (claim["run_id"], claim["source_id"]) == (selected["run_id"], selected["source_id"])
+        or _order(claim) <= _order(selected)
+    ):
+        return False
+    # The writer may have published this terminal log after our scan. A direct
+    # validation is evidence to retry the whole read, not to trust the pointer.
+    validated = _completed(store, claim["run_id"])
+    if validated is not None and all(validated[key] == claim[key] for key in (
+        "run_id", "source_id", "input_id", "completed_utc",
+    )):
+        if selected is None or _order(validated) > _order(selected):
+            raise SelectionSnapshotChanged("completed run appeared during read")
+        return False  # the log is valid; only the pointer's file timestamp is stale
+    return True
+
+
 def completion_history_unavailable(
     store: LabStore, source_id: str, record: dict[str, Any],
     selected: dict[str, Any] | None,
@@ -120,18 +139,14 @@ def completion_history_unavailable(
         claim = _advisory_pointer(raw)
         if claim is None or claim["source_id"] != source_id:
             continue
-        if selected is None or (claim["run_id"] != selected["run_id"]
-                                and _order(claim) > _order(selected)):
+        if _unverified_claim(store, claim, selected):
             return True
     return False
 
 
 def global_completion_history_unavailable(store: LabStore, selected: dict[str, Any] | None) -> bool:
     claim = _advisory_pointer(_read_json(store.lab / "last_completed_run.json", 4096))
-    return claim is not None and (selected is None or (
-        (claim["run_id"], claim["source_id"]) != (selected["run_id"], selected["source_id"])
-        and _order(claim) > _order(selected)
-    ))
+    return claim is not None and _unverified_claim(store, claim, selected)
 
 
 def completion_snapshot(store: LabStore) -> tuple[dict[str, dict[str, Any]], dict[str, Any] | None]:
