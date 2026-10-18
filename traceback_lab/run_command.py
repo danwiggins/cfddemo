@@ -27,6 +27,7 @@ from .ingest import (
     ChunkSet,
     _existing_ancestor,
     _check_regular,
+    _read_header,
     align,
     aligner_argv_identity,
     cached_sha256,
@@ -637,11 +638,18 @@ def _preflight_budget(args: argparse.Namespace, store: LabStore, *, example_need
 
     paths = collect_paths(args.inputs)
     reference = resolve_reference(store.root, args.reference_id, example=args.example)
-    # Every accepted chunk is at most this size, whether aligned or not. The
-    # unaligned formula plus a new index dominates both D30 branches.
+    # Reading one BAM header is cheap. Only one aligned BAM is valid; otherwise
+    # the unaligned formula bounds every accepted chunk without hashing it.
     chunks = [Chunk(path=path, name=path.name, index=None, size=path.stat().st_size) for path in paths]
+    if len(chunks) == 1:
+        try:
+            _read_header(chunks[0])
+        except Exception:  # noqa: BLE001 - this optional probe must not replace the ingest error
+            # Let the normal ingestion path report a malformed BAM.
+            chunks[0].aligned = False
+    known_mmi = args.mmi if args.mmi is not None else mmi_path(store, reference)
     upper = disk_budget(
-        store, ChunkSet(chunks), mmi_needed=True,
+        store, ChunkSet(chunks), mmi_needed=not known_mmi.is_file(),
         fasta_bytes=reference.loaded.source.fasta_size_bytes,
     )
     if upper.ok:
@@ -662,7 +670,6 @@ def _preflight_budget(args: argparse.Namespace, store: LabStore, *, example_need
         return
 
     samtools, minimap2 = require_aligner_tools()
-    known_mmi = args.mmi if args.mmi is not None else mmi_path(store, reference)
     if known_mmi.is_file():
         candidate = aligned_input_id(
             source_id=chunkset.source_id,
