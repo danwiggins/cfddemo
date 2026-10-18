@@ -59,7 +59,8 @@ pre.stderr { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; 
   .switcher select { flex: 1 1 auto; min-width: 0; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
-.lenses a.disabled, main a.disabled { pointer-events: none; color: var(--muted); }
+.lab a.disabled { pointer-events: none; color: var(--muted); }
+.lab button.disabled, .lab select.disabled { cursor: not-allowed; opacity: .75; }
 /* ---- S6c: landing, Findings, Stability ---------------------------------------------- */
 .app-header { flex-wrap: nowrap; }
 .app-header .flag-pill { font-size: .875rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }

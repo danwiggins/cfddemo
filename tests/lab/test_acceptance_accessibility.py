@@ -9,7 +9,12 @@ from pathlib import Path
 
 import pytest
 
-from tests.lab.test_acceptance_synthetic_routes import ID12, _run_marker, _sample, _server
+from tests.lab.test_acceptance_synthetic_routes import (
+    ID12,
+    _run_marker,
+    _sample,
+    _server,
+)
 from tests.lab.test_lab_server import _chrome, _dom_cdp
 from tests.lab.test_landing import _dom, needs_chrome
 
@@ -32,7 +37,7 @@ def test_landing_responsive_clia_and_single_column_geometry(size, tmp_path) -> N
     with _server(tmp_path, _sample()) as server:
         profile = tmp_path / "browser-profile"
 
-        def inspect(_command, evaluate) -> None:
+        def inspect(command, evaluate) -> None:
             observed.update(evaluate("""(() => {
               const panel = document.querySelector('#main .clia-panel');
               const band = document.querySelector('#main .landing-band');
@@ -643,6 +648,353 @@ def test_live_status_changes_keep_focus_and_open_disclosure(tmp_path) -> None:
              f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/findings"],
             profile, ok=lambda d: 'data-ready="1"' in d and 'class="finding-card"' in d,
             interact=interact, timeout=180,
+        )
+
+
+@needs_chrome
+def test_disconnected_page_blocks_fetch_controls_until_reconnected(tmp_path) -> None:
+    """AC21: a stalled server must not leave the run-log fetch button live."""
+
+    phase = {"down": False}
+    with _server(tmp_path, _sample()) as server:
+        kind, source = server.app.assets["/assets/lab.js"]
+        server.app.assets["/assets/lab.js"] = (
+            kind, source.replace(b"const POLL_MS = 15000;", b"const POLL_MS = 500;"),
+        )
+        original_status = server.app.api.status
+
+        def status():
+            if phase["down"]:
+                raise OSError("synthetic disconnect")
+            return original_status()
+
+        server.app.api.status = status
+
+        def inspect(command, evaluate) -> None:
+            evaluate("""(() => {
+              const original = window.fetch;
+              window.runLogFetches = 0;
+              window.fetch = (...args) => {
+                if (String(args[0]).includes('/run-log/')) window.runLogFetches += 1;
+                return original.apply(window, args);
+              };
+            })()""")
+            button = "document.querySelector('button[aria-label=\"Run log line for bam-qc\"]')"
+            assert evaluate(f"!!{button} && !{button}.disabled")
+            evaluate(f"{button}.focus()")
+            assert evaluate(f"document.activeElement === {button}")
+
+            phase["down"] = True
+            for _ in range(40):
+                if evaluate("document.body.dataset.disconnected === '1'"):
+                    break
+                time.sleep(0.2)
+            else:
+                pytest.fail("three missed polls did not mark the page disconnected")
+            assert evaluate(f"document.activeElement === {button}")
+            assert evaluate(f"{button}.getAttribute('aria-disabled') === 'true'")
+            assert evaluate("document.getElementById('sample-switcher').disabled")
+            assert evaluate("!document.getElementById('key-button').disabled")
+            evaluate(f"{button}.click()")
+            assert evaluate("window.runLogFetches === 0")
+
+            phase["down"] = False
+            for _ in range(40):
+                if evaluate("document.body.dataset.disconnected === '0'"):
+                    break
+                time.sleep(0.2)
+            else:
+                pytest.fail("the page did not reconnect")
+            assert evaluate(f"!{button}.disabled && !document.getElementById('sample-switcher').disabled")
+            evaluate(f"{button}.click()")
+            assert evaluate("window.runLogFetches === 1")
+
+            evaluate("document.getElementById('sample-switcher').focus()")
+            phase["down"] = True
+            for _ in range(40):
+                if evaluate("document.body.dataset.disconnected === '1'"):
+                    break
+                time.sleep(0.2)
+            else:
+                pytest.fail("the page did not disconnect again")
+            assert evaluate("document.activeElement === document.getElementById('sample-switcher')")
+            _key(command, "Tab", "Tab", 9)
+            assert evaluate("document.activeElement === document.getElementById('key-button')")
+            _key(command, "Enter", "Enter", 13)
+            assert evaluate("document.getElementById('key-dialog').open")
+            _key(command, "Escape", "Escape", 27)
+            assert evaluate("!document.getElementById('key-dialog').open")
+            shift_tab = {"key": "Tab", "code": "Tab", "windowsVirtualKeyCode": 9,
+                         "nativeVirtualKeyCode": 9, "modifiers": 8}
+            command("Input.dispatchKeyEvent", {"type": "rawKeyDown", **shift_tab})
+            command("Input.dispatchKeyEvent", {"type": "keyUp", **shift_tab})
+            assert evaluate("document.activeElement !== document.getElementById('key-button')")
+
+        profile = tmp_path / "browser-profile"
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/trust-qc"],
+            profile, ok=lambda d: 'data-ready="1"' in d and "Run log line for bam-qc" in d,
+            interact=inspect, timeout=90,
+        )
+
+
+@needs_chrome
+def test_disconnected_navigation_keeps_url_and_view_in_sync(tmp_path) -> None:
+    """AC21: Enter on a focused lens link cannot queue a hidden route change."""
+
+    phase = {"down": False}
+    with _server(tmp_path, _sample()) as server:
+        kind, source = server.app.assets["/assets/lab.js"]
+        server.app.assets["/assets/lab.js"] = (
+            kind, source.replace(b"const POLL_MS = 15000;", b"const POLL_MS = 500;"),
+        )
+        original_status = server.app.api.status
+
+        def status():
+            if phase["down"]:
+                raise OSError("synthetic disconnect")
+            return original_status()
+
+        server.app.api.status = status
+
+        def inspect(command, evaluate) -> None:
+            command("Page.bringToFront")
+            evaluate("""(() => {
+              window.trustHash = location.hash;
+              window.stabilityLink = document.querySelector('#lenses a[href$="/stability"]');
+              window.stabilityLink.focus();
+            })()""")
+            assert evaluate("document.activeElement === window.stabilityLink")
+            phase["down"] = True
+            for _ in range(40):
+                if evaluate("document.body.dataset.disconnected === '1'"):
+                    break
+                time.sleep(0.2)
+            else:
+                pytest.fail("three missed polls did not mark the page disconnected")
+            assert evaluate("window.stabilityLink.getAttribute('aria-disabled') === 'true'")
+            _key(command, "Enter", "Enter", 13)
+            assert evaluate("location.hash === window.trustHash")
+            assert evaluate("document.querySelector('#main h1')?.textContent === 'Trust / QC'")
+
+            phase["down"] = False
+            for _ in range(40):
+                if evaluate("document.body.dataset.disconnected === '0'"):
+                    break
+                time.sleep(0.2)
+            else:
+                pytest.fail("the page did not reconnect")
+            _key(command, "Enter", "Enter", 13)
+            for _ in range(40):
+                if evaluate("document.querySelector('#main h1')?.textContent === 'Stability'"):
+                    break
+                time.sleep(0.2)
+            else:
+                pytest.fail("a re-enabled lens link did not navigate")
+
+            phase["down"] = True
+            for _ in range(40):
+                if evaluate("document.body.dataset.disconnected === '1'"):
+                    break
+                time.sleep(0.2)
+            else:
+                pytest.fail("the page did not disconnect again")
+            evaluate("history.back()")
+            for _ in range(20):
+                if evaluate("location.hash.endsWith('/stability')"):
+                    break
+                time.sleep(0.05)
+            assert evaluate("location.hash.endsWith('/stability')")
+            assert evaluate("document.querySelector('#main h1')?.textContent === 'Stability'")
+
+        profile = tmp_path / "browser-profile"
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/trust-qc"],
+            profile, ok=lambda d: 'data-ready="1"' in d and "Run log line for bam-qc" in d,
+            interact=inspect, timeout=90,
+        )
+
+
+@needs_chrome
+def test_pending_navigation_is_cancelled_when_status_disconnects(tmp_path) -> None:
+    """A held sample response cannot move the URL ahead of the visible route."""
+
+    phase = {"down": False}
+    with _server(tmp_path, _sample()) as server:
+        kind, source = server.app.assets["/assets/lab.js"]
+        server.app.assets["/assets/lab.js"] = (
+            kind, source.replace(b"const POLL_MS = 15000;", b"const POLL_MS = 500;"),
+        )
+        original_status = server.app.api.status
+
+        def status():
+            if phase["down"]:
+                raise OSError("synthetic disconnect")
+            return original_status()
+
+        server.app.api.status = status
+
+        def inspect(_command, evaluate) -> None:
+            evaluate("""(() => {
+              window.trustHash = location.hash;
+              const original = window.fetch;
+              window.fetch = (...args) => String(args[0]) === '/api/samples/aaaaaaaaaaaa'
+                ? new Promise((resolve) => { window.releaseUnknownSample = () => resolve(new Response(
+                    JSON.stringify({found: false, candidates: []}), {status: 404,
+                    headers: {'Content-Type': 'application/json'}})); })
+                : original.apply(window, args);
+              location.hash = '#/sample/aaaaaaaaaaaa/findings';
+            })()""")
+            for _ in range(20):
+                if evaluate("typeof window.releaseUnknownSample === 'function'"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("unknown sample request was not held")
+            phase["down"] = True
+            for _ in range(40):
+                if evaluate("document.body.dataset.disconnected === '1'"):
+                    break
+                time.sleep(0.2)
+            else:
+                pytest.fail("the page did not disconnect")
+            assert evaluate("location.hash === window.trustHash")
+            assert evaluate("document.querySelector('#main h1')?.textContent === 'Trust / QC'")
+            evaluate("window.releaseUnknownSample()")
+            time.sleep(0.1)
+            assert evaluate("location.hash === window.trustHash")
+            assert evaluate("document.querySelector('#main h1')?.textContent === 'Trust / QC'")
+            assert evaluate("document.querySelector('.lab-banner a')?.getAttribute('aria-disabled') === 'true'")
+            assert evaluate("document.querySelector('.lab-title')?.getAttribute('aria-disabled') === 'true'")
+            phase["down"] = False
+            for _ in range(40):
+                if evaluate("document.body.dataset.disconnected === '0'"):
+                    break
+                time.sleep(0.2)
+            else:
+                pytest.fail("the page did not reconnect")
+            assert evaluate("location.hash === window.trustHash")
+            assert evaluate("document.querySelector('#main h1')?.textContent === 'Trust / QC'")
+            assert evaluate("!document.querySelector('.lab-title')?.hasAttribute('aria-disabled')")
+
+        profile = tmp_path / "browser-profile"
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/trust-qc"],
+            profile, ok=lambda d: 'data-ready="1"' in d and "Run log line for bam-qc" in d,
+            interact=inspect, timeout=90,
+        )
+
+
+@needs_chrome
+def test_hung_status_observations_count_as_missed_polls(tmp_path) -> None:
+    """Three unanswered polls disconnect the page within the polling budget."""
+
+    with _server(tmp_path, _sample()) as server:
+        kind, source = server.app.assets["/assets/lab.js"]
+        server.app.assets["/assets/lab.js"] = (
+            kind, source.replace(b"const POLL_MS = 15000;", b"const POLL_MS = 500;"),
+        )
+
+        def inspect(_command, evaluate) -> None:
+            evaluate("""(() => {
+              const original = window.fetch;
+              window.hangStatus = true;
+              window.fetch = (...args) => window.hangStatus && String(args[0]) === '/api/status'
+                ? new Promise(() => {}) : original.apply(window, args);
+            })()""")
+            for _ in range(40):
+                if evaluate("document.body.dataset.disconnected === '1'"):
+                    break
+                time.sleep(0.2)
+            else:
+                pytest.fail("three unanswered status polls did not disconnect the page")
+            assert evaluate("document.getElementById('status').textContent.includes('Lab server not responding')")
+            evaluate("window.hangStatus = false")
+            for _ in range(40):
+                if evaluate("document.body.dataset.disconnected === '0'"):
+                    break
+                time.sleep(0.2)
+            else:
+                pytest.fail("the page did not reconnect after status responses resumed")
+
+        profile = tmp_path / "browser-profile"
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/trust-qc"],
+            profile, ok=lambda d: 'data-ready="1"' in d and "Run log line for bam-qc" in d,
+            interact=inspect, timeout=90,
+        )
+
+
+@needs_chrome
+def test_late_compare_picker_is_disabled_until_status_recovers(tmp_path) -> None:
+    """A cohort response arriving after disconnection cannot add a live picker."""
+
+    phase = {"down": False}
+    with _server(tmp_path, _sample()) as server:
+        kind, source = server.app.assets["/assets/lab.js"]
+        server.app.assets["/assets/lab.js"] = (
+            kind, source.replace(b"const POLL_MS = 15000;", b"const POLL_MS = 500;"),
+        )
+        original_status = server.app.api.status
+
+        def status():
+            if phase["down"]:
+                raise OSError("synthetic disconnect")
+            return original_status()
+
+        server.app.api.status = status
+
+        def inspect(_command, evaluate) -> None:
+            evaluate(f"""(() => {{
+              const original = window.fetch;
+              window.fetch = (...args) => String(args[0]) === '/api/cohorts'
+                ? new Promise((resolve) => {{ window.releaseCohorts = () => resolve(new Response(
+                    JSON.stringify({{cohorts: [{{cohort_id: 'synthetic', cohort_version: 'synthetic:1', member_n: 10}}], unavailable: []}}),
+                    {{status: 200, headers: {{'Content-Type': 'application/json'}}}})); }})
+                : original.apply(window, args);
+              location.hash = '#/sample/{ID12}/compare';
+            }})()""")
+            for _ in range(20):
+                if evaluate("typeof window.releaseCohorts === 'function'"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("cohort listing request was not held")
+            phase["down"] = True
+            for _ in range(40):
+                if evaluate("document.body.dataset.disconnected === '1'"):
+                    break
+                time.sleep(0.2)
+            else:
+                pytest.fail("the page did not disconnect")
+            evaluate("window.releaseCohorts()")
+            for _ in range(20):
+                if evaluate("!!document.querySelector('select[aria-label=\"Cohort generation\"]')"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("late cohort picker did not render")
+            picker = "document.querySelector('select[aria-label=\"Cohort generation\"]')"
+            assert evaluate(f"{picker}.disabled && {picker}.getAttribute('aria-disabled') === 'true'")
+            phase["down"] = False
+            for _ in range(40):
+                if evaluate("document.body.dataset.disconnected === '0'"):
+                    break
+                time.sleep(0.2)
+            else:
+                pytest.fail("the page did not reconnect")
+            assert evaluate(f"!{picker}.disabled && !{picker}.hasAttribute('aria-disabled')")
+
+        profile = tmp_path / "browser-profile"
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/trust-qc"],
+            profile, ok=lambda d: 'data-ready="1"' in d and "Run log line for bam-qc" in d,
+            interact=inspect, timeout=90,
         )
 
 
