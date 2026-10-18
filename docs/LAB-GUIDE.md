@@ -1013,10 +1013,13 @@ The volume filled up during a step (exit 3, retryable). The staging directory wa
 
 ### TBX-LAB-012
 
-Another Lab writer is running (exit 3, retryable). Run, simulation, cohort
-changes, identity operations, and asset or calibration registration share the
-single `ROOT/lab/.lock`. The cause names the holder's command, run id, pid,
-step and start time. Wait for it to finish, or stop that process.
+Another Lab writer is running, or cohort selection changed repeatedly during
+a stored dry-run preview (exit 3, retryable). Run, simulation, cohort changes,
+identity operations, and asset or calibration registration share the single
+`ROOT/lab/.lock`. For a lock conflict, the cause names the holder's command,
+run id, pid, step and start time. Wait for it to finish, or stop that process.
+A dry run takes no lock; if cohort selection changes repeatedly during its
+selected-summary read, retry the preview after the cohort update finishes.
 
 ### TBX-LAB-013
 
