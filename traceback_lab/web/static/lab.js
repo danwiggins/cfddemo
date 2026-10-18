@@ -721,6 +721,9 @@
     document.addEventListener(type, (event) => {
       if (document.body.dataset.disconnected !== "1" || !(event.target instanceof Element) ||
           !event.target.matches("select[data-requires-server], #sample-switcher")) return;
+      // Keep keyboard escape and focus travel available to local Key and
+      // disclosures; every selection-changing key remains blocked.
+      if (type === "keydown" && ["Tab", "Escape", "F6"].includes(event.key)) return;
       event.preventDefault();
       event.stopImmediatePropagation();
     }, true);

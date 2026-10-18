@@ -37,7 +37,7 @@ def test_landing_responsive_clia_and_single_column_geometry(size, tmp_path) -> N
     with _server(tmp_path, _sample()) as server:
         profile = tmp_path / "browser-profile"
 
-        def inspect(_command, evaluate) -> None:
+        def inspect(command, evaluate) -> None:
             observed.update(evaluate("""(() => {
               const panel = document.querySelector('#main .clia-panel');
               const band = document.querySelector('#main .landing-band');
@@ -670,7 +670,7 @@ def test_disconnected_page_blocks_fetch_controls_until_reconnected(tmp_path) -> 
 
         server.app.api.status = status
 
-        def inspect(_command, evaluate) -> None:
+        def inspect(command, evaluate) -> None:
             evaluate("""(() => {
               const original = window.fetch;
               window.runLogFetches = 0;
@@ -708,6 +708,27 @@ def test_disconnected_page_blocks_fetch_controls_until_reconnected(tmp_path) -> 
             assert evaluate(f"!{button}.disabled && !document.getElementById('sample-switcher').disabled")
             evaluate(f"{button}.click()")
             assert evaluate("window.runLogFetches === 1")
+
+            evaluate("document.getElementById('sample-switcher').focus()")
+            phase["down"] = True
+            for _ in range(40):
+                if evaluate("document.body.dataset.disconnected === '1'"):
+                    break
+                time.sleep(0.2)
+            else:
+                pytest.fail("the page did not disconnect again")
+            assert evaluate("document.activeElement === document.getElementById('sample-switcher')")
+            _key(command, "Tab", "Tab", 9)
+            assert evaluate("document.activeElement === document.getElementById('key-button')")
+            _key(command, "Enter", "Enter", 13)
+            assert evaluate("document.getElementById('key-dialog').open")
+            _key(command, "Escape", "Escape", 27)
+            assert evaluate("!document.getElementById('key-dialog').open")
+            shift_tab = {"key": "Tab", "code": "Tab", "windowsVirtualKeyCode": 9,
+                         "nativeVirtualKeyCode": 9, "modifiers": 8}
+            command("Input.dispatchKeyEvent", {"type": "rawKeyDown", **shift_tab})
+            command("Input.dispatchKeyEvent", {"type": "keyUp", **shift_tab})
+            assert evaluate("document.activeElement !== document.getElementById('key-button')")
 
         profile = tmp_path / "browser-profile"
         _dom_cdp(
