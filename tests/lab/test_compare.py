@@ -50,7 +50,7 @@ def test_compare_pins_one_generation_and_gates_after_leave_one_out(
     generation = CohortGeneration(cohort_id="healthy", version=7, kind=kind, members=members)
     reads = []
     monkeypatch.setattr(web_api, "read_current", lambda store, cohort_id: (reads.append(cohort_id), generation)[1])
-    monkeypatch.setattr(cohorts, "member_for_generation", lambda store, generation, source_id: members[0])
+    monkeypatch.setattr(cohorts, "member_for_generation", lambda store, generation, source_id, **_: members[0])
     envelope = ResultEnvelope(
         algorithm_id="fragment-size", algorithm_version="1", status="ok",
         provenance=provenance(
@@ -138,7 +138,7 @@ def test_compare_rejects_changed_full_input_or_source(
         aligner_identity="minimap2 2.28; samtools 1.20",
         results=(_result(target_source, 101.0),),
     )
-    monkeypatch.setattr(cohorts, "member_for_generation", lambda store, generation, source_id: target)
+    monkeypatch.setattr(cohorts, "member_for_generation", lambda store, generation, source_id, **_: target)
     api = web_api.LabApi(LabStore(tmp_path))
     monkeypatch.setattr(api, "_resolve", lambda id12: (_TARGET, []))
     monkeypatch.setattr(api, "_id12s", lambda: {_TARGET: _TARGET[:12]})
@@ -214,7 +214,7 @@ def test_real_store_list_and_compare_fail_closed_after_pointer_damage(tmp_path, 
     assert listing["unavailable"][0]["problem"]["code"] == "TBX-LAB-022"
 
     monkeypatch.setattr(api, "_resolve", lambda id12: (_TARGET, []))
-    monkeypatch.setattr(web_api.views, "load_sample", lambda store, source_id: SimpleNamespace(example=False))
+    monkeypatch.setattr(web_api.views, "load_sample", lambda store, source_id: SimpleNamespace(example=False, full=SimpleNamespace(input_id=f"{101:064x}")))
     selected_broken = api.compare(_TARGET[:12], "broken")
     assert selected_broken["state"] == "cohort_unavailable" and selected_broken["metrics"] == []
 
@@ -236,7 +236,7 @@ def test_compare_cohort_unavailable_has_no_metrics(tmp_path, monkeypatch, cohort
             raise problem
         return None
     monkeypatch.setattr(web_api, "read_current", current)
-    monkeypatch.setattr(web_api.views, "load_sample", lambda store, source_id: SimpleNamespace(example=False))
+    monkeypatch.setattr(web_api.views, "load_sample", lambda store, source_id: SimpleNamespace(example=False, full=SimpleNamespace(input_id=f"{101:064x}")))
     root = tmp_path / "root with spaces"
     api = web_api.LabApi(LabStore(root))
     monkeypatch.setattr(api, "_resolve", lambda id12: (_TARGET, []))
@@ -255,12 +255,12 @@ def test_compare_cohort_unavailable_has_no_metrics(tmp_path, monkeypatch, cohort
 def test_compare_target_unavailable_has_no_metrics(tmp_path, monkeypatch) -> None:
     generation = CohortGeneration(cohort_id="healthy", version=7, members=())
     monkeypatch.setattr(web_api, "read_current", lambda store, cohort_id: generation)
-    monkeypatch.setattr(web_api.views, "load_sample", lambda store, source_id: SimpleNamespace(example=False))
+    monkeypatch.setattr(web_api.views, "load_sample", lambda store, source_id: SimpleNamespace(example=False, full=SimpleNamespace(input_id=f"{101:064x}")))
     problem = LabProblem(
         "TBX-LAB-020", cause="stored source record is malformed",
         fix="Restore the source record matching its filename before cohort add/build",
     )
-    def unavailable(store, generation, source_id):
+    def unavailable(store, generation, source_id, **_):
         raise problem
     monkeypatch.setattr(cohorts, "member_for_generation", unavailable)
     api = web_api.LabApi(LabStore(tmp_path))
@@ -283,7 +283,10 @@ def test_compare_missing_full_input_has_prose_recovery(tmp_path, monkeypatch) ->
     }))
     generation = CohortGeneration(cohort_id="healthy", version=7, members=())
     monkeypatch.setattr(web_api, "read_current", lambda store, cohort_id: generation)
-    monkeypatch.setattr(web_api.views, "load_sample", lambda store, source_id: SimpleNamespace(example=False))
+    monkeypatch.setattr(web_api.views, "load_sample", lambda store, source_id: SimpleNamespace(example=False, full=SimpleNamespace(input_id=f"{101:064x}")))
+    monkeypatch.setattr(cohorts, "member_for_generation", lambda store, generation, source_id, **_: (
+        _ for _ in ()
+    ).throw(ValueError("admitted source has no full aligned input")))
     api = web_api.LabApi(store)
     monkeypatch.setattr(api, "_resolve", lambda id12: (_TARGET, []))
     monkeypatch.setattr(api, "_id12s", lambda: {_TARGET: _TARGET[:12]})

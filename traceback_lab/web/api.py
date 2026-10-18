@@ -22,7 +22,12 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .. import views
-from ..completed_runs import completed_for_source, completion_snapshot
+from ..completed_runs import (
+    completed_for_source,
+    completion_history_unavailable,
+    completion_snapshot,
+    global_completion_history_unavailable,
+)
 from ..cohort_contracts import CohortGeneration, CohortMember, MetricProjection, project_metric
 from ..cohort_density import project_density_band
 from ..cohorts import list_cohorts, member_for_generation_or_independent, member_from_store, pon_dependent_algorithms, read_current
@@ -583,10 +588,12 @@ class LabApi:
             sample = views.load_sample(self.store, source_id, completion_index=completion_index)
             if sample is None:
                 unavailable = completion_index.get(source_id)
-                if unavailable is not None:
+                uncertain = completion_history_unavailable(self.store, source_id, record, unavailable)
+                if uncertain or unavailable is not None:
                     rows.append({
-                        "id12": id12, "state": "completed_input_unavailable",
-                        "run_utc": unavailable["completed_utc"], "depth_x": None,
+                        "id12": id12,
+                        "state": "completion_history_unavailable" if uncertain else "completed_input_unavailable",
+                        "run_utc": "" if uncertain else unavailable["completed_utc"], "depth_x": None,
                         "example": bool(record.get("example")),
                         "counts": {"ok": 0, "skipped": 0, "failed": 0},
                         "outside_reference": 0, "controls": {"spike": None, "split": False},
@@ -635,11 +642,17 @@ class LabApi:
                 }
             )
         rows.sort(key=lambda row: row["run_utc"], reverse=True)
+        history_unavailable = global_completion_history_unavailable(self.store, completed)
         default_id12 = self._id12s().get(completed["source_id"]) if completed else None
-        if default_id12 not in {row["id12"] for row in rows if row.get("state") != "completed_input_unavailable"}:
+        if history_unavailable or default_id12 not in {
+            row["id12"] for row in rows if row.get("state") not in (
+                "completed_input_unavailable", "completion_history_unavailable",
+            )
+        }:
             default_id12 = None
         return {"samples": rows, "default_sample_id12": default_id12,
-                "completed_input_unavailable": bool(completed and default_id12 is None),
+                "completed_input_unavailable": bool(completed and default_id12 is None and not history_unavailable),
+                "completion_history_unavailable": history_unavailable,
                 "root_has_runs": bool(self.store.run_ids())}
 
     def _resolve(self, id12: str) -> tuple[str | None, list[str]]:
@@ -666,6 +679,9 @@ class LabApi:
         if sample is None:
             record = source_record(self.store, source_id) or {}
             completed = completed_for_source(self.store, source_id, record)
+            if completion_history_unavailable(self.store, source_id, record, completed):
+                return {"found": True, "state": "completion_history_unavailable",
+                        "id12": self._id12s()[source_id], "source_id": source_id}
             if completed is not None:
                 return {"found": True, "state": "completed_input_unavailable",
                         "id12": self._id12s()[source_id], "source_id": source_id,

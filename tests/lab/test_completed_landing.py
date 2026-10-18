@@ -201,3 +201,75 @@ def test_supported_large_run_log_can_be_the_completed_default(tmp_path) -> None:
     (store.runs_dir / f"{run_id}.jsonl").write_bytes(raw)
     assert LabApi(store).samples()["default_sample_id12"] == source[:12]
     record_completion(store, run_id, source, input_id)
+
+
+@pytest.mark.parametrize("damage", ("corrupt_middle", "removed"))
+def test_unreadable_completed_history_never_selects_new_active_input(tmp_path, damage) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    source, completed_input, active_input = "a" * 64, "8" * 64, "9" * 64
+    _source(store, source, (completed_input, "2026-10-17T10:00:00Z"),
+            (active_input, "2026-10-18T10:00:00Z"))
+    run_id = "r-20261017-1000-abcd"
+    _run(store, run_id, source, completed_input, "2026-10-17T10:00:00Z")
+    record_completion(store, run_id, source, completed_input)
+    path = store.runs_dir / f"{run_id}.jsonl"
+    if damage == "corrupt_middle":
+        lines = path.read_bytes().splitlines()
+        path.write_bytes(b"\n".join((lines[0], lines[1], b"{malformed", lines[2])) + b"\n")
+    else:
+        path.unlink()
+
+    api = LabApi(store)
+    assert api.sample(source[:12])["state"] == "completion_history_unavailable"
+    listing = api.samples()
+    assert listing["default_sample_id12"] is None
+    assert listing["completion_history_unavailable"] is True
+    assert listing["samples"][0]["state"] == "completion_history_unavailable"
+
+
+@needs_chrome
+def test_newer_unreadable_completion_blocks_older_default_but_not_older_explicit(tmp_path) -> None:
+    store = LabStore(tmp_path / "root")
+    store.ensure()
+    older, newer = "a" * 64, "b" * 64
+    old_input, new_input = "8" * 64, "9" * 64
+    _source(store, older, (old_input, "2026-10-17T10:00:00Z"))
+    _source(store, newer, (new_input, "2026-10-18T10:00:00Z"))
+    old_run, new_run = "r-20261017-1000-abcd", "r-20261018-1000-abcd"
+    _run(store, old_run, older, old_input, "2026-10-17T10:00:00Z")
+    record_completion(store, old_run, older, old_input)
+    _run(store, new_run, newer, new_input, "2026-10-18T10:00:00Z")
+    record_completion(store, new_run, newer, new_input)
+    (store.runs_dir / f"{new_run}.jsonl").unlink()
+
+    api = LabApi(store)
+    listing = api.samples()
+    assert listing["default_sample_id12"] is None
+    assert listing["completion_history_unavailable"] is True
+    assert api.sample(older[:12])["full_input_id"] == old_input
+    assert api.sample(newer[:12])["state"] == "completion_history_unavailable"
+    with RunningLabServer(store) as server:
+        home = _dom(server, tmp_path / "browser-home", route="/",
+                    want=lambda page: "Completion history unavailable" in page)
+        detail = _dom(server, tmp_path / "browser-detail", route=f"/?sample={newer[:12]}",
+                      want=lambda page: f"Sample {newer[:12]} exists" in page)
+    assert "latest recorded completion cannot be verified" in home
+    assert f"Sample {newer[:12]} exists" in detail and "Unknown sample" not in detail
+
+
+def test_valid_run_wins_when_saved_pointer_has_later_file_mtime(tmp_path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    source, input_id = "a" * 64, "8" * 64
+    _source(store, source, (input_id, "2026-10-17T10:00:00Z"))
+    run_id = "r-20261017-1000-abcd"
+    _run(store, run_id, source, input_id, "2026-10-17T10:00:00Z")
+    record_completion(store, run_id, source, input_id)
+    os.utime(store.runs_dir / f"{run_id}.jsonl", ns=(1, 1))
+
+    api = LabApi(store)
+    assert api.sample(source[:12])["full_input_id"] == input_id
+    listing = api.samples()
+    assert listing["default_sample_id12"] == source[:12]
+    assert listing["completion_history_unavailable"] is False

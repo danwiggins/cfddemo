@@ -23,6 +23,7 @@
     samples: [],
     defaultSampleId12: null,
     completedInputUnavailable: false,
+    completionHistoryUnavailable: false,
     sample: null,
     generationAtLoad: null,
     lastStatus: null,
@@ -183,7 +184,7 @@
       ...(state.sample && state.sample.found ? [] : [h("option", { value: "", selected: true, disabled: true }, "Select a sample")]),
       ...state.samples.map((row) =>
         h("option", { value: row.id12, selected: state.sample && state.sample.id12 === row.id12 },
-          `${row.id12} · ${row.run_utc ? row.run_utc.slice(0, 10) : "—"} · ${row.depth_x !== null ? row.depth_x.toFixed(2) + "x" : "—"}${row.example ? " · EXAMPLE (synthetic)" : ""}${row.state === "completed_input_unavailable" ? " · completed input unavailable" : ""}`)
+          `${row.id12} · ${row.run_utc ? row.run_utc.slice(0, 10) : "—"} · ${row.depth_x !== null ? row.depth_x.toFixed(2) + "x" : "—"}${row.example ? " · EXAMPLE (synthetic)" : ""}${row.state === "completed_input_unavailable" ? " · completed input unavailable" : row.state === "completion_history_unavailable" ? " · completion history unavailable" : ""}`)
       )
     );
   }
@@ -210,7 +211,7 @@
 
   function renderNav() {
     const nav = document.getElementById("lenses");
-    const sample = state.sample && state.sample.found && state.sample.state !== "completed_input_unavailable"
+    const sample = state.sample && state.sample.found && !["completed_input_unavailable", "completion_history_unavailable"].includes(state.sample.state)
       ? state.sample : null;
     nav.replaceChildren();
     // Lens tabs belong to a sample's lens routes; the landing page has none (spec layout).
@@ -250,6 +251,13 @@
       } else main.append(h("section", { class: "panel loading-lens" }, h("p", {}, "Loading…")));
       return;
     }
+    if (route.name === "home" && !route.id12 && state.completionHistoryUnavailable) {
+      main.append(h("h1", { class: "view-title" }, "Completion history unavailable"),
+        h("p", { class: "problem" }, "The latest recorded completion cannot be verified. Restore its run log or rerun the sample before viewing a default result."),
+        h("ul", {}, ...state.samples.map((row) => h("li", {},
+          h("a", { href: `#/?sample=${row.id12}` }, row.id12)))));
+      return;
+    }
     if (route.name === "home" && !route.id12 && state.completedInputUnavailable) {
       main.append(h("h1", { class: "view-title" }, "Latest completed input unavailable"),
         h("p", { class: "problem" }, "The latest completed run's primary input cannot be read. Restore that input or rerun the sample."),
@@ -280,6 +288,12 @@
     if (sample.state === "completed_input_unavailable") {
       main.append(h("h1", { class: "view-title" }, "Completed input unavailable"),
         h("p", { class: "problem" }, `Sample ${sample.id12} exists, but its completed run's primary input cannot be read. Restore that input or rerun the sample.`),
+        h("p", {}, h("a", { href: "#/" }, "Back to Lab home")));
+      return;
+    }
+    if (sample.state === "completion_history_unavailable") {
+      main.append(h("h1", { class: "view-title" }, "Completion history unavailable"),
+        h("p", { class: "problem" }, `Sample ${sample.id12} exists, but its recorded completion cannot be verified. Restore its run log or rerun the sample.`),
         h("p", {}, h("a", { href: "#/" }, "Back to Lab home")));
       return;
     }
@@ -773,6 +787,7 @@
       state.defaultSampleId12 = listing.default_sample_id12 !== undefined
         ? listing.default_sample_id12 : (listing.samples[0] && listing.samples[0].id12) || null;
       state.completedInputUnavailable = !!listing.completed_input_unavailable;
+      state.completionHistoryUnavailable = !!listing.completion_history_unavailable;
       state.loading = false;
       setStatus("");
       await poll();

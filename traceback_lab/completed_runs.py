@@ -89,6 +89,51 @@ def _order(candidate: dict[str, Any]) -> tuple[str, int, str]:
     return candidate["completed_utc"], candidate["completed_mtime_ns"], candidate["run_id"]
 
 
+def _advisory_pointer(value: Any) -> dict[str, Any] | None:
+    """A recorded claim can signal uncertainty, never authorize a selection."""
+
+    if not isinstance(value, dict):
+        return None
+    run_id, source_id, input_id, utc, mtime = (
+        value.get(key) for key in (
+            "run_id", "source_id", "input_id", "completed_utc", "completed_mtime_ns",
+        )
+    )
+    if (not isinstance(run_id, str) or not _RUN.fullmatch(run_id)
+            or not isinstance(source_id, str) or not _HASH.fullmatch(source_id)
+            or not isinstance(input_id, str) or not _HASH.fullmatch(input_id)
+            or not isinstance(utc, str) or not _UTC.fullmatch(utc)
+            or not isinstance(mtime, int) or isinstance(mtime, bool) or mtime < 0):
+        return None
+    return {"run_id": run_id, "source_id": source_id, "input_id": input_id,
+            "completed_utc": utc, "completed_mtime_ns": mtime}
+
+
+def completion_history_unavailable(
+    store: LabStore, source_id: str, record: dict[str, Any],
+    selected: dict[str, Any] | None,
+) -> bool:
+    """Fail closed if a newer recorded completion has no validated terminal log."""
+
+    claims = (record.get("last_completed_run"), _read_json(store.lab / "last_completed_run.json", 4096))
+    for raw in claims:
+        claim = _advisory_pointer(raw)
+        if claim is None or claim["source_id"] != source_id:
+            continue
+        if selected is None or (claim["run_id"] != selected["run_id"]
+                                and _order(claim) > _order(selected)):
+            return True
+    return False
+
+
+def global_completion_history_unavailable(store: LabStore, selected: dict[str, Any] | None) -> bool:
+    claim = _advisory_pointer(_read_json(store.lab / "last_completed_run.json", 4096))
+    return claim is not None and (selected is None or (
+        (claim["run_id"], claim["source_id"]) != (selected["run_id"], selected["source_id"])
+        and _order(claim) > _order(selected)
+    ))
+
+
 def completion_snapshot(store: LabStore) -> tuple[dict[str, dict[str, Any]], dict[str, Any] | None]:
     """One bounded-per-log scan shared by all rows in a sample listing."""
     by_source: dict[str, dict[str, Any]] = {}

@@ -165,7 +165,7 @@ def _published_agreement(tmp_path, monkeypatch):
     monkeypatch.setattr(web_api, "read_current", lambda store, cohort_id: generation)
     # The fixture target copies parameter hashes from selected publications;
     # compatibility keys and cohort peers are supplied at the snapshot boundary.
-    monkeypatch.setattr(web_api, "_cohort_target", lambda store, generation, source: (target, None))
+    monkeypatch.setattr(web_api, "_cohort_target", lambda store, generation, source, **_: (target, None))
     return store, id12
 
 
@@ -219,8 +219,8 @@ def test_stale_copy_number_binding_is_explained_on_agreement_page(tmp_path, monk
     store, id12 = _published_agreement(tmp_path, monkeypatch)
     original_target = web_api._cohort_target
 
-    def stale_target(store, generation, source_id):
-        target, problem = original_target(store, generation, source_id)
+    def stale_target(store, generation, source_id, **kwargs):
+        target, problem = original_target(store, generation, source_id, **kwargs)
         results = tuple(
             result.model_copy(update={"parameters_sha256": "0" * 64})
             if result.algorithm_id == "copy-number" else result
