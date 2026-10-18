@@ -21,6 +21,8 @@
   ];
   const state = {
     samples: [],
+    defaultSampleId12: null,
+    completedInputUnavailable: false,
     sample: null,
     generationAtLoad: null,
     lastStatus: null,
@@ -143,7 +145,7 @@
     const revision = ++state.navigationRevision;
     const requestedHash = location.hash || "#/";
     const route = parseRoute();
-    const target = route.id12 || (state.samples[0] && state.samples[0].id12) || null;
+    const target = route.id12 || (route.name === "home" ? state.defaultSampleId12 : null);
     const sample = route.name === "home" || route.name === "lens" ? await loadSample(target) : state.sample;
     if (revision !== state.navigationRevision || (location.hash || "#/") !== requestedHash) return;
     if (sample !== state.sample) state.runLogLines.clear();
@@ -178,6 +180,7 @@
   function renderSwitcher() {
     const select = document.getElementById("sample-switcher");
     select.replaceChildren(
+      ...(state.sample && state.sample.found ? [] : [h("option", { value: "", selected: true, disabled: true }, "Select a sample")]),
       ...state.samples.map((row) =>
         h("option", { value: row.id12, selected: state.sample && state.sample.id12 === row.id12 },
           `${row.id12} · ${row.run_utc ? row.run_utc.slice(0, 10) : "—"} · ${row.depth_x !== null ? row.depth_x.toFixed(2) + "x" : "—"}${row.example ? " · EXAMPLE (synthetic)" : ""}`)
@@ -246,8 +249,22 @@
       } else main.append(h("section", { class: "panel loading-lens" }, h("p", {}, "Loading…")));
       return;
     }
+    if (route.name === "home" && !route.id12 && state.completedInputUnavailable) {
+      main.append(h("h1", { class: "view-title" }, "Latest completed input unavailable"),
+        h("p", { class: "problem" }, "The latest completed run's primary input cannot be read. Restore that input or rerun the sample."),
+        h("ul", {}, ...state.samples.map((row) => h("li", {},
+          h("a", { href: `#/?sample=${row.id12}` }, row.id12)))));
+      return;
+    }
     if (!state.samples.length && route.name === "home") {
       main.append(...emptyState());
+      return;
+    }
+    if (route.name === "home" && !route.id12 && !state.defaultSampleId12) {
+      main.append(h("h1", { class: "view-title" }, "No completed Lab run yet"),
+        h("p", { class: "empty" }, "The registered samples below have no completed analysis run. A running or interrupted analysis can be opened explicitly."),
+        h("ul", {}, ...state.samples.map((row) => h("li", {},
+          h("a", { href: `#/?sample=${row.id12}` }, row.id12)))));
       return;
     }
     if (route.name === "clia" && window.TracebackLabViews && window.TracebackLabViews.clia) { main.append(...window.TracebackLabViews.clia()); return; }
@@ -746,6 +763,9 @@
       render();
       const listing = await api("/api/samples");
       state.samples = listing.samples;
+      state.defaultSampleId12 = listing.default_sample_id12 !== undefined
+        ? listing.default_sample_id12 : (listing.samples[0] && listing.samples[0].id12) || null;
+      state.completedInputUnavailable = !!listing.completed_input_unavailable;
       state.loading = false;
       setStatus("");
       await poll();

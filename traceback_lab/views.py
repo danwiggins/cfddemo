@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .completed_runs import completed_for_source
 from .envelope import ResultEnvelope
 from .ingest import id12_for, input_manifest, source_record
 from .interpretation.engine import Library, classify, load_library
@@ -188,12 +189,22 @@ class SampleView:
         return [item for item in self.derived if item.transform == transform]
 
 
-def load_sample(store: LabStore, source_id: str) -> SampleView | None:
+def load_sample(store: LabStore, source_id: str, *,
+                completion_index: Mapping[str, Mapping[str, Any]] | None = None) -> SampleView | None:
     record = source_record(store, source_id)
     if record is None:
         return None
     inputs = sorted(record.get("inputs", []), key=lambda entry: entry.get("used_utc", ""), reverse=True)
-    full_input = next((entry["input_id"] for entry in inputs if input_manifest(store, entry["input_id"])), None)
+    completed = (completion_index.get(source_id) if completion_index is not None
+                 else completed_for_source(store, source_id, record))
+    completed_input = completed["input_id"] if completed else None
+    if completed_input:
+        if (not any(entry.get("input_id") == completed_input for entry in inputs)
+                or not input_manifest(store, completed_input)):
+            return None  # never relabel a newer active input as the completed one
+        full_input = completed_input
+    else:
+        full_input = next((entry["input_id"] for entry in inputs if input_manifest(store, entry["input_id"])), None)
     if full_input is None:
         return None
     manifest = input_manifest(store, full_input) or {}

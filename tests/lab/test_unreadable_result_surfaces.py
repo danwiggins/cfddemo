@@ -285,7 +285,7 @@ def test_failure_detail_stays_out_of_curve_and_stability_labels(route, tmp_path)
 def test_malformed_stored_result_is_visible_without_alignment(route, copy_text, tmp_path) -> None:
     store = _malformed_store(tmp_path)
     id12 = LabApi(store).samples()["samples"][0]["id12"]
-    path = None if route == "home" else f"/sample/{id12}/{route}"
+    path = f"/?sample={id12}" if route == "home" else f"/sample/{id12}/{route}"
     with RunningLabServer(store) as server:
         dom = _dom(server, tmp_path / "browser", route=path)
     assert f"{copy_text} (sample {id12})" in dom
@@ -300,7 +300,7 @@ def test_malformed_stored_result_is_visible_without_alignment(route, copy_text, 
 def test_ambiguous_legacy_result_is_visible_across_surfaces(route, copy_text, tmp_path) -> None:
     store = _ambiguous_store(tmp_path)
     id12 = LabApi(store).samples()["samples"][0]["id12"]
-    path = None if route == "home" else f"/sample/{id12}/{route}"
+    path = f"/?sample={id12}" if route == "home" else f"/sample/{id12}/{route}"
     with RunningLabServer(store) as server:
         dom = _dom(server, tmp_path / "browser", route=path)
     assert copy_text in dom

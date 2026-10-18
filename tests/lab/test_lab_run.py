@@ -26,6 +26,7 @@ from traceback_lab import registry
 from traceback_lab import doctor
 from traceback_lab import run_command as run_module
 from traceback_lab.store import LabStore
+from traceback_lab.web.api import LabApi
 from traceback_runner import cli as signed_cli
 
 REPO = Path(__file__).resolve().parents[2]
@@ -162,6 +163,9 @@ def test_run_aligns_publishes_and_reruns_from_cache(lab_world, capsys, monkeypat
     assert block[-1].startswith("NEXT    traceback lab")
 
     store = LabStore(root)
+    listing = LabApi(store).samples()
+    assert listing["default_sample_id12"] == listing["samples"][0]["id12"]
+    assert (store.lab / "last_completed_run.json").is_file()
     (input_dir,) = [p for p in store.inputs_dir.iterdir() if p.is_dir()]
     manifest = json.loads((input_dir / "manifest.json").read_bytes())
     assert manifest["records"] == {"ubam": 1800, "aligned_primary_plus_unmapped": 1800}
