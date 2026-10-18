@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .completed_runs import completed_for_source
+from .completed_runs import completed_for_source, completion_history_unavailable
 from .envelope import ResultEnvelope
 from .ingest import id12_for, input_manifest, source_record
 from .interpretation.engine import Library, classify, load_library
@@ -198,6 +198,8 @@ def load_sample(store: LabStore, source_id: str, *,
     inputs = sorted(record.get("inputs", []), key=lambda entry: entry.get("used_utc", ""), reverse=True)
     completed = (completion_index.get(source_id) if completion_index is not None
                  else completed_for_source(store, source_id, record))
+    if completion_history_unavailable(store, source_id, record, completed):
+        return None
     completed_input = completed["input_id"] if completed else None
     if completed_input:
         if (not any(entry.get("input_id") == completed_input for entry in inputs)
