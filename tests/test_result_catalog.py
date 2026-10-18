@@ -682,8 +682,15 @@ def _published_catalog_objects(catalog: ResultCatalog) -> list[Path]:
 def _kill_after_catalog_rename(catalog: ResultCatalog, *, prepared: bool) -> Path:
     """Leave a real post-rename orphan, without Python's exception cleanup."""
     exit_code = 73
+    root = catalog.root
+    import_roots = catalog.import_roots
+    trust_store = catalog.trust_store
+    catalog.close()  # Do not fork with a shared catalog flock descriptor.
 
     def child() -> None:
+        child_catalog = ResultCatalog(
+            root, import_roots=import_roots, trust_store=trust_store
+        )
         original = catalog_module.rename_directory_exclusive_at
 
         def rename_then_die(parent_fd: int, source: str, destination: str) -> None:
@@ -691,12 +698,16 @@ def _kill_after_catalog_rename(catalog: ResultCatalog, *, prepared: bool) -> Pat
             os._exit(exit_code)
 
         catalog_module.rename_directory_exclusive_at = rename_then_die
-        (_prepare if prepared else _import)(catalog)
+        (_prepare if prepared else _import)(child_catalog)
 
     assert run_in_child(child) == exit_code
-    assert catalog.query(CatalogQuery()).empty
-    objects = _published_catalog_objects(catalog)
+    reopened = ResultCatalog(
+        root, import_roots=import_roots, trust_store=trust_store
+    )
+    assert reopened.query(CatalogQuery()).empty
+    objects = _published_catalog_objects(reopened)
     assert len(objects) == 1
+    reopened.close()
     return objects[0]
 
 
@@ -756,6 +767,41 @@ def test_catalog_rename_rejects_same_bytes_replacement_inode(
     assert replaced
     assert renamed
     assert catalog.query(CatalogQuery()).empty
+
+
+@pytest.mark.parametrize("prepared", [False, True], ids=["import", "prepare"])
+def test_catalog_rejects_changed_bytes_before_opening_staging_descriptor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prepared: bool
+) -> None:
+    catalog, _, _ = _catalog(tmp_path)
+    original_publish = catalog_module._publish_sealed_object
+    substituted = False
+
+    def swap_before_open(
+        objects_fd: int,
+        temporary: Path,
+        object_name: str,
+        bundle_sha256: str,
+        manifest_sha256: str,
+    ) -> None:
+        nonlocal substituted
+        displaced = temporary.with_name(f"{temporary.name}-verified")
+        temporary.rename(displaced)
+        shutil.copytree(displaced, temporary)
+        manifest = temporary / "bundle-manifest.json"
+        manifest.write_bytes(manifest.read_bytes() + b"\n")
+        substituted = True
+        original_publish(
+            objects_fd, temporary, object_name, bundle_sha256, manifest_sha256
+        )
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(catalog_module, "_publish_sealed_object", swap_before_open)
+        with pytest.raises(CatalogFilesystemError):
+            (_prepare if prepared else _import)(catalog)
+    assert substituted
+    assert catalog.query(CatalogQuery()).empty
+    assert _published_catalog_objects(catalog) == []
 
 
 @pytest.mark.parametrize("prepared", [False, True], ids=["import", "prepare"])
