@@ -1,5 +1,6 @@
 """Crash and read-boundary checks for cohort member selector publication."""
 
+import json
 import os
 import select
 import signal
@@ -16,6 +17,7 @@ from traceback_lab.problems import LabProblem
 from traceback_lab.store import (MAX_COHORT_SELECTION_JOURNAL_BYTES, LabStore,
                                  ResultOrderUnavailable, SelectionSnapshotChanged)
 from traceback_lab.views import selected_results
+from traceback_runner import cli as signed_cli
 
 
 def _panel(sources: tuple[str, ...]) -> pon.PonBuild:
@@ -308,9 +310,10 @@ def test_unsafe_journal_blocks_readers_and_next_writer(
         journal.symlink_to(target)
     with pytest.raises(ResultOrderUnavailable):
         selected_results(LabStore(tmp_path), input_id)
-    with pytest.raises(ResultOrderUnavailable):
+    with pytest.raises(LabProblem) as caught:
         with LabStore(tmp_path).writer("blocked by journal", "r-20261017-0006-abcd"):
             pass
+    assert caught.value.code == "TBX-LAB-022"
     assert selector.read_bytes() == original
     assert read_current(store, "healthy-v1") == previous
 
@@ -393,3 +396,52 @@ def test_malformed_member_selector_is_actionable_cohort_problem(
     assert "Restore" in caught.value.fix
     assert read_current(store, "healthy-v1") == previous
     assert not store.cohort_selection_journal_file.exists()
+
+
+@pytest.mark.parametrize("damage", ["malformed", "oversized", "symlink"])
+def test_damaged_pending_journal_cli_refuses_with_repair_guidance_before_mutation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], damage: str,
+) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    cohort = store.lab / "cohorts" / "healthy-v1"
+    cohort.mkdir(parents=True)
+    pointer = cohort / "current.json"
+    pointer.write_bytes(b'{"version":1}')
+    store.last_run_file.write_bytes(b"prior run pointer")
+    store.active_file.write_bytes(b"prior active heartbeat")
+    before_generation = store.generation()
+    journal = store.cohort_selection_journal_file
+    if damage == "malformed":
+        journal.write_bytes(b"{bad json")
+    elif damage == "oversized":
+        with journal.open("wb") as stream:
+            stream.truncate(MAX_COHORT_SELECTION_JOURNAL_BYTES + 1)
+    else:
+        target = tmp_path / "external-journal"
+        target.write_bytes(b"external sentinel")
+        journal.symlink_to(target)
+    before_journal = journal.read_bytes() if damage == "malformed" else None
+    before_size = journal.stat().st_size
+
+    code = signed_cli.main([
+        "lab", "cohort", "build", "--cohort", "healthy-v1", "--root", str(tmp_path), "--json",
+    ])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 3
+    assert payload["data"]["code"] == "TBX-LAB-022"
+    assert "pending-cohort-selections.json" in payload["data"]["fix"]
+    assert "known-good backup" in payload["data"]["fix"]
+    assert "ResultOrderUnavailable" not in json.dumps(payload)
+    if damage == "symlink":
+        assert str(target) not in json.dumps(payload)
+        assert journal.is_symlink() and target.read_bytes() == b"external sentinel"
+    else:
+        assert journal.is_file() and journal.stat().st_size == before_size
+        if before_journal is not None:
+            assert journal.read_bytes() == before_journal
+    assert pointer.read_bytes() == b'{"version":1}'
+    assert store.last_run_file.read_bytes() == b"prior run pointer"
+    assert store.active_file.read_bytes() == b"prior active heartbeat"
+    assert store.generation() == before_generation
+    assert not store.runs_dir.exists()

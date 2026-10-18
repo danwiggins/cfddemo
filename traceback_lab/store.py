@@ -781,7 +781,18 @@ class LabStore:
                 raise self._busy_problem() from exc
             # Recover a killed cohort build before this writer changes any
             # public pointer, run-log head, or active heartbeat.
-            self.recover_pending_cohort_selection()
+            try:
+                self.recover_pending_cohort_selection()
+            except ResultOrderUnavailable as exc:
+                raise LabProblem(
+                    "TBX-LAB-022",
+                    cause="pending cohort selection transaction cannot be safely recovered",
+                    fix=("Inspect ROOT/lab/pending-cohort-selections.json, ROOT/lab/cohort-selection-epoch, "
+                         "and the matching cohort pointer and generation; restore damaged files from a "
+                         "known-good backup before retrying"),
+                    data={"field": "pending cohort selection transaction",
+                          "journal": "pending-cohort-selections.json"},
+                ) from exc
             lock = WriterLock(self, command, run_id, step, heartbeat_s)
             # One small pointer so readers find the newest run without a scan.
             write_atomic(self.last_run_file, canonical_json_bytes({"run_id": run_id, "command": command}))
