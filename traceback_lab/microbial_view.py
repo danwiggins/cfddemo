@@ -9,14 +9,17 @@ import re
 from pathlib import Path
 from typing import Any
 
-from .algorithms.microbial import MICROBIAL, _tool
+from traceback_runner.serialization import canonical_json_bytes
+
+from .algorithms.microbial import MICROBIAL
+from .cohorts import _execution_plan
 from .cohort_contracts import CohortGeneration, CohortMember, CohortResult
 from .file_access import open_regular_no_follow
-from .ingest import resolve_reference
+from .ingest import input_manifest, resolve_reference
 from .interpretation.engine import COHORT_MIN
 from .microbial_db import MicrobialDbError, MicrobialDbReceiptChanged, RECEIPT_RECOVERY, inspect_database
 from .problems import LabProblem
-from .registry import ToolPin, execution_identity
+from .registry import execution_identity
 from .store import LabStore
 from .views import SampleView
 
@@ -149,11 +152,6 @@ def profile_for_sample(store: LabStore, sample: SampleView, generation: CohortGe
     if envelope.status != "ok":
         return {"state": "measurement_unavailable", "reason": envelope.skip_message or "Microbial measurement unavailable",
                 "taxa": []}
-    kraken = _tool("kraken2")
-    bracken = _tool("bracken")
-    if kraken is None or bracken is None:
-        return {"state": "tool_unavailable", "reason": "Kraken2/Bracken tools or required upstream source-install helpers are unavailable; restore the pinned toolchain",
-                "taxa": []}
     summary = sample.full.results.get("read-summary")
     if summary is None or summary.status != "ok":
         return {"state": "upstream_unavailable", "reason": "Selected read summary is unavailable; rerun it before viewing this microbial profile",
@@ -161,27 +159,87 @@ def profile_for_sample(store: LabStore, sample: SampleView, generation: CohortGe
     try:
         database = inspect_database(store, verify_bytes=False)
         reference = resolve_reference(store.root, envelope.provenance.reference_id, example=True)
-        upstream = summary.provenance.parameters_sha256
-        expected = execution_identity(
-            MICROBIAL, reference_sha256=reference.sha256, asset_sha256s=[database.sha256],
-            upstream=[{"algorithm_id": "read-summary", "parameters_sha256": upstream}],
-            tool_pins=[ToolPin("kraken2", kraken[1], "kraken2-mit").identity(),
-                       ToolPin("bracken", bracken[1], "bracken-gpl3").identity()],
-        )
     except MicrobialDbReceiptChanged:
         return {"state": "asset_unavailable", "reason": RECEIPT_RECOVERY, "taxa": []}
     except (MicrobialDbError, LabProblem, OSError, ValueError):
         return {"state": "asset_unavailable", "reason": "Pinned microbial database or reference is unavailable",
                 "taxa": []}
-    if (envelope.provenance.source_id != sample.source_id or envelope.provenance.input_id != sample.full.input_id
-            or envelope.provenance.parameters_sha256 != expected):
-        return {"state": "stale", "reason": "Microbial input or pinned toolchain differs; restore the pinned environment or rerun under the current one",
+    input_id = sample.full.input_id
+    identity = envelope.provenance.parameters_sha256
+    try:
+        manifest = input_manifest(store, input_id)
+    except (OSError, ValueError, TypeError):
+        manifest = None
+    if (not isinstance(manifest, dict)
+            or manifest.get("input_id") != input_id
+            or manifest.get("source_id") != sample.source_id
+            or manifest.get("reference_id") != envelope.provenance.reference_id
+            or manifest.get("reference_sha256") != reference.sha256
+            or manifest.get("platform") != sample.platform):
+        return {"state": "stale", "reason": "Stored microbial input manifest differs from this result; restore the recorded input or rerun microbial profiling",
                 "taxa": []}
-    selected = store.selected_result_artifacts(sample.full.input_id, "microbial", expected)
-    if selected is None or selected[0] != envelope:
+    if (envelope.algorithm_version != MICROBIAL.version
+            or envelope.provenance.source_id != sample.source_id or envelope.provenance.input_id != input_id
+            or summary.provenance.source_id != sample.source_id
+            or summary.provenance.input_id != input_id
+            or summary.provenance.reference_id != envelope.provenance.reference_id):
+        return {"state": "stale", "reason": "Microbial input or selected read summary differs; rerun microbial profiling",
+                "taxa": []}
+    selected = store.selected_result_snapshot(input_id, "microbial", identity)
+    if (selected is None or selected[1] != envelope
+            or (sample.full.attempt_ids.get("microbial") is not None
+                and selected[0].name != sample.full.attempt_ids["microbial"])):
         return {"state": "stored_profile_unavailable", "reason": "Selected microbial result changed while loading its profile",
                 "taxa": []}
-    profile = _read_profile(selected[1] / "microbial_profile.json")
+    summary_identity = summary.provenance.parameters_sha256
+    summary_selected = store.selected_result_snapshot(input_id, "read-summary", summary_identity)
+    if (summary_selected is None or summary_selected[1] != summary
+            or (sample.full.attempt_ids.get("read-summary") is not None
+                and summary_selected[0].name != sample.full.attempt_ids["read-summary"])):
+        return {"state": "upstream_unavailable", "reason": "Selected read summary changed; reload the sample or rerun microbial profiling",
+                "taxa": []}
+    attempt = selected[0]
+    plan = _execution_plan(attempt)
+    if plan is None:
+        return {"state": "stored_profile_unavailable", "reason": "Selected microbial producer plan is missing or invalid; rerun microbial profiling",
+                "taxa": []}
+    upstream = [{"algorithm_id": "read-summary", "parameters_sha256": summary_identity}]
+    try:
+        valid_plan = (
+            plan.get("schema") == "traceback.lab.execution-plan.v1"
+            and plan.get("algorithm_id") == MICROBIAL.id
+            and plan.get("algorithm_version") == MICROBIAL.version
+            and plan.get("input_id") == input_id
+            and plan.get("reference_sha256") == reference.sha256
+            and plan.get("platform") == sample.platform
+            and plan.get("upstream") == upstream
+            and plan.get("asset_sha256s") == [database.sha256]
+            and isinstance(plan.get("parameters"), dict)
+            and canonical_json_bytes(plan["parameters"]) == canonical_json_bytes(MICROBIAL.parameters)
+            and isinstance(plan.get("tools"), list)
+            and len(plan["tools"]) == 2
+            and [pin.get("name") for pin in plan["tools"]] == ["kraken2", "bracken"]
+            and all(isinstance(pin.get("version"), str) and re.fullmatch(r"[0-9a-f]{64}", pin["version"])
+                    for pin in plan["tools"])
+        )
+        expected = (execution_identity(
+            MICROBIAL, reference_sha256=reference.sha256,
+            asset_sha256s=plan["asset_sha256s"], upstream=upstream,
+            platform=sample.platform if sample.platform != "ont" else None,
+            tool_pins=plan["tools"], parameters=plan["parameters"],
+        ) if valid_plan else None)
+    except (TypeError, ValueError, KeyError, AttributeError, RecursionError):
+        expected = None
+    if expected != identity:
+        return {"state": "stale", "reason": "Selected microbial producer plan, reference, or database differs; restore the recorded inputs or rerun microbial profiling",
+                "taxa": []}
+    if store.upstream_selections_at(attempt) != ({
+        "algorithm_id": "read-summary", "input_id": input_id,
+        "parameters_sha256": summary_identity, "attempt_id": summary_selected[0].name,
+    },):
+        return {"state": "stale", "reason": "Selected read-summary attempt differs from the microbial producer plan; rerun microbial profiling",
+                "taxa": []}
+    profile = _read_profile(attempt / "artifacts" / "microbial_profile.json")
     if (profile is None or profile.get("source_id") != sample.source_id
             or profile.get("input_id") != sample.full.input_id
             or profile.get("database_sha256") != database.sha256

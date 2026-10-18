@@ -78,6 +78,51 @@ def _private_out(store: LabStore) -> Path:
     return out
 
 
+def _stub_profile_plan(monkeypatch, store: LabStore, sample: SampleView, artifacts: Path,
+                       reference_sha256: str, database_sha256: str, *,
+                       real_microbial_selection: bool = False) -> None:
+    """Supply a recorded producer plan for synthetic profile/metric tests."""
+    from traceback_lab import microbial_view as view
+
+    summary = sample.full.results["read-summary"]
+    measured = sample.full.results["microbial"]
+    summary_attempt = artifacts.parent / "read-summary-attempt"
+    plan = {
+        "schema": "traceback.lab.execution-plan.v1", "algorithm_id": "microbial",
+        "algorithm_version": algorithm.MICROBIAL.version,
+        "input_id": sample.full.input_id, "reference_sha256": reference_sha256,
+        "platform": sample.platform, "parameters": algorithm.MICROBIAL.parameters,
+        "tools": [ToolPin("kraken2", "e" * 64).identity(),
+                  ToolPin("bracken", "e" * 64).identity()],
+        "asset_sha256s": [database_sha256],
+        "upstream": [{"algorithm_id": "read-summary",
+                      "parameters_sha256": summary.provenance.parameters_sha256}],
+    }
+    actual_snapshot = store.selected_result_snapshot
+
+    def snapshot(input_id, algorithm_id, identity):
+        if algorithm_id == "read-summary":
+            return summary_attempt, summary, None
+        if real_microbial_selection:
+            return actual_snapshot(input_id, algorithm_id, identity)
+        return artifacts.parent, measured, None
+
+    monkeypatch.setattr(store, "selected_result_snapshot", snapshot)
+    monkeypatch.setattr(store, "upstream_selections_at", lambda _attempt: ({
+        "algorithm_id": "read-summary", "input_id": sample.full.input_id,
+        "parameters_sha256": summary.provenance.parameters_sha256,
+        "attempt_id": summary_attempt.name,
+    },))
+    monkeypatch.setattr(view, "input_manifest", lambda _store, _input_id: {
+        "input_id": sample.full.input_id, "source_id": sample.source_id,
+        "reference_id": measured.provenance.reference_id,
+        "reference_sha256": reference_sha256, "platform": sample.platform,
+    })
+    monkeypatch.setattr(view, "_execution_plan", lambda _attempt: plan)
+    monkeypatch.setattr(view, "execution_identity", lambda *_args, **_kwargs:
+                        measured.provenance.parameters_sha256)
+
+
 def test_planned_result_resolves_into_sample_profile_without_identity_stubs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, synthetic_world,
 ) -> None:
@@ -144,6 +189,49 @@ def test_planned_result_resolves_into_sample_profile_without_identity_stubs(
     assert all(not row["metric_id"].startswith("taxon_") for row in microbial["metrics"])
     assert payload["microbial_profile"]["taxa"][0]["taxid"] == 562
     assert payload["library_health"]["no_library_entry"] == 0
+
+    # The selected producer plan, rather than today's PATH, attests the
+    # measurement. Changing or removing executables cannot hide its profile.
+    original_pin = algorithm._tool("kraken2")
+    assert original_pin is not None
+    kraken.write_text(kraken.read_text() + "# changed after measurement\n")
+    assert algorithm._tool("kraken2") != original_pin
+    assert profile_for_sample(store, sample, None, None, "not_built")["taxa"][0]["taxid"] == 562
+    monkeypatch.setenv("PATH", str(tmp_path / "empty-tools"))
+    assert algorithm._tool("kraken2") is None
+    assert algorithm._tool("bracken") is None
+    assert profile_for_sample(store, sample, None, None, "not_built")["taxa"][0]["taxid"] == 562
+    assert LabApi(store).sample(source[:12])["microbial_profile"]["taxa"][0]["taxid"] == 562
+    assert "microbial" in {row.algorithm_id for row in cohorts._selected_results(
+        store, sample.full.input_id, manifest)}
+
+    identity = sample.full.results["microbial"].provenance.parameters_sha256
+    attempt = store.selected_attempt(sample.full.input_id, "microbial", identity)
+    assert attempt is not None
+    plan_path = attempt / "execution_plan.json"
+    plan_bytes = plan_path.read_bytes()
+    plan = json.loads(plan_bytes)
+    plan["asset_sha256s"] = ["0" * 64]
+    plan_path.write_text(json.dumps(plan))
+    assert profile_for_sample(store, sample, None, None, "not_built")["state"] == "stale"
+    plan_path.write_bytes(plan_bytes)
+    plan_path.unlink()
+    assert profile_for_sample(store, sample, None, None, "not_built")["state"] == "stored_profile_unavailable"
+    plan_path.write_bytes(plan_bytes)
+    upstream_path = attempt / "upstream_selections.json"
+    upstream_bytes = upstream_path.read_bytes()
+    upstream = json.loads(upstream_bytes)
+    upstream["selections"][0]["attempt_id"] = "a-20000101T000000000000-00000000"
+    upstream_path.write_text(json.dumps(upstream))
+    assert profile_for_sample(store, sample, None, None, "not_built")["state"] == "stale"
+    upstream_path.write_bytes(upstream_bytes)
+    manifest_path = store.inputs_dir / sample.full.input_id / "manifest.json"
+    manifest_bytes = manifest_path.read_bytes()
+    mismatched_manifest = json.loads(manifest_bytes)
+    mismatched_manifest["source_id"] = "0" * 64
+    manifest_path.write_text(json.dumps(mismatched_manifest))
+    assert profile_for_sample(store, sample, None, None, "not_built")["state"] == "stale"
+    manifest_path.write_bytes(manifest_bytes)
 
 
 def test_outer_timeout_removes_private_candidate_files(
@@ -350,7 +438,7 @@ def test_sample_page_uses_bounded_receipt_and_reports_changed_database(tmp_path,
     prov = provenance(tool="fixture", parameters_sha256=identity, source_id=source,
                       input_id=input_id, reference_id="ref")
     summary = ResultEnvelope(algorithm_id="read-summary", algorithm_version="1", status="ok", provenance=prov)
-    measured = ResultEnvelope(algorithm_id="microbial", algorithm_version="3", status="ok", provenance=prov,
+    measured = ResultEnvelope(algorithm_id="microbial", algorithm_version="5", status="ok", provenance=prov,
                                   metrics=[Metric(metric_id="primary_reads", value=1),
                                            Metric(metric_id="candidate_unmapped_reads", value=0),
                                            Metric(metric_id="too_short_unmapped_reads", value=0),
@@ -369,24 +457,11 @@ def test_sample_page_uses_bounded_receipt_and_reports_changed_database(tmp_path,
         "too_short_unmapped_reads": 0, "missing_sequence_unmapped_reads": 0,
         "omitted_taxa": 0, "taxa": [],
     }))
-    tool_calls = []
-    def pinned_tool(name):
-        tool_calls.append(name)
-        return name, "e" * 64
-    monkeypatch.setattr(view, "_tool", pinned_tool)
     monkeypatch.setattr(view, "resolve_reference", lambda *_args, **_kwargs: SimpleNamespace(sha256="f" * 64))
-    def pinned_identity(*_args, **kwargs):
-        assert kwargs["tool_pins"] == [
-            view.ToolPin("kraken2", "e" * 64, "kraken2-mit").identity(),
-            view.ToolPin("bracken", "e" * 64, "bracken-gpl3").identity(),
-        ]
-        return identity
-    monkeypatch.setattr(view, "execution_identity", pinned_identity)
-    monkeypatch.setattr(store, "selected_result_artifacts", lambda *_args: (measured, artifacts))
+    _stub_profile_plan(monkeypatch, store, sample, artifacts, "f" * 64, database.sha256)
     monkeypatch.setattr(db, "_digest_file", lambda _path: pytest.fail("page streamed database bytes"))
 
     assert profile_for_sample(store, sample, None, None, "not_built")["state"] == "cohort_unavailable"
-    assert tool_calls == ["kraken2", "bracken"]
     missing_summary = SampleView(source, source[:12], False,
                                  InputView("full", input_id, None, {}, {"microbial": measured}))
     assert profile_for_sample(store, missing_summary, None, None, "not_built")["state"] == "upstream_unavailable"
@@ -402,7 +477,6 @@ def _profile_with_nonzero_exclusions(tmp_path: Path, monkeypatch) -> dict:
     store = LabStore(tmp_path / "measure")
     source, input_id, summary_identity = "a" * 64, "b" * 64, "c" * 64
     monkeypatch.setattr(algorithm, "_tool", lambda name: (name, "e" * 64))
-    monkeypatch.setattr(view, "_tool", lambda name: (name, "e" * 64))
     identity = execution_identity(
         algorithm.MICROBIAL, reference_sha256="f" * 64, asset_sha256s=["d" * 64],
         upstream=[{"algorithm_id": "read-summary", "parameters_sha256": summary_identity}],
@@ -413,7 +487,7 @@ def _profile_with_nonzero_exclusions(tmp_path: Path, monkeypatch) -> dict:
                                input_id=input_id, reference_id="ref")
     summary = ResultEnvelope(algorithm_id="read-summary", algorithm_version="1", status="ok",
                              provenance=summary_prov)
-    measured = ResultEnvelope(algorithm_id="microbial", algorithm_version="3", status="ok",
+    measured = ResultEnvelope(algorithm_id="microbial", algorithm_version="5", status="ok",
                               provenance=measured_prov,
                               metrics=[Metric(metric_id="primary_reads", value=10),
                                        Metric(metric_id="candidate_unmapped_reads", value=5),
@@ -436,7 +510,7 @@ def _profile_with_nonzero_exclusions(tmp_path: Path, monkeypatch) -> dict:
     monkeypatch.setattr(view, "inspect_database", lambda _store, **_kwargs: SimpleNamespace(
         sha256="d" * 64, source_label="anonymous synthetic database", read_length=75))
     monkeypatch.setattr(view, "resolve_reference", lambda *_args, **_kwargs: SimpleNamespace(sha256="f" * 64))
-    monkeypatch.setattr(store, "selected_result_artifacts", lambda *_args: (measured, artifacts))
+    _stub_profile_plan(monkeypatch, store, sample, artifacts, "f" * 64, "d" * 64)
     return profile_for_sample(store, sample, None, None, "not_built")
 
 
@@ -459,7 +533,7 @@ def test_profile_refuses_artifact_from_newly_selected_attempt(tmp_path: Path, mo
     summary = ResultEnvelope(algorithm_id="read-summary", algorithm_version="1", status="ok", provenance=prov)
 
     def result(denominator: int) -> ResultEnvelope:
-        return ResultEnvelope(algorithm_id="microbial", algorithm_version="3", status="ok",
+        return ResultEnvelope(algorithm_id="microbial", algorithm_version="5", status="ok",
                               provenance=prov, metrics=[
                                   Metric(metric_id="primary_reads", value=denominator),
                                   Metric(metric_id="candidate_unmapped_reads", value=0),
@@ -482,11 +556,11 @@ def test_profile_refuses_artifact_from_newly_selected_attempt(tmp_path: Path, mo
     store.publish_result(first, input_id=input_id, artifacts={"microbial_profile.json": artifact(1)})
     sample = SampleView(source, source[:12], False,
                         InputView("full", input_id, None, {}, {"read-summary": summary, "microbial": first}))
-    monkeypatch.setattr(view, "_tool", lambda name: (name, "e" * 64))
     monkeypatch.setattr(view, "inspect_database", lambda *_args, **_kwargs: SimpleNamespace(
         sha256="d" * 64, source_label="synthetic database", read_length=75))
     monkeypatch.setattr(view, "resolve_reference", lambda *_args, **_kwargs: SimpleNamespace(sha256="f" * 64))
-    monkeypatch.setattr(view, "execution_identity", lambda *_args, **_kwargs: identity)
+    _stub_profile_plan(monkeypatch, store, sample, tmp_path / "artifacts", "f" * 64,
+                       "d" * 64, real_microbial_selection=True)
     assert profile_for_sample(store, sample, None, None, "not_built")["state"] == "cohort_unavailable"
     store.publish_result(result(2), input_id=input_id, artifacts={"microbial_profile.json": artifact(2)})
     assert profile_for_sample(store, sample, None, None, "not_built")["state"] == "stored_profile_unavailable"
@@ -1165,7 +1239,7 @@ def test_cohort_975_zero_fills_complete_absent_taxa_and_refuses_missing_referenc
                       input_id=input_id, reference_id="ref")
     summary = ResultEnvelope(algorithm_id="read-summary", algorithm_version="1", status="ok", provenance=prov)
     measured = ResultEnvelope(
-        algorithm_id="microbial", algorithm_version="1", status="ok", provenance=prov,
+        algorithm_id="microbial", algorithm_version="5", status="ok", provenance=prov,
         metrics=[Metric(metric_id="primary_reads", value=100),
                  Metric(metric_id="candidate_unmapped_reads", value=5),
                  Metric(metric_id="too_short_unmapped_reads", value=0),
@@ -1188,12 +1262,10 @@ def test_cohort_975_zero_fills_complete_absent_taxa_and_refuses_missing_referenc
         "taxa": [{"taxid": 123, "name": "Candidate species", "category": "bacteria",
                   "estimated_reads": 0.0004, "rpm_primary": 4.0}],
     }))
-    monkeypatch.setattr(view, "_tool", lambda name: (name, "e" * 64))
     monkeypatch.setattr(view, "inspect_database", lambda _store, **_kwargs: SimpleNamespace(
         sha256="d" * 64, source_label="synthetic database", read_length=75))
     monkeypatch.setattr(view, "resolve_reference", lambda *_args, **_kwargs: SimpleNamespace(sha256="f" * 64))
-    monkeypatch.setattr(view, "execution_identity", lambda *_args, **_kwargs: identity)
-    monkeypatch.setattr(store, "selected_result_artifacts", lambda *_args: (measured, artifacts))
+    _stub_profile_plan(monkeypatch, store, sample, artifacts, "f" * 64, "d" * 64)
     members = []
     for index in range(10):
         result = CohortResult(
@@ -1281,9 +1353,9 @@ def test_cohort_975_zero_fills_complete_absent_taxa_and_refuses_missing_referenc
     assert unavailable["state"] == "cohort_unavailable" and unavailable["cohort_p975"] is None
     changed = measured.model_copy(update={"metrics": [
         *measured.metrics[:-1], Metric(metric_id="taxon_123_rpm", value=9.0)]})
-    monkeypatch.setattr(store, "selected_result_artifacts", lambda *_args: (changed, artifacts))
+    monkeypatch.setattr(store, "selected_result_snapshot", lambda *_args: (artifacts.parent, changed, None))
     assert profile_for_sample(store, sample, generation, target, "ready")["state"] == "stored_profile_unavailable"
-    monkeypatch.setattr(store, "selected_result_artifacts", lambda *_args: (measured, artifacts))
+    _stub_profile_plan(monkeypatch, store, sample, artifacts, "f" * 64, "d" * 64)
     bad_profile = json.loads((artifacts / "microbial_profile.json").read_text())
     bad_profile["taxa"][0]["rpm_primary"] = 9.0
     (artifacts / "microbial_profile.json").write_text(json.dumps(bad_profile))
