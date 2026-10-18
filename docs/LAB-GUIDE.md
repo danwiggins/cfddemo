@@ -837,10 +837,14 @@ pooled as protocol-matched references. Distinct source IDs are not proof of
 independent donors. The separate PoN denominator does not become a
 percentile denominator.
 
-For a verified internal cohort with at least ten eligible aligned members,
-`cohort build` creates one full panel and one leave-one-out panel per member.
-It recomputes each member's copy-number, instability, and arm-summary results against that
-member's panel before publishing the generation. This build requires the
+For an internal cohort with at least ten Lab-aligned members, `cohort build`
+attempts panel construction. A panel source must pass the builder's gate of
+at least 2M counted reads after filtering; fewer than ten passing sources
+blocks the build. This panel-source gate is stricter than the 1M counted-read
+floor for measuring a target. The build creates one full panel and one
+leave-one-out panel per passing source, then recomputes those members'
+copy-number, instability, and arm-summary results against their own panels
+before publishing the generation. This build requires the
 installed ichorCNA toolchain and registered copy-number method assets. If
 panel construction or member recomputation fails, no new generation is
 selected and any previously selected generation remains current. The
