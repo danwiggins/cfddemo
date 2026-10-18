@@ -148,6 +148,50 @@ def test_fai_offset_edit_fails_indexed_m5_even_when_names_and_lengths_match(tmp_
     assert "index" in error.value.cause
 
 
+def test_symlinked_fai_proof_tracks_link_target_edits(tmp_path) -> None:
+    fasta = tmp_path / "tiny.fa"
+    fasta.write_text(">chr1\n" + "ACGT" * 25 + "\n")
+    pysam.faidx(str(fasta))
+    fai = Path(f"{fasta}.fai")
+    target = tmp_path / "index-target.fai"
+    fai.rename(target)
+    fai.symlink_to(target)
+    root = tmp_path / "root"
+    register_reference(root, fasta, "hg38", assembly="GRCh38")
+    store = LabStore(root)
+    store.ensure()
+    reference = resolve_reference(root, "hg38")
+    verify_reference_source(store, reference, write_cache=True)
+    old = target.stat()
+    fields = target.read_text().strip().split("\t")
+    fields[2] = str(int(fields[2]) + 1)
+    target.write_text("\t".join(fields) + "\n")
+    os.utime(target, ns=(old.st_atime_ns, old.st_mtime_ns))
+    with pytest.raises(LabProblem) as error:
+        verify_reference_source(store, reference, write_cache=True)
+    assert error.value.code == "TBX-LAB-004"
+
+
+def test_alias_only_fai_requires_index_beside_canonical_fasta(tmp_path) -> None:
+    real = tmp_path / "real.fa"
+    real.write_text(">chr1\n" + "ACGT" * 25 + "\n")
+    alias = tmp_path / "alias.fa"
+    alias.symlink_to(real)
+    pysam.faidx(str(alias))
+    assert Path(f"{alias}.fai").is_file()
+    assert not Path(f"{real}.fai").exists()
+    root = tmp_path / "root"
+    register_reference(root, alias, "hg38", assembly="GRCh38")
+    store = LabStore(root)
+    store.ensure()
+    reference = resolve_reference(root, "hg38")
+    assert reference.fasta == real
+    with pytest.raises(LabProblem) as error:
+        verify_reference_source(store, reference, write_cache=False)
+    assert error.value.code == "TBX-LAB-004"
+    assert "canonical FASTA path" in error.value.cause
+
+
 def test_mmi_cache_rehashes_same_size_restored_mtime_replacement(tmp_path) -> None:
     store = LabStore(tmp_path / "root")
     store.ensure()
@@ -194,6 +238,14 @@ def test_normal_cached_run_and_dry_run_refuse_changed_reference(tmp_path, capsys
     assert main([*argv, "--dry-run"]) == 3
     dry = json.loads(capsys.readouterr().out)
     assert dry["data"]["code"] == "TBX-LAB-004"
+    stored = [
+        "lab", "run", first["data"]["sample"]["id12"], "--only", "bam-qc",
+        "--no-downsample", "--no-controls", "--root", str(store.root), "--json",
+    ]
+    assert main(stored) == 3
+    assert json.loads(capsys.readouterr().out)["data"]["code"] == "TBX-LAB-004"
+    assert main([*stored, "--dry-run"]) == 3
+    assert json.loads(capsys.readouterr().out)["data"]["code"] == "TBX-LAB-004"
 
 
 def test_worker_reference_change_blocks_result_publication(tmp_path, capsys, monkeypatch) -> None:

@@ -2,9 +2,10 @@
 
 The persistent proof is an optimization for cooperative local files: a first
 use verifies the complete FASTA SHA-256 and each contig's indexed sequence M5.
-Subsequent uses compare device/inode/size/mtime/ctime for both the FASTA and
-its .fai. Same-UID hostile changes during a tool's read remain outside the
-local file contract; callers also check the proof after a consuming step.
+Subsequent uses compare device/inode/size/mtime/ctime for the FASTA and its
+.fai, including a symlinked index's target. This assumes a reliable ctime.
+Same-UID hostile changes during a tool's read remain outside the local file
+contract; callers also check the proof after a consuming step.
 """
 
 from __future__ import annotations
@@ -47,30 +48,44 @@ def _problem(cause: str) -> LabProblem:
     )
 
 
-def _stamp(path: Path) -> _Stamp:
+def _stamp(path: Path, *, what: str, allow_symlink: bool = False) -> _Stamp:
     try:
         info = path.lstat()
     except OSError as exc:
-        raise _problem("registered reference FASTA or index is missing or unreadable") from exc
-    if not stat.S_ISREG(info.st_mode):
-        raise _problem("registered reference FASTA or index is not a regular file")
+        raise _problem(f"{what} is missing or unreadable") from exc
+    if not stat.S_ISREG(info.st_mode) and not (allow_symlink and stat.S_ISLNK(info.st_mode)):
+        raise _problem(f"{what} is not a regular file")
     return _Stamp(
         str(path), info.st_dev, info.st_ino, info.st_size,
         info.st_mtime_ns, info.st_ctime_ns,
     )
 
 
-def _stamps(fasta: Path) -> tuple[_Stamp, _Stamp]:
-    return _stamp(fasta), _stamp(Path(f"{fasta}.fai"))
+def _stamps(fasta: Path) -> tuple[_Stamp, ...]:
+    source = _stamp(fasta, what="registered FASTA")
+    index_path = Path(f"{fasta}.fai")
+    index = _stamp(
+        index_path, what="registered FASTA index beside the canonical FASTA path",
+        allow_symlink=True,
+    )
+    if not index_path.is_symlink():
+        return source, index
+    try:
+        target = index_path.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise _problem("registered FASTA index symlink does not resolve") from exc
+    return source, index, _stamp(target, what="registered FASTA index symlink target")
 
 
-def _proof_key(reference: Reference, stamps: tuple[_Stamp, _Stamp]) -> str:
+def _proof_key(reference: Reference, stamps: tuple[_Stamp, ...]) -> str:
     payload = {
         "version": _PROOF_VERSION,
         "registration": reference.loaded.registered.model_dump(mode="json"),
         "fasta": asdict(stamps[0]),
         "fai": asdict(stamps[1]),
     }
+    if len(stamps) == 3:
+        payload["fai_target"] = asdict(stamps[2])
     return f"{_PROOF_VERSION}:" + hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
 
 

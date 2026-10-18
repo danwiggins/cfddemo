@@ -555,12 +555,20 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
             samtools, minimap2 = find_samtools(), find_minimap2()
             low, high = estimate_align_minutes(chunkset.total_bytes)
             reason = "new source"
-            existing = mmi_path(store, reference)
-            if samtools.version and minimap2.version and existing.is_file() and args.mmi is None:
+            existing = args.mmi if args.mmi is not None else mmi_path(store, reference)
+            if samtools.version and minimap2.version and existing.is_file():
                 cache = store.load_hash_cache()
                 key = store.strong_hash_cache_key(existing)
                 mmi_sha = cache.get(key, {}).get("sha256")
-                if mmi_sha:
+                previous = source_record(store, chunkset.source_id) or {}
+                previous_inputs = previous.get("inputs", [])
+                has_aligned_input = any(
+                    isinstance(row, dict) and row.get("kind") == "aligned"
+                    for row in previous_inputs
+                ) if isinstance(previous_inputs, list) else False
+                if not mmi_sha and has_aligned_input:
+                    reason = "reuse unknown until index hashed"
+                elif mmi_sha:
                     input_id = aligned_input_id(
                         source_id=chunkset.source_id,
                         reference_sha256=reference.sha256,
@@ -576,8 +584,14 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
             data["alignment"] = reason
             alignment_required = reason != "reused"
             data["estimate_min"] = [round(low, 1), round(high, 1)]
+            if reason == "reused":
+                estimate = ""
+            elif reason == "reuse unknown until index hashed":
+                estimate = f" · if realignment needed, estimate {low:.0f}-{high:.0f} min"
+            else:
+                estimate = f" · estimate {low:.0f}-{high:.0f} min"
             lines.append(
-                f"ALIGN     {reason}" + ("" if reason == "reused" else f" · estimate {low:.0f}-{high:.0f} min")
+                f"ALIGN     {reason}" + estimate
                 + (" · minimap2 index built first" if mmi_needed else "")
             )
     if args.cohort is not None:
