@@ -49,7 +49,7 @@ def world(tmp_path, monkeypatch, *, compat_b=COMPAT, unit_b="bp", value_b=170.0)
             ),),
         )
     monkeypatch.setattr(web_api.views, "load_sample", lambda store, source: samples[source])
-    monkeypatch.setattr(web_api, "member_from_store", lambda store, source: selected[source])
+    monkeypatch.setattr(web_api, "member_from_store", lambda store, source, **_: selected[source])
     api = web_api.LabApi(LabStore(tmp_path))
     monkeypatch.setattr(api, "_id12s", lambda: {source: source[:12] for source in sources})
     return api, samples, selected
@@ -221,7 +221,7 @@ def test_sample_pair_rejects_example_and_unknown_peer(tmp_path, monkeypatch) -> 
 
 def test_sample_pair_marks_unavailable_peer_without_substituting_zero(tmp_path, monkeypatch) -> None:
     api, _, selected = world(tmp_path, monkeypatch)
-    def current(store, source):
+    def current(store, source, **_):
         if source == SOURCE_B:
             raise ValueError("admitted source has no full aligned input")
         return selected[source]

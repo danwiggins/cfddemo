@@ -183,7 +183,7 @@
       ...(state.sample && state.sample.found ? [] : [h("option", { value: "", selected: true, disabled: true }, "Select a sample")]),
       ...state.samples.map((row) =>
         h("option", { value: row.id12, selected: state.sample && state.sample.id12 === row.id12 },
-          `${row.id12} · ${row.run_utc ? row.run_utc.slice(0, 10) : "—"} · ${row.depth_x !== null ? row.depth_x.toFixed(2) + "x" : "—"}${row.example ? " · EXAMPLE (synthetic)" : ""}`)
+          `${row.id12} · ${row.run_utc ? row.run_utc.slice(0, 10) : "—"} · ${row.depth_x !== null ? row.depth_x.toFixed(2) + "x" : "—"}${row.example ? " · EXAMPLE (synthetic)" : ""}${row.state === "completed_input_unavailable" ? " · completed input unavailable" : ""}`)
       )
     );
   }
@@ -210,7 +210,8 @@
 
   function renderNav() {
     const nav = document.getElementById("lenses");
-    const sample = state.sample && state.sample.found ? state.sample : null;
+    const sample = state.sample && state.sample.found && state.sample.state !== "completed_input_unavailable"
+      ? state.sample : null;
     nav.replaceChildren();
     // Lens tabs belong to a sample's lens routes; the landing page has none (spec layout).
     nav.hidden = !sample || state.route.name !== "lens";
@@ -274,6 +275,12 @@
       main.append(h("h1", { class: "view-title" }, "Unknown sample"),
         h("p", {}, `No Lab sample matches ${shown}. `, h("a", { href: "#/" }, "Back to Lab home")));
       if (sample && sample.candidates && sample.candidates.length) main.append(h("p", {}, `Candidates: ${sample.candidates.join(", ")}`));
+      return;
+    }
+    if (sample.state === "completed_input_unavailable") {
+      main.append(h("h1", { class: "view-title" }, "Completed input unavailable"),
+        h("p", { class: "problem" }, `Sample ${sample.id12} exists, but its completed run's primary input cannot be read. Restore that input or rerun the sample.`),
+        h("p", {}, h("a", { href: "#/" }, "Back to Lab home")));
       return;
     }
     const lens = route.name === "lens" ? route.lens : null;

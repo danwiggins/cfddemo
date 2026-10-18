@@ -16,6 +16,7 @@ from traceback_lab.ingest import resolve_sample
 from traceback_lab.problems import LabProblem
 from traceback_lab.registry import ToolPin, execution_identity
 from traceback_lab.store import MAX_EXECUTION_PLAN_BYTES, LabStore
+from traceback_lab.web.api import LabApi
 from traceback_runner import cli as signed_cli
 
 
@@ -982,8 +983,8 @@ def test_pon_input_selection_uses_only_verified_full_aligned_inputs(store: LabSt
 def test_completed_input_projection_pins_prior_input_without_changing_build_selection(store: LabStore) -> None:
     source_id = _sample(store, 1)
     completed_input, active_input = _sha(101), _sha(201)
-    add_sample(store, "healthy", source_id)
-    generation = build_cohort(store, "healthy")
+    add_sample(store, "healthy-v1", source_id)
+    generation = build_cohort(store, "healthy-v1")
     original = store.inputs_dir / completed_input
     active = store.inputs_dir / active_input
     active.mkdir(parents=True)
@@ -1006,6 +1007,19 @@ def test_completed_input_projection_pins_prior_input_without_changing_build_sele
     )
     assert problem is None and target.input_id == completed_input
     assert cohorts.member_for_generation_or_independent(store, generation, source_id)[0].input_id == active_input
+    run_id = "r-20261017-1000-abcd"
+    log = store.run_log(run_id)
+    log.append("run_start", command="run")
+    log.append("sample", source_id=source_id, input_id=completed_input)
+    log.append("run_end", status="ok", exit_code=0)
+    detail = LabApi(store).sample(source_id[:12])
+    assert detail["full_input_id"] == completed_input
+    assert detail["cohort_state"] == "ready"
+    peer_id = _sample(store, 2, value=110.0)
+    api = LabApi(store)
+    ids = api._id12s()
+    comparison = api.compare_samples(ids[source_id], ids[peer_id])
+    assert comparison["state"] == "ready"
     with pytest.raises(LabProblem, match="TBX-LAB-020"):
         cohorts.member_from_store(store, source_id, input_id=_sha(999))
     (original / "manifest.json").unlink()

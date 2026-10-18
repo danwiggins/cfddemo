@@ -643,7 +643,7 @@ def test_damaged_full_selection_is_named_on_stability_page(tmp_path) -> None:
         id12 = web_api.LabApi(store)._id12s()[source_id]
         dom = _dom(server, tmp_path / "browser", route=f"/sample/{id12}/stability",
                    want=lambda page: "full-depth result unreadable" in page)
-        home = _dom(server, tmp_path / "browser-home", route="/",
+        home = _dom(server, tmp_path / "browser-home", route=f"/?sample={id12}",
                     want=lambda page: "full-depth algorithm result unavailable" in page)
     assert "fragment-size: full-depth result unreadable; no metric-level Stability panel can be shown." in dom
     assert "1 full-depth algorithm result unavailable" in home
