@@ -672,6 +672,153 @@ def _inode_and_ctime(metadata: os.stat_result) -> tuple[int, int, int]:
     return metadata.st_dev, metadata.st_ino, metadata.st_ctime_ns
 
 
+def _published_catalog_objects(catalog: ResultCatalog) -> list[Path]:
+    return sorted(
+        path for path in catalog._bound_objects.iterdir()
+        if len(path.name) == 64 and path.is_dir()
+    )
+
+
+def _kill_after_catalog_rename(catalog: ResultCatalog, *, prepared: bool) -> Path:
+    """Leave a real post-rename orphan, without Python's exception cleanup."""
+    exit_code = 73
+
+    def child() -> None:
+        original = catalog_module.rename_directory_exclusive_at
+
+        def rename_then_die(parent_fd: int, source: str, destination: str) -> None:
+            original(parent_fd, source, destination)
+            os._exit(exit_code)
+
+        catalog_module.rename_directory_exclusive_at = rename_then_die
+        (_prepare if prepared else _import)(catalog)
+
+    assert run_in_child(child) == exit_code
+    assert catalog.query(CatalogQuery()).empty
+    objects = _published_catalog_objects(catalog)
+    assert len(objects) == 1
+    return objects[0]
+
+
+@pytest.mark.parametrize("prepared", [False, True], ids=["import", "prepare"])
+def test_catalog_post_rename_crash_retry_seals_same_inode(
+    tmp_path: Path, prepared: bool
+) -> None:
+    catalog, _, import_root = _catalog(tmp_path)
+    orphan = _kill_after_catalog_rename(catalog, prepared=prepared)
+    before = orphan.stat(follow_symlinks=False)
+    assert stat.S_IMODE(before.st_mode) == 0o700
+
+    reopened = ResultCatalog(
+        tmp_path / "catalog",
+        import_roots={"root_primary": import_root},
+        trust_store=catalog.trust_store,
+    )
+    result = (_prepare if prepared else _import)(reopened)
+    after = orphan.stat(follow_symlinks=False)
+    assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+    assert stat.S_IMODE(after.st_mode) == 0o555
+    assert not any(
+        path.name.startswith(".catalog-")
+        for path in reopened._bound_objects.iterdir()
+    )
+    reference = result.reference if prepared else result
+    assert verify_bundle(orphan, reopened.trust_store).manifest.record_id == (
+        reference.bundle_record_id
+    )
+    if prepared:
+        assert reopened.query(CatalogQuery()).empty
+        reopened.stage_prepared_import(result)
+        reopened.adopt_prepared_import(result)
+        reopened.finish_prepared_import(result)
+    assert reopened.query(CatalogQuery()).results == (reference,)
+
+
+@pytest.mark.parametrize("prepared", [False, True], ids=["import", "prepare"])
+def test_catalog_mismatched_orphan_is_not_overwritten(
+    tmp_path: Path, prepared: bool
+) -> None:
+    catalog, _, import_root = _catalog(tmp_path)
+    orphan = _kill_after_catalog_rename(catalog, prepared=prepared)
+    before = orphan.stat(follow_symlinks=False)
+    manifest = orphan / "bundle-manifest.json"
+    manifest.chmod(0o600)
+    manifest.write_bytes(manifest.read_bytes() + b"\n")
+    manifest.chmod(0o444)
+    changed_bytes = manifest.read_bytes()
+
+    reopened = ResultCatalog(
+        tmp_path / "catalog",
+        import_roots={"root_primary": import_root},
+        trust_store=catalog.trust_store,
+    )
+    with pytest.raises(CatalogConflict, match="object identity conflicts"):
+        (_prepare if prepared else _import)(reopened)
+    after = orphan.stat(follow_symlinks=False)
+    assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+    assert manifest.read_bytes() == changed_bytes
+    assert reopened.query(CatalogQuery()).empty
+
+
+@pytest.mark.parametrize("prepared", [False, True], ids=["import", "prepare"])
+@pytest.mark.parametrize("barrier", ["object", "parent"])
+def test_catalog_fsync_failure_cannot_expose_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prepared: bool, barrier: str
+) -> None:
+    catalog, _, import_root = _catalog(tmp_path)
+    original_rename = catalog_module.rename_directory_exclusive_at
+    original_fsync = os.fsync
+    object_identity: tuple[int, int] | None = None
+    parent_stat = os.fstat(catalog._objects_fd)
+    parent_identity = (parent_stat.st_dev, parent_stat.st_ino)
+    triggered = False
+
+    def observe_rename(parent_fd: int, source: str, destination: str) -> None:
+        nonlocal object_identity
+        original_rename(parent_fd, source, destination)
+        published = os.stat(destination, dir_fd=parent_fd, follow_symlinks=False)
+        object_identity = (published.st_dev, published.st_ino)
+
+    def fail_barrier(fd: int) -> None:
+        nonlocal triggered
+        metadata = os.fstat(fd)
+        identity = (metadata.st_dev, metadata.st_ino)
+        target = object_identity if barrier == "object" else parent_identity
+        if object_identity is not None and identity == target:
+            triggered = True
+            raise OSError(5, f"injected {barrier} fsync failure")
+        original_fsync(fd)
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(catalog_module, "rename_directory_exclusive_at", observe_rename)
+        patcher.setattr(os, "fsync", fail_barrier)
+        with pytest.raises(OSError, match=f"injected {barrier} fsync failure"):
+            (_prepare if prepared else _import)(catalog)
+    assert triggered
+    assert catalog.query(CatalogQuery()).empty
+    objects = _published_catalog_objects(catalog)
+    assert len(objects) == 1
+    before = objects[0].stat(follow_symlinks=False)
+
+    reopened = ResultCatalog(
+        tmp_path / "catalog",
+        import_roots={"root_primary": import_root},
+        trust_store=catalog.trust_store,
+    )
+    result = (_prepare if prepared else _import)(reopened)
+    after = objects[0].stat(follow_symlinks=False)
+    assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+    assert stat.S_IMODE(after.st_mode) == 0o555
+    if prepared:
+        assert reopened.query(CatalogQuery()).empty
+        reopened.stage_prepared_import(result)
+        reopened.adopt_prepared_import(result)
+        reopened.finish_prepared_import(result)
+    assert reopened.query(CatalogQuery()).results == (
+        result.reference if prepared else result,
+    )
+
+
 def test_failed_publisher_never_unlinks_an_object_adopted_concurrently(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
