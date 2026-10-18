@@ -752,12 +752,12 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
     items = registry.plan([alg for _, alg in entries], only=_only(args.only), profile=args.profile)
     previous_term = signal.signal(signal.SIGTERM, _interrupted_handler)
     try:
+        progress(f"ROOT  {store.root}")
         _preflight_budget(
             args, store, example_needs_generation=example_needs_generation, progress=progress,
         )
         run_id = new_run_id()
         started = time.monotonic()
-        progress(f"ROOT  {store.root}")
     except KeyboardInterrupt:
         signal.signal(signal.SIGTERM, previous_term)
         raise LabProblem(
