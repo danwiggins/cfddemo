@@ -417,6 +417,48 @@ def test_dry_run_writes_nothing_and_ignores_the_lock(lab_world, capsys, monkeypa
     assert len(before) <= len(snapshot)
 
 
+def test_dry_run_reports_unknown_reuse_for_legacy_mmi_hash_cache(
+    lab_world, capsys, monkeypatch, shared_mmi,
+) -> None:
+    _registry(monkeypatch, "SUMMARY")
+    store = LabStore(lab_world["root"])
+    code, first = _json(
+        capsys, "run", str(lab_world["chunks"]), "--root", str(store.root),
+        "--mmi", str(shared_mmi), "--only", "read-summary",
+    )
+    assert code == 0, first
+    cache = store.load_hash_cache()
+    cache.pop(store.strong_hash_cache_key(shared_mmi), None)
+    cache[store.hash_cache_key(shared_mmi)] = {
+        "sha256": hashlib.sha256(shared_mmi.read_bytes()).hexdigest(), "records": -1,
+    }
+    store.save_hash_cache(cache)
+    before = store.hash_cache_file.read_bytes()
+    code, payload = _json(
+        capsys, "run", str(lab_world["chunks"]), "--root", str(store.root),
+        "--mmi", str(shared_mmi), "--dry-run",
+    )
+    assert code == 0
+    assert payload["data"]["alignment"] == "reuse unknown until index hashed"
+    assert store.hash_cache_file.read_bytes() == before
+
+
+def test_dry_run_rejects_symlinked_mmi_like_real_run(
+    lab_world, capsys, monkeypatch, shared_mmi, tmp_path,
+) -> None:
+    _registry(monkeypatch, "SUMMARY")
+    alias = tmp_path / "alias.mmi"
+    alias.symlink_to(shared_mmi)
+    argv = (
+        "run", str(lab_world["chunks"]), "--root", str(lab_world["root"]),
+        "--mmi", str(alias),
+    )
+    for extra in (("--dry-run",), ()):
+        code, payload = _json(capsys, *argv, *extra)
+        assert code == 3
+        assert payload["data"]["code"] == "TBX-LAB-005"
+
+
 def test_stored_dry_run_retries_concurrent_cohort_selection_without_writing(
     lab_world, capsys, monkeypatch, shared_mmi,
 ) -> None:

@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pysam
 import pytest
 
 from traceback_lab.cohort_contracts import CohortGeneration, CohortMember, CohortPon
 from traceback_lab.cohorts import add_sample, build_cohort
 from traceback_lab.store import LabStore, new_run_id
 from traceback_runner import cli as signed_cli
+from traceback_runner.references import register_reference
 from traceback_runner.serialization import canonical_json_bytes
 from tests.lab.test_cohort_store import _sample
 
@@ -33,6 +35,16 @@ def _dry_run(
         argv.extend(("--only", only))
     code = signed_cli.main(argv)
     return code, json.loads(capsys.readouterr().out)
+
+
+def _bind_registered_reference(store: LabStore, manifest: dict) -> dict:
+    fasta = store.root / "synthetic.fa"
+    fasta.write_text(">chr1\n" + "ACGT" * 250 + "\n")
+    pysam.faidx(str(fasta))
+    registered = register_reference(store.root, fasta, "synthetic", assembly="synthetic")
+    manifest["reference_id"] = "synthetic"
+    manifest["reference_sha256"] = registered.registered.asset_sha256
+    return manifest
 
 
 def _publish_built_panel(store: LabStore) -> None:
@@ -72,8 +84,7 @@ def test_explicit_cohort_preview_checks_built_status_without_writes_or_lock(
     # Stored dry-runs validate the same complete reference binding as real runs.
     source = json.loads((store.sources_dir / f"{source_id}.json").read_text())
     manifest_path = store.inputs_dir / source["inputs"][0]["input_id"] / "manifest.json"
-    manifest = json.loads(manifest_path.read_text())
-    manifest["reference_id"] = "synthetic"
+    manifest = _bind_registered_reference(store, json.loads(manifest_path.read_text()))
     manifest_path.write_text(json.dumps(manifest))
     if state == "unbuilt":
         add_sample(store, "healthy", source_id)
@@ -167,15 +178,12 @@ def test_stored_preview_refuses_ineligible_explicit_panel_without_writes(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], input_kind: str,
     expected_code: str, only: str | None, panel: str,
 ) -> None:
-    import pysam
-
     store = LabStore(tmp_path)
     source_id = _sample(store, 20, example=input_kind == "example", aligned=input_kind != "illumina")
     source = json.loads((store.sources_dir / f"{source_id}.json").read_text())
     directory = store.inputs_dir / source["inputs"][0]["input_id"]
     manifest_path = directory / "manifest.json"
-    manifest = json.loads(manifest_path.read_text())
-    manifest["reference_id"] = "synthetic"
+    manifest = _bind_registered_reference(store, json.loads(manifest_path.read_text()))
     if input_kind == "illumina":
         manifest["platform"] = "illumina"
         header = {"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 1000}],

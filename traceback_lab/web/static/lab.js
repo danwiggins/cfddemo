@@ -27,6 +27,8 @@
     missed: 0,
     lastOk: null,
     route: { name: "home" },
+    renderedHash: null,
+    navigationRevision: 0,
     loading: true,
     runLogLines: new Map(),
     staleRunLogCleared: false,
@@ -47,7 +49,35 @@
       if (child === null || child === undefined || child === false) continue;
       el.append(child instanceof Node ? child : document.createTextNode(String(child)));
     }
+    // Async route content may arrive after the disconnected state was set.
+    if ((tag === "button" || tag === "select") && "data-requires-server" in (attrs || {})) {
+      if (document.body.dataset.disconnected === "1") setFetchControlEnabled(el, false);
+    }
+    if (tag === "a" && typeof attrs?.href === "string" && attrs.href.startsWith("#/") &&
+        document.body.dataset.disconnected === "1") setLinkEnabled(el, false);
     return el;
+  }
+
+  function setLinkEnabled(link, enabled) {
+    if (enabled) { link.removeAttribute("aria-disabled"); link.removeAttribute("tabindex"); link.classList.remove("disabled"); }
+    else { link.setAttribute("aria-disabled", "true"); link.setAttribute("tabindex", "-1"); link.classList.add("disabled"); }
+  }
+
+  function setFetchControlEnabled(control, enabled) {
+    // A focused control keeps focus so the live status announcement does not
+    // unexpectedly move a keyboard user. Capture listeners block its action.
+    control.disabled = !enabled && document.activeElement !== control;
+    if (enabled) {
+      control.removeAttribute("aria-disabled");
+      control.removeAttribute("aria-describedby");
+      control.removeAttribute("tabindex");
+      control.classList.remove("disabled");
+    } else {
+      control.setAttribute("aria-disabled", "true");
+      control.setAttribute("aria-describedby", "status");
+      control.setAttribute("tabindex", "-1");
+      control.classList.add("disabled");
+    }
   }
 
   function fmt(value, unit) {
@@ -78,8 +108,8 @@
     if (!response.ok) throw new Error("bootstrap");
   }
 
-  async function api(path) {
-    const response = await fetch(path, { credentials: "same-origin" });
+  async function api(path, signal) {
+    const response = await fetch(path, { credentials: "same-origin", ...(signal ? { signal } : {}) });
     if (response.status === 401) throw Object.assign(new Error("session"), { session: true });
     const payload = await response.json();
     if (!response.ok && !(path.startsWith("/api/samples/") && response.status === 404)) throw new Error(`http ${response.status}`);
@@ -103,19 +133,24 @@
   }
 
   async function loadSample(id12) {
-    if (!id12) { state.sample = null; return; }
-    if (state.sample && state.sample.id12 === id12) return;
-    state.runLogLines.clear();
+    if (!id12) return null;
+    if (state.sample && state.sample.id12 === id12) return state.sample;
     const payload = await api(`/api/samples/${id12}`);
-    state.sample = payload.found ? payload : { found: false, id12, candidates: payload.candidates || [] };
+    return payload.found ? payload : { found: false, id12, candidates: payload.candidates || [] };
   }
 
   async function navigate() {
-    state.route = parseRoute();
-    const route = state.route;
+    const revision = ++state.navigationRevision;
+    const requestedHash = location.hash || "#/";
+    const route = parseRoute();
     const target = route.id12 || (state.samples[0] && state.samples[0].id12) || null;
-    if (route.name === "home" || route.name === "lens") await loadSample(target);
+    const sample = route.name === "home" || route.name === "lens" ? await loadSample(target) : state.sample;
+    if (revision !== state.navigationRevision || (location.hash || "#/") !== requestedHash) return;
+    if (sample !== state.sample) state.runLogLines.clear();
+    state.sample = sample;
+    state.route = route;
     render();
+    state.renderedHash = requestedHash;
     const title = document.querySelector("main h1");
     if (title) { title.setAttribute("tabindex", "-1"); title.focus({ preventScroll: false }); }
     revealCurrentNav();
@@ -134,7 +169,7 @@
     let reload = status.querySelector("button.reload");
     if (action) {
       if (!reload) {
-        reload = h("button", { type: "button", class: "control reload", onclick: () => location.reload() }, action);
+        reload = h("button", { type: "button", class: "control reload", "data-requires-server": "", onclick: () => location.reload() }, action);
         status.append(h("span", { "data-reload-action": "" }, " ", reload));
       } else reload.textContent = action;
     } else if (reload) reload.closest("[data-reload-action]").remove();
@@ -397,6 +432,7 @@
         }
       };
       const logLink = canPin ? h("button", { type: "button", class: "control",
+        "data-requires-server": "",
         "aria-label": `Run log line for ${a.algorithm_id}`, onclick: async () => {
         if (state.lastStatus && state.generationAtLoad !== null && state.lastStatus.generation > state.generationAtLoad) {
           showLogLine("Results changed on disk; reload before viewing this run log line.");
@@ -574,9 +610,21 @@
     }
   }
 
+  let polling = false;
   async function poll() {
+    if (polling) return;
+    polling = true;
+    const controller = new AbortController();
+    let timeoutId;
+    // Finish one observation before the next 15-second poll is due.
+    const deadline = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => {
+        controller.abort();
+        reject(new Error("status poll deadline"));
+      }, Math.max(100, POLL_MS * 0.8));
+    });
     try {
-      const status = await api("/api/status");
+      const status = await Promise.race([api("/api/status", controller.signal), deadline]);
       state.missed = 0;
       state.lastOk = new Date();
       document.body.classList.remove("dimmed");
@@ -632,22 +680,58 @@
         const since = state.lastOk ? state.lastOk.toTimeString().slice(0, 5) : "page load";
         setStatus(`Lab server not responding since ${since}. What you see may be out of date. Restart \`traceback lab serve --open\`; it opens a fresh page.`);
         document.body.classList.add("dimmed");
+        restoreRenderedRoute();
         setControlsEnabled(false);
       }
+    } finally {
+      clearTimeout(timeoutId);
+      polling = false;
     }
   }
 
   // Disconnected: the page stays readable but every control that would fetch is off.
   function setControlsEnabled(enabled) {
-    document.getElementById("sample-switcher").disabled = !enabled;
-    for (const link of document.querySelectorAll("#lenses a, main a[href^='#/']")) {
-      if (enabled) { link.removeAttribute("aria-disabled"); link.removeAttribute("tabindex"); link.classList.remove("disabled"); }
-      else { link.setAttribute("aria-disabled", "true"); link.setAttribute("tabindex", "-1"); link.classList.add("disabled"); }
+    setFetchControlEnabled(document.getElementById("sample-switcher"), enabled);
+    for (const control of document.querySelectorAll("button[data-requires-server], select[data-requires-server]")) {
+      setFetchControlEnabled(control, enabled);
     }
+    for (const link of document.querySelectorAll("a[href^='#/']")) setLinkEnabled(link, enabled);
     document.body.dataset.disconnected = enabled ? "0" : "1";
   }
+  function restoreRenderedRoute() {
+    if (!state.renderedHash || location.hash === state.renderedHash) return;
+    // Cancel a sample fetch that started before disconnection. Its late answer
+    // must not replace the route the reader was actually viewing.
+    state.navigationRevision += 1;
+    history.replaceState(null, "", location.pathname + location.search + state.renderedHash);
+  }
+  document.addEventListener("click", (event) => {
+    if (document.body.dataset.disconnected !== "1" || !(event.target instanceof Element) ||
+        !event.target.closest("a[href^='#/'], [data-requires-server], #sample-switcher")) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }, true);
+  document.addEventListener("change", (event) => {
+    if (document.body.dataset.disconnected !== "1" || !(event.target instanceof Element) ||
+        !event.target.matches("select[data-requires-server], #sample-switcher")) return;
+    event.preventDefault();
+    event.stopImmediatePropagation();
+  }, true);
+  for (const type of ["keydown", "pointerdown"]) {
+    document.addEventListener(type, (event) => {
+      if (document.body.dataset.disconnected !== "1" || !(event.target instanceof Element) ||
+          !event.target.matches("select[data-requires-server], #sample-switcher")) return;
+      // Keep keyboard escape and focus travel available to local Key and
+      // disclosures; every selection-changing key remains blocked.
+      if (type === "keydown" && ["Tab", "Escape", "F6"].includes(event.key)) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+    }, true);
+  }
   window.addEventListener("hashchange", (event) => {
-    if (document.body.dataset.disconnected === "1") event.stopImmediatePropagation();
+    if (document.body.dataset.disconnected !== "1") return;
+    event.stopImmediatePropagation();
+    restoreRenderedRoute();
   }, true);
 
   // -- start ----------------------------------------------------------------------------

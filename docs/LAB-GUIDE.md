@@ -323,12 +323,13 @@ of 1 can coexist with different absolute frequencies. The artifact and Signals
 show their maximum absolute frequency difference as a diagnostic, without an
 additional acceptance cutoff.
 
-**Exploratory epi-clock.** Verify the three hg38 assay-site coordinates, then
-follow the [epi-clock map instructions](epi-clock.md) to prepare the JSON map and
-its SHA-256. Register and inspect it with:
+**Exploratory epi-clock.** Review the three verified hg38 assay-site coordinates
+and their [provenance](epi-clock-coordinate-provenance.md), then use the
+[pinned map and SHA-256](epi-clock.md) for explicit registration. From the
+repository root, register and inspect it with:
 
 ```bash
-traceback lab asset register-clock-map --file MAP.json --sha256 HEX_SHA256 --root ROOT
+traceback lab asset register-clock-map --file docs/assets/weidner-3-grch38-map.json --sha256 ba5ce4d1f2313f6e39b5ff50fd19823ea96e7edec68ea611db5dcbff1b0f21df --root ROOT
 traceback lab asset inspect-clock-map --root ROOT
 ```
 
@@ -982,6 +983,10 @@ samtools or minimap2 is missing or older than 1.20 / 2.28, and the input is unal
 ### TBX-LAB-004
 
 No reference is registered (exit 3), or several are and `--reference` was not given (exit 2, listing the IDs). Register one with `traceback reference register --fasta hg38.fa --id hg38 --root R`, or add `--reference ID`. The `lab-example` reference is never picked by default for real input.
+
+A changed registered FASTA or `.fai` also blocks a Lab run under this code. On first use, the Lab checks the complete FASTA SHA-256 and the indexed contig M5 values against the registration. Later runs reuse that proof while the FASTA and `.fai` file identities and change times remain stable. The pre-use proof must still match when a worker or index build finishes, so an edit followed by restoration also blocks publication. `--dry-run` never writes the proof cache, so each preview without a valid cached proof reads the full reference twice. The proof assumes the reference filesystem records a reliable change time (`ctime`); it detects ordinary local edits and replacements under that assumption, but cannot defend against hostile metadata spoofing or changes that collide within the filesystem's change-time resolution. Restore changed files or register the correct reference in a new ROOT.
+
+The `.fai` must be beside the canonical FASTA path recorded at registration. If registration used a FASTA symlink and only the symlink has a neighboring `.fai`, run `samtools faidx` on the symlink's resolved FASTA path before Lab use. A `.fai` symlink to a regular index is supported. Neither this check nor a hashed minimap2 index proves which reference an aligned BAM originally used: prealigned BAM `@SQ` validation compares names and lengths, not M5; an operator-supplied `--mmi` or pre-existing cached index is checked for byte changes but is not proven to have been built from the registered FASTA. A changed index can also report TBX-LAB-004. Previously published results and attempts are not retroactively qualified. If a dry run reports `reuse unknown until index hashed`, the first real run rehashes the existing index in full before deciding whether alignment can be reused; that one-time check can take longer for a large index.
 
 ### TBX-LAB-005
 

@@ -849,7 +849,7 @@
       for (const [i, button] of [...tabs.children].entries()) button.setAttribute("aria-pressed", String(i === index));
       body.replaceChildren(...families[index][2](sample));
     };
-    families.forEach(([, label], i) => tabs.append(h("button", { type: "button", class: "control subtab", "aria-pressed": "false", onclick: () => show(i) }, label)));
+    families.forEach(([, label], i) => tabs.append(h("button", { type: "button", class: "control subtab", "data-requires-server": "", "aria-pressed": "false", onclick: () => show(i) }, label)));
     out.push(tabs, body);
     const initial = ["fragment-size", "end-motifs", "delfi-ratio", "finaletoolkit-xcheck", "tss-profile", "long-tail", "mtdna", "breakpoint-motifs", "griffin", "aligned-end-structure", "lionheart"].some((id) => algo(sample, id) || (id !== "long-tail" && id !== "mtdna" && unreadableArtifact(sample, id)))
       ? 0 : algo(sample, "copy-number") || unreadableArtifact(sample, "copy-number") ? 1 : 2;
@@ -1510,7 +1510,7 @@
             "No cohort generation has been built under this ROOT. Add eligible samples with `traceback lab cohort add`, then publish with `traceback lab cohort build`."), rootProblem, unavailablePanel);
           return;
         }
-        const picker = h("select", { "aria-label": "Cohort generation" },
+        const picker = h("select", { "aria-label": "Cohort generation", "data-requires-server": "" },
           ...data.cohorts.map((row) => h("option", { value: row.cohort_id }, `${row.cohort_id} · ${row.cohort_version} · n = ${row.member_n}`)));
         results = h("div", { "aria-live": "polite" });
         slot.replaceChildren(h("label", {}, "Choose cohort ", picker), rootProblem, unavailablePanel, results);
@@ -1551,7 +1551,7 @@
       section.append(h("p", { class: "empty" }, "No other real sample is available under this ROOT."));
       return section;
     }
-    const picker = h("select", { id: "compare-other-sample" },
+    const picker = h("select", { id: "compare-other-sample", "data-requires-server": "" },
       ...others.map((row) => h("option", { value: row.id12 }, row.id12)));
     const result = h("div", { "aria-live": "polite" });
     section.append(h("label", { for: "compare-other-sample" }, "Sample B "), picker, result);

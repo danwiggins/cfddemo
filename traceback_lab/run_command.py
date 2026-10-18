@@ -23,6 +23,7 @@ from .ingest import (
     GIB,
     AlignedInput,
     ChunkSet,
+    _check_regular,
     align,
     aligner_argv_identity,
     cached_sha256,
@@ -44,6 +45,7 @@ from .ingest import (
     write_source,
 )
 from .platforms import for_input, from_rg_lines
+from .reference_integrity import verify_reference_source
 from .problems import (
     EXIT_OK,
     EXIT_PARTIAL,
@@ -212,10 +214,7 @@ def _target_from_input(
     methylbert_min_classified_reads: int | None = None,
 ) -> RunTarget:
     extras: dict[str, Any] = {}
-    try:
-        extras["reference_fasta"] = str(resolve_reference(store.root, reference_id, example=True).fasta)
-    except LabProblem:
-        pass  # algorithms that need the FASTA fail or skip on their own
+    extras["reference_fasta"] = str(resolve_reference(store.root, reference_id, example=True).fasta)
     extras["methylbert_bundle_sha256"] = methylbert_bundle_sha256
     extras["methylbert_code_sha256"] = methylbert_code_sha256
     extras["methylbert_min_classified_reads"] = methylbert_min_classified_reads
@@ -230,6 +229,7 @@ def _target_from_input(
         label="full",
         example=example,
         extras=extras,
+        reference_integrity_required=True,
     )
 
 
@@ -433,6 +433,14 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
         platform = _stored_platform(aligned)
         example = bool(record.get("example"))
         reference_id, reference_sha256 = _stored_reference_binding(aligned)
+        registered = resolve_reference(store.root, reference_id, example=True)
+        if registered.sha256 != reference_sha256:
+            raise LabProblem(
+                "TBX-LAB-004",
+                cause="stored input and current reference registration have different SHA-256 values",
+                fix="Restore the original reference registration for this stored input",
+            )
+        verify_reference_source(store, registered, write_cache=False)
         with_sex_assertion(record, args.sex)
         data["sample"] = {
             "id12": id12_for(store, source_id), "input_id": aligned.input_id, "platform": platform,
@@ -524,6 +532,7 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
         mark_platform_skips(platform)
         with_sex_assertion(source_record(store, chunkset.source_id) or {}, args.sex)
         reference = resolve_reference(store.root, args.reference_id)
+        verify_reference_source(store, reference, write_cache=False)
         data["reference_id"] = reference.reference_id
         data["chunks"] = {"count": len(chunkset.chunks), "bytes": chunkset.total_bytes, "excluded": chunkset.excluded_indexes}
         lines.append(f"REFERENCE {reference.reference_id}")
@@ -547,12 +556,23 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
             samtools, minimap2 = find_samtools(), find_minimap2()
             low, high = estimate_align_minutes(chunkset.total_bytes)
             reason = "new source"
-            existing = mmi_path(store, reference)
-            if samtools.version and minimap2.version and existing.is_file() and args.mmi is None:
+            existing = (
+                _check_regular(args.mmi.absolute(), 0, args.mmi.name)
+                if args.mmi is not None else mmi_path(store, reference)
+            )
+            if samtools.version and minimap2.version and existing.is_file():
                 cache = store.load_hash_cache()
-                key = store.hash_cache_key(existing)
+                key = store.strong_hash_cache_key(existing)
                 mmi_sha = cache.get(key, {}).get("sha256")
-                if mmi_sha:
+                previous = source_record(store, chunkset.source_id) or {}
+                previous_inputs = previous.get("inputs", [])
+                has_aligned_input = any(
+                    isinstance(row, dict) and row.get("kind") == "aligned"
+                    for row in previous_inputs
+                ) if isinstance(previous_inputs, list) else False
+                if not mmi_sha and has_aligned_input:
+                    reason = "reuse unknown until index hashed"
+                elif mmi_sha:
                     input_id = aligned_input_id(
                         source_id=chunkset.source_id,
                         reference_sha256=reference.sha256,
@@ -568,8 +588,14 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
             data["alignment"] = reason
             alignment_required = reason != "reused"
             data["estimate_min"] = [round(low, 1), round(high, 1)]
+            if reason == "reused":
+                estimate = ""
+            elif reason == "reuse unknown until index hashed":
+                estimate = f" · if realignment needed, estimate {low:.0f}-{high:.0f} min"
+            else:
+                estimate = f" · estimate {low:.0f}-{high:.0f} min"
             lines.append(
-                f"ALIGN     {reason}" + ("" if reason == "reused" else f" · estimate {low:.0f}-{high:.0f} min")
+                f"ALIGN     {reason}" + estimate
                 + (" · minimap2 index built first" if mmi_needed else "")
             )
     if args.cohort is not None:
@@ -659,6 +685,14 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     aligned, record = _stored_input(store, source_id)
                     _stored_platform(aligned)
                     reference_id, reference_sha256 = _stored_reference_binding(aligned)
+                    registered = resolve_reference(store.root, reference_id, example=True)
+                    if registered.sha256 != reference_sha256:
+                        raise LabProblem(
+                            "TBX-LAB-004",
+                            cause="stored input and current reference registration have different SHA-256 values",
+                            fix="Restore the original reference registration for this stored input",
+                        )
+                    verify_reference_source(store, registered, write_cache=True)
                     record = record_source_sex(store, source_id, args.sex)
                     example = bool(record.get("example"))
                     scrubber = Scrubber(root=store.root)
@@ -678,6 +712,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     input_platform = _declared_platform(chunkset)
                     with_sex_assertion(source_record(store, chunkset.source_id) or {}, args.sex)
                     reference = resolve_reference(store.root, args.reference_id, example=args.example)
+                    reference_proof = verify_reference_source(store, reference, write_cache=True)
                     reference_id, reference_sha256 = reference.reference_id, reference.sha256
                     example = bool(args.example)
                     progress(
@@ -703,7 +738,10 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                         if input_manifest(store, prealigned_id) is None:
                             budget = disk_budget(store, chunkset, mmi_needed=False, fasta_bytes=0)
                             require_budget(budget, "ingest")
-                        aligned = ingest_prealigned(store, chunkset, reference, progress=progress)
+                        aligned = ingest_prealigned(
+                            store, chunkset, reference, reference_proof=reference_proof,
+                            progress=progress,
+                        )
                     else:
                         samtools, minimap2 = require_aligner_tools()
                         # Reuse needs no disk: decide reuse before the budget.
@@ -734,11 +772,15 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                             store,
                             reference,
                             minimap2,
+                            reference_proof=reference_proof,
                             override=args.mmi,
                             scrubber=scrubber,
                             timeout_s=ALIGN_TIMEOUT_S,
                             echo=_echo(args.verbose),
                             progress=progress,
+                        )
+                        verify_reference_source(
+                            store, reference, write_cache=True, expected_proof=reference_proof,
                         )
                         if change is not None and not reusable:
                             low, high = estimate_align_minutes(chunkset.total_bytes)
@@ -755,6 +797,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                             minimap2=minimap2,
                             mmi=mmi,
                             mmi_sha256=mmi_sha,
+                            reference_proof=reference_proof,
                             threads=args.threads,
                             sort_mem=args.sort_mem,
                             timeout_s=ALIGN_TIMEOUT_S,

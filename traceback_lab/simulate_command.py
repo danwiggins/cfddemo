@@ -101,17 +101,21 @@ def simulate_command(args: argparse.Namespace, store: LabStore) -> tuple[int, di
             log.append("run_start", command=f"simulate {kind}", pid=_pid())
             id12 = id12_for(store, source_id)
             log.append("sample", sample=id12, source_id=source_id, input_id=aligned.input_id)
-            parent = _target_from_input(
-                aligned,
-                aligned.manifest["reference_id"],
-                aligned.manifest["reference_sha256"],
-                bool(record.get("example")),
-                store,
-            )
-            from .pon_consumer import bind_target
+            try:
+                parent = _target_from_input(
+                    aligned,
+                    aligned.manifest["reference_id"],
+                    aligned.manifest["reference_sha256"],
+                    bool(record.get("example")),
+                    store,
+                )
+                from .pon_consumer import bind_target
 
-            items = bind_target(store, items, parent, aligned.manifest, cohort_id=args.cohort)
-            scrubber = Scrubber(root=store.root)
+                items = bind_target(store, items, parent, aligned.manifest, cohort_id=args.cohort)
+                scrubber = Scrubber(root=store.root)
+            except LabProblem as problem:
+                log.append("run_end", status="blocked", exit_code=problem.exit_code, code=problem.code, step=lock.step)
+                raise
             try:
                 # Intermediates (read-summary, meth-calls) on the parent; derived
                 # inputs reuse them through their row masks (D33).
@@ -157,6 +161,9 @@ def simulate_command(args: argparse.Namespace, store: LabStore) -> tuple[int, di
                     fix="Rerun the same command; only missing results recompute",
                     data={"step": lock.step, "run_id": run_id},
                 ) from None
+            except LabProblem as problem:
+                log.append("run_end", status="blocked", exit_code=problem.exit_code, code=problem.code, step=lock.step)
+                raise
             results = [result for run in runs for result in run.results]
             failed = [result for result in results if result.status == "failed"]
             synthetic = synthetic_summary(store, runs)
