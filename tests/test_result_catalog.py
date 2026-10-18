@@ -735,6 +735,30 @@ def test_catalog_post_rename_crash_retry_seals_same_inode(
 
 
 @pytest.mark.parametrize("prepared", [False, True], ids=["import", "prepare"])
+def test_catalog_matching_orphan_reseals_writable_descendant(
+    tmp_path: Path, prepared: bool
+) -> None:
+    catalog, _, import_root = _catalog(tmp_path)
+    orphan = _kill_after_catalog_rename(catalog, prepared=prepared)
+    before = orphan.stat(follow_symlinks=False)
+    manifest = orphan / "bundle-manifest.json"
+    original_bytes = manifest.read_bytes()
+    manifest.chmod(0o600)
+
+    reopened = ResultCatalog(
+        tmp_path / "catalog",
+        import_roots={"root_primary": import_root},
+        trust_store=catalog.trust_store,
+    )
+    (_prepare if prepared else _import)(reopened)
+    after = orphan.stat(follow_symlinks=False)
+    assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+    assert manifest.read_bytes() == original_bytes
+    assert stat.S_IMODE(after.st_mode) == 0o555
+    assert stat.S_IMODE(manifest.stat(follow_symlinks=False).st_mode) == 0o444
+
+
+@pytest.mark.parametrize("prepared", [False, True], ids=["import", "prepare"])
 def test_catalog_mismatched_orphan_is_not_overwritten(
     tmp_path: Path, prepared: bool
 ) -> None:
