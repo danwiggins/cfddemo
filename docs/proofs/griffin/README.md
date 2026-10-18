@@ -1,10 +1,10 @@
 # Griffin pinned Snakemake synthetic workflow proof
 
-This is a synthetic execution receipt for the Griffin foundation, not a qualified
-human hg38 or 5-million-pair Lab result. The data were 500 generated
-paired-end fragments, a 30 kb toy chr1 FASTA, one TF-like site, synthetic
-GC-frequency tables and a constant-one mappability track. The input setup
-is `generate_toy.py`; the workflow configuration is
+This note records a synthetic execution attempt for the Griffin foundation.
+It is not a qualified human hg38 or 5-million-pair Lab result. The data were
+500 generated paired-end fragments, a 30 kb toy chr1 FASTA, one TF-like site,
+synthetic GC-frequency tables and a constant-one mappability track. The input
+setup is `generate_toy.py`; the workflow configuration is
 `setup_workflows.py`, both beside this note. Both scripts accept `--base-dir`
 and default to a `cfdna-griffin` directory under the system temporary directory.
 The recorded run used an ephemeral scratch directory; its absolute location
@@ -41,10 +41,13 @@ jobs, including coverage, site merging and plotting. The Lab's strict
 corrected-profile parser accepted the output with one `ToySite` profile,
 132 bins and central coverage 2.92846. The corrected TSV SHA-256 is
 `80119c9756431fce599f87103248b07aef993b6263c0ce54013674b8488d6180`.
-The resulting bias table, corrected TSV and plot are in the sibling
-`griffin-snakemake-proof/` folder. Contention on the shared WSL host made
-these toy jobs unusually slow; the receipt is an execution proof, not a
-production runtime estimate.
+The recorded scratch run wrote its bias table, corrected TSV and plot under
+`$PROOF_BASE/snakemake-proof/`. Those outputs are not checked in beside this
+README. The commands and scripts above provide a procedure for a new synthetic
+attempt with the specified upstream checkout and tools; the listed hashes
+describe the original unbundled attempt. Contention on the shared WSL host made
+those toy jobs unusually slow, so its timing is not a production runtime
+estimate.
 
 This run exposed two adapter concerns: upstream cluster settings requested
 eight worker processes despite `--cores 1`, so this manual proof capped
@@ -80,8 +83,8 @@ PYTHONPATH="$PWD" "$PROOF_PYTHON" \
 ```
 
 The recorded attempt was generated beneath an ephemeral scratch directory by
-the checked-in proof script above.
-`provenance.json` has status `complete`, pinned upstream commit, 500 verified
+the checked-in proof script above. Its unbundled `provenance.json` reported
+status `complete`, pinned upstream commit, 500 verified
 D21 pairs, one core, the Python 3.11.17 / Snakemake 5.19.2 runtime and exact
 input, asset, script and generated-config fingerprints. Both original pinned
 workflow logs report 4/4 jobs complete and exit zero. The adapter's strict
@@ -90,8 +93,9 @@ generated corrected TSV SHA-256 is
 `8a72d21d3c0dcb3f90eeb94c08bb47d3efa97ed12daf616ff22ec3551209d594`;
 the final provenance SHA-256 is
 `d3114e6b01bc173bbfec26f7b1fa1e9811e788b2f6cd59d7be151947eb963621`.
-The adapter output and process-pool behavior now have a bounded mechanics
-proof; no human hg38 or full-depth result is implied.
+The provenance file and adapter output are not tracked artifacts. These hashes
+are historical notes for bounded adapter mechanics, not a receipt verifiable
+from this checkout alone. No human hg38 or full-depth result is implied.
 
 The complete human hg38 asset registration and 5-million-pair normal Lab
 run remain open qualification steps.
