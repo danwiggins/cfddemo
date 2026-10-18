@@ -24,7 +24,10 @@ from typing import Any
 from traceback_runner.serialization import canonical_json_bytes
 
 from .envelope import Depth, Failure, ResultEnvelope, provenance
+from .ingest import resolve_reference
 from .pipeline import Stage, run_pipeline
+from .problems import LabProblem
+from .reference_integrity import verify_reference_source
 from .registry import (
     Algorithm,
     InputContext,
@@ -38,6 +41,34 @@ from .scrub import Scrubber
 from .store import MAX_EXECUTION_PLAN_BYTES, LabStore, RunLog, WriterLock, open_regular_no_follow
 
 DEFAULT_TIMEOUT_S = 3600.0
+
+
+def _verify_target_reference(store: LabStore, target: RunTarget, *, write_cache: bool) -> None:
+    """Guard both cached selections and new workers against reference drift."""
+
+    if not target.reference_integrity_required:
+        return
+    consumed_fasta = target.extras.get("reference_fasta")
+    if not isinstance(consumed_fasta, str) or not consumed_fasta:
+        raise LabProblem(
+            "TBX-LAB-004",
+            cause="run target has no registered FASTA path to verify",
+            fix="Recreate the run from an input bound to a registered reference",
+        )
+    reference = resolve_reference(store.root, target.reference_id, example=True)
+    if reference.sha256 != target.reference_sha256:
+        raise LabProblem(
+            "TBX-LAB-004",
+            cause="stored input and current reference registration have different SHA-256 values",
+            fix="Restore the original reference registration for this stored input",
+        )
+    if os.path.abspath(reference.fasta) != os.path.abspath(consumed_fasta):
+        raise LabProblem(
+            "TBX-LAB-004",
+            cause="run target FASTA path differs from the current reference registration",
+            fix="Restore the original reference registration for this stored input",
+        )
+    verify_reference_source(store, reference, write_cache=write_cache)
 
 
 def _cached_plan_matches(attempt: Path | None, expected: Mapping[str, Any], *, required: bool) -> bool:
@@ -118,6 +149,7 @@ class RunTarget:
     derived: Mapping[str, Any] | None = None
     example: bool = False
     extras: dict[str, Any] = field(default_factory=dict)
+    reference_integrity_required: bool = False
 
     def context(self, root: Path) -> InputContext:
         return InputContext(
@@ -222,6 +254,7 @@ def run_plan(
     done: dict[str, StepResult] = dict(upstream_results or {})
     scratch_root = store.lab / "tmp" / run_id
     for item in items:
+        _verify_target_reference(store, target, write_cache=lock is not None)
         algorithm = item.algorithm
         platform_rejected = target.platform not in algorithm.requires.platforms
         pon_unavailable = target.extras.get("pon_unavailable") if algorithm.id == "copy-number" else None
@@ -463,6 +496,7 @@ def run_plan(
                         peak_disk=outcome.peak_disk_bytes,
                     )
                 else:
+                    _verify_target_reference(store, target, write_cache=lock is not None)
                     attempt_id = store.publish_result(
                         envelope,
                         input_id=target.input_id,

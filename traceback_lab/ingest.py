@@ -528,10 +528,17 @@ def mmi_path(store: LabStore, reference: Reference) -> Path:
 
 def cached_sha256(store: LabStore, path: Path) -> str:
     cache = store.load_hash_cache()
-    key = store.hash_cache_key(path)
+    key = store.strong_hash_cache_key(path)
     if key in cache and isinstance(cache[key].get("sha256"), str):
-        return cache[key]["sha256"]
+        if store.strong_hash_cache_key(path) == key:
+            return cache[key]["sha256"]
     digest = _sha256_file(path)
+    if store.strong_hash_cache_key(path) != key:
+        raise LabProblem(
+            "TBX-LAB-004",
+            cause="minimap2 index changed while it was being hashed",
+            fix="Restore the unchanged index or rebuild it from the registered reference",
+        )
     cache[key] = {"sha256": digest, "records": -1}
     store.save_hash_cache(cache)
     return digest
@@ -793,6 +800,15 @@ def align(
                 fix="Not retryable as-is: `traceback lab runs RUN_ID --step align`, then report",
                 data={"ubam_records": chunkset.total_records, "aligned_records": aligned_count},
             )
+        from .reference_integrity import verify_reference_source
+
+        verify_reference_source(store, reference, write_cache=True)
+        if cached_sha256(store, mmi) != mmi_sha256:
+            raise LabProblem(
+                "TBX-LAB-004",
+                cause="minimap2 index bytes changed during alignment",
+                fix="Restore the unchanged index or rebuild it from the registered reference",
+            )
         for leftover in staging.glob("sort*.bam"):
             leftover.unlink()
         manifest = {
@@ -874,6 +890,9 @@ def ingest_prealigned(
                 data={"argument": 1, "kind": "changing"},
             )
         pysam.index(str(bam), str(staging / "aligned.bam.bai"))
+        from .reference_integrity import verify_reference_source
+
+        verify_reference_source(store, reference, write_cache=True)
         manifest = {
             "schema": INPUT_SCHEMA,
             "input_id": input_id,

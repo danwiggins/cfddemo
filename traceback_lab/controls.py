@@ -161,6 +161,7 @@ def run_derived(
             label=spec.label(),
             derived=mask_spec,
             example=parent.example,
+            reference_integrity_required=parent.reference_integrity_required,
             extras={
                 **{key: value for key, value in parent.extras.items() if key != "upstream"},
                 **(
