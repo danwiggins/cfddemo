@@ -701,6 +701,64 @@ def _kill_after_catalog_rename(catalog: ResultCatalog, *, prepared: bool) -> Pat
 
 
 @pytest.mark.parametrize("prepared", [False, True], ids=["import", "prepare"])
+def test_catalog_rename_source_is_writable_then_published_object_is_sealed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prepared: bool
+) -> None:
+    catalog, _, _ = _catalog(tmp_path)
+    original_rename = catalog_module.rename_directory_exclusive_at
+    observed_mode: int | None = None
+
+    def inspect_rename(parent_fd: int, source: str, destination: str) -> None:
+        nonlocal observed_mode
+        metadata = os.stat(source, dir_fd=parent_fd, follow_symlinks=False)
+        observed_mode = stat.S_IMODE(metadata.st_mode)
+        original_rename(parent_fd, source, destination)
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(catalog_module, "rename_directory_exclusive_at", inspect_rename)
+        result = (_prepare if prepared else _import)(catalog)
+    assert observed_mode == 0o700
+    object_path = catalog._bound_objects / (
+        result.reference.bundle_sha256 if prepared else result.bundle_sha256
+    )
+    assert stat.S_IMODE(object_path.stat(follow_symlinks=False).st_mode) == 0o555
+    assert stat.S_IMODE(
+        (object_path / "bundle-manifest.json").stat(follow_symlinks=False).st_mode
+    ) == 0o444
+
+
+@pytest.mark.parametrize("prepared", [False, True], ids=["import", "prepare"])
+def test_catalog_rename_rejects_same_bytes_replacement_inode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prepared: bool
+) -> None:
+    catalog, _, _ = _catalog(tmp_path)
+    original_rename = catalog_module.rename_directory_exclusive_at
+    replaced = False
+    renamed = False
+
+    def swap_source(parent_fd: int, source: str, destination: str) -> None:
+        nonlocal replaced, renamed
+        displaced = f"{source}-displaced"
+        original = catalog._bound_objects / source
+        os.rename(source, displaced, src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
+        shutil.copytree(catalog._bound_objects / displaced, original)
+        before = os.stat(displaced, dir_fd=parent_fd, follow_symlinks=False)
+        after = os.stat(source, dir_fd=parent_fd, follow_symlinks=False)
+        assert (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
+        replaced = True
+        original_rename(parent_fd, source, destination)
+        renamed = True
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(catalog_module, "rename_directory_exclusive_at", swap_source)
+        with pytest.raises((CatalogError, OSError)):
+            (_prepare if prepared else _import)(catalog)
+    assert replaced
+    assert renamed
+    assert catalog.query(CatalogQuery()).empty
+
+
+@pytest.mark.parametrize("prepared", [False, True], ids=["import", "prepare"])
 def test_catalog_post_rename_crash_retry_seals_same_inode(
     tmp_path: Path, prepared: bool
 ) -> None:
