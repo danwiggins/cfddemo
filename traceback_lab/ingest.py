@@ -549,6 +549,7 @@ def ensure_mmi(
     reference: Reference,
     minimap2: Tool,
     *,
+    reference_proof: str,
     override: Path | None,
     scrubber: Scrubber,
     timeout_s: float,
@@ -567,7 +568,10 @@ def ensure_mmi(
     staging = final.with_name(f".staging-{os.urandom(6).hex()}.mmi")
     if progress is not None:
         progress("align   building the minimap2 index once (hg38: ~20-40 min, ~8 GB)")
+    from .reference_integrity import verify_reference_source
+
     try:
+        verify_reference_source(store, reference, write_cache=True, expected_proof=reference_proof)
         result = run_pipeline(
             [Stage("minimap2-index", [str(minimap2.path), "-x", "map-ont", "-d", str(staging), str(reference.fasta)])],
             timeout_s=timeout_s,
@@ -575,6 +579,7 @@ def ensure_mmi(
         )
         if not result.ok:
             raise _align_failed(result, scrubber, "minimap2 index build")
+        verify_reference_source(store, reference, write_cache=True, expected_proof=reference_proof)
         os.replace(staging, final)
     finally:
         staging.unlink(missing_ok=True)
@@ -722,6 +727,7 @@ def align(
     minimap2: Tool,
     mmi: Path,
     mmi_sha256: str,
+    reference_proof: str,
     threads: int | None,
     sort_mem: str,
     timeout_s: float,
@@ -756,6 +762,10 @@ def align(
             progress(f"align   {int(elapsed // 60)}m{int(elapsed % 60):02d}s elapsed (estimate {low:.0f}-{high:.0f} min)")
 
     def build(staging: Path) -> None:
+        from .reference_integrity import verify_reference_source
+
+        verify_reference_source(store, reference, write_cache=True, expected_proof=reference_proof)
+        mmi_proof = store.strong_hash_cache_key(mmi)
         stages = alignment_stages(
             chunkset,
             samtools=samtools,
@@ -800,9 +810,13 @@ def align(
                 fix="Not retryable as-is: `traceback lab runs RUN_ID --step align`, then report",
                 data={"ubam_records": chunkset.total_records, "aligned_records": aligned_count},
             )
-        from .reference_integrity import verify_reference_source
-
-        verify_reference_source(store, reference, write_cache=True)
+        verify_reference_source(store, reference, write_cache=True, expected_proof=reference_proof)
+        if store.strong_hash_cache_key(mmi) != mmi_proof:
+            raise LabProblem(
+                "TBX-LAB-004",
+                cause="minimap2 index changed during alignment",
+                fix="Restore the unchanged index or rebuild it from the registered reference",
+            )
         if cached_sha256(store, mmi) != mmi_sha256:
             raise LabProblem(
                 "TBX-LAB-004",
@@ -850,6 +864,7 @@ def ingest_prealigned(
     chunkset: ChunkSet,
     reference: Reference,
     *,
+    reference_proof: str | None = None,
     progress: Callable[[str], None] | None = None,
 ) -> AlignedInput:
     """Copy one already-aligned BAM into the store and index it."""
@@ -870,6 +885,12 @@ def ingest_prealigned(
             "TBX-LAB-024", cause="prealigned BAM has no unanimous supported platform declaration",
             fix="Use a BAM whose read groups all declare PL:ONT or PL:ILLUMINA",
         )
+    from .reference_integrity import verify_reference_source
+
+    if reference_proof is None:
+        reference_proof = verify_reference_source(store, reference, write_cache=True)
+    else:
+        verify_reference_source(store, reference, write_cache=True, expected_proof=reference_proof)
     input_id = prealigned_input_id(source_id=source_id, reference_sha256=reference.sha256, platform=platform)
     existing = input_manifest(store, input_id)
     if existing is not None:
@@ -890,9 +911,7 @@ def ingest_prealigned(
                 data={"argument": 1, "kind": "changing"},
             )
         pysam.index(str(bam), str(staging / "aligned.bam.bai"))
-        from .reference_integrity import verify_reference_source
-
-        verify_reference_source(store, reference, write_cache=True)
+        verify_reference_source(store, reference, write_cache=True, expected_proof=reference_proof)
         manifest = {
             "schema": INPUT_SCHEMA,
             "input_id": input_id,

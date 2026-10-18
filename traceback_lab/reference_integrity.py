@@ -4,8 +4,9 @@ The persistent proof is an optimization for cooperative local files: a first
 use verifies the complete FASTA SHA-256 and each contig's indexed sequence M5.
 Subsequent uses compare device/inode/size/mtime/ctime for the FASTA and its
 .fai, including a symlinked index's target. This assumes a reliable ctime.
-Same-UID hostile changes during a tool's read remain outside the local file
-contract; callers also check the proof after a consuming step.
+Callers compare the pre-use proof token at publication, rejecting edits even
+when original bytes are restored. Hostile metadata spoofing and ctime-colliding
+changes remain outside the cooperative local file contract.
 """
 
 from __future__ import annotations
@@ -127,11 +128,14 @@ def _check_indexed_contigs(reference: Reference, fasta: Path) -> None:
 
 def verify_reference_source(
     store: LabStore, reference: Reference, *, write_cache: bool,
-) -> None:
-    """Verify full registered bytes on first use; then check the strong stamp.
+    expected_proof: str | None = None,
+) -> str:
+    """Verify current bytes and return a token binding registration and file stamps.
 
     Dry-run calls with ``write_cache=False`` and never creates or rewrites a
-    cache, FASTA or index. Actual calls occur under the Lab writer lock.
+    cache, FASTA or index. A consumer passes its pre-use token back at the
+    publication boundary; an edit then restore must not pass as unchanged.
+    Actual calls occur under the Lab writer lock.
     """
 
     fasta = reference.fasta
@@ -139,13 +143,15 @@ def verify_reference_source(
     if before[0].size != reference.loaded.source.fasta_size_bytes:
         raise _problem("registered FASTA size changed since registration")
     key = _proof_key(reference, before)
+    if expected_proof is not None and key != expected_proof:
+        raise _problem("registered FASTA or index changed during consumption")
     cache = store.load_hash_cache()
     proof = cache.get(key)
     if (isinstance(proof, dict) and proof.get("sha256") == reference.sha256
             and proof.get("indexed_m5_verified") is True):
         if _stamps(fasta) != before:
             raise _problem("registered FASTA or index changed during verification")
-        return
+        return key
     if _raw_sha256(fasta) != reference.sha256:
         raise _problem("registered FASTA bytes changed since registration")
     _check_indexed_contigs(reference, fasta)
@@ -154,3 +160,4 @@ def verify_reference_source(
     if write_cache:
         cache[key] = {"sha256": reference.sha256, "indexed_m5_verified": True}
         store.save_hash_cache(cache)
+    return key
