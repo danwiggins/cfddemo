@@ -42,7 +42,10 @@ class Side:
 def _number(value: Any) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    number = float(value)
+    try:
+        number = float(value)
+    except OverflowError:
+        return None
     return number if math.isfinite(number) else None
 
 
@@ -58,7 +61,7 @@ def _relative(a: float, b: float, tolerance: float) -> bool:
 def stable(spec: Mapping[str, Any] | None, a: Side, b: Side) -> bool | None:
     """``True`` stable, ``False`` unstable, ``None`` no verdict."""
 
-    if spec is None:
+    if spec is None or spec.get("kind") == "unvalidated":
         return None
     x, y = _number(a.value), _number(b.value)
     if x is None or y is None:
@@ -94,6 +97,8 @@ def deviation(spec: Mapping[str, Any] | None, value: Any, full: Any, fraction: f
     value, or the signed difference in the metric's unit when the metric is
     ``absolute`` or the full value is 0 (a relative deviation is undefined)."""
 
+    if spec is not None and spec.get("kind") == "unvalidated":
+        return None, "none"
     x, y = _number(value), _number(full)
     if x is None or y is None:
         return None, "none"
@@ -111,7 +116,7 @@ def band_at(spec: Mapping[str, Any] | None, a: Side, full: Side) -> tuple[float,
     pooled-proportion approximation, which uses the full value for p̄)."""
 
     y = _number(full.value)
-    if spec is None or y is None:
+    if spec is None or spec.get("kind") == "unvalidated" or y is None:
         return None
     kind = spec.get("kind")
     tolerance = spec.get("tolerance")

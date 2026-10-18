@@ -103,21 +103,33 @@ or self-declared approval as a completed release gate.
 `.github/workflows/ci.yml` runs on every pull request and on pushes to `main`,
 on `macos-latest` and `ubuntu-latest` with Python 3.11. Both `ci (macos-latest)`
 and `ci (ubuntu-latest)` are required checks. macOS team workstations remain the
-product host (security spec X1, #86); the ubuntu job catches Linux-only
-regressions. Each job runs
-`uv sync --frozen`, `uvx ruff@0.7.4 check .`, and
-`pytest -n auto -m "not slow" --timeout 600` as one step, web service tests
-included. The local web service's single-instance lock is per state directory
-(golden-path item A3), so parallel workers on distinct temporary roots do not
-collide.
+product host (security spec X1, #86); the Ubuntu job catches portability
+regressions. macOS installs `samtools` and `minimap2` with Homebrew. Ubuntu
+installs pinned, checksummed upstream `samtools` 1.21 and `minimap2` 2.28 over
+its older distribution copies. Each job verifies that `uv.lock` is tracked,
+runs the literal `uv sync` command, and requires no lockfile diff; then it runs
+`uvx ruff@0.7.4 check .` and
+`uv run pytest -p no:cacheprovider -n auto --timeout 600 -m "not slow" --durations=10`.
+Web service and Lab tests are included. The local web service's single-instance
+lock is per state directory (golden-path item A3), so parallel workers on
+distinct temporary roots do not collide.
 
-`.github/workflows/slow.yml` runs `pytest -m slow` nightly, on demand, and on
+`.github/workflows/slow.yml` runs `uv sync --frozen` followed by
+`uv run pytest -p no:cacheprovider --timeout 600 -m slow --durations=10`
+nightly, on demand, and on
 pull requests that touch `traceback_runner/product_gates.py`,
-`traceback_runner/web/`, or the product-gates fixture. Today the only slow test
-compares the live product-gates harness with the frozen
-`tests/fixtures/product_gates/foundation_report.json`. After a contract change,
+`traceback_runner/web/`, product-gates tests or fixtures, or the regeneration
+script. The workflow comment identifies its product-gates fixture comparison;
+the marker selection itself is authoritative as the suite evolves. After a
+product-gates contract change,
 regenerate the fixture with
 `uv run python scripts/regenerate_product_gate_fixture.py`; never hand-edit it.
+
+`.github/workflows/canary.yml` runs the synthetic golden path, demo/verify,
+and generated-BAM canary on macOS and Ubuntu nightly, on demand, and on
+canary-related pull requests. Its in-job baseline and committed baseline are
+synthetic checks. The real-input canary and its private baseline stay on an
+operator workstation and do not run in repository CI.
 
 Branch protection is a manual repository-admin action (golden-path decision
 D8). The operator runs, once both `ci (...)` checks have reported on a pull

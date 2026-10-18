@@ -15,11 +15,11 @@ from traceback_runner import cli as signed_cli
 
 
 def _c(algorithm_id="bam-qc", **overrides) -> Candidate:
-    base = dict(
-        algorithm_id=algorithm_id, label=algorithm_id, value=1.0, unit=None, tier="NEWER", status="ok",
-        state="no_reference", usable_at_half=True, split_stable=True, split_relative_diff=0.01,
-        citation_verified=True, control_recovered=None, order=0,
-    )
+    base = {
+        "algorithm_id": algorithm_id, "label": algorithm_id, "value": 1.0, "unit": None, "tier": "NEWER", "status": "ok",
+        "state": "no_reference", "usable_at_half": True, "split_stable": True, "split_relative_diff": 0.01,
+        "citation_verified": True, "control_recovered": None, "order": 0,
+    }
     base.update(overrides)
     return Candidate(**base)
 
@@ -124,7 +124,8 @@ def _dom(server, tmp_path, *, size="1280,800", route=None, want=None) -> str:
 
     if want is None:
         want = (lambda d: True) if route else (lambda d: "data-measured" in d)
-    good = lambda d: 'data-ready="1"' in d and want(d)  # noqa: E731
+    def good(d: str) -> bool:
+        return 'data-ready="1"' in d and want(d)
     link = server.issue_link() + (f"&route={route}" if route else "")
     tmp_path.mkdir(parents=True, exist_ok=True)
     profile = tmp_path / "profile"
@@ -132,6 +133,7 @@ def _dom(server, tmp_path, *, size="1280,800", route=None, want=None) -> str:
         [_chrome(), "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run",
          f"--user-data-dir={profile}", f"--window-size={size}", link],
         profile, ok=good, timeout=90,
+        viewport=tuple(map(int, size.split(","))),
     )
 
 
@@ -185,14 +187,99 @@ def test_no_horizontal_page_scroll(page_root, tmp_path, size) -> None:
 def test_navigation_order_with_compare(page_root, tmp_path) -> None:
     with RunningLabServer(LabStore(page_root)) as server:
         dom = _dom(server, tmp_path, route=f"/sample/{_id12(page_root)}/stability")
-    nav = re.search(r'<nav aria-label="Lenses"[^>]*>(.*?)</nav>', dom, re.S).group(1)
+    nav = re.search(r'<nav aria-label="Lenses"[^>]*>(.*?)</nav>', dom, re.DOTALL).group(1)
     labels = re.findall(r">([A-Za-z/ ]+?)(?: \(\d+[^)]*\))?</a>", nav)
-    assert labels == ["Findings", "Trust/QC", "Stability", "Signals", "Compare", "Body map", "Agreement", "Evidence", "Methods"]
+    assert labels == ["Findings", "Trust/QC", "Stability", "Signals", "Body map", "Agreement", "Compare", "Evidence", "Methods"]
     assert 'aria-current="page">Stability' in nav
     options = re.findall(r"<option[^>]*>([^<]*)</option>", dom)
     assert len(options) == 1 and "@" not in options[0]  # derived inputs are never samples
     assert "usable to" in dom or "unstable below full depth" in dom
     assert "Stability: every point" in dom
+
+
+@needs_chrome
+def test_stability_names_both_halves_without_a_numeric_verdict(page_root, tmp_path, monkeypatch) -> None:
+    from traceback_lab import views
+
+    original = views.stability_panels
+
+    def panels_with_missing_halves(sample, library=None):
+        panels = original(sample, library)
+        states = [
+            (("skipped", "depth"), ("failed", "algorithm failed")),
+            (("unavailable", "selected result unavailable"), ("not_interpretable", "metric value unavailable")),
+        ]
+        for panel, (a, b) in zip(panels, states):
+            panel["split"] = None
+            panel["split_status"] = {
+                half: {"state": state, "reason": reason, "value": None, "deviation": None}
+                for half, (state, reason) in zip(("A", "B"), (a, b))
+            }
+        assert len(panels) >= 3
+        panels[2]["split"] = {"a": 100, "b": 105, "absolute_diff": 5,
+                               "deviation_a": None, "deviation_b": None,
+                               "relative_abs_diff": 5 / 102.5, "stable": None}
+        panels[2]["split_status"] = {
+            half: {"state": "ok", "reason": None, "value": value, "deviation": None}
+            for half, value in (("A", 100), ("B", 105))
+        }
+        panels[2]["split_warning"] = "an unrecognized split label is present"
+        for point in panels[2]["points"]:
+            point.update({"state": "not_interpretable", "unit": "none", "deviation": None, "band": None})
+        return panels
+
+    monkeypatch.setattr(views, "stability_panels", panels_with_missing_halves)
+    with RunningLabServer(LabStore(page_root)) as server:
+        dom = _dom(server, tmp_path, route=f"/sample/{_id12(page_root)}/stability",
+                   want=lambda page: "Split halves: split A skipped" in page)
+    assert "split A skipped (depth); split B failed (algorithm failed)" in dom
+    assert "split A unavailable (selected result unavailable); split B not interpretable (metric value unavailable)" in dom
+    assert "No split-half stability verdict." in dom
+    assert "100 / 105" in dom and "|A−B| = 5" in dom
+    assert "relative difference 4.9%" in dom
+    assert "no split-half stability verdict; an unrecognized split label is present" in dom
+    assert "No validated stability deviation scale" in dom
+
+
+@needs_chrome
+@pytest.mark.parametrize("comparable", [False, True])
+def test_home_names_unavailable_split_comparisons(page_root, tmp_path, comparable) -> None:
+    with RunningLabServer(LabStore(page_root)) as server:
+        original = server.app.api.sample
+
+        def sample(id12):
+            payload = original(id12)
+            payload["stability"] = [{"split": None, "split_status": {
+                "A": {"state": "skipped"}, "B": {"state": "unavailable"},
+            }}]
+            payload["repeatability"] = {
+                "median_relative_abs_diff": 0.05, "metrics": 1, "unstable": 0,
+                "verdict_metrics": 1, "no_verdict_metrics": 0,
+                "incomparable_metrics": 1, "worst": [],
+            } if comparable else None
+            return payload
+
+        server.app.api.sample = sample
+        expected = "1 metric comparison unavailable" if comparable else "1 split metric comparison unavailable"
+        dom = _dom(server, tmp_path, want=lambda page: expected in page)
+    assert expected in dom
+    if comparable:
+        assert "Median split-half |A−B|: 5.0%" in dom
+    else:
+        assert "no comparable pair is available" in dom
+        assert "See Stability" in dom
+
+
+@needs_chrome
+def test_stability_intro_does_not_call_recorded_halves_absent(page_root, tmp_path, monkeypatch) -> None:
+    from traceback_lab import views
+
+    monkeypatch.setattr(views, "repeatability", lambda panels: None)
+    with RunningLabServer(LabStore(page_root)) as server:
+        dom = _dom(server, tmp_path, route=f"/sample/{_id12(page_root)}/stability",
+                   want=lambda page: "Split halves were recorded, but no comparable pair is available." in page)
+    assert "Split halves were recorded, but no comparable pair is available." in dom
+    assert "Split-half markers absent" not in dom
 
 
 @needs_chrome
@@ -273,6 +360,40 @@ def test_findings_grouping_and_flags(page_root, tmp_path) -> None:
 
 
 @needs_chrome
+def test_next_step_and_identity_privacy_flags_are_local_pills(page_root, tmp_path, monkeypatch) -> None:
+    from traceback_lab.web.api import LabApi
+
+    real_sample = LabApi.sample
+
+    def sample_with_disclosures(api, id12):
+        payload = real_sample(api, id12)
+        metric = next(
+            metric for algorithm in payload["algorithms"] if not algorithm["hidden"]
+            for metric in algorithm["metrics"]
+            if metric.get("entry") and isinstance(metric.get("value"), (int, float))
+        )
+        metric["label"] = "Analytical next-step probe"
+        metric["state"] = "above_typical"
+        metric["entry"]["next_steps"] = {"analytical": ["Inspect the depth curve"]}
+        payload["algorithms"].append({
+            "algorithm_id": "identity", "status": "skipped", "hidden": True, "metrics": [],
+        })
+        return payload
+
+    monkeypatch.setattr(LabApi, "sample", sample_with_disclosures)
+    with RunningLabServer(LabStore(page_root)) as server:
+        findings = _dom(server, tmp_path / "findings-flags", route=f"/sample/{_id12(page_root)}/findings")
+        trust = _dom(server, tmp_path / "identity-flags", route=f"/sample/{_id12(page_root)}/trust-qc")
+
+    card = next(block for block in re.findall(r'<article class="finding-card".*?</article>', findings, re.S)
+                if "Analytical next-step probe" in block)
+    assert re.search(r'<strong>Next steps \(analytical\): </strong>Inspect the depth curve '
+                     r'<span class="flag-pill">FLAG: CLIA — reads as clinical advice', card)
+    identity = re.search(r'<h2>Identity comparisons</h2>(.*?)</section>', trust, re.S).group(1)
+    assert '<span class="flag-pill">FLAG: PRIVACY — pair comparison can reveal family relationships.</span>' in identity
+
+
+@needs_chrome
 def test_about_clia_renders_the_full_copy(page_root, tmp_path) -> None:
     with RunningLabServer(LabStore(page_root)) as server:
         dom = _dom(server, tmp_path, route="/about/clia",
@@ -293,6 +414,17 @@ def _id12(root: Path) -> str:
     from traceback_lab.web.api import LabApi
 
     return LabApi(LabStore(root)).samples()["samples"][0]["id12"]
+
+
+def test_agreement_api_reports_copy_number_unavailable_at_fixture_depth(page_root: Path) -> None:
+    from traceback_lab.web.api import LabApi
+
+    payload = LabApi(LabStore(page_root)).sample(_id12(page_root))
+    concordance = payload["concordance"]
+    assert "not independent confirmation" in concordance["caption"]
+    assert "whole-genome doubling" in concordance["wgd_caveat"]
+    assert len(concordance["pairs"]) == 3
+    assert all(pair["state"] == "missing_cn" and pair["x"] is None for pair in concordance["pairs"])
 
 
 @needs_chrome
@@ -329,6 +461,7 @@ def test_deep_link_waits_for_deferred_lens_script(page_root, tmp_path, monkeypat
     """Fast API responses must not outrun the later deferred views script."""
 
     import time
+
     from traceback_lab.web.server import _Handler
 
     original = _Handler.do_GET
@@ -356,6 +489,7 @@ def test_signals_body_map_and_agreement(page_root, tmp_path) -> None:
         body = _dom(server, tmp_path / "b", route=f"/sample/{id12}/body-map")
         agreement = _dom(server, tmp_path / "a", route=f"/sample/{id12}/agreement")
     assert 'data-rendered="1"' in signals and "Size density" in signals and "Data table" in signals
+    assert "Griffin TF-site profile" in signals and "FLAG: LEGAL" in signals
     assert 'aria-pressed="true"' in signals
     assert "FLAG: LEGAL" in body and "cell-origin" in body
     assert "These signals share inputs and are not independent confirmation; agreement is not validation." in agreement

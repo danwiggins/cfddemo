@@ -160,6 +160,14 @@ def _tools(tools: Iterable[Mapping[str, str]]) -> list[dict[str, str]]:
     return sorted(pinned, key=lambda tool: (tool["name"], tool["version"]))
 
 
+def _identity_platform(platform: str | None) -> str | None:
+    """Legacy ONT result/cohort identities omitted the platform key."""
+
+    if platform not in {None, "ont", "illumina", "unknown"}:
+        raise ValueError("unknown Lab platform")
+    return None if platform == "ont" else platform
+
+
 def parameters_sha256(
     *,
     algorithm_id: str,
@@ -179,8 +187,7 @@ def parameters_sha256(
 
     if not ALGORITHM_ID_PATTERN.fullmatch(algorithm_id):
         raise ValueError("algorithm id must match ^[a-z0-9-]{1,40}$")
-    if platform is not None and platform not in {"ont", "illumina", "unknown"}:
-        raise ValueError("unknown Lab platform")
+    platform = _identity_platform(platform)
     identity = {
         "algorithm_id": algorithm_id,
         "algorithm_version": str(algorithm_version),
@@ -223,8 +230,7 @@ def cohort_compat_key(
 
     drop = set(per_sample_asset_keys)
     shared = {key: value for key, value in parameters.items() if key not in drop}
-    if platform is not None and platform not in {"ont", "illumina", "unknown"}:
-        raise ValueError("unknown Lab platform")
+    platform = _identity_platform(platform)
     identity = {
         "algorithm_id": algorithm_id,
         "algorithm_version": str(algorithm_version),

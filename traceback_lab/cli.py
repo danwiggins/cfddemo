@@ -85,6 +85,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     add_asset_parser(commands, _common)
 
+    from .fetal_command import add_fetal_parser
+
+    add_fetal_parser(commands, _common)
+
+    from .dd_command import add_dd_parser
+
+    add_dd_parser(commands, _common)
+
     from .doctor import add_doctor_parser
 
     add_doctor_parser(commands, _common)
@@ -96,6 +104,14 @@ def build_parser() -> argparse.ArgumentParser:
     from .cohort_command import add_cohort_parser
 
     add_cohort_parser(commands, _common)
+
+    from .arm_zscore_command import add_arm_zscore_parser
+
+    add_arm_zscore_parser(commands, _common)
+
+    from .microbial_command import add_microbial_parser
+
+    add_microbial_parser(commands, _common)
 
     from .identity_command import add_identity_parser
 
@@ -140,6 +156,7 @@ def _algorithms(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
             "cost": algorithm.cost,
             "consumes": algorithm.consumes,
             "min_eligible_reads": algorithm.requires.min_eligible_reads,
+            "input_gate": getattr(algorithm, "input_gate", None),
             "upstream": list(algorithm.upstream),
             "hidden": algorithm.id in library.hidden_algorithms,
             **catalog(algorithm.id),
@@ -158,7 +175,7 @@ def _algorithms(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
     lines = [f"ROOT  {store.root}"]
     if rows:
         lines.append(_table(
-            ("ID", "TIER", "FAMILY", "COST", "MIN DEPTH", "LICENSES", "FOOTNOTE"),
+            ("ID", "TIER", "FAMILY", "COST", "MIN DEPTH", "INPUT GATE", "LICENSES", "FOOTNOTE"),
             [
                 (
                     row["id"] + (" (intermediate)" if row["hidden"] else ""),
@@ -166,6 +183,7 @@ def _algorithms(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     row["family"],
                     row["cost"],
                     f"{row['min_depth_x']:g}x" if row["min_depth_x"] else "any",
+                    row["input_gate"] or "-",
                     ", ".join(row["license_ids"]) or "-",
                     (row["footnote"] or "-")[:70],
                 )

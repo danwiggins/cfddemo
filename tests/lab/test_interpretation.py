@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -13,6 +14,8 @@ from traceback_lab.interpretation.engine import (
     LIBRARY_FILE,
     LICENSES_FILE,
     Cohort,
+    Entry,
+    Library,
     LibraryError,
     bootstrap_p95_interval,
     classify,
@@ -181,6 +184,41 @@ def test_loader_refusals(mutator, message) -> None:
         parse_library(_mutate(mutator), LICENSES)
 
 
+@pytest.mark.parametrize("checked", [
+    {"by": "reviewer", "date": "2026-10-17"},
+    {"by": "reviewer", "date": "2026-10-17", "note": "  "},
+    {"by": "reviewer", "date": "2026-10-17", "note": 123},
+    {"by": "  ", "date": "2026-10-17", "note": "source checked"},
+    {"by": "reviewer", "date": False, "note": "source checked"},
+])
+def test_citation_check_requires_three_nonblank_text_fields(checked) -> None:
+    with pytest.raises(LibraryError, match="citation_checked needs nonblank by, date and note"):
+        parse_library(_mutate(lambda d: d["entries"][0].update(citation_checked=checked)), LICENSES)
+
+
+def test_absent_citation_check_remains_unverified() -> None:
+    library = parse_library(_mutate(lambda d: d["entries"][0].pop("citation_checked")), LICENSES)
+    assert not library.entry("bam-qc", "total_reads").citation_verified
+
+
+def test_direct_entry_with_incomplete_check_serializes_as_unverified() -> None:
+    from traceback_lab.web.api import _catalog, _metric_payload
+
+    source = LIB.entry("bam-qc", "mapped_fraction")
+    assert source is not None
+    entry = Entry(source.algorithm_id, source.metric_id, {
+        **source.raw, "citation_checked": {"by": "reviewer", "date": "2026-10-17"},
+    })
+    assert not entry.citation_verified
+    row = SimpleNamespace(
+        metric_id=entry.metric_id, label=entry["label"], value=0.95, unit="fraction", n=100,
+        tier=entry.tier, interpretation=classify(0.95, entry),
+    )
+    assert _metric_payload(row, entry, None)["entry"]["citation_checked"] is None
+    library = Library(LIB.version, {(entry.algorithm_id, entry.metric_id): entry}, LIB.licenses)
+    assert _catalog(library, [entry.algorithm_id], [])[0]["citation_checked"] is False
+
+
 def test_loader_reports_the_yaml_line_and_refuses_python_tags() -> None:
     with pytest.raises(LibraryError, match="line"):
         parse_library("version: 0.1.0\nentries: [\n", LICENSES)
@@ -193,6 +231,27 @@ def test_default_stability_by_value_kind() -> None:
     assert entry.stability == {"kind": "proportion"}
     library = parse_library(_mutate(lambda d: d["entries"][4].pop("stability")), LICENSES)
     assert library.entry("bam-qc", "mean_read_q").stability == {"kind": "relative", "tolerance": 0.10}
+
+
+def test_signed_metric_requires_explicit_stability_at_every_tier() -> None:
+    def arm_entry(data):
+        return next(entry for entry in data["entries"]
+                    if entry["algorithm_id"] == "arm-summary" and entry["metric_id"] == "chr1p_log2")
+
+    signed = [entry for entry in LIB.entries.values() if entry["value_kind"] == "signed"]
+    arm_log2 = [entry for entry in signed if entry.algorithm_id == "arm-summary"
+                and entry.metric_id.endswith("_log2")]
+    assert len(arm_log2) == 44
+    assert all(entry.stability == {"kind": "unvalidated"} for entry in arm_log2)
+    assert all(entry.stability is not None for entry in signed)
+
+    for change in ({}, {"tier": "NEWER"}, {"reference": {"kind": "internal_cohort"}}):
+        def remove_declaration(data):
+            arm_entry(data).pop("stability")
+            arm_entry(data).update(change)
+
+        with pytest.raises(LibraryError, match="explicit stability"):
+            parse_library(_mutate(remove_declaration), LICENSES)
 
 
 def _envelope(metrics):

@@ -1,6 +1,6 @@
 # TSS coverage profile (exploratory)
 
-`tss-profile` computes an in-house aggregate coverage profile around protein-coding transcription start sites. It does not run Zhao-lab code, infer expression for an individual gene, or use a clinical cutoff. The approved demo-lane spec assigns the method to L2, fragmentomics, the NEWER tier, and a 5 million-read gate.
+`tss-profile` computes an in-house aggregate coverage profile around protein-coding transcription start sites. It does not run Zhao-lab code, infer expression for an individual gene, or use a clinical cutoff. The Lab registry places it in fragmentomics with a 5 million-read gate; the read-time interpretation library labels it NEWER. That tier does not validate this ONT implementation.
 
 ## Annotation and registration
 

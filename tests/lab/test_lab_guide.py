@@ -104,6 +104,7 @@ def journey_root(tmp_path_factory) -> dict:
     import os
 
     root = tmp_path_factory.mktemp("journey") / "root"
+    run_cwd = tmp_path_factory.mktemp("journey-run-cwd")
     previous = os.environ.get("TRACEBACK_ROOT")
     os.environ["TRACEBACK_ROOT"] = str(root)
     outputs = {}
@@ -117,15 +118,21 @@ def journey_root(tmp_path_factory) -> dict:
 
             buffer = io.StringIO()
             started = time.monotonic()
-            with contextlib.redirect_stdout(buffer):
-                code = signed_cli.main(argv[3:])
+            previous_cwd = Path.cwd()
+            try:
+                if argv[-2:] == ["run", "--example"]:
+                    os.chdir(run_cwd)
+                with contextlib.redirect_stdout(buffer):
+                    code = signed_cli.main(argv[3:])
+            finally:
+                os.chdir(previous_cwd)
             outputs[" ".join(argv[3:])] = (code, buffer.getvalue(), time.monotonic() - started)
     finally:
         if previous is None:
             os.environ.pop("TRACEBACK_ROOT", None)
         else:
             os.environ["TRACEBACK_ROOT"] = previous
-    return {"root": root, "outputs": outputs}
+    return {"root": root, "run_cwd": run_cwd, "outputs": outputs}
 
 
 def test_doctor_step_passes_with_fixes_on_every_warning(journey_root) -> None:
@@ -141,7 +148,9 @@ def test_example_step_runs_within_budget_and_prints_the_summary(journey_root) ->
     code, out, elapsed = journey_root["outputs"]["lab run --example"]
     assert code == 0, out
     assert elapsed < EXAMPLE_BUDGET_S, f"lab run --example took {elapsed:.0f} s"
+    assert out.splitlines()[0] == f"ROOT  {journey_root['root']}"
     block = out[out.index("ROOT    ") :].splitlines()
+    assert block[0] == f"ROOT    {journey_root['root']}"
     sample = next(line for line in block if line.startswith("SAMPLE  "))
     assert re.match(r"SAMPLE  [0-9a-f]{12,} ", sample)
     assert any(line == "NEXT    traceback lab serve --open" for line in block)
@@ -170,6 +179,48 @@ def test_no_input_prints_the_three_line_quickstart(tmp_path, capsys) -> None:
     out = capsys.readouterr().out
     assert code == 2
     assert out.splitlines()[-3:] == ["  traceback lab doctor", "  traceback lab run --example", "  traceback lab serve --open"]
+
+
+def test_serve_uses_the_run_root_across_cwds(journey_root, tmp_path) -> None:
+    """The guide's run and serve commands share TRACEBACK_ROOT across directories."""
+
+    import os
+    import signal
+    import subprocess
+
+    assert journey_root["run_cwd"] != REPO
+    argv = next(a for a in journey() if a[-2:] == ["serve", "--open"])
+    env = {**os.environ, "TRACEBACK_ROOT": str(journey_root["root"]), "BROWSER": "true", "PYTHONPATH": str(REPO)}
+    stdout_path = tmp_path / "root-stdout.log"
+    stderr_path = tmp_path / "root-stderr.log"
+    with stdout_path.open("w") as stdout, stderr_path.open("w") as stderr:
+        process = subprocess.Popen(
+            argv, cwd=REPO, env=env, stdout=stdout, stderr=stderr, stdin=subprocess.DEVNULL,
+            start_new_session=os.name != "nt",
+        )
+        try:
+            lines = _serve_banner(process, stdout_path, stderr_path, timeout=SERVE_BANNER_TIMEOUT_S)
+            assert lines[0] == f"ROOT  {journey_root['root']}"
+            assert re.match(r"^http://127\.0\.0\.1:\d+/#bootstrap=[A-Za-z0-9_-]{43,}$", lines[1]), lines
+            assert "has no Lab runs" not in stdout_path.read_text()
+        finally:
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=10)
+            else:
+                try:
+                    os.killpg(process.pid, signal.SIGTERM)
+                except (ProcessLookupError, PermissionError):
+                    pass
+            try:
+                process.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                if os.name == "nt":
+                    subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False, timeout=10)
+                else:
+                    os.killpg(process.pid, signal.SIGKILL)
+                process.wait(timeout=5)
 
 
 @needs_chrome

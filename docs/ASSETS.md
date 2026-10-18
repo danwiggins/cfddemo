@@ -69,3 +69,21 @@ Its result reports independently:
 An old object may therefore remain byte-valid while current authority is unknown
 or revoked. Historical bytes are retained for audit, but both
 `execution_authorized` and `qualification_established` remain false.
+
+## Separate Lab registrations
+
+The registry above is for **synthetic release assets**. `traceback lab` has
+separate local registrations for method inputs, including its TSS annotation,
+MethylBERT model bundle, epi-clock coordinate map, and input-scoped prenatal
+or donor calibrations. Installing a synthetic release asset does not satisfy a
+Lab method's asset preflight or establish biological qualification.
+
+The [TSS profile](LAB-TSS-PROFILE.md), [MethylBERT bundle](METHYLBERT-BUNDLE.md),
+and [epi-clock map](epi-clock.md) pages describe their exact bytes and runtime
+checks. The [donor chrY](dd-cfdna-chry.md), [fetal chrY](fetal-chry.md), and
+[NIPTeR](fetal-nipter.md) contracts bind to a stored input and reference. For
+a new immutable calibration slot, registration first reads that stored input's
+manifest and checks its input ID, source ID, and reference SHA-256. A missing,
+unreadable, or mismatched manifest is refused before the slot is published.
+Those checks protect provenance; they do not verify the operator's calibration
+study, model quality, consent, or rights.

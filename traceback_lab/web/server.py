@@ -35,7 +35,7 @@ from traceback_runner.web.auth import (
     build_loopback_config,
 )
 
-from ..store import LabStore
+from ..store import LabStore, ResultOrderUnavailable
 from . import api
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -64,6 +64,7 @@ _ROUTES = (
     ("cohorts", re.compile(r"^/api/cohorts$")),
     ("compare", re.compile(rf"^/api/cohorts/({COHORT})/samples/({ID12})/compare$")),
     ("run_log_line", re.compile(rf"^/api/samples/({ID12})/run-log/({ALG})$")),
+    ("pinned_run_log_line", re.compile(rf"^/api/samples/({ID12})/run-log/({ALG})/([0-9a-f]{{64}})/([0-9a-f]{{64}})/(a-\d{{8}}T\d{{12}}-[0-9a-f]{{8}})$")),
     ("compare_samples", re.compile(rf"^/api/samples/({ID12})/compare/({ID12})$")),
     ("sample", re.compile(rf"^/api/samples/({ID12})$")),
     ("artifact", re.compile(rf"^/api/samples/({ID12})/artifact/({DERIVED})/({ALG})/({PANEL})$")),
@@ -218,6 +219,9 @@ class _Handler(BaseHTTPRequestHandler):
                 elif name == "run_log_line":
                     payload = self.app.api.run_log_line(*match.groups())
                     self._json(200 if payload.get("found") else 404, payload)
+                elif name == "pinned_run_log_line":
+                    payload = self.app.api.run_log_line(*match.groups())
+                    self._json(200 if payload.get("found") else 404, payload)
                 else:
                     found = self.app.api.artifact(*match.groups())
                     if found is None:
@@ -228,6 +232,12 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": {"code": "TBX-LAB-WEB-404"}})
         except BoundaryDenied as denied:
             self._json(denied.status_code, {"error": {"code": denied.code}})
+        except ResultOrderUnavailable:
+            self._json(503, {"error": {
+                "code": "TBX-LAB-WEB-SELECTION-UNAVAILABLE",
+                "message": "Current result selections are unavailable.",
+                "fix": "Retry; if this persists, inspect Lab storage and restore damaged selection files from a known-good backup.",
+            }})
         except Exception:  # noqa: BLE001 - never leak internals
             self._json(500, {"error": {"code": "TBX-LAB-WEB-500"}})
 
@@ -271,12 +281,16 @@ class _Handler(BaseHTTPRequestHandler):
     do_PATCH = do_PUT
 
 
+class _LabHTTPServer(ThreadingHTTPServer):
+    daemon_threads = True
+    request_queue_size = 16  # Accommodate the initial burst of CSS, scripts, and API requests.
+
+
 class RunningLabServer:
     """A started server: ``base_url``, ``issue_link()``, ``close()``."""
 
     def __init__(self, store: LabStore, *, port: int = 0) -> None:
-        self.httpd = ThreadingHTTPServer(("127.0.0.1", port), _Handler)
-        self.httpd.daemon_threads = True
+        self.httpd = _LabHTTPServer(("127.0.0.1", port), _Handler)
         actual = self.httpd.server_address[1]
         boundary = LocalWebBoundary(build_loopback_config(port=actual), BootstrapBroker())
         app = LabWebApp(store=store, boundary=boundary, assets=_assets(), api=api.LabApi(store))

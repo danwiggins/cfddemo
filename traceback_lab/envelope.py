@@ -30,19 +30,31 @@ Status = Literal["ok", "skipped", "failed"]
 # Skip reasons the runner and algorithms may record (D7, D14, D22, D36).
 SKIP_REASONS: tuple[str, ...] = (
     "depth",
+    "derived_input",
+    "disk",
     "missing_toolchain",
     "missing_asset",
+    "no_pon",
+    "protocol_mismatch",
     "invalid_asset",
+    "asset_unavailable",
     "missing_channel",
+    "low_support",
     "missing_tags",
     "example_reference",
+    "input_unavailable",
     "platform",
+    "unsupported_input",
     "platform_unverified",
+    "superseded_method",
     "derived_not_supported",
     "missing_input",
     "input_kind",
     "reference",
     "upstream",
+    "unqualified_support",
+    "missing_gpu",
+    "model_not_ready",
 )
 
 Sha256 = Annotated[str, Field(pattern=SHA256_PATTERN.pattern)]

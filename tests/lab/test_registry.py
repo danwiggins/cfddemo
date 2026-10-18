@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from traceback_runner.serialization import canonical_json_bytes
 from traceback_lab.problems import LabProblem
 from traceback_lab.registry import (
     AlgorithmOutput,
@@ -79,6 +81,13 @@ def test_load_registry_checks_duplicates_and_upstream_order() -> None:
 
 def test_shipped_registry_loads() -> None:
     load_registry()
+
+
+def test_shipped_parameters_preserve_identity_after_recorded_json_roundtrip() -> None:
+    for algorithm in load_registry():
+        encoded = canonical_json_bytes(algorithm.parameters)
+        recorded = json.loads(encoded)
+        assert canonical_json_bytes(recorded) == encoded, algorithm.id
 
 
 def test_profile_fast_drops_slow_algorithms() -> None:

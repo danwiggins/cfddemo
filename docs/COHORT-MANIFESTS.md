@@ -133,11 +133,10 @@ live manifests, because the missing collection event cannot be reconstructed
 honestly. Rebuild v2 from independently pinned provider collection-event
 evidence; never translate the old timestamp automatically.
 
-This module is the immutable manifest and live-validation contract. A protected
-durable cohort-version registry, optimistic publication transaction, and
-backup/restore rehearsal remain a separate D05 persistence follow-up. Until
-that lands, v2 manifests can be materialized for bounded computation but cannot
-support a claim that cohort publication is durably registered. The timepoint
+This module is the immutable manifest and live-validation contract. The separate
+protected D05 [cohort registry](COHORT-REGISTRY.md) implements durable version
+publication, conflict detection, and backup/restore. A v2 manifest is durably
+registered only after that registry commits its publication. The timepoint
 handle is safe for a browser selector only after a protected read model
 authorizes the record; this contract does not expose subject or collection
 tokens to the UI.

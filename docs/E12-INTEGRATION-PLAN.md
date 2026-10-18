@@ -4,6 +4,17 @@ Status: implementation map at `7df3ca834217c06c99dfdcae3f99885e0d8d949d`.
 This document is not qualification evidence and does not authorize release,
 export, provider operation, or clinical interpretation.
 
+Current reading at `1b078e47`: the requirement map and test list below are
+the design and acceptance record. The protected D08 builder, composite
+authority fence, source-value projection, saved-comparison registry, and local
+browser routes are implemented; the historical dependency ledger at the end
+marks merged work explicitly. Installed-package quickstart and rollback
+evidence, a production composition root for `LongitudinalExplorerSource`,
+observed accessibility/operator evidence, and independent release authority
+remain open. `traceback_runner.product_gates` continues to report E12 as an
+unavailable release dependency. Do not read implemented research inspection
+as release or export authorization.
+
 ## Product boundary
 
 E12 is the protected D08 longitudinal read model plus its bounded public

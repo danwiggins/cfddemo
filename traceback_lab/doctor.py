@@ -173,13 +173,6 @@ def lab_checks(store: LabStore) -> list[dict[str, Any]]:
             checks.append(_check("ichor_assets", "warn", "ichorCNA assets need the toolchain first", "traceback toolchain install ichor"))
     except Exception:  # noqa: BLE001 - any asset problem means "not registered"
         checks.append(_check("ichor_assets", "warn", "ichorCNA method assets not registered under ROOT (else copy-number skips)", "traceback method-asset register --from-toolchain copy-number --root <ROOT>"))
-    try:
-        from traceback_runner.toolchain import resolve_modkit
-
-        resolve_modkit()
-        checks.append(_check("modkit", "pass", "modkit installed (cell-origin, Phase 0b)"))
-    except Exception:  # noqa: BLE001
-        checks.append(_check("modkit", "warn", "modkit not installed (cell-origin will skip; Phase 0b)", "traceback toolchain install modkit"))
     from traceback_runner.references import list_assets
 
     kinds = {kind.value for kind, _ in list_assets(root)}

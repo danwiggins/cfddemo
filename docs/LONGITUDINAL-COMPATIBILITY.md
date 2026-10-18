@@ -1,9 +1,9 @@
 # Pinned-anchor longitudinal compatibility
 
 `evidence_inspector.longitudinal_compatibility` is the additive D02 boundary
-used by future E12 views. It does not change E05's pairwise API, execute a
-bridge, run reanalysis, create cohort membership, or authorize provider
-identity.
+used by the D08 workspace and synthetic E12 browser views. It does not change
+E05's pairwise API, execute a bridge, run reanalysis, create cohort membership,
+or authorize provider identity.
 
 ## Complete identity
 
@@ -83,9 +83,11 @@ decision. The returned decision is an immutable as-of artifact, not proof that
 the mutable store remains current after return. Delta/trend consumers must replay
 the exact member or series against the live store immediately before rendering.
 Scientific qualification and provider approval are not inferred from
-a fixture, method label, matching digest, or passing test. The future durable
-comparison-membership ledger must replay the live store and bind the exact D02
-decisions before materializing a view.
+a fixture, method label, matching digest, or passing test. The protected D03
+[decision registry](LONGITUDINAL-DECISION-REGISTRY.md) binds exact D02 series
+decisions at publication and replays them against the live store on reads.
+A delta/trend view must still hold the composite authority fence through
+rendering.
 
 The engine invokes a best-effort process-integrity diagnostic before and after
 the live-store snapshot and fails closed when mutation is observed. That check

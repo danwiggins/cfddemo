@@ -2,9 +2,9 @@
 
 **One blood draw. Three computed cfDNA signals. Every claim traceable.**
 
-Traceback turns Oxford Nanopore reads into fragment-length, methylation
-cell-origin, and chromosome-dosage evidence, then uses a bounded AI reviewer
-to check whether the written interpretation is actually supported.
+The public evidence demo turns Oxford Nanopore reads into fragment-length,
+methylation cell-origin, and chromosome-dosage evidence, then uses a bounded
+AI reviewer to check whether the written interpretation is supported.
 
 [Open the live demo](https://cfddemo-production.up.railway.app) ·
 [View the repository](https://github.com/danwiggins/cfddemo) ·
@@ -13,7 +13,24 @@ to check whether the written interpretation is actually supported.
 > Research prototype only. It does not diagnose cancer or replace a validated
 > clinical assay.
 
-## What the demo proves
+## Choose a local workflow
+
+| Workflow | Use it for | Record and qualification |
+|---|---|---|
+| [Signed local runner](docs/SCIENTIST-QUICK-GUIDE.md) | A BAM-to-record journey for fragment length; optional cell-origin and ichorCNA copy-number analyses are described in the [operator guide](docs/OPERATOR-GUIDE.md#several-analyses-of-one-bam). | Development-signed, local, unqualified records. |
+| [Traceback Lab](docs/LAB-GUIDE.md) | Exploratory measurements on stored ONT or supported prealigned Illumina BAMs, with local sample and cohort views. | Unsigned results with execution provenance; research use only. |
+| [Public evidence demo](docs/DEMO.md) | Inspect three fixed aggregate readouts and a recorded or live bounded AI evidence review. | A demonstration, not a new analysis of your BAM. |
+
+Lab includes read quality and depth checks; fragment, methylation, end-pattern,
+and microbial measurements; exploratory copy-number and cohort comparisons;
+and input-scoped prenatal or transplant calculations where an operator supplies
+matching controls. Each method has its own platform, depth, asset, and tool
+requirements. Run `traceback lab algorithms` for the registered catalog and
+see the [plain-language algorithm explainer](docs/LAB-ALGORITHM-EXPLAINER.md)
+for what each method may teach you and the [Lab algorithm guide](docs/LAB-GUIDE.md#algorithms)
+for requirements and limits.
+
+## What the public demo shows
 
 - **Fragmentomics:** a deterministic BAM-derived read-length distribution with
   explicit filters, denominator, mode, median, and long-fragment fraction.
@@ -28,6 +45,8 @@ to check whether the written interpretation is actually supported.
 
 The third readout is deliberately narrow: it is not ichorCNA, does not estimate
 tumor fraction, and cannot resolve focal or subclonal events.
+
+The diagram below describes the public evidence demo, not the Lab run path.
 
 ```mermaid
 flowchart LR
@@ -54,13 +73,14 @@ uv run pytest
 uv run streamlit run app.py
 ```
 
-To take your own Nanopore BAMs through the CLI (align, reference register,
-preflight, run, catalog import, `serve`), start with the short
-[scientist quick guide](docs/SCIENTIST-QUICK-GUIDE.md); the full reference is
+To take your own Nanopore BAMs through the signed CLI (align, reference
+register, preflight, run, catalog import, `serve`), start with the short
+[scientist quick guide](docs/SCIENTIST-QUICK-GUIDE.md). The full reference is
 [Real local BAM (unqualified)](docs/OPERATOR-GUIDE.md#real-local-bam-unqualified)
 in the operator guide. It needs `samtools` (`brew install samtools`) to index
-the inputs. Every record it makes is unqualified, local and not for clinical
-use.
+the inputs. These local records are unqualified and not for clinical use.
+For the separate, unsigned multi-algorithm workflow, follow the
+[Lab guide](docs/LAB-GUIDE.md#first-five-minutes).
 
 The checked-in public demo bundles contain aggregate measurements and
 provenance only. They do not contain BAMs, read IDs, local paths, source
@@ -109,9 +129,11 @@ uv run python -m scripts.regenerate_copy_number \
 
 ## Documentation
 
+- [Browse all documentation](docs/README.md)
 - [Scientist quick guide: your BAMs to a browsable record](docs/SCIENTIST-QUICK-GUIDE.md)
 - [Operator guide: every command, error code and recovery step](docs/OPERATOR-GUIDE.md)
 - [Lab guide: every cfDNA algorithm on a kit BAM, unsigned, research only](docs/LAB-GUIDE.md)
+- [Lab algorithm explainer: what each measurement may reveal](docs/LAB-ALGORITHM-EXPLAINER.md)
 - [Canaries: the nightly real-data and CI checks](docs/CANARIES.md)
 - [Three-minute demo](docs/DEMO.md)
 - [75-second recording script](docs/RECORDING-SCRIPT.md)

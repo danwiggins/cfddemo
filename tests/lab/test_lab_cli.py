@@ -122,6 +122,14 @@ def test_signed_help_lists_lab(capsys) -> None:
     assert "lab" in capsys.readouterr().out
 
 
+def test_sex_flag_help_states_its_preanalytic_limit(capsys) -> None:
+    with pytest.raises(SystemExit):
+        signed_cli.main(["lab", "run", "--help"])
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "--sex {M,F}" in help_text
+    assert "not a diagnostic sex or gender determination" in help_text
+
+
 def _raised_codes() -> set[str]:
     codes: set[str] = set()
     for path in (REPO / "traceback_lab").rglob("*.py"):
@@ -145,7 +153,9 @@ def test_problem_table_exit_codes() -> None:
     assert PROBLEMS["TBX-LAB-015"].exit_code == 6
     assert PROBLEMS["TBX-LAB-016"].exit_code == 8
     assert PROBLEMS["TBX-LAB-019"].exit_code == 0
-    assert len(PROBLEMS) == 24
+    assert PROBLEMS["TBX-LAB-024"].exit_code == 3
+    assert PROBLEMS["TBX-LAB-025"].exit_code == 0
+    assert len(PROBLEMS) == 25
 
 
 def test_usage_errors_keep_the_json_contract(tmp_path: Path, capsys) -> None:

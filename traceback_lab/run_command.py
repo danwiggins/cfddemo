@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import errno
 import shlex
+import shutil
 import signal
 import sys
 import time
@@ -15,9 +16,16 @@ from typing import Any
 from traceback_runner.cli import _local_envelope, _result, _with_human
 
 from . import registry
+from .cohort_command import _cohort_id
+from .identity import SHA256_PATTERN, aligned_input_id, prealigned_input_id
 from .ingest import (
+    EXAMPLE_REFERENCE_ID,
+    GIB,
     AlignedInput,
     ChunkSet,
+    align,
+    aligner_argv_identity,
+    cached_sha256,
     collect_paths,
     disk_budget,
     ensure_mmi,
@@ -28,27 +36,27 @@ from .ingest import (
     inspect_chunks,
     is_sample_reference,
     mmi_path,
-    align,
+    record_source_sex,
     require_budget,
     resolve_reference,
     resolve_sample,
-    record_source_sex,
     source_record,
     write_source,
-    aligner_argv_identity,
-    cached_sha256,
-    GIB,
-    EXAMPLE_REFERENCE_ID,
 )
-from .identity import aligned_input_id, prealigned_input_id
 from .platforms import for_input, from_rg_lines
 from .problems import (
-    EXIT_OK, EXIT_PARTIAL, EXIT_USAGE, LabProblem, problem_lines, problem_payload,
+    EXIT_OK,
+    EXIT_PARTIAL,
+    EXIT_USAGE,
+    LabProblem,
+    problem_lines,
+    problem_payload,
 )
+from .registry import execution_identity
 from .runner import DEFAULT_TIMEOUT_S, RunTarget, StepResult, run_plan
-from .scrub import Scrubber
 from .sample_metadata import with_sex_assertion
-from .store import LabStore, new_run_id
+from .scrub import Scrubber
+from .store import LabStore, ResultOrderUnavailable, SelectionSnapshotChanged, new_run_id
 from .tools import find_minimap2, find_samtools, require_aligner_tools
 
 ALIGN_TIMEOUT_S = 48 * 3600.0
@@ -70,18 +78,22 @@ def add_run_parser(commands: Any, common: Callable[[argparse.ArgumentParser], No
     run.add_argument("--reference", dest="reference_id", metavar="ID", help="registered reference id")
     run.add_argument("--profile", choices=("all", "fast"), default="all")
     run.add_argument("--only", metavar="A,B", help="only these algorithms (overrides --profile)")
+    run.add_argument("--cohort", type=_cohort_id, metavar="ID", help="use this built protocol-matched cohort's panel of normals")
     run.add_argument("--downsample", default="0.5,0.25,0.1", metavar="F,F,F", help="depth-curve fractions (default 0.5,0.25,0.1)")
     run.add_argument("--no-downsample", action="store_true", help="skip the depth curve")
     run.add_argument("--controls", dest="controls", action="store_true", default=True, help="run the positive controls (default)")
     run.add_argument("--no-controls", dest="controls", action="store_false", help="skip the CNA spike and split halves")
     run.add_argument("--tf", default="0.03,0.10,0.30", metavar="TF,TF", help="synthetic CNA spike tumour fractions")
     run.add_argument("--skip-bad-chunks", action="store_true", help="exclude truncated chunks (provisional)")
-    run.add_argument("--sex", choices=("M", "F"), help="operator-declared sample sex for a read-time pre-analytic check")
+    run.add_argument("--sex", choices=("M", "F"), help="operator assertion for a pre-analytic comparison; not a diagnostic sex or gender determination")
     run.add_argument("--force", action="store_true", help="recompute every result")
     run.add_argument("--timeout-s", type=float, default=DEFAULT_TIMEOUT_S, metavar="S")
     run.add_argument("--threads", type=_threads, metavar="N", help="alignment threads (default min(8, cores-2))")
     run.add_argument("--sort-mem", type=_sort_mem, default="1G", metavar="MEM", help="samtools sort memory per thread (e.g. 768M, 2G)")
     run.add_argument("--mmi", type=Path, metavar="PATH", help="reuse an existing minimap2 index")
+    run.add_argument("--methylbert-bundle-sha256", type=_sha256, metavar="SHA256", help="operator-trusted registered MethylBERT tumour/normal bundle")
+    run.add_argument("--methylbert-code-sha256", type=_sha256, metavar="SHA256", help="trusted digest of the pinned installed MethylBERT Python sources")
+    run.add_argument("--methylbert-min-classified", type=_positive_count, metavar="N", help="independently qualified minimum unique classified reads for this MethylBERT model")
     run.add_argument("--dry-run", action="store_true", help="print the plan; write nothing, take no lock")
     run.add_argument("--verbose", action="store_true", help="stream tool stderr live (never stored)")
     common(run)
@@ -101,6 +113,20 @@ def _threads(value: str) -> int:
     if not 1 <= number <= 256:
         raise argparse.ArgumentTypeError("--threads is 1-256")
     return number
+
+
+def _sha256(value: str) -> str:
+    import re
+
+    if not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise argparse.ArgumentTypeError("MethylBERT SHA-256 must be 64 lowercase hexadecimal characters")
+    return value
+
+
+def _positive_count(value: str) -> int:
+    if not value.isdecimal() or len(value) > 12 or int(value) < 1:
+        raise argparse.ArgumentTypeError("MethylBERT minimum classified reads must be a positive integer")
+    return int(value)
 
 
 def _progress(as_json: bool) -> Callable[[str], None]:
@@ -160,6 +186,7 @@ def _flags(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "profile": args.profile,
         "only": args.only,
+        "cohort": args.cohort,
         "skip_bad_chunks": args.skip_bad_chunks,
         "force": args.force,
         "timeout_s": args.timeout_s,
@@ -169,6 +196,9 @@ def _flags(args: argparse.Namespace) -> dict[str, Any]:
         "reference_id": args.reference_id,
         "declared_sex": args.sex,
         "stored_sample": len(args.inputs) == 1 and _is_stored(args.inputs[0]),
+        "methylbert_bundle_sha256": getattr(args, "methylbert_bundle_sha256", None),
+        "methylbert_code_sha256": getattr(args, "methylbert_code_sha256", None),
+        "methylbert_min_classified_reads": getattr(args, "methylbert_min_classified", None),
     }
 
 
@@ -177,13 +207,18 @@ def _is_stored(text: str) -> bool:
 
 
 def _target_from_input(
-    aligned: AlignedInput, reference_id: str, reference_sha256: str, example: bool, store: LabStore
+    aligned: AlignedInput, reference_id: str, reference_sha256: str, example: bool, store: LabStore,
+    *, methylbert_bundle_sha256: str | None = None, methylbert_code_sha256: str | None = None,
+    methylbert_min_classified_reads: int | None = None,
 ) -> RunTarget:
     extras: dict[str, Any] = {}
     try:
         extras["reference_fasta"] = str(resolve_reference(store.root, reference_id, example=True).fasta)
     except LabProblem:
         pass  # algorithms that need the FASTA fail or skip on their own
+    extras["methylbert_bundle_sha256"] = methylbert_bundle_sha256
+    extras["methylbert_code_sha256"] = methylbert_code_sha256
+    extras["methylbert_min_classified_reads"] = methylbert_min_classified_reads
     platform = _stored_platform(aligned)
     return RunTarget(
         input_id=aligned.input_id,
@@ -216,12 +251,30 @@ def _stored_platform(aligned: AlignedInput) -> str:
     return platform
 
 
+def _stored_reference_binding(aligned: AlignedInput) -> tuple[str, str]:
+    manifest = aligned.manifest
+    if (
+        not isinstance(manifest, dict)
+        or not isinstance(manifest.get("reference_id"), str)
+        or not manifest["reference_id"]
+        or not isinstance(manifest.get("reference_sha256"), str)
+        or not SHA256_PATTERN.fullmatch(manifest["reference_sha256"])
+    ):
+        raise LabProblem(
+            "TBX-LAB-017",
+            cause="the stored aligned input has no valid reference binding",
+            fix="Restore the stored input from a known-good backup, or re-ingest under a fresh ROOT",
+            data={"input_id": aligned.input_id},
+        )
+    return manifest["reference_id"], manifest["reference_sha256"]
+
+
 def _declared_platform(chunkset: ChunkSet) -> str:
     declared = {from_rg_lines(chunk.rg_lines) for chunk in chunkset.chunks}
     if len(declared) != 1 or "unknown" in declared:
         raise LabProblem(
             "TBX-LAB-024", cause="BAM read groups have no unanimous supported platform declaration",
-            fix="Use input whose read groups all declare PL:ONT or PL:ILLUMINA",
+            fix="Verify instrument provenance and regenerate a BAM with truthful unanimous PL:ONT or PL:ILLUMINA read groups",
         )
     platform = next(iter(declared))
     if not chunkset.aligned and platform != "ont":
@@ -291,31 +344,184 @@ def _aligner_warning(change: dict[str, Any], low: float, high: float) -> dict[st
     }
 
 
+def _memory_warning() -> dict[str, Any] | None:
+    from .doctor import MIN_RAM, _ram
+
+    try:
+        physical_ram = _ram()
+    except Exception:  # noqa: BLE001 - an advisory probe must never abort a run
+        return None
+    if physical_ram is None or physical_ram >= MIN_RAM:
+        return None
+    recommended_gib = MIN_RAM // GIB
+    physical_gib = physical_ram / GIB
+    return {
+        "kind": "low_memory",
+        "code": "TBX-LAB-025",
+        "cause": f"physical RAM is {physical_gib:g} GiB, below the {recommended_gib} GiB alignment recommendation",
+        "retryable": False,
+        "docs": "docs/LAB-GUIDE.md#tbx-lab-025",
+        "summary": f"Less than {recommended_gib} GiB of physical RAM detected; alignment may fail or be slow",
+        "physical_ram_bytes": physical_ram,
+        "recommended_bytes": MIN_RAM,
+        "fix": f"Use a machine with at least {recommended_gib} GiB RAM for a full hg38 alignment",
+    }
+
+
+def _memory_warning_lines(warning: dict[str, Any]) -> list[str]:
+    return [
+        f"WARN      {warning['code']}: {warning['summary']}",
+        *problem_lines(LabProblem(
+            warning["code"], cause=warning["cause"], fix=warning["fix"],
+        )),
+    ]
+
+
+def _dry_run_read_summary(store: LabStore, input_id: str, identity: str) -> Any:
+    """Read one selected summary without crossing a cohort selector change."""
+
+    for _ in range(3):
+        try:
+            with store.selection_read_context():
+                return store.read_result(input_id, "read-summary", identity)
+        except SelectionSnapshotChanged:
+            continue
+        except ResultOrderUnavailable as exc:
+            raise LabProblem(
+                "TBX-LAB-022",
+                cause="the selected read-summary or cohort selection metadata is unreadable",
+                fix="Restore the affected selection metadata from a known-good backup, then retry the dry run",
+            ) from exc
+    raise LabProblem(
+        "TBX-LAB-012",
+        summary="Selected result changed during dry run",
+        cause="a concurrent cohort update changed the selected read-summary during this preview",
+        fix="Retry the dry run after the cohort update finishes",
+    )
+
+
 def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str], None]) -> tuple[int, dict[str, Any]]:
     store.check_version()
+    from .pon_consumer import require_built_cohort, require_cohort_input
+
     entries = registry.registry_entries()
     items = registry.plan([alg for _, alg in entries], only=_only(args.only), profile=args.profile)
     plan_rows = [
         {"algorithm_id": item.algorithm.id, "upstream": item.upstream_only, "decision": "decided after alignment"}
         for item in items
     ]
-    data: dict[str, Any] = {"root": str(store.root), "dry_run": True, "plan": plan_rows}
+    memory_warning = _memory_warning()
+    data: dict[str, Any] = {"root": str(store.root), "dry_run": True, "plan": plan_rows,
+                            "warnings": [memory_warning] if memory_warning else []}
     lines = [f"ROOT      {store.root}"]
+    if memory_warning:
+        lines.extend(_memory_warning_lines(memory_warning))
+    alignment_required = False
+    example = bool(args.example)
+
+    def mark_platform_skips(platform: str) -> None:
+        for row, item in zip(plan_rows, items):
+            if platform not in item.algorithm.requires.platforms:
+                row["decision"] = "skip expected (platform)"
+        if args.controls and platform != "ont":
+            data["controls"] = {"cna_skipped": "platform"}
+            lines.append("CONTROL   CNA spike not built (platform)")
+
     if len(args.inputs) == 1 and _is_stored(args.inputs[0]):
         source_id = resolve_sample(store, args.inputs[0])
-        with_sex_assertion(source_record(store, source_id) or {}, args.sex)
-        aligned, _ = _stored_input(store, source_id)
-        data["sample"] = {"id12": id12_for(store, source_id), "input_id": aligned.input_id,
-                          "platform": _stored_platform(aligned)}
+        aligned, record = _stored_input(store, source_id)
+        platform = _stored_platform(aligned)
+        example = bool(record.get("example"))
+        reference_id, reference_sha256 = _stored_reference_binding(aligned)
+        with_sex_assertion(record, args.sex)
+        data["sample"] = {
+            "id12": id12_for(store, source_id), "input_id": aligned.input_id, "platform": platform,
+        }
+        data["reference_id"] = reference_id
         data["alignment"] = "reused (stored sample)"
+        excluded = record.get("excluded", [])
+        if not isinstance(excluded, list) or not all(
+            isinstance(index, int) and not isinstance(index, bool) and index >= 0
+            for index in excluded
+        ):
+            excluded = None
+        chunks = record.get("chunks")
+        if isinstance(chunks, list) and chunks and all(
+            isinstance(chunk, dict) and isinstance(chunk.get("size"), int)
+            and not isinstance(chunk["size"], bool) and chunk["size"] >= 0
+            for chunk in chunks
+        ):
+            data["chunks"] = {
+                "count": len(chunks), "bytes": sum(chunk["size"] for chunk in chunks),
+                "excluded": excluded,
+            }
+        else:
+            data["chunks"] = {"count": None, "bytes": None, "excluded": excluded}
+        data["budget"] = {
+            "required_bytes": 0,
+            "free_bytes": shutil.disk_usage(store.root).free,
+            "parts": {},
+            "scope": "ingest and alignment (reused)",
+            "analysis_scratch": "not predicted",
+        }
         lines.append(f"SAMPLE    {id12_for(store, source_id)} (stored)")
+        lines.append(f"REFERENCE {data['reference_id']}")
+        suffix = " · exclusions unknown" if excluded is None else (f" · excluded {excluded}" if excluded else "")
+        if data["chunks"]["count"] is not None:
+            lines.append(
+                f"INPUT     {data['chunks']['count']} stored chunk(s) · "
+                f"{data['chunks']['bytes'] / GIB:.2f} GB{suffix}"
+            )
+        else:
+            lines.append(f"INPUT     unknown (stored chunk record incomplete){suffix}")
         lines.append("ALIGN     reused (stored sample)")
+        lines.append(
+            f"DISK      ingest/align needs 0 GB, has {data['budget']['free_bytes'] / GIB:.1f} GB "
+            "(reused; not a sufficiency check)"
+        )
+        lines.append("ANALYSIS  scratch disk not predicted")
+        mark_platform_skips(platform)
+        summary = next((item.algorithm for item in items if item.algorithm.id == "read-summary"), None)
+        if summary is not None and not args.force:
+            identity = execution_identity(
+                summary, reference_sha256=reference_sha256,
+                platform=platform if platform != "ont" else None,
+            )
+            selected = _dry_run_read_summary(store, aligned.input_id, identity)
+            if selected is not None and selected.status == "ok":
+                plan_rows[next(index for index, item in enumerate(items) if item.algorithm.id == "read-summary")][
+                    "decision"
+                ] = "reused (selected result)"
+                values = {metric.metric_id: metric.value for metric in selected.metrics}
+                eligible = values.get("eligible_reads")
+                depth_x = values.get("approx_depth_x")
+                if (
+                    isinstance(eligible, int) and not isinstance(eligible, bool) and eligible >= 0
+                    and isinstance(depth_x, (int, float)) and not isinstance(depth_x, bool)
+                ):
+                    data["eligible_reads"] = eligible
+                    lines.append(f"DEPTH     {eligible:,} eligible reads (selected read-summary)")
+                    for row, item in zip(plan_rows, items):
+                        if row["decision"] != "decided after alignment":
+                            continue
+                        minimum = item.algorithm.requires.min_eligible_reads
+                        if minimum and eligible < minimum:
+                            row["decision"] = "skip expected below depth minimum (unless cached)"
+                            row["eligible_reads"] = eligible
+                            row["minimum_eligible_reads"] = minimum
+                        elif minimum:
+                            row["decision"] = "depth minimum met; other checks at run time"
+        for row in plan_rows:
+            if row["decision"] == "decided after alignment":
+                row["decision"] = "decided at run time"
     else:
         paths = collect_paths(args.inputs)
         chunkset = inspect_chunks(paths, store, skip_bad_chunks=args.skip_bad_chunks, write_cache=False)
         input_platform = _declared_platform(chunkset)
+        platform = input_platform if chunkset.aligned else "ont"
         data["sample"] = {"source_id": chunkset.source_id,
-                          "platform": input_platform if chunkset.aligned else "ont"}
+                          "platform": platform}
+        mark_platform_skips(platform)
         with_sex_assertion(source_record(store, chunkset.source_id) or {}, args.sex)
         reference = resolve_reference(store.root, args.reference_id)
         data["reference_id"] = reference.reference_id
@@ -360,11 +566,21 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
                     elif _aligner_change(store, chunkset.source_id, {"samtools": samtools.version, "minimap2": minimap2.version}):
                         reason = "aligner identity changed (TBX-LAB-019): realigns"
             data["alignment"] = reason
+            alignment_required = reason != "reused"
             data["estimate_min"] = [round(low, 1), round(high, 1)]
             lines.append(
                 f"ALIGN     {reason}" + ("" if reason == "reused" else f" · estimate {low:.0f}-{high:.0f} min")
                 + (" · minimap2 index built first" if mmi_needed else "")
             )
+    if args.cohort is not None:
+        require_cohort_input(args.cohort, platform=platform, example=example)
+        cohort = require_built_cohort(store, args.cohort)
+        compatibility = "after alignment" if alignment_required else "during run"
+        data["cohort"] = {
+            "id": cohort.cohort_id, "version": cohort.version_id,
+            "panel": "built", "compatibility": compatibility,
+        }
+        lines.append(f"COHORT    {cohort.version_id} (built; compatibility checked {compatibility})")
     for row in plan_rows:
         lines.append(f"PLAN      {row['algorithm_id']}{' (upstream)' if row['upstream'] else ''}: {row['decision']}")
     if not plan_rows:
@@ -375,6 +591,12 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
 
 def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]]:
     if args.example:
+        if args.cohort is not None:
+            raise LabProblem(
+                "TBX-LAB-021", cause="an EXAMPLE input cannot use a real cohort panel",
+                fix="Omit --cohort for EXAMPLE, or use a real ONT input",
+                data={"cohort_id": args.cohort, "field": "EXAMPLE"},
+            )
         if args.inputs:
             raise LabProblem(
                 "TBX-LAB-005",
@@ -386,13 +608,18 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
 
         store.check_version()
         if args.dry_run and not prepared(store.root):
+            memory_warning = _memory_warning()
             payload = _local_envelope(
                 _result("lab run", "ok", "dry run: nothing written", data={
                     "root": str(store.root), "dry_run": True, "example": True,
                     "alignment": "example not generated yet: generated and aligned on first run (~200k reads, under a minute)",
+                    "warnings": [memory_warning] if memory_warning else [],
                 })
             )
-            return EXIT_OK, _with_human(payload, [f"ROOT      {store.root}", "EXAMPLE   not generated yet: generated and aligned on first run (~200k reads, under a minute)"], replace_data=True)
+            lines = [f"ROOT      {store.root}", "EXAMPLE   not generated yet: generated and aligned on first run (~200k reads, under a minute)"]
+            if memory_warning:
+                lines.extend(_memory_warning_lines(memory_warning))
+            return EXIT_OK, _with_human(payload, lines, replace_data=True)
         # Generation and registration happen under the writer lock (below).
         args.inputs = [str(example_dir(store.root) / "chunks")]
         args.reference_id = EXAMPLE_REFERENCE_ID
@@ -421,15 +648,19 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                 stored = len(args.inputs) == 1 and _is_stored(args.inputs[0])
                 chunkset: ChunkSet | None = None
                 warnings: list[dict[str, Any]] = []
+                memory_warning = _memory_warning()
+                if memory_warning:
+                    warnings.append(memory_warning)
+                    for line in _memory_warning_lines(memory_warning):
+                        progress(line)
                 example = False
                 if stored:
                     source_id = resolve_sample(store, args.inputs[0])
                     aligned, record = _stored_input(store, source_id)
                     _stored_platform(aligned)
+                    reference_id, reference_sha256 = _stored_reference_binding(aligned)
                     record = record_source_sex(store, source_id, args.sex)
                     example = bool(record.get("example"))
-                    reference_id = aligned.manifest["reference_id"]
-                    reference_sha256 = aligned.manifest["reference_sha256"]
                     scrubber = Scrubber(root=store.root)
                     progress(f"ingest                   stored sample {id12_for(store, source_id)}")
                 else:
@@ -547,9 +778,17 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                         f"align                    {'reused' if aligned.reused else 'done'} · input {aligned.input_id[:12]}"
                     )
                 id12 = id12_for(store, aligned.source_id)
-                target = _target_from_input(aligned, reference_id, reference_sha256, example, store)
+                target = _target_from_input(
+                    aligned, reference_id, reference_sha256, example, store,
+                    methylbert_bundle_sha256=getattr(args, "methylbert_bundle_sha256", None),
+                    methylbert_code_sha256=getattr(args, "methylbert_code_sha256", None),
+                    methylbert_min_classified_reads=getattr(args, "methylbert_min_classified", None),
+                )
                 log.append("sample", sample=id12, source_id=aligned.source_id, input_id=aligned.input_id,
                            platform=target.platform)
+                from .pon_consumer import bind_target
+
+                items = bind_target(store, items, target, aligned.manifest, cohort_id=args.cohort)
                 results = run_plan(
                     store,
                     lock,
@@ -670,7 +909,7 @@ def _pid() -> int:
 
 
 def _duration(seconds: float) -> str:
-    seconds = int(round(seconds))
+    seconds = round(seconds)
     if seconds < 60:
         return f"{seconds}s"
     minutes, seconds = divmod(seconds, 60)
@@ -686,7 +925,7 @@ def _skip_remedy(algorithm_id: str, reason: str, root: Path) -> dict[str, Any] |
     argv: list[str]
     asset: str
     if reason == "missing_toolchain":
-        tool = {"copy-number": "ichor", "cell-origin": "modkit"}.get(algorithm_id)
+        tool = {"copy-number": "ichor"}.get(algorithm_id)
         if tool is None:
             return None
         asset, argv = tool, ["traceback", "toolchain", "install", tool]
@@ -708,6 +947,13 @@ def _skip_remedy(algorithm_id: str, reason: str, root: Path) -> dict[str, Any] |
             "traceback", "lab", "asset", "add", "pmd", "--file",
             "YOUR_LOCAL_PMD_coordinates_hg38.bed.gz", "--source-label",
             "Zhou-2018-operator-supplied", "--terms", "unknown", "--root", str(root),
+        ]
+    elif reason == "missing_asset" and algorithm_id == "meth-tf":
+        asset = "compatible tumour/healthy methylation marker reference"
+        argv = [
+            "traceback", "lab", "asset", "add", "meth-tf-reference", "--file",
+            "YOUR_LOCAL_MARKER_REFERENCE.json", "--source-label", "operator-marker-panel",
+            "--terms", "unknown", "--root", str(root),
         ]
     else:
         return None
@@ -812,6 +1058,8 @@ def _summary(
         lines.append(f"FAILED  {result.algorithm_id}: {result.first_line}")
         lines.append(f"        details: traceback lab runs {run_id} --step {result.algorithm_id}")
     for warning in warnings:
+        if warning.get("kind") == "low_memory":
+            continue  # already shown before alignment, including the next action
         lines.append(f"WARN    {warning['summary']}")
         lines.extend(problem_lines(LabProblem(
             warning["code"], cause=warning["cause"], fix=warning["fix"],

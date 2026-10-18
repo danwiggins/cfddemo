@@ -22,8 +22,8 @@ entries:
     reference: {kind: none}
     performance: null
     performance_missing_reason: "QC measure, not a diagnostic"
-    meaning_high: "More sequenced molecules: more depth for every other algorithm."
-    meaning_low: "Few molecules: most algorithms will be skipped or not interpretable."
+    meaning_high: "More primary reads: more depth for other algorithms. Paired-end libraries contribute two reads per molecule."
+    meaning_low: "Few primary reads: many algorithms will be skipped or not interpretable."
     confounders: ["flow-cell yield", "input cfDNA mass"]
     next_steps:
       analytical: ["Check the depth curve for what this read count supports"]
@@ -91,23 +91,23 @@ entries:
     value_kind: proportion
     tier: NEWER
     origin_tier: NEWER
-    origin_platform: "ONT"
+    origin_platform: "any"
     min_depth_x: null
     reference: {kind: none}
     performance: null
     performance_missing_reason: "none published"
-    meaning_high: "More supplementary alignments; on ONT this can indicate ligation chimeras, while short-read split alignments have other causes."
-    meaning_low: "Fewer supplementary alignments; this alone does not establish a low chimera rate."
-    confounders: ["sequencing platform and alignment method", "library prep chemistry", "input mass"]
+    meaning_high: "More alignments have supplementary records; inspect their mapping and library origin."
+    meaning_low: "Fewer alignments have supplementary records."
+    confounders: ["library prep chemistry", "read length", "aligner settings"]
     next_steps:
-      analytical: ["Compare only within a matched platform and alignment method", "On ONT, check the long-fragment tail"]
+      analytical: ["Compare only within one sequencing platform and aligner protocol"]
       clinical_setting: null
     license_ids: []
     flags: []
     headline: false
     stability: {kind: proportion}
     citations: []
-    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "No citation displayed. V1 (partial run): the read-coverage chimera proxy is uninformative on ONT; this share is the proxy used."}
+    citation_checked: {by: "Lab S5 platform review", date: "2026-10-17", note: "No citation displayed. This is a raw supplementary-alignment QC share; no cross-platform chimera threshold is supplied."}
 
   - algorithm_id: bam-qc
     metric_id: mean_read_q
@@ -115,23 +115,23 @@ entries:
     value_kind: positive
     tier: PROVEN
     origin_tier: PROVEN
-    origin_platform: "ONT"
+    origin_platform: "any"
     min_depth_x: null
     reference: {kind: none}
     performance: null
     performance_missing_reason: "QC measure, not a diagnostic"
-    meaning_high: "Higher reported base quality within the same sequencing platform and quality pipeline."
-    meaning_low: "Lower reported base quality within the same sequencing platform and quality pipeline; ONT methylation calls and end motifs may be less reliable."
-    confounders: ["sequencing platform and quality-score calibration", "basecaller model", "flow-cell wear"]
+    meaning_high: "Higher average recorded base quality."
+    meaning_low: "Lower average recorded base quality; inspect the platform-specific quality distribution."
+    confounders: ["sequencing platform", "basecaller or sequencer model", "quality calibration"]
     next_steps:
-      analytical: ["Compare within one platform and quality pipeline", "For ONT, confirm the basecall model"]
+      analytical: ["Compare quality only within one sequencing platform and protocol"]
       clinical_setting: null
     license_ids: []
     flags: []
     headline: false
     stability: {kind: relative, tolerance: 0.05}
     citations: []
-    citation_checked: {by: "lab build agent", date: "2026-10-15", note: "No citation displayed; QC measure."}
+    citation_checked: {by: "Lab S5 platform review", date: "2026-10-17", note: "No citation displayed. This is raw recorded base quality; interpretation is restricted to platform- and protocol-matched QC."}
 
   - algorithm_id: bam-qc
     metric_id: genome_ge1x_fraction
@@ -473,6 +473,7 @@ entries:
     flags: [LEGAL]
     headline: true
     citations: ["doi:10.1038/s41467-025-66503-3"]
+    citation_checked: {by: "S3 primary-paper review", date: "2026-10-17", note: "DOI resolves to the LIONHEART Nature Communications paper. It defines scores as sample-standardized Pearson correlations between paired-end Illumina cfDNA WGS coverage and open-chromatin reference features. This metric counts finite profiles in the operator's run; no fixed paper count, performance figure, or ONT validity is claimed here."}
 
   # ----------------------------------------------------------- copy-number
   - algorithm_id: copy-number
@@ -715,6 +716,180 @@ entries:
     citations: []
     citation_checked: {by: "lab build agent", date: "2026-10-16", note: "No citation displayed; missing-estimate bin count."}
 
+  # ------------------------------------------------------------ arm-summary
+  - algorithm_id: arm-summary
+    metric_id: arms_with_value
+    label: "Autosomal arms with an estimable corrected log2"
+    value_kind: count
+    tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "ONT Lab PoN-corrected ichorCNA bins"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "Exploratory coverage count; no validated ONT arm-z performance or cutoff"
+    meaning_high: "More arms had finite, unmasked copy-number bins for cohort comparison."
+    meaning_low: "Few arms could be summarized; inspect the copy-number track and masks."
+    confounders: ["low depth", "masked bins", "centromere geometry", "copy-number noise"]
+    next_steps: {analytical: ["Use arm-zscores only with a compatible published cohort and at least ten controls after source exclusion"], clinical_setting: null}
+    license_ids: [gpl-copyleft]
+    flags: []
+    headline: true
+    citations: []
+    citation_checked: {by: "lab build agent", date: "2026-10-16", note: "No citation displayed; a descriptive Lab bin-coverage count, not a biological threshold."}
+
+  - &arm_log2
+    algorithm_id: arm-summary
+    metric_id: chr1p_log2
+    label: "Chromosome 1 p-arm median corrected log2"
+    value_kind: signed
+    stability: {kind: unvalidated}
+    tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "ONT Lab PoN-corrected ichorCNA bins"
+    min_depth_x: null
+    reference: {kind: none, missing_note: "No published arm reference; use arm-zscores only with a compatible ten-control cohort."}
+    performance: null
+    performance_missing_reason: "Exploratory arm value; no validated ONT arm-z performance or cutoff"
+    meaning_high: "Higher corrected arm copy-number estimate relative to the selected PoN; inspect the copy-number track."
+    meaning_low: "Lower corrected arm copy-number estimate relative to the selected PoN; inspect the copy-number track."
+    confounders: ["low depth", "masked bins", "centromere geometry", "copy-number noise", "PoN mismatch"]
+    next_steps: {analytical: ["Review arm-zscores against a compatible published cohort with at least ten controls after source exclusion"], clinical_setting: null}
+    license_ids: [gpl-copyleft]
+    flags: []
+    headline: false
+    citations: []
+    citation_checked: {by: "lab build agent", date: "2026-10-16", note: "Descriptive arm median from the selected copy-number track; no diagnostic cutoff."}
+  - <<: *arm_log2
+    metric_id: chr1q_log2
+    label: "Chromosome 1 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr2p_log2
+    label: "Chromosome 2 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr2q_log2
+    label: "Chromosome 2 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr3p_log2
+    label: "Chromosome 3 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr3q_log2
+    label: "Chromosome 3 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr4p_log2
+    label: "Chromosome 4 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr4q_log2
+    label: "Chromosome 4 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr5p_log2
+    label: "Chromosome 5 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr5q_log2
+    label: "Chromosome 5 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr6p_log2
+    label: "Chromosome 6 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr6q_log2
+    label: "Chromosome 6 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr7p_log2
+    label: "Chromosome 7 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr7q_log2
+    label: "Chromosome 7 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr8p_log2
+    label: "Chromosome 8 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr8q_log2
+    label: "Chromosome 8 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr9p_log2
+    label: "Chromosome 9 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr9q_log2
+    label: "Chromosome 9 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr10p_log2
+    label: "Chromosome 10 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr10q_log2
+    label: "Chromosome 10 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr11p_log2
+    label: "Chromosome 11 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr11q_log2
+    label: "Chromosome 11 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr12p_log2
+    label: "Chromosome 12 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr12q_log2
+    label: "Chromosome 12 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr13p_log2
+    label: "Chromosome 13 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr13q_log2
+    label: "Chromosome 13 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr14p_log2
+    label: "Chromosome 14 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr14q_log2
+    label: "Chromosome 14 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr15p_log2
+    label: "Chromosome 15 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr15q_log2
+    label: "Chromosome 15 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr16p_log2
+    label: "Chromosome 16 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr16q_log2
+    label: "Chromosome 16 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr17p_log2
+    label: "Chromosome 17 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr17q_log2
+    label: "Chromosome 17 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr18p_log2
+    label: "Chromosome 18 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr18q_log2
+    label: "Chromosome 18 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr19p_log2
+    label: "Chromosome 19 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr19q_log2
+    label: "Chromosome 19 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr20p_log2
+    label: "Chromosome 20 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr20q_log2
+    label: "Chromosome 20 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr21p_log2
+    label: "Chromosome 21 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr21q_log2
+    label: "Chromosome 21 q-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr22p_log2
+    label: "Chromosome 22 p-arm median corrected log2"
+  - <<: *arm_log2
+    metric_id: chr22q_log2
+    label: "Chromosome 22 q-arm median corrected log2"
+
   # ------------------------------------------------------------ modbase-qc
   - algorithm_id: modbase-qc
     metric_id: mm_tagged_fraction
@@ -726,13 +901,8 @@ entries:
     min_depth_x: null
     reference: {kind: none}
     qc_band: {direction: higher_is_better, pass: 0.95, warn: 0.50}
-    performance:
-      kind: depth_threshold
-      value: "Cell-type proportions held from full depth down to 0.2x (about 2.5M aligned fragments) and degraded at 0.05x and below (under 700,000 aligned fragments); one ONT study"
-      platform: ONT
-      depth: "0.05-0.2x"
-      source: "Katsman 2022, Genome Biol"
-    performance_missing_reason: null
+    performance: null
+    performance_missing_reason: "No published depth-performance validation is cited for this MM-tagged-read QC measure"
     meaning_high: "Methylation calls are present on nearly every read."
     meaning_low: "Many reads lack modified-base calls: basecalled without a modbase model, or tags dropped during alignment."
     confounders: ["basecaller configuration", "tags dropped by an aligner without -y"]
@@ -743,8 +913,8 @@ entries:
     flags: []
     headline: true
     stability: {kind: proportion}
-    citations: ["doi:10.1186/s13059-022-02710-1"]
-    citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "PMC9283844 full text: 'From full depth down to 0.2x (about 2.5M aligned fragments), all samples were dominated by the expected cell types'; 'significantly degraded at 0.05x coverage and below (corresponding to less than 700,000 aligned fragments)'. These thresholds are for cell-type deconvolution quality. QC bands are provisional team defaults (not from literature)."}
+    citations: []
+    citation_checked: {by: "S1 primary-source audit", date: "2026-10-17", note: "No performance citation displayed. Katsman 2022 Fig. 1A-C tests cell-type deconvolution depth, not MM-tagged-read QC. QC bands are provisional team defaults (not from literature)."}
 
   - algorithm_id: modbase-qc
     metric_id: mod_codes
@@ -853,13 +1023,13 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: classes
-      value: "Single-cohort classes, no published cut-off: 1-4 kb fragments marked delayed blood processing (over 40% of samples stored 6-24 h showed it; rapidly processed samples did not); >7.5 kb marked cell lysis during plasma processing"
-      platform: "ONT MinION (median 4.7M reads)"
-      depth: "1-16M reads"
+      value: "Published ONT context, not a cutoff for >300 bp: 1-4 kb enrichment was associated with delayed processing in a neuroendocrine cohort (>40% of samples stored 6-24 h); >7.5 kb fragments were consistent with cell lysis in one cohort"
+      platform: "ONT MinION R9.4.1 (pan-cancer/healthy) and PromethION R10.4.1 (neuroendocrine)"
+      depth: "Pan-cancer/healthy MinION subset: 1-16M reads (median 4.7M); no validated depth for this Lab scalar"
       source: "Berman 2026, Genome Biol"
     performance_missing_reason: null
-    meaning_high: "More long molecules: delayed processing (white-cell DNA) or cell lysis, or library chimeras."
-    meaning_low: "Mostly mono- and di-nucleosomal cfDNA."
+    meaning_high: "More >300 bp molecules; inspect the 1-4 kb and >7.5 kb classes for processing artifacts and consider library chimeras."
+    meaning_low: "Few molecules above 300 bp."
     confounders: ["time to spin", "tube type", "ligation chimeras", "ONT size bias toward longer fragments"]
     next_steps:
       analytical: ["Check time to spin and tube type", "Compare with the supplementary (chimera) share"]
@@ -882,13 +1052,13 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: classes
-      value: "Over 40% of samples stored 6-24 h before processing showed the 1-4 kb signature; rapidly processed samples did not. No published cut-off"
-      platform: "ONT MinION"
-      depth: "1-16M reads"
+      value: "In a neuroendocrine ONT cohort, over 40% of samples stored 6-24 h at room temperature showed 1-4 kb enrichment; rapidly processed samples did not. No validated fraction cutoff"
+      platform: "ONT PromethION R10.4.1 (neuroendocrine cohort)"
+      depth: "No validated depth for this Lab scalar"
       source: "Berman 2026, Genome Biol"
     performance_missing_reason: null
-    meaning_high: "Delayed blood processing released white-cell DNA (DNASE1L3-type fragmentation)."
-    meaning_low: "No sign of delayed processing."
+    meaning_high: "An elevated 1-4 kb share is consistent with delayed blood processing and blood-derived DNA; long molecules can also have biological causes."
+    meaning_low: "No elevation in this 1-4 kb share."
     confounders: ["time to spin", "tube type", "cancer with high cfDNA levels (the same paper reports 1-4 kb DNA in some cancers)"]
     next_steps:
       analytical: ["Check time to spin and tube type"]
@@ -912,13 +1082,13 @@ entries:
     qc_band: {direction: lower_is_better, pass: 0.001, warn: 0.01}
     performance:
       kind: classes
-      value: "Ultra-long (>7.5 kb) fragments marked cell lysis during plasma processing; no published cut-off"
-      platform: "ONT MinION"
+      value: "In one ONT cohort, >7.5 kb fragments decreased after high-speed spin and were consistent with blood-cell lysis during plasma processing; no validated fraction cutoff"
+      platform: "ONT MinION R9.4.1 (pan-cancer/healthy cohort)"
       depth: "1-16M reads"
       source: "Berman 2026, Genome Biol"
     performance_missing_reason: null
-    meaning_high: "Cells lysed during plasma processing, releasing genomic DNA."
-    meaning_low: "No sign of lysis."
+    meaning_high: "An elevated >7.5 kb share is consistent with blood-cell lysis during processing, including plasma thawing."
+    meaning_low: "No elevation in this >7.5 kb share."
     confounders: ["centrifugation protocol", "freeze-thaw", "tube type"]
     next_steps:
       analytical: ["Check the plasma spin protocol"]
@@ -1016,13 +1186,13 @@ entries:
     min_depth_x: null
     reference:
       kind: published_mean
-      statistic: "median, cancer and healthy samples pooled (Illumina)"
+      statistic: "median, cancer and healthy samples pooled (Illumina WGS; different filters and denominator from this Lab metric)"
       value: 0.0032
       unit: "% of reads"
       source: "van der Pol 2023, Genome Biol"
     performance:
       kind: auc
-      value: "Adding mtDNA features to copy number raised AUC from 0.73 to 0.81 (abstract; the Results text says 0.82); 655 cancer and 200 healthy samples, random forest"
+      value: "Published Illumina random forest: ichorCNA tumour fraction alone AUC 0.73; adding mtDNA fraction AUC 0.81 in the abstract (0.82 in Results), n=655 cancer/200 healthy. Not validated for this ONT scalar"
       platform: Illumina
       depth: "0.1-30x"
       source: "van der Pol 2023, Genome Biol"
@@ -1075,10 +1245,10 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments), with proportions degraded at 0.05x and below; the 5x minor-tissue floor is a separate Lab rule"
       platform: ONT
       depth: "0.2x"
-      source: "Katsman 2022, Genome Biol"
+      source: "Katsman 2022, Genome Biol (0.2x); Lab policy (5x)"
     performance_missing_reason: null
     meaning_high: "A larger Adipocytes share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
     meaning_low: "A smaller Adipocytes share of the cell-free DNA."
@@ -1086,7 +1256,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1104,10 +1274,10 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments), with proportions degraded at 0.05x and below; the 5x minor-tissue floor is a separate Lab rule"
       platform: ONT
       depth: "0.2x"
-      source: "Katsman 2022, Genome Biol"
+      source: "Katsman 2022, Genome Biol (0.2x); Lab policy (5x)"
     performance_missing_reason: null
     meaning_high: "A larger Bladder-Ep share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
     meaning_low: "A smaller Bladder-Ep share of the cell-free DNA."
@@ -1115,7 +1285,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1133,7 +1303,7 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Major cell types held from full depth down to 0.2x (about 2.5M fragments); degraded at 0.05x and below"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments); proportions degraded at 0.05x and below"
       platform: ONT
       depth: "0.2x"
       source: "Katsman 2022, Genome Biol"
@@ -1144,7 +1314,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1162,7 +1332,7 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Major cell types held from full depth down to 0.2x (about 2.5M fragments); degraded at 0.05x and below"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments); proportions degraded at 0.05x and below"
       platform: ONT
       depth: "0.2x"
       source: "Katsman 2022, Genome Biol"
@@ -1173,7 +1343,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: true
     stability: {kind: proportion}
@@ -1191,7 +1361,7 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Major cell types held from full depth down to 0.2x (about 2.5M fragments); degraded at 0.05x and below"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments); proportions degraded at 0.05x and below"
       platform: ONT
       depth: "0.2x"
       source: "Katsman 2022, Genome Biol"
@@ -1202,7 +1372,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1220,7 +1390,7 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Major cell types held from full depth down to 0.2x (about 2.5M fragments); degraded at 0.05x and below"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments); proportions degraded at 0.05x and below"
       platform: ONT
       depth: "0.2x"
       source: "Katsman 2022, Genome Biol"
@@ -1231,7 +1401,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1249,7 +1419,7 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Major cell types held from full depth down to 0.2x (about 2.5M fragments); degraded at 0.05x and below"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments); proportions degraded at 0.05x and below"
       platform: ONT
       depth: "0.2x"
       source: "Katsman 2022, Genome Biol"
@@ -1260,7 +1430,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1278,10 +1448,10 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments), with proportions degraded at 0.05x and below; the 5x minor-tissue floor is a separate Lab rule"
       platform: ONT
       depth: "0.2x"
-      source: "Katsman 2022, Genome Biol"
+      source: "Katsman 2022, Genome Biol (0.2x); Lab policy (5x)"
     performance_missing_reason: null
     meaning_high: "A larger Bone-Osteob share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
     meaning_low: "A smaller Bone-Osteob share of the cell-free DNA."
@@ -1289,7 +1459,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1307,10 +1477,10 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments), with proportions degraded at 0.05x and below; the 5x minor-tissue floor is a separate Lab rule"
       platform: ONT
       depth: "0.2x"
-      source: "Katsman 2022, Genome Biol"
+      source: "Katsman 2022, Genome Biol (0.2x); Lab policy (5x)"
     performance_missing_reason: null
     meaning_high: "A larger Breast-Basal-Ep share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
     meaning_low: "A smaller Breast-Basal-Ep share of the cell-free DNA."
@@ -1318,7 +1488,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1336,10 +1506,10 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments), with proportions degraded at 0.05x and below; the 5x minor-tissue floor is a separate Lab rule"
       platform: ONT
       depth: "0.2x"
-      source: "Katsman 2022, Genome Biol"
+      source: "Katsman 2022, Genome Biol (0.2x); Lab policy (5x)"
     performance_missing_reason: null
     meaning_high: "A larger Breast-Luminal-Ep share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
     meaning_low: "A smaller Breast-Luminal-Ep share of the cell-free DNA."
@@ -1347,7 +1517,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1365,10 +1535,10 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments), with proportions degraded at 0.05x and below; the 5x minor-tissue floor is a separate Lab rule"
       platform: ONT
       depth: "0.2x"
-      source: "Katsman 2022, Genome Biol"
+      source: "Katsman 2022, Genome Biol (0.2x); Lab policy (5x)"
     performance_missing_reason: null
     meaning_high: "A larger Colon-Ep share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
     meaning_low: "A smaller Colon-Ep share of the cell-free DNA."
@@ -1376,7 +1546,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1394,10 +1564,10 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments), with proportions degraded at 0.05x and below; the 5x minor-tissue floor is a separate Lab rule"
       platform: ONT
       depth: "0.2x"
-      source: "Katsman 2022, Genome Biol"
+      source: "Katsman 2022, Genome Biol (0.2x); Lab policy (5x)"
     performance_missing_reason: null
     meaning_high: "A larger Colon-Fibro share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
     meaning_low: "A smaller Colon-Fibro share of the cell-free DNA."
@@ -1405,7 +1575,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1423,10 +1593,10 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments), with proportions degraded at 0.05x and below; the 5x minor-tissue floor is a separate Lab rule"
       platform: ONT
       depth: "0.2x"
-      source: "Katsman 2022, Genome Biol"
+      source: "Katsman 2022, Genome Biol (0.2x); Lab policy (5x)"
     performance_missing_reason: null
     meaning_high: "A larger Dermal-Fibro share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
     meaning_low: "A smaller Dermal-Fibro share of the cell-free DNA."
@@ -1434,7 +1604,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1452,10 +1622,10 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments), with proportions degraded at 0.05x and below; the 5x minor-tissue floor is a separate Lab rule"
       platform: ONT
       depth: "0.2x"
-      source: "Katsman 2022, Genome Biol"
+      source: "Katsman 2022, Genome Biol (0.2x); Lab policy (5x)"
     performance_missing_reason: null
     meaning_high: "A larger Endothel share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
     meaning_low: "A smaller Endothel share of the cell-free DNA."
@@ -1463,7 +1633,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1481,10 +1651,10 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments), with proportions degraded at 0.05x and below; the 5x minor-tissue floor is a separate Lab rule"
       platform: ONT
       depth: "0.2x"
-      source: "Katsman 2022, Genome Biol"
+      source: "Katsman 2022, Genome Biol (0.2x); Lab policy (5x)"
     performance_missing_reason: null
     meaning_high: "A larger Epid-Kerat share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
     meaning_low: "A smaller Epid-Kerat share of the cell-free DNA."
@@ -1492,7 +1662,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1510,10 +1680,10 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments), with proportions degraded at 0.05x and below; the 5x minor-tissue floor is a separate Lab rule"
       platform: ONT
       depth: "0.2x"
-      source: "Katsman 2022, Genome Biol"
+      source: "Katsman 2022, Genome Biol (0.2x); Lab policy (5x)"
     performance_missing_reason: null
     meaning_high: "A larger Eryth-prog share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
     meaning_low: "A smaller Eryth-prog share of the cell-free DNA."
@@ -1521,7 +1691,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1539,10 +1709,10 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments), with proportions degraded at 0.05x and below; the 5x minor-tissue floor is a separate Lab rule"
       platform: ONT
       depth: "0.2x"
-      source: "Katsman 2022, Genome Biol"
+      source: "Katsman 2022, Genome Biol (0.2x); Lab policy (5x)"
     performance_missing_reason: null
     meaning_high: "A larger Fallopian-Ep share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
     meaning_low: "A smaller Fallopian-Ep share of the cell-free DNA."
@@ -1550,7 +1720,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1568,10 +1738,10 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments), with proportions degraded at 0.05x and below; the 5x minor-tissue floor is a separate Lab rule"
       platform: ONT
       depth: "0.2x"
-      source: "Katsman 2022, Genome Biol"
+      source: "Katsman 2022, Genome Biol (0.2x); Lab policy (5x)"
     performance_missing_reason: null
     meaning_high: "A larger Gallbladder share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
     meaning_low: "A smaller Gallbladder share of the cell-free DNA."
@@ -1579,7 +1749,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1597,10 +1767,10 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments), with proportions degraded at 0.05x and below; the 5x minor-tissue floor is a separate Lab rule"
       platform: ONT
       depth: "0.2x"
-      source: "Katsman 2022, Genome Biol"
+      source: "Katsman 2022, Genome Biol (0.2x); Lab policy (5x)"
     performance_missing_reason: null
     meaning_high: "A larger Gastric-Ep share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
     meaning_low: "A smaller Gastric-Ep share of the cell-free DNA."
@@ -1608,7 +1778,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1626,10 +1796,10 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments), with proportions degraded at 0.05x and below; the 5x minor-tissue floor is a separate Lab rule"
       platform: ONT
       depth: "0.2x"
-      source: "Katsman 2022, Genome Biol"
+      source: "Katsman 2022, Genome Biol (0.2x); Lab policy (5x)"
     performance_missing_reason: null
     meaning_high: "A larger Head-Neck-Ep share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
     meaning_low: "A smaller Head-Neck-Ep share of the cell-free DNA."
@@ -1637,7 +1807,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1655,10 +1825,10 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments), with proportions degraded at 0.05x and below; the 5x minor-tissue floor is a separate Lab rule"
       platform: ONT
       depth: "0.2x"
-      source: "Katsman 2022, Genome Biol"
+      source: "Katsman 2022, Genome Biol (0.2x); Lab policy (5x)"
     performance_missing_reason: null
     meaning_high: "A larger Heart-Cardio share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
     meaning_low: "A smaller Heart-Cardio share of the cell-free DNA."
@@ -1666,7 +1836,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1684,10 +1854,10 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments), with proportions degraded at 0.05x and below; the 5x minor-tissue floor is a separate Lab rule"
       platform: ONT
       depth: "0.2x"
-      source: "Katsman 2022, Genome Biol"
+      source: "Katsman 2022, Genome Biol (0.2x); Lab policy (5x)"
     performance_missing_reason: null
     meaning_high: "A larger Heart-Fibro share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
     meaning_low: "A smaller Heart-Fibro share of the cell-free DNA."
@@ -1695,7 +1865,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1713,10 +1883,10 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments), with proportions degraded at 0.05x and below; the 5x minor-tissue floor is a separate Lab rule"
       platform: ONT
       depth: "0.2x"
-      source: "Katsman 2022, Genome Biol"
+      source: "Katsman 2022, Genome Biol (0.2x); Lab policy (5x)"
     performance_missing_reason: null
     meaning_high: "A larger Kidney-Ep share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
     meaning_low: "A smaller Kidney-Ep share of the cell-free DNA."
@@ -1724,7 +1894,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1742,10 +1912,10 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments), with proportions degraded at 0.05x and below; the 5x minor-tissue floor is a separate Lab rule"
       platform: ONT
       depth: "0.2x"
-      source: "Katsman 2022, Genome Biol"
+      source: "Katsman 2022, Genome Biol (0.2x); Lab policy (5x)"
     performance_missing_reason: null
     meaning_high: "A larger Liver-Hep share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
     meaning_low: "A smaller Liver-Hep share of the cell-free DNA."
@@ -1753,7 +1923,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1771,10 +1941,10 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments), with proportions degraded at 0.05x and below; the 5x minor-tissue floor is a separate Lab rule"
       platform: ONT
       depth: "0.2x"
-      source: "Katsman 2022, Genome Biol"
+      source: "Katsman 2022, Genome Biol (0.2x); Lab policy (5x)"
     performance_missing_reason: null
     meaning_high: "A larger Lung-Ep-Alveo share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
     meaning_low: "A smaller Lung-Ep-Alveo share of the cell-free DNA."
@@ -1782,7 +1952,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1800,10 +1970,10 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments), with proportions degraded at 0.05x and below; the 5x minor-tissue floor is a separate Lab rule"
       platform: ONT
       depth: "0.2x"
-      source: "Katsman 2022, Genome Biol"
+      source: "Katsman 2022, Genome Biol (0.2x); Lab policy (5x)"
     performance_missing_reason: null
     meaning_high: "A larger Lung-Ep-Bron share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
     meaning_low: "A smaller Lung-Ep-Bron share of the cell-free DNA."
@@ -1811,7 +1981,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1829,7 +1999,7 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Major cell types held from full depth down to 0.2x (about 2.5M fragments); degraded at 0.05x and below"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments); proportions degraded at 0.05x and below"
       platform: ONT
       depth: "0.2x"
       source: "Katsman 2022, Genome Biol"
@@ -1840,7 +2010,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1858,10 +2028,10 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments), with proportions degraded at 0.05x and below; the 5x minor-tissue floor is a separate Lab rule"
       platform: ONT
       depth: "0.2x"
-      source: "Katsman 2022, Genome Biol"
+      source: "Katsman 2022, Genome Biol (0.2x); Lab policy (5x)"
     performance_missing_reason: null
     meaning_high: "A larger Neuron share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
     meaning_low: "A smaller Neuron share of the cell-free DNA."
@@ -1869,7 +2039,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1887,10 +2057,10 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments), with proportions degraded at 0.05x and below; the 5x minor-tissue floor is a separate Lab rule"
       platform: ONT
       depth: "0.2x"
-      source: "Katsman 2022, Genome Biol"
+      source: "Katsman 2022, Genome Biol (0.2x); Lab policy (5x)"
     performance_missing_reason: null
     meaning_high: "A larger Oligodend share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
     meaning_low: "A smaller Oligodend share of the cell-free DNA."
@@ -1898,7 +2068,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1916,10 +2086,10 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments), with proportions degraded at 0.05x and below; the 5x minor-tissue floor is a separate Lab rule"
       platform: ONT
       depth: "0.2x"
-      source: "Katsman 2022, Genome Biol"
+      source: "Katsman 2022, Genome Biol (0.2x); Lab policy (5x)"
     performance_missing_reason: null
     meaning_high: "A larger Ovary-Ep share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
     meaning_low: "A smaller Ovary-Ep share of the cell-free DNA."
@@ -1927,7 +2097,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1945,10 +2115,10 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments), with proportions degraded at 0.05x and below; the 5x minor-tissue floor is a separate Lab rule"
       platform: ONT
       depth: "0.2x"
-      source: "Katsman 2022, Genome Biol"
+      source: "Katsman 2022, Genome Biol (0.2x); Lab policy (5x)"
     performance_missing_reason: null
     meaning_high: "A larger Pancreas-Acinar share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
     meaning_low: "A smaller Pancreas-Acinar share of the cell-free DNA."
@@ -1956,7 +2126,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -1974,10 +2144,10 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments), with proportions degraded at 0.05x and below; the 5x minor-tissue floor is a separate Lab rule"
       platform: ONT
       depth: "0.2x"
-      source: "Katsman 2022, Genome Biol"
+      source: "Katsman 2022, Genome Biol (0.2x); Lab policy (5x)"
     performance_missing_reason: null
     meaning_high: "A larger Pancreas-Alpha share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
     meaning_low: "A smaller Pancreas-Alpha share of the cell-free DNA."
@@ -1985,7 +2155,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -2003,10 +2173,10 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments), with proportions degraded at 0.05x and below; the 5x minor-tissue floor is a separate Lab rule"
       platform: ONT
       depth: "0.2x"
-      source: "Katsman 2022, Genome Biol"
+      source: "Katsman 2022, Genome Biol (0.2x); Lab policy (5x)"
     performance_missing_reason: null
     meaning_high: "A larger Pancreas-Beta share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
     meaning_low: "A smaller Pancreas-Beta share of the cell-free DNA."
@@ -2014,7 +2184,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -2032,10 +2202,10 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments), with proportions degraded at 0.05x and below; the 5x minor-tissue floor is a separate Lab rule"
       platform: ONT
       depth: "0.2x"
-      source: "Katsman 2022, Genome Biol"
+      source: "Katsman 2022, Genome Biol (0.2x); Lab policy (5x)"
     performance_missing_reason: null
     meaning_high: "A larger Pancreas-Delta share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
     meaning_low: "A smaller Pancreas-Delta share of the cell-free DNA."
@@ -2043,7 +2213,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -2061,10 +2231,10 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments), with proportions degraded at 0.05x and below; the 5x minor-tissue floor is a separate Lab rule"
       platform: ONT
       depth: "0.2x"
-      source: "Katsman 2022, Genome Biol"
+      source: "Katsman 2022, Genome Biol (0.2x); Lab policy (5x)"
     performance_missing_reason: null
     meaning_high: "A larger Pancreas-Duct share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
     meaning_low: "A smaller Pancreas-Duct share of the cell-free DNA."
@@ -2072,7 +2242,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -2090,10 +2260,10 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments), with proportions degraded at 0.05x and below; the 5x minor-tissue floor is a separate Lab rule"
       platform: ONT
       depth: "0.2x"
-      source: "Katsman 2022, Genome Biol"
+      source: "Katsman 2022, Genome Biol (0.2x); Lab policy (5x)"
     performance_missing_reason: null
     meaning_high: "A larger Prostate-Ep share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
     meaning_low: "A smaller Prostate-Ep share of the cell-free DNA."
@@ -2101,7 +2271,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -2119,10 +2289,10 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments), with proportions degraded at 0.05x and below; the 5x minor-tissue floor is a separate Lab rule"
       platform: ONT
       depth: "0.2x"
-      source: "Katsman 2022, Genome Biol"
+      source: "Katsman 2022, Genome Biol (0.2x); Lab policy (5x)"
     performance_missing_reason: null
     meaning_high: "A larger Skeletal-Musc share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
     meaning_low: "A smaller Skeletal-Musc share of the cell-free DNA."
@@ -2130,7 +2300,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -2148,10 +2318,10 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments), with proportions degraded at 0.05x and below; the 5x minor-tissue floor is a separate Lab rule"
       platform: ONT
       depth: "0.2x"
-      source: "Katsman 2022, Genome Biol"
+      source: "Katsman 2022, Genome Biol (0.2x); Lab policy (5x)"
     performance_missing_reason: null
     meaning_high: "A larger Small-Int-Ep share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
     meaning_low: "A smaller Small-Int-Ep share of the cell-free DNA."
@@ -2159,7 +2329,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -2177,10 +2347,10 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments), with proportions degraded at 0.05x and below; the 5x minor-tissue floor is a separate Lab rule"
       platform: ONT
       depth: "0.2x"
-      source: "Katsman 2022, Genome Biol"
+      source: "Katsman 2022, Genome Biol (0.2x); Lab policy (5x)"
     performance_missing_reason: null
     meaning_high: "A larger Smooth-Musc share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
     meaning_low: "A smaller Smooth-Musc share of the cell-free DNA."
@@ -2188,7 +2358,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -2206,10 +2376,10 @@ entries:
     reference: {kind: internal_cohort}
     performance:
       kind: depth_robustness
-      value: "Minor cell types are not interpretable below 5x (Lab rule); only majors were shown stable to 0.2x"
+      value: "Katsman found expected common cell types at 0.2x (about 2.5M aligned fragments), with proportions degraded at 0.05x and below; the 5x minor-tissue floor is a separate Lab rule"
       platform: ONT
       depth: "0.2x"
-      source: "Katsman 2022, Genome Biol"
+      source: "Katsman 2022, Genome Biol (0.2x); Lab policy (5x)"
     performance_missing_reason: null
     meaning_high: "A larger Thyroid-Ep share of the cell-free DNA; for non-blood cell types this can reflect tissue injury or turnover."
     meaning_low: "A smaller Thyroid-Ep share of the cell-free DNA."
@@ -2217,7 +2387,7 @@ entries:
     next_steps:
       analytical: ["Confirm depth (minor tissues need >= 5x)", "Compare against the kit cohort when it exists"]
       clinical_setting: null
-    license_ids: [modkit-ont-public, yissum-uxm, loyfer-atlas-terms-unknown]
+    license_ids: [yissum-uxm, loyfer-atlas-terms-unknown]
     flags: [LEGAL]
     headline: false
     stability: {kind: proportion}
@@ -2431,7 +2601,7 @@ entries:
     performance_missing_reason: null
     meaning_high: "More 5hmC calls."
     meaning_low: "Fewer 5hmC calls; global 5hmC loss has been reported in cancer cfDNA with a different chemistry."
-    confounders: ["basecaller 5hmC model accuracy", "5hmC is rare: most calls are noise at low depth"]
+    confounders: ["basecaller 5hmC model accuracy", "shallow-depth sampling variance"]
     next_steps:
       analytical: ["Exploratory only; never a headline"]
       clinical_setting: null
@@ -2520,6 +2690,79 @@ entries:
     citations: ["doi:10.1038/s41588-018-0073-4"]
     citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "PMID 29610480: common-PMD definition."}
 
+  # ----------------------------------------------------------- methylbert
+  - algorithm_id: methylbert
+    metric_id: tumour_fraction
+    label: "MethylBERT tumour-source fraction (exploratory)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "MethylBERT study; ONT cfDNA Lab workflow not biologically qualified"
+    min_depth_x: null
+    reference: {kind: internal_cohort}
+    performance: null
+    performance_missing_reason: "No validated ONT cfDNA recovery for this operator-supplied checkpoint and basecalling model"
+    meaning_high: "More reads resemble the tumour class of the registered training data; not a clinical tumour fraction."
+    meaning_low: "Fewer reads resemble that class; low classified support or model mismatch may dominate."
+    confounders: ["training cohort", "DMR selection", "basecalling model", "classified-read support", "GPU/model version"]
+    next_steps:
+      analytical: ["Review classified_reads and the registered model provenance", "Compare with independent copy-number and methylation estimates"]
+      clinical_setting: null
+    license_ids: [methylbert-mit]
+    flags: []
+    headline: true
+    stability: {kind: proportion}
+    citations: ["doi:10.1038/s41467-025-55920-z"]
+    citation_checked: {by: "Lab integration", date: "2026-10-17", note: "The MethylBERT paper and pinned upstream source describe read-level tumour/normal deconvolution; they do not qualify this operator checkpoint or ONT Lab adapter."}
+
+  - algorithm_id: methylbert
+    metric_id: normal_fraction
+    label: "MethylBERT normal-source fraction"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "MethylBERT study; ONT cfDNA Lab workflow not biologically qualified"
+    min_depth_x: null
+    reference: {kind: internal_cohort}
+    performance: null
+    performance_missing_reason: "No validated ONT cfDNA recovery for this operator-supplied checkpoint"
+    meaning_high: "More reads resemble the normal class of the registered training data."
+    meaning_low: "Fewer reads resemble the normal class of the registered training data."
+    confounders: ["training cohort", "DMR selection", "basecalling model", "classified-read support"]
+    next_steps:
+      analytical: ["Read with tumour_fraction and classified_reads"]
+      clinical_setting: null
+    license_ids: [methylbert-mit]
+    flags: []
+    headline: false
+    stability: {kind: proportion}
+    citations: ["doi:10.1038/s41467-025-55920-z"]
+    citation_checked: {by: "Lab integration", date: "2026-10-17", note: "The complement of the exploratory tumour-source fraction; no checkpoint-specific ONT qualification."}
+
+  - algorithm_id: methylbert
+    metric_id: classified_reads
+    label: "Unique reads contributing to MethylBERT deconvolution"
+    value_kind: count
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "ONT MM/ML adapter to MethylBERT"
+    min_depth_x: null
+    reference: {kind: internal_cohort}
+    performance: null
+    performance_missing_reason: "No qualified minimum classified-read support is established"
+    meaning_high: "More eligible molecules contribute to this model estimate."
+    meaning_low: "The estimate may be unstable; compare this count with eligible input reads."
+    confounders: ["DMR coverage", "read length", "modification-call quality", "training model"]
+    next_steps:
+      analytical: ["Do not substitute classified reads for the 2.5-million eligible-input floor"]
+      clinical_setting: null
+    license_ids: [methylbert-mit]
+    flags: []
+    headline: false
+    stability: {kind: scales_with_depth, tolerance: 0.10}
+    citations: []
+    citation_checked: {by: "Lab integration", date: "2026-10-17", note: "Lab implementation denominator, not a published performance threshold."}
+
   # -------------------------------------------------------- hypometh-reads
   - algorithm_id: hypometh-reads
     metric_id: hypometh_read_fraction
@@ -2531,9 +2774,9 @@ entries:
     min_depth_x: null
     reference: {kind: internal_cohort}
     performance: null
-    performance_missing_reason: "none published for a genome-wide read share; the thresholds come from the UXM fragment classes"
-    meaning_high: "Many fully unmethylated molecules: more DNA from cell types unmethylated at random sites, or a global hypomethylation signal."
-    meaning_low: "Few unmethylated molecules."
+    performance_missing_reason: "No published performance for this Lab genome-wide share using <25%; Loyfer's UXM U class includes reads at exactly 25%"
+    meaning_high: "Many reads with less than 25% methylated CpGs: more DNA from cell types unmethylated at sampled sites, or a global hypomethylation signal."
+    meaning_low: "Few reads meet the strict <25% CpG-methylation rule."
     confounders: ["CpG density of the regions reads fall in", "call confidence", "depth (noise)"]
     next_steps:
       analytical: ["Exploratory only", "Read with global-5mc"]
@@ -2543,7 +2786,7 @@ entries:
     headline: true
     stability: {kind: proportion}
     citations: ["doi:10.1038/s41586-022-05580-6"]
-    citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "PMC9811898 (Loyfer 2023): 'we used k = 4 and thresholds of less than or equal to 25% methylated CpGs for U reads, and more than or equal to 75% methylated CpGs for M reads' (>= 3 CpGs for cfDNA mixtures). Only the published thresholds are reused; no UXM/wgbs_tools code."}
+    citation_checked: {by: "S1 primary-source audit", date: "2026-10-17", note: "Loyfer 2023 Methods: UXM uses k=4, U <=25% and M >=75%; in silico cfDNA mixtures use at least 3 CpGs. This Lab scalar uses strict <25%, so reads at exactly 25% contribute to U counts but not this scalar. No UXM/wgbs_tools code is invoked."}
 
   - algorithm_id: hypometh-reads
     metric_id: u_x_m_counts
@@ -2568,6 +2811,67 @@ entries:
     citations: ["doi:10.1038/s41586-022-05580-6"]
     citation_checked: {by: "lab build agent (Phase 1)", date: "2026-10-15", note: "PMC9811898: U <= 25%, M >= 75%, k = 4."}
 
+
+  # --------------------------------------------------------------- meth-tf
+  - &meth_tf_metric
+    algorithm_id: meth-tf
+    metric_id: tumor_fraction
+    label: "Tumour share of fitted methylation reference weights"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "ONT; operator-registered tumour/healthy CpG reference"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No validated ONT methylation tumour-fraction calibration, detection limit, or clinical cutoff"
+    missing_value_caption: "The observed reference columns lacked numerical rank or a nonzero nonnegative fit."
+    meaning_high: "The fitted tumour reference has a larger share of the two nonnegative weights; this is not a calibrated tumour burden."
+    meaning_low: "The fitted healthy reference has a larger share of the two nonnegative weights; a zero estimate is not evidence of no tumour."
+    confounders: ["marker panel provenance", "basecall modification model", "methylation heterogeneity", "coverage", "reference mismatch"]
+    next_steps: {analytical: ["Inspect reference registration, marker coverage, and fit diagnostics"], clinical_setting: null}
+    license_ids: [meth-tf-reference-operator]
+    flags: [CLIA]
+    headline: true
+    citations: []
+    citation_checked: {by: "Lab S3 implementation", date: "2026-10-17", note: "Software NNLS convention only; no supplied biological reference or performance citation."}
+  - <<: *meth_tf_metric
+    metric_id: identifiable
+    label: "Two methylation reference columns have numerical rank and nonzero fit"
+    value_kind: categorical
+    headline: false
+    meaning_high: "A numerical solution exists; inspect the condition number because full rank does not establish a reliable biological estimate."
+    meaning_low: "Too few covered markers, insufficient reference rank, or no nonzero nonnegative fit; inspect coverage and the condition number."
+  - <<: *meth_tf_metric
+    metric_id: markers_covered
+    label: "Registered methylation markers with CpG calls"
+    value_kind: count
+    headline: false
+    meaning_high: "More registered markers contributed observations."
+    meaning_low: "Few registered markers contributed; the mixture may be unidentifiable."
+  - <<: *meth_tf_metric
+    metric_id: cpg_calls_used
+    label: "CpG calls at registered methylation markers"
+    value_kind: count
+    headline: false
+    meaning_high: "More eligible 5mC-channel calls contributed at registered markers."
+    meaning_low: "Few registered-marker calls contributed."
+  - <<: *meth_tf_metric
+    metric_id: fit_rms
+    label: "Unnormalized marker-weight fit residual RMS"
+    value_kind: positive
+    headline: false
+    missing_value_caption: "The fit is unidentifiable; inspect marker coverage and call counts."
+    meaning_high: "Observed marker fractions differ more from the fitted two-reference mixture."
+    meaning_low: "Less numerical mismatch; with only two covered markers an interior fit is exactly determined, so a low residual does not establish fit quality."
+  - <<: *meth_tf_metric
+    metric_id: reference_condition_number
+    label: "Count-weighted methylation reference condition number"
+    value_kind: positive
+    headline: false
+    missing_value_caption: "Fewer than two markers were covered or the observed reference matrix was singular."
+    meaning_high: "The two observed reference columns are nearly collinear; small call or reference errors can strongly change the fitted fraction. No validated cutoff is available."
+    meaning_low: "The observed reference columns are better separated numerically; this alone does not establish biological validity."
 
   # ------------------------------------------------------------- frag-x-meth
   - algorithm_id: frag-x-meth
@@ -2599,6 +2903,53 @@ entries:
       note: "No scientific citation or reference interval displayed. Engineering formula: D21 eligible molecules with at least four C+m CpG calls; per-molecule 5mC fraction is argmax-5mC calls divided by C+m CpG calls; group means are unweighted by call count; delta is mean for 151-220 bp minus mean for 100-150 bp. Null when either group is empty. Stability tolerance is an engineering comparison rule, not a biological threshold."
 
 
+  # -------------------------------------------------------------- griffin
+  - algorithm_id: griffin
+    metric_id: central_coverage
+    label: "Griffin GC-corrected central TF-site coverage"
+    value_kind: positive
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "paired-end cfDNA WGS, hg38"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No validated performance or reference range for this TF-site list and sample"
+    meaning_high: "More corrected nucleosome protection at the registered primary TF-site list; this is not a TF expression call."
+    meaning_low: "Less corrected nucleosome protection at the registered primary TF-site list; this is not a TF expression call."
+    confounders: ["TF binding-site selection", "GC correction and mappability filtering", "cell-type mixture", "sequencing depth", "fragment-size selection"]
+    next_steps:
+      analytical: ["Inspect the full site-centered profile and registered TF-site list", "Compare only against protocol-matched samples"]
+      clinical_setting: null
+    license_ids: [method-patents]
+    flags: [LEGAL]
+    headline: true
+    stability: {kind: relative, tolerance: 0.10}
+    citations: ["doi:10.1038/s41467-022-35076-w"]
+    citation_checked: {by: "Lab S5 method audit", date: "2026-10-16", note: "Doebley et al. Griffin reports GC-corrected central TF-site coverage for paired-end cfDNA WGS. The Lab's registered primary site list determines this scalar. The 10% stability tolerance is an engineering comparison rule, not a biological threshold; no diagnostic interpretation is asserted."}
+
+  - algorithm_id: griffin
+    metric_id: site_count
+    label: "Sites in primary Griffin TF list"
+    value_kind: count
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "paired-end cfDNA WGS, hg38"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "Site count is coverage metadata, not a diagnostic"
+    meaning_high: "The registered primary site list contains more sites."
+    meaning_low: "The registered primary site list contains fewer sites."
+    confounders: ["TF-site annotation and filtering"]
+    next_steps: {analytical: ["Inspect the registered site list"], clinical_setting: null}
+    license_ids: [method-patents]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: absolute, tolerance: 1}
+    citations: ["doi:10.1038/s41467-022-35076-w"]
+    citation_checked: {by: "Lab S5 method audit", date: "2026-10-16", note: "Griffin output reports number_of_sites for each site list. The one-site stability tolerance is an engineering comparison rule, not a biological threshold."}
+
   # ------------------------------------------------------ breakpoint-motifs
   - algorithm_id: breakpoint-motifs
     metric_id: cpg_near_end_fraction
@@ -2627,6 +2978,145 @@ entries:
       date: "2026-10-16"
       note: "No scientific citation or reference interval displayed. Engineering formula: D21 eligible molecules supply aligned-span start and end-1, not claimed physical cleavage sites. Each valid end contributes once to the denominator, including both ends of one read even if they select the same CpG. A reference CG C coordinate within 10 bp inclusive is near; equal-distance ties select the lower C. Endpoint motifs are separate panels and require complete A/C/G/T contexts. LEGAL is a caution flag, not a rights clearance."
 
+  # --------------------------------------------------------------- microbial
+  - &microbial_base
+    algorithm_id: microbial
+    metric_id: microbial_rpm_primary
+    label: "Candidate microbial estimated reads per million primary reads"
+    value_kind: positive
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "Kraken2/Bracken metagenomics; ONT cfDNA use unvalidated"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "Only a protocol-matched cohort 97.5th percentile is shown when available; no infection threshold"
+    meaning_high: "More candidate microbial sequence among human-unmapped reads; contamination and misclassification remain possible."
+    meaning_low: "Fewer candidate microbial sequences detected under this database and read-length policy."
+    confounders: ["database content", "human alignment and residual human DNA", "reagent contamination", "read length", "cohort protocol"]
+    next_steps:
+      analytical: ["Review taxid-level counts and a protocol-matched cohort", "Confirm any biological interpretation independently"]
+      clinical_setting: null
+    license_ids: [kraken2-mit, bracken-gpl3]
+    flags: [PRIVACY]
+    headline: true
+    stability: {kind: relative, tolerance: 0.10}
+    citations: []
+    citation_checked: {by: "Lab S4 build", date: "2026-10-16", note: "No diagnostic performance or ONT reference interval claimed."}
+
+  - <<: *microbial_base
+    metric_id: primary_reads
+    label: "Primary QC-passing non-duplicate reads"
+    value_kind: count
+    meaning_high: "More reads in the denominator for the reported candidate rate."
+    meaning_low: "Fewer reads in the denominator; candidate rates are noisier."
+    headline: false
+    stability: {kind: scales_with_depth, tolerance: 0.10}
+  - <<: *microbial_base
+    metric_id: candidate_unmapped_reads
+    label: "Human-unmapped reads submitted to Kraken2"
+    value_kind: count
+    meaning_high: "More reads failed human alignment and met the registered clipping length."
+    meaning_low: "Fewer reads were available for microbial classification."
+    headline: false
+    stability: {kind: scales_with_depth, tolerance: 0.10}
+  - <<: *microbial_base
+    metric_id: too_short_unmapped_reads
+    label: "Human-unmapped reads below Bracken length"
+    value_kind: count
+    meaning_high: "More unmapped reads were excluded to keep the Bracken length model exact."
+    meaning_low: "Few reads were excluded by the registered length."
+    headline: false
+    stability: {kind: scales_with_depth, tolerance: 0.10}
+  - <<: *microbial_base
+    metric_id: missing_sequence_unmapped_reads
+    label: "Human-unmapped reads without sequence"
+    value_kind: count
+    meaning_high: "More unmapped reads lacked bases and could not be classified."
+    meaning_low: "Few unmapped reads lacked sequence."
+    headline: false
+    stability: {kind: scales_with_depth, tolerance: 0.10}
+  - <<: *microbial_base
+    metric_id: classified_candidate_reads
+    label: "Kraken2 classified candidate reads"
+    value_kind: count
+    meaning_high: "More submitted reads received a taxonomy assignment, including non-microbial taxa."
+    meaning_low: "More submitted reads remained unclassified."
+    headline: false
+    stability: {kind: scales_with_depth, tolerance: 0.10}
+  - <<: *microbial_base
+    metric_id: unclassified_candidate_reads
+    label: "Kraken2 unclassified candidate reads"
+    value_kind: count
+    meaning_high: "More submitted reads were not assigned within this database."
+    meaning_low: "Fewer submitted reads remained unclassified."
+    headline: false
+    stability: {kind: scales_with_depth, tolerance: 0.10}
+  - <<: *microbial_base
+    metric_id: microbial_estimated_reads
+    label: "Bracken estimated microbial reads"
+    value_kind: positive
+    meaning_high: "More estimated reads fall under explicitly microbial taxonomy roots."
+    meaning_low: "Fewer estimated reads fall under those roots."
+    headline: false
+    stability: {kind: scales_with_depth, tolerance: 0.10}
+  - <<: *microbial_base
+    metric_id: omitted_taxa
+    label: "Microbial taxa omitted from the bounded display"
+    value_kind: count
+    meaning_high: "The displayed top taxa do not include every candidate species; missing taxa cannot be assumed zero."
+    meaning_low: "All candidate microbial taxa fit in the displayed profile."
+    headline: false
+    stability: {kind: absolute, tolerance: 1}
+  # ----------------------------------------------- aligned-end-structure
+  - algorithm_id: aligned-end-structure
+    metric_id: ocf_like_end_asymmetry
+    label: "Open-chromatin aligned-end asymmetry (OCF-like)"
+    value_kind: signed
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "ONT aligned-span proxy; published OCF used paired-end short reads"
+    min_depth_x: 10
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No calibrated reference range or tissue-origin performance for this ONT estimator"
+    meaning_high: "More D−U ends left of catalogued centers and U−D ends right of them; no tissue fraction is inferred."
+    meaning_low: "More negative values indicate the opposite directional end-count pattern in the pinned regions; no tissue fraction is inferred."
+    confounders: ["catalogue tissue and assay", "alignment clipping", "aligned-span length distribution", "ONT library preparation", "depth and region coverage"]
+    next_steps:
+      analytical: ["Inspect eligible centers and raw U/D end counts", "Compare only with the same pinned catalogue and protocol"]
+      clinical_setting: null
+    license_ids: [method-patents]
+    flags: [LEGAL]
+    headline: true
+    stability: {kind: unvalidated}
+    citations: ["doi:10.1101/gr.242719.118"]
+    citation_checked: {by: "Lab S5 evidence audit", date: "2026-10-17", note: "Sun 2019 Genome Research (PMID 30808726) displays D−U summed from −60−10 to −60+10 and U−D from +60−10 to +60+10, while calling these 20-bp windows. This Lab measurement follows the displayed inclusive integer bounds (21 positions each); the paper does not resolve the counting convention. It uses ONT aligned-span ends and operator-pinned hg38 regions, and does not reproduce short-read tissue calibration."}
+
+  - algorithm_id: aligned-end-structure
+    metric_id: preferred_end_support_fraction
+    label: "Pinned preferred-end site support"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "ONT aligned-span proxy; published site discovery used deep paired-end short reads"
+    min_depth_x: 10
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No validated background, diagnostic performance or tissue-specific calibration for this ONT support fraction"
+    meaning_high: "A larger fraction of eligible aligned-span ends coincides with pinned U/D site coordinates."
+    meaning_low: "A smaller fraction of eligible aligned-span ends coincides with pinned U/D site coordinates."
+    confounders: ["site catalogue provenance", "alignment-end precision", "library preparation", "fragment-length distribution"]
+    next_steps:
+      analytical: ["Inspect eligible end count and catalogue digest", "Compare only with the same pinned site catalogue and library protocol", "Do not treat a 10x sample as de novo preferred-site discovery"]
+      clinical_setting: null
+    license_ids: [method-patents]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: unvalidated}
+    citations: ["doi:10.1073/pnas.1804134115"]
+    citation_checked: {by: "Lab S5 evidence audit", date: "2026-10-17", note: "Sun 2018 PNAS (PMID 29760053) mined size-tagged preferred ends from approximately 470x pooled paired-end plasma sequencing. This Lab metric only counts exact matches to an operator-pinned catalogue; it does not discover or validate tissue-specific sites."}
+
   # ------------------------------------------------------------- viral-reads
   - algorithm_id: viral-reads
     metric_id: ebv_rpm
@@ -2647,7 +3137,7 @@ entries:
       analytical: ["Review the registered accession list and alignment evidence", "Confirm a signal with an independent assay"]
       clinical_setting: null
     license_ids: [viral-reference-terms-vary]
-    flags: [LEGAL]
+    flags: [LEGAL, PRIVACY]
     headline: true
     citations: []
     citation_checked: {by: "Lab method contract", date: "2026-10-16", note: "No ONT cfDNA assay citation or clinical cutoff is claimed; qPCR context comes from the approved D10 catalog."}
@@ -2671,7 +3161,7 @@ entries:
       analytical: ["Review which HPV accession versions are registered", "Confirm a signal with an independent assay"]
       clinical_setting: null
     license_ids: [viral-reference-terms-vary]
-    flags: [LEGAL]
+    flags: [LEGAL, PRIVACY]
     headline: false
     citations: []
     citation_checked: {by: "Lab method contract", date: "2026-10-16", note: "No ONT cfDNA assay citation or clinical cutoff is claimed; HPV coverage is bundle-specific."}
@@ -2695,7 +3185,7 @@ entries:
       analytical: ["Review the registered accession list and alignment evidence", "Confirm a signal with an independent assay"]
       clinical_setting: null
     license_ids: [viral-reference-terms-vary]
-    flags: [LEGAL]
+    flags: [LEGAL, PRIVACY]
     headline: false
     citations: []
     citation_checked: {by: "Lab method contract", date: "2026-10-16", note: "No ONT cfDNA assay citation or clinical cutoff is claimed; qPCR context is separate."}
@@ -2822,6 +3312,273 @@ entries:
     citations: []
     citation_checked: {by: "Lab TLEN engineering review", date: "2026-10-16", note: "Engineering FFT statistic reused over TLEN bins, not an established clinical threshold."}
 
+  - algorithm_id: fetal-fraction
+    metric_id: fetal_fraction
+    label: "Fetal fraction (model unavailable)"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: PROVEN
+    origin_platform: "prenatal cfDNA; no ONT-matched fetal-fraction model"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "NIPTeR does not calculate fetal fraction; a separately validated model is required"
+    missing_value_caption: "No validated fetal-fraction model is registered. NIPTeR only calculates chromosome z-scores."
+    meaning_high: "A higher measured fetal fraction would require a separately validated method."
+    meaning_low: "A lower measured fetal fraction would require a separately validated method."
+    confounders: ["gestational age", "maternal factors", "fetal sex", "assay platform"]
+    next_steps:
+      analytical: ["Obtain and validate an independent fetal-fraction model on the matched ONT protocol"]
+      clinical_setting: null
+    license_ids: [nipter-lgpl]
+    flags: [FDA, PRIVACY, LEGAL]
+    headline: true
+    stability: {kind: proportion}
+    citations:
+      - "doi:10.1186/s12859-018-2557-8"
+    citation_checked: {by: "Lab NIPTeR method review", date: "2026-10-17", note: "Package function index and original NIPTeR paper reviewed; fetal fraction is not an NIPTeR output."}
+
+  - algorithm_id: fetal-fraction
+    metric_id: trisomy_13_z
+    label: "Chromosome 13 NIPTeR z-score"
+    value_kind: signed
+    tier: SPECULATIVE
+    origin_tier: PROVEN
+    origin_platform: "short-read prenatal cfDNA with a matched euploid NIPTeR control group"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No ONT-matched clinical cutoff or validation"
+    meaning_high: "Higher chromosome 13 fraction relative to the registered control group."
+    meaning_low: "Lower chromosome 13 fraction relative to the registered control group."
+    confounders: ["control group mismatch", "GC bias", "mapping bias", "fetal fraction"]
+    next_steps: {analytical: ["Inspect control-group match and protocol"], clinical_setting: null}
+    license_ids: [nipter-lgpl]
+    flags: [FDA, PRIVACY, LEGAL]
+    headline: false
+    stability: {kind: absolute, tolerance: 0.1}
+    citations: ["doi:10.1186/s12859-018-2557-8"]
+    citation_checked: {by: "Lab NIPTeR method review", date: "2026-10-17", note: "Package workflow and paper reviewed; ONT transfer lacks matched validation."}
+
+  - algorithm_id: fetal-fraction
+    metric_id: trisomy_18_z
+    label: "Chromosome 18 NIPTeR z-score"
+    value_kind: signed
+    tier: SPECULATIVE
+    origin_tier: PROVEN
+    origin_platform: "short-read prenatal cfDNA with a matched euploid NIPTeR control group"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No ONT-matched clinical cutoff or validation"
+    meaning_high: "Higher chromosome 18 fraction relative to the registered control group."
+    meaning_low: "Lower chromosome 18 fraction relative to the registered control group."
+    confounders: ["control group mismatch", "GC bias", "mapping bias", "fetal fraction"]
+    next_steps: {analytical: ["Inspect control-group match and protocol"], clinical_setting: null}
+    license_ids: [nipter-lgpl]
+    flags: [FDA, PRIVACY, LEGAL]
+    headline: false
+    stability: {kind: absolute, tolerance: 0.1}
+    citations: ["doi:10.1186/s12859-018-2557-8"]
+    citation_checked: {by: "Lab NIPTeR method review", date: "2026-10-17", note: "Package workflow and paper reviewed; ONT transfer lacks matched validation."}
+
+  - algorithm_id: fetal-fraction
+    metric_id: trisomy_21_z
+    label: "Chromosome 21 NIPTeR z-score"
+    value_kind: signed
+    tier: SPECULATIVE
+    origin_tier: PROVEN
+    origin_platform: "short-read prenatal cfDNA with a matched euploid NIPTeR control group"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No ONT-matched clinical cutoff or validation"
+    meaning_high: "Higher chromosome 21 fraction relative to the registered control group."
+    meaning_low: "Lower chromosome 21 fraction relative to the registered control group."
+    confounders: ["control group mismatch", "GC bias", "mapping bias", "fetal fraction"]
+    next_steps: {analytical: ["Inspect control-group match and protocol"], clinical_setting: null}
+    license_ids: [nipter-lgpl]
+    flags: [FDA, PRIVACY, LEGAL]
+    headline: false
+    stability: {kind: absolute, tolerance: 0.1}
+    citations: ["doi:10.1186/s12859-018-2557-8"]
+    citation_checked: {by: "Lab NIPTeR method review", date: "2026-10-17", note: "Package workflow and paper reviewed; ONT transfer lacks matched validation."}
+
+  - &fetal_chry_base
+    algorithm_id: fetal-fraction-chry
+    metric_id: fetal_fraction
+    label: "Male-fetus chrY calibrated fetal fraction"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: PROVEN
+    origin_platform: "short-read maternal plasma sequencing; ONT transfer unvalidated"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No independently verified, ONT-matched accuracy or detection limit"
+    missing_value_caption: "The chrY rate is outside the operator's validated calibration bounds or the method was gated."
+    meaning_high: "More chrY signal under an asserted male-fetus pregnancy and matched calibration."
+    meaning_low: "Less chrY signal; background and assay limits may dominate."
+    confounders: ["fetal-sex assertion", "other male DNA sources", "sex-chromosome variation", "mapping bias", "protocol mismatch"]
+    next_steps: {analytical: ["Review the operator calibration and chrY read count"], clinical_setting: null}
+    license_ids: []
+    flags: [FDA, PRIVACY, LEGAL]
+    headline: true
+    stability: {kind: proportion}
+    citations: ["doi:10.1371/journal.pone.0146997"]
+    citation_checked: {by: "Lab S4 fetal-fraction method review", date: "2026-10-17", note: "Primary method reviewed; no ONT calibration supplied or assumed."}
+
+  - <<: *fetal_chry_base
+    metric_id: fetal_chry_nonpar_reads
+    label: "Male-fetus chrY non-PAR reads"
+    value_kind: count
+    missing_value_caption: "Not measured because the chrY method was gated."
+    meaning_high: "More eligible chrY starts outside pseudoautosomal regions."
+    meaning_low: "Fewer eligible chrY starts; the calibrated fraction may be unavailable."
+    headline: false
+    stability: {kind: scales_with_depth, tolerance: 0.1}
+
+  - <<: *fetal_chry_base
+    metric_id: fetal_chry_reads_per_million
+    label: "Male-fetus chrY non-PAR reads per million eligible"
+    value_kind: positive
+    missing_value_caption: "Not measured because the chrY method was gated."
+    meaning_high: "Higher observed chrY rate before calibration."
+    meaning_low: "Lower observed chrY rate before calibration."
+    headline: false
+    stability: {kind: relative, tolerance: 0.1}
+  - algorithm_id: dd-cfdna-chry
+    metric_id: dd_cfdna_fraction
+    label: "Exploratory male-donor chrY fraction"
+    value_kind: proportion
+    tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "male donor, female recipient, matched ONT transplant cfDNA calibration"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No qualified ONT donor-fraction accuracy or clinical reference interval"
+    missing_value_caption: "No operator-verified matched calibration, insufficient calibrated depth, or chrY rate outside calibration bounds."
+    meaning_high: "More non-PAR chrY reads relative to the registered female background and full male-donor response."
+    meaning_low: "Fewer non-PAR chrY reads relative to that calibration."
+    confounders: ["pregnancy", "sex chromosome variation", "alignment bias", "control mismatch", "low depth"]
+    next_steps: {analytical: ["Verify transplant assertions and calibration provenance", "Validate on matched mixtures before interpretation"], clinical_setting: null}
+    license_ids: []
+    flags: [FDA, PRIVACY]
+    headline: true
+    stability: {kind: absolute, tolerance: 0.10}
+    citations: []
+    citation_checked: {by: "Lab donor calibration review", date: "2026-10-17", note: "Linear response is an explicit operator-supplied engineering calibration, not a published clinical estimator."}
+
+  - algorithm_id: dd-cfdna-chry
+    metric_id: chry_nonpar_reads
+    label: "Eligible chrY non-PAR reads"
+    value_kind: count
+    tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "ONT; this Lab's D21 non-PAR chrY supporting count"
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "Raw supporting count, not a clinical cutoff"
+    license_ids: []
+    flags: [FDA, PRIVACY]
+    headline: false
+    stability: {kind: scales_with_depth, tolerance: 0.10}
+    citations: []
+
+  - algorithm_id: dd-cfdna-chry
+    metric_id: chry_reads_per_million
+    label: "Eligible chrY non-PAR reads per million"
+    value_kind: positive
+    tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "ONT; this Lab's D21 non-PAR chrY supporting rate"
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "A matched female background is required for interpretation"
+    license_ids: []
+    flags: [FDA, PRIVACY]
+    headline: false
+    stability: {kind: relative, tolerance: 0.10}
+    citations: []
+
+  # -------------------------------------------------------------------- wps
+  - algorithm_id: wps
+    metric_id: qualifying_fragment_depth_x
+    label: "WPS-eligible 120–180 bp aligned-fragment depth"
+    value_kind: positive
+    tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "ONT aligned-span support for this Lab WPS implementation"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "No validated support-depth threshold or biological interpretation is established"
+    meaning_high: "More eligible aligned-fragment span bases support the WPS calculation."
+    meaning_low: "Sparse eligible span depth can leave a WPS score with little molecular support."
+    confounders: ["ONT fragment-length distribution", "mapping and copy-number bias", "sequencing depth"]
+    next_steps:
+      analytical: ["Inspect qualifying fragment count and depth in the WPS summary"]
+      clinical_setting: null
+    license_ids: [method-patents]
+    flags: [LEGAL]
+    headline: true
+    stability: {kind: unvalidated}
+    citations: []
+    citation_checked: {by: "Lab S5 source review", date: "2026-10-17", note: "No citation displayed. This support-depth metric is a Lab-specific descriptive count, not a measure or threshold validated by Snyder et al."}
+
+  # ---------------------------------------------- finaletoolkit-xcheck
+  - algorithm_id: finaletoolkit-xcheck
+    metric_id: motif_pearson_r
+    label: "FinaleToolkit paired-end 4-mer frequency concordance"
+    value_kind: signed
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "paired-end Illumina"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "Method parity is not biological or clinical validation"
+    missing_value_caption: "Correlation unavailable when paired-end motifs have insufficient variation."
+    meaning_high: "The pinned toolkit and independent paired-end counter have correlated 4-mer frequency patterns; inspect the artifact for absolute differences."
+    meaning_low: "The toolkit and independent counter disagree; inspect input filters and the paired-end artifact."
+    confounders: ["BAM pair flags", "MAPQ", "reference end coordinates", "sparse motifs"]
+    next_steps:
+      analytical: ["Inspect paired-end method settings and the 256-frequency artifact", "Do not transfer this concordance to single-end ONT"]
+      clinical_setting: null
+    license_ids: [method-patents]
+    flags: [LEGAL]
+    headline: true
+    stability: {kind: absolute, tolerance: 0.01}
+    citations: ["doi:10.1093/bioadv/vbaf236"]
+    citation_checked: {by: "Lab S5 cross-check audit", date: "2026-10-17", note: "Official FinaleToolkit 1.1.0 documentation and tagged source define paired-end 5-prime motifs; correlation is an engineering parity check only."}
+
+  - algorithm_id: finaletoolkit-xcheck
+    metric_id: delfi_ratio_pearson_r
+    label: "FinaleToolkit paired-end uncorrected DELFI-bin concordance"
+    value_kind: signed
+    tier: SPECULATIVE
+    origin_tier: NEWER
+    origin_platform: "paired-end Illumina"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "Uncorrected 100-kb method parity is not the published GC-corrected classifier"
+    missing_value_caption: "Correlation unavailable without at least two variable bins containing long fragments."
+    meaning_high: "The toolkit and independent paired-end counter agree on comparable short/long bins."
+    meaning_low: "The toolkit and independent counter disagree on comparable short/long bins."
+    confounders: ["BAM pair flags", "MAPQ", "sparse bins", "GC correction intentionally disabled"]
+    next_steps:
+      analytical: ["Inspect per-bin counts and method settings", "Do not transfer this concordance to the Lab ONT track"]
+      clinical_setting: null
+    license_ids: [method-patents, no-license-not-adopted]
+    flags: [LEGAL]
+    headline: false
+    stability: {kind: absolute, tolerance: 0.01}
+    citations: ["doi:10.1093/bioadv/vbaf236", "doi:10.1038/s41586-019-1272-6"]
+    citation_checked: {by: "Lab S5 cross-check audit", date: "2026-10-17", note: "Official FinaleToolkit 1.1.0 DELFI API documents paired-end BAM, 100-kb input bins, optional GC correction and 5-Mb merging; both are disabled here for raw-count parity. The Cristiano classifier is not evaluated."}
+
+  # -------------------------------------------------------------- epi-clock
   - algorithm_id: epi-clock
     metric_id: epigenetic_age_years
     label: "Exploratory Weidner three-CpG age estimate"
@@ -2853,6 +3610,8 @@ entries:
     label: "cg02228185 5mC+5hmC fraction"
     value_kind: proportion
     tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "ONT cfDNA; this Lab's per-site 5mC+5hmC call fraction"
     reference: {kind: none}
     performance: null
     performance_missing_reason: "No matched cfDNA ONT reference"
@@ -2865,6 +3624,8 @@ entries:
     label: "cg25809905 5mC+5hmC fraction"
     value_kind: proportion
     tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "ONT cfDNA; this Lab's per-site 5mC+5hmC call fraction"
     reference: {kind: none}
     performance: null
     performance_missing_reason: "No matched cfDNA ONT reference"
@@ -2877,6 +3638,8 @@ entries:
     label: "Weidner PDE4C upstream CpG 5mC+5hmC fraction"
     value_kind: proportion
     tier: SPECULATIVE
+    origin_tier: SPECULATIVE
+    origin_platform: "ONT cfDNA; this Lab's per-site 5mC+5hmC call fraction"
     reference: {kind: none}
     performance: null
     performance_missing_reason: "No matched cfDNA ONT reference"

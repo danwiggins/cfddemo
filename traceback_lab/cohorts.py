@@ -8,30 +8,58 @@ cannot mix old and new members in one response.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import stat
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Iterator
 
 from pydantic import ValidationError
 
 from traceback_runner.serialization import canonical_json_bytes
 
 from .cohort_contracts import CohortGeneration, CohortMember, CohortResult, MetricProjection, project_metric
-from .identity import SHA256_PATTERN, cohort_compat_key
+from .cohort_density import capture_density_vectors
+from .file_access import directory_no_follow
+from .identity import SHA256_PATTERN, canonical_sha256, cohort_compat_key
 from .ingest import resolve_sample, source_ids
 from .problems import LabProblem
 from .registry import execution_identity, load_registry
-from .store import LabStore, new_run_id, open_regular_no_follow, write_atomic
+from .store import (MAX_EXECUTION_PLAN_BYTES, LabStore, ResultOrderUnavailable,
+                    SelectionSnapshotChanged, _fsync_dir, new_run_id,
+                    open_regular_no_follow, write_atomic)
+from .views import selected_result_snapshots
 
 if TYPE_CHECKING:
     from .pon import PonInput
 
 _COHORT_ID = re.compile(r"^[a-z][a-z0-9-]{0,39}$")
+_SOURCE_REF = re.compile(r"^[0-9a-f]{12,64}$")
 _ROSTER_SCHEMA = "traceback.lab.cohort-roster.v1"
 _VERSION_NAME = re.compile(r"^[1-9][0-9]*$")
+
+
+class MemberSelectionStorageError(ValueError):
+    """A stored member selector cannot be safely journaled or restored."""
+
+    def __init__(self, input_id: str, algorithm_id: str) -> None:
+        self.input_id = input_id
+        self.algorithm_id = algorithm_id
+        super().__init__("member result selection storage is invalid")
+
+
+def _member_selection_problem(cohort_id: str, input_id: str, algorithm_id: str) -> LabProblem:
+    return LabProblem(
+        "TBX-LAB-022",
+        cause=(f"stored cohort {cohort_id} has an invalid {algorithm_id} result selection "
+               f"for input {input_id[:12]}"),
+        fix="Restore the selected result file from a known-good backup, then retry cohort build",
+        data={"cohort_id": cohort_id, "input_id": input_id, "algorithm_id": algorithm_id,
+              "field": "member result selection"},
+    )
 
 
 @dataclass(frozen=True)
@@ -108,6 +136,29 @@ def _generation_versions(directory: Path, cohort_id: str) -> tuple[int, ...]:
         except ValueError as exc:
             raise _storage_problem(cohort_id, "generation name") from exc
     return tuple(sorted(versions))
+
+
+def _aborted_generation_versions(directory: Path, cohort_id: str) -> frozenset[int]:
+    """Known unpublished first-build generations survive for inspection."""
+
+    path = directory / "aborted-generations.json"
+    try:
+        with os.fdopen(open_regular_no_follow(path), "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 64 * 1024:
+                raise ValueError("invalid aborted-generation marker")
+            data = json.loads(stream.read(64 * 1024 + 1))
+    except FileNotFoundError:
+        return frozenset()
+    except (OSError, ValueError, TypeError) as exc:
+        raise _storage_problem(cohort_id, "aborted-generations.json") from exc
+    if (not isinstance(data, dict) or set(data) != {"schema", "versions"}
+            or data["schema"] != "traceback.lab.aborted-generations.v1"
+            or not isinstance(data["versions"], list)
+            or any(type(version) is not int or version < 1 for version in data["versions"])
+            or data["versions"] != sorted(set(data["versions"]))):
+        raise _storage_problem(cohort_id, "aborted-generations.json")
+    return frozenset(data["versions"])
 
 
 def read_roster(store: LabStore, cohort_id: str) -> tuple[str, ...]:
@@ -223,6 +274,44 @@ def add_sample(store: LabStore, cohort_id: str, sample_ref: str) -> bool:
         return True
 
 
+def remove_sample(store: LabStore, cohort_id: str, source_ref: str) -> str:
+    """Remove one pending member without changing any published generation or sample data.
+
+    Resolve the ID against the roster itself: an unrecoverable source record must
+    not prevent the operator from removing that member before rebuilding.
+    """
+
+    if not _SOURCE_REF.fullmatch(source_ref):
+        raise LabProblem(
+            "TBX-LAB-017", cause="cohort removal needs a lowercase source ID or ID12",
+            fix="Use the member's printed ID12 or full source ID",
+            data={"cohort_id": cohort_id, "field": "source ID"},
+        )
+    with store.writer("cohort remove", new_run_id()):
+        directory = _cohort_dir(store, cohort_id)
+        roster_path = directory / "members.json"
+        if not roster_path.is_file() or roster_path.is_symlink():
+            raise _storage_problem(cohort_id, "members.json")
+        if (directory / "current.json").exists() or (directory / "current.json").is_symlink():
+            read_current(store, cohort_id)
+        roster = read_roster(store, cohort_id)
+        matches = [source_id for source_id in roster if source_id.startswith(source_ref)]
+        if len(matches) != 1:
+            cause = ("source prefix matches several cohort members" if matches
+                     else "source is not in this cohort's pending roster")
+            raise LabProblem(
+                "TBX-LAB-017", cause=cause,
+                fix="Use one member's unique ID12 or full source ID from the roster",
+                data={"cohort_id": cohort_id, "field": "source ID"},
+            )
+        source_id = matches[0]
+        write_atomic(roster_path, canonical_json_bytes({
+            "schema": _ROSTER_SCHEMA, "source_ids": [item for item in roster if item != source_id],
+        }))
+        store.bump_generation()
+        return source_id
+
+
 def _invalid_input(input_id: str, field: str) -> LabProblem:
     return LabProblem(
         "TBX-LAB-020",
@@ -301,7 +390,209 @@ def _aligner(manifest: dict[str, Any], input_id: str) -> tuple[str, dict[str, An
     }
 
 
-def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) -> tuple[CohortResult, ...]:
+def _execution_plan(attempt: Path) -> dict[str, Any] | None:
+    """Read a producer plan only from a bounded, regular attempt file."""
+
+    try:
+        with os.fdopen(open_regular_no_follow(attempt / "execution_plan.json"), "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                    or info.st_size > MAX_EXECUTION_PLAN_BYTES):
+                return None
+            plan = json.loads(stream.read(MAX_EXECUTION_PLAN_BYTES + 1))
+    except (OSError, ValueError, TypeError, RecursionError):
+        return None
+    return plan if isinstance(plan, dict) else None
+
+
+def _recorded_selection(
+    store: LabStore, input_id: str, algorithm: Any, attempt: Path, latest: Any,
+    manifest: dict[str, Any],
+    upstream: list[dict[str, str]], current_assets: list[str] | None,
+    platform: str,
+) -> tuple[str, Any, dict[str, Any]] | None:
+    """Select a result by its recorded effective identity, without live probes."""
+    identity = latest.provenance.parameters_sha256
+    try:
+        plan = _execution_plan(attempt)
+        if (not isinstance(plan, dict)
+                or plan.get("schema") != "traceback.lab.execution-plan.v1"
+                or plan.get("algorithm_id") != algorithm.id
+                or plan.get("algorithm_version") != algorithm.version
+                or plan.get("input_id") != input_id
+                or plan.get("reference_sha256") != manifest["reference_sha256"]
+                or plan.get("platform") != platform
+                or plan.get("upstream") != upstream
+                or not isinstance(plan.get("parameters"), dict)
+                or not isinstance(plan.get("tools"), list)
+                or not isinstance(plan.get("asset_sha256s"), list)):
+            return None
+        if any(callable(getattr(algorithm, hook, None)) for hook in
+               ("identity_tools", "identity_assets", "identity_parameters")):
+            # Dynamic hooks may add effective parameters, but may not alter
+            # their static contract. Normalize through JSON because producer
+            # tuples are stored as lists. Static methods can retain recorded
+            # historical pins after a reader upgrade (for example cell-origin).
+            if any(key not in plan["parameters"] or
+                   canonical_json_bytes(plan["parameters"][key]) != canonical_json_bytes(value)
+                   for key, value in algorithm.parameters.items()):
+                return None
+        # Griffin's fixed method and Snakemake pins must still match the
+        # producer plan even when its dynamic runtime pin changes.
+        if algorithm.id == "griffin" and any(tool.identity() not in plan["tools"] for tool in algorithm.tools):
+            return None
+        if current_assets is not None and plan["asset_sha256s"] != current_assets:
+            return None
+        # An explicit panel request cannot be replaced by an old PoN plan.
+        if algorithm.id == "copy-number" and (
+            plan["parameters"].get("pon_policy") != algorithm.parameters.get("pon_policy")
+            or plan["parameters"].get("pon_sha256") != algorithm.parameters.get("pon_sha256")
+        ):
+            return None
+        recorded_identity = execution_identity(
+            algorithm, reference_sha256=manifest["reference_sha256"],
+            upstream=plan["upstream"], asset_sha256s=plan["asset_sha256s"],
+            platform=platform if platform != "ont" else None,
+            tool_pins=plan["tools"], parameters=plan["parameters"],
+        )
+    except (OSError, ValueError, TypeError, AttributeError, KeyError, RecursionError):
+        return None
+    if recorded_identity != identity:
+        return None
+    return identity, latest, plan
+
+
+def _pon_scoped_snapshot(
+    store: LabStore, input_id: str, algorithm: Any, *,
+    reference_sha256: str, platform: str, pon_sha256: str,
+    upstream: list[dict[str, str]], legacy_identity: str | None,
+) -> tuple[Path, Any] | None:
+    """Choose the latest selected attempt in one requested PoN dependency scope.
+
+    Another cohort's panel may be newer globally. An unreadable selector or
+    producer plan with unknown scope still blocks an older match, since it
+    could be a damaged newer result for this same panel.
+    """
+
+    algorithm_id = algorithm.id
+    base = store.results_dir / input_id / algorithm_id
+    if base.is_symlink():
+        return None
+    try:
+        identities = sorted(base.iterdir())
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return None
+    matches: list[tuple[int | None, Path, Any]] = []
+    unknown_orders: list[int | None] = []
+    for identity_dir in identities:
+        if identity_dir.is_symlink():
+            unknown_orders.append(None)
+            continue
+        try:
+            visible = store.selection_visible(input_id, algorithm_id, identity_dir.name)
+        except SelectionSnapshotChanged:
+            raise
+        except OSError:
+            return None
+        if not visible:
+            continue
+        if not SHA256_PATTERN.fullmatch(identity_dir.name) or not identity_dir.is_dir():
+            unknown_orders.append(None)
+            continue
+        order_hint = store.selection_order_hint(input_id, algorithm_id, identity_dir.name)
+        selected = store.selected_result_snapshot(input_id, algorithm_id, identity_dir.name)
+        if selected is None:
+            unknown_orders.append(order_hint)
+            continue
+        attempt, envelope, order = selected
+        plan = _execution_plan(attempt)
+        if plan is None:
+            try:
+                (attempt / "execution_plan.json").lstat()
+            except FileNotFoundError:
+                if identity_dir.name == legacy_identity:
+                    matches.append((order, attempt, envelope))
+                else:
+                    unknown_orders.append(order)
+            else:
+                unknown_orders.append(order)
+            continue
+        if (plan.get("schema") != "traceback.lab.execution-plan.v1"
+                or plan.get("algorithm_id") != algorithm_id
+                or plan.get("algorithm_version") != algorithm.version
+                or plan.get("input_id") != input_id
+                or plan.get("reference_sha256") != reference_sha256
+                or plan.get("platform") != platform
+                or not isinstance(plan.get("parameters"), dict)
+                or not isinstance(plan.get("upstream"), list)
+                or not isinstance(plan.get("tools"), list)
+                or not isinstance(plan.get("asset_sha256s"), list)):
+            unknown_orders.append(order)
+            continue
+        try:
+            recorded_identity = execution_identity(
+                algorithm, reference_sha256=reference_sha256,
+                upstream=plan["upstream"], asset_sha256s=plan["asset_sha256s"],
+                platform=platform if platform != "ont" else None,
+                tool_pins=plan["tools"], parameters=plan["parameters"],
+            )
+        except (ValueError, TypeError, KeyError, RecursionError):
+            unknown_orders.append(order)
+            continue
+        if recorded_identity != envelope.provenance.parameters_sha256:
+            unknown_orders.append(order)
+            continue
+        if algorithm_id == "copy-number":
+            parameters = plan["parameters"]
+            in_scope = (parameters.get("pon_policy") == "lab_loo_v1"
+                        and parameters.get("pon_sha256") == pon_sha256)
+        else:
+            in_scope = plan["upstream"] == upstream
+        if in_scope:
+            matches.append((order, attempt, envelope))
+    if not matches or (len(matches) > 1 and any(order is None for order, _, _ in matches)):
+        return None
+    chosen_order = max(order or 0 for order, _, _ in matches)
+    newest = [(attempt, envelope) for order, attempt, envelope in matches
+              if (order or 0) == chosen_order]
+    if len(newest) != 1:
+        return None
+    attempt, envelope = newest[0]
+    if any(order is None or chosen_order is None or order >= chosen_order
+           for order in unknown_orders):
+        return None
+    return attempt, envelope
+
+
+def _consumed_attempts_current(
+    store: LabStore, attempt: Path, upstream: list[dict[str, str]],
+    snapshots: dict[str, tuple[Path, Any]], input_id: str,
+) -> bool:
+    recorded = store.upstream_selections_at(attempt)
+    if recorded is None or [
+        {"algorithm_id": row["algorithm_id"], "parameters_sha256": row["parameters_sha256"]}
+        for row in recorded
+    ] != sorted(upstream, key=lambda row: row["algorithm_id"]):
+        return False
+    for row in recorded:
+        if row["input_id"] == input_id:
+            selected = snapshots.get(row["algorithm_id"])
+            if (selected is None or selected[0].name != row["attempt_id"]
+                    or selected[1].provenance.parameters_sha256 != row["parameters_sha256"]):
+                return False
+        else:
+            selected = store.selected_attempt(row["input_id"], row["algorithm_id"],
+                                              row["parameters_sha256"])
+            if selected is None or selected.name != row["attempt_id"]:
+                return False
+    return True
+
+
+def _selected_results_once(
+    store: LabStore, input_id: str, manifest: dict[str, Any], *, pon_selection: Any | None = None,
+) -> tuple[CohortResult, ...]:
     """Snapshot only selected status-ok results on the full input."""
 
     label, aligner = _aligner(manifest, input_id)
@@ -325,50 +616,171 @@ def _selected_results(store: LabStore, input_id: str, manifest: dict[str, Any]) 
         )
     found: list[CohortResult] = []
     identities: dict[str, str] = {}
+    latest_results = selected_result_snapshots(store, input_id)
+    chosen_snapshots = dict(latest_results)
+    pon_dependent = pon_dependent_algorithms() if pon_selection is not None else set()
     for algorithm in load_registry():
+        if algorithm.id == "copy-number" and pon_selection is not None:
+            from .pon_consumer import bind_copy_number_algorithm
+
+            algorithm = bind_copy_number_algorithm(algorithm, pon_selection)
+        supported = getattr(getattr(algorithm, "requires", None), "platforms", frozenset({"ont"}))
+        if platform not in supported:
+            continue
         upstream = [
             {"algorithm_id": name, "parameters_sha256": identities[name]}
             for name in algorithm.upstream if name in identities
         ]
         if len(upstream) != len(algorithm.upstream):
             continue
+        if algorithm.id not in pon_dependent:
+            snapshot = latest_results.get(algorithm.id)
+            if snapshot is None or snapshot[1].status != "ok":
+                continue
         assets_of = getattr(algorithm, "asset_sha256s", None)
+        scoped_assets_of = getattr(algorithm, "asset_sha256s_for_input", None)
+        identity_assets = getattr(algorithm, "identity_assets", None)
+        identity_tools = getattr(algorithm, "identity_tools", None)
         try:
-            identity = execution_identity(
-                algorithm, reference_sha256=manifest["reference_sha256"], upstream=upstream,
-                asset_sha256s=assets_of(store.root) if callable(assets_of) else (),
-                platform=platform if platform != "ont" else None,
+            assets = (None if callable(identity_assets) else
+                      list(scoped_assets_of(store.root, input_id)) if callable(scoped_assets_of) else
+                      list(assets_of(store.root) if callable(assets_of) else ()))
+            legacy_identity = None
+            if algorithm.id in pon_dependent and not any(callable(hook) for hook in (
+                identity_tools, identity_assets, getattr(algorithm, "identity_parameters", None),
+            )):
+                legacy_identity = execution_identity(
+                    algorithm, reference_sha256=manifest["reference_sha256"], upstream=upstream,
+                    asset_sha256s=assets or (), platform=platform if platform != "ont" else None,
+                )
+        except (OSError, ValueError, KeyError, LabProblem):
+            continue
+        if algorithm.id in pon_dependent:
+            snapshot = _pon_scoped_snapshot(
+                store, input_id, algorithm,
+                reference_sha256=manifest["reference_sha256"], platform=platform,
+                pon_sha256=pon_selection.pon_sha256, upstream=upstream,
+                legacy_identity=legacy_identity,
             )
+            # A globally selected result from another panel must not satisfy
+            # a downstream dependency in this requested generation.
+            chosen_snapshots.pop(algorithm.id, None)
+        if snapshot is None or snapshot[1].status != "ok":
+            continue
+        attempt, latest = snapshot
+        try:
+            stored = _recorded_selection(store, input_id, algorithm, attempt, latest, manifest,
+                                         upstream, assets, platform)
+            if stored is not None:
+                identity, chosen, plan = stored
+                tool_identities = plan["tools"]
+                effective_parameters = plan["parameters"]
+            else:
+                # A present but invalid producer plan must not be reinterpreted
+                # as a legacy result using today's algorithm definition.
+                try:
+                    (attempt / "execution_plan.json").lstat()
+                except FileNotFoundError:
+                    pass
+                else:
+                    continue
+                if (callable(identity_tools) or callable(identity_assets)
+                        or callable(getattr(algorithm, "identity_parameters", None))):
+                    # Dynamic identities need a producer-recorded plan. A
+                    # reader's GPU, packages or PATH cannot reconstruct one.
+                    continue
+                tool_identities = [tool.identity() for tool in algorithm.tools]
+                identity = execution_identity(
+                    algorithm, reference_sha256=manifest["reference_sha256"], upstream=upstream,
+                    asset_sha256s=assets or (),
+                    platform=platform if platform != "ont" else None,
+                    tool_pins=tool_identities,
+                )
+                if identity != latest.provenance.parameters_sha256:
+                    continue
+                chosen = latest
+                effective_parameters = algorithm.parameters
         except (OSError, ValueError, KeyError, LabProblem):
             # An unresolved asset cannot make an old result current-compatible.
             continue
-        chosen = store.read_result(input_id, algorithm.id, identity)
         if chosen is None or chosen.status != "ok":
+            continue
+        if algorithm.upstream and not _consumed_attempts_current(
+            store, attempt, upstream, chosen_snapshots, input_id,
+        ):
             continue
         if chosen.algorithm_version != algorithm.version or chosen.provenance.source_id != manifest["source_id"]:
             continue
         identities[algorithm.id] = identity
+        chosen_snapshots[algorithm.id] = (attempt, chosen)
         metrics = {
             metric.metric_id: metric.value
             for metric in chosen.metrics
             if metric.value is None or (isinstance(metric.value, (int, float)) and not isinstance(metric.value, bool))
         }
+        if algorithm.id == "microbial":
+            primary = metrics.get("primary_reads")
+            candidates = metrics.get("candidate_unmapped_reads")
+            too_short = metrics.get("too_short_unmapped_reads")
+            missing_sequence = metrics.get("missing_sequence_unmapped_reads")
+            if (any(isinstance(value, bool) or not isinstance(value, (int, float))
+                    or not math.isfinite(value) or value < 0
+                    for value in (primary, candidates, too_short, missing_sequence))
+                    or primary == 0 or (candidates == 0 and too_short + missing_sequence > 0)
+                    or metrics.get("microbial_rpm_primary") is None):
+                # Missing counters in older snapshots cannot distinguish an
+                # assayed zero from unassayable unmapped molecules.
+                continue
+        compat_tools = list(tool_identities)
+        if algorithm.id == "arm-summary":
+            # Unlike member-specific PoNs, the arm-definition bytes are shared
+            # by controls and must participate in cohort compatibility.
+            compat_tools.extend({"name": "arm-centromere-sha256", "version": digest} for digest in (assets or ()))
         compat = cohort_compat_key(
             algorithm_id=algorithm.id, algorithm_version=algorithm.version,
-            parameters=algorithm.parameters, tools=[tool.identity() for tool in algorithm.tools],
+            parameters=effective_parameters, tools=compat_tools,
             reference_sha256=manifest["reference_sha256"], aligner_identity=aligner,
-            pon_policy=str(algorithm.parameters.get("pon_policy", "none")),
-            per_sample_asset_keys=("pon_asset_sha256",),
+            pon_policy=("lab_loo_v1" if pon_selection is not None
+                        and algorithm.id in ("copy-number", "instability", "arm-summary")
+                        else str(effective_parameters.get("pon_policy", "none"))),
+            per_sample_asset_keys=("pon_sha256",) if effective_parameters.get("pon_policy") == "lab_loo_v1" else (),
             platform=platform if platform != "ont" else None,
         )
+        if algorithm.id == "fetal-fraction":
+            # An input-scoped prenatal control is part of the measurement;
+            # never pool z-scores produced against different control RDS bytes.
+            compat = chosen.provenance.parameters_sha256
+        if algorithm.id == "microbial":
+            # Preserve the aligner match in the generic key and also pin the
+            # exact DB/tool/upstream execution identity for this method.
+            compat = canonical_sha256({"cohort": compat,
+                                       "execution": chosen.provenance.parameters_sha256})
         found.append(CohortResult(
             algorithm_id=algorithm.id, parameters_sha256=chosen.provenance.parameters_sha256,
             cohort_compat_key=compat, metrics=metrics,
+            metric_n={metric.metric_id: metric.n for metric in chosen.metrics
+                      if metric.metric_id in metrics and metric.n is not None},
         ))
     return tuple(found)
 
 
-def member_from_store(store: LabStore, source_id: str) -> CohortMember:
+def _selected_results(
+    store: LabStore, input_id: str, manifest: dict[str, Any], *, pon_selection: Any | None = None,
+) -> tuple[CohortResult, ...]:
+    """Read generic and PoN-scoped selectors under one stable store epoch."""
+
+    for _ in range(3):
+        try:
+            with store.selection_read_context():
+                return _selected_results_once(
+                    store, input_id, manifest, pon_selection=pon_selection,
+                )
+        except SelectionSnapshotChanged:
+            continue
+    raise ResultOrderUnavailable("cohort result selections kept changing during read")
+
+
+def member_from_store(store: LabStore, source_id: str, *, pon_selection: Any | None = None) -> CohortMember:
     """Pin current full-input result attempts for one admitted source."""
 
     record = _checked_source_record(store, source_id)
@@ -381,7 +793,69 @@ def member_from_store(store: LabStore, source_id: str) -> CohortMember:
     input_id, manifest = selected
     label, _ = _aligner(manifest, input_id)
     return CohortMember(source_id=source_id, input_id=input_id, aligner_identity=label,
-                        results=_selected_results(store, input_id, manifest))
+                        results=_selected_results(store, input_id, manifest, pon_selection=pon_selection),
+                        pon_asset_sha256=(pon_selection.pon_sha256 if pon_selection is not None
+                                          and pon_selection.target_excluded else None))
+
+
+def member_for_generation(store: LabStore, generation: CohortGeneration, source_id: str) -> CohortMember:
+    """Read a target under one pinned generation's PoN protocol."""
+
+    if generation.pon_asset_sha256 is None:
+        return member_from_store(store, source_id)
+    from .pon_consumer import selection_for_generation
+
+    selected = _full_input(store, _checked_source_record(store, source_id))
+    if selected is None:
+        raise ValueError("admitted source has no full aligned input")
+    input_id, manifest = selected
+    label, _ = _aligner(manifest, input_id)
+    selection = selection_for_generation(
+        store, generation, source_id=source_id,
+        reference_sha256=manifest["reference_sha256"], aligner_identity=label,
+    )
+    return member_from_store(store, source_id, pon_selection=selection)
+
+
+def pon_dependent_algorithms() -> set[str]:
+    """The registry's transitive copy-number dependency closure."""
+
+    dependent = {"copy-number"}
+    algorithms = load_registry()
+    while True:
+        expanded = dependent | {
+            algorithm.id for algorithm in algorithms
+            if any(upstream in dependent for upstream in algorithm.upstream)
+        }
+        if expanded == dependent:
+            return dependent
+        dependent = expanded
+
+
+def member_for_generation_or_independent(
+    store: LabStore, generation: CohortGeneration, source_id: str,
+) -> tuple[CohortMember, LabProblem | None]:
+    """Keep independent metrics when only the selected PoN method is unavailable."""
+
+    try:
+        return member_for_generation(store, generation, source_id), None
+    except LabProblem as problem:
+        protocol_drift = (
+            problem.data.get("field") == "panel of normals"
+            and problem.data.get("reason") == "protocol_mismatch"
+        )
+        if (generation.pon_asset_sha256 is None or problem.code != "TBX-LAB-020"
+                or (problem.data.get("field") not in ("toolchain", "method assets")
+                    and not protocol_drift)):
+            raise
+        # PoN binding remains unavailable. Retain only results whose methods
+        # do not consume copy-number; their own cohort keys still gate comparison.
+        dependent = pon_dependent_algorithms()
+        target = member_from_store(store, source_id)
+        return target.model_copy(update={
+            "results": tuple(result for result in target.results
+                             if result.algorithm_id not in dependent),
+        }), problem
 
 
 def pon_inputs_for_members(store: LabStore, members: tuple[CohortMember, ...]) -> tuple[PonInput, ...]:
@@ -412,13 +886,96 @@ def pon_inputs_for_members(store: LabStore, members: tuple[CohortMember, ...]) -
     return tuple(eligible)
 
 
+def _member_selection_paths(
+    store: LabStore, input_ids: tuple[str, ...], algorithm_ids: tuple[str, ...],
+) -> set[Path]:
+    """Find mutable selectors that a member recomputation can change."""
+
+    paths: set[Path] = set()
+    for input_id in input_ids:
+        for algorithm_id in algorithm_ids:
+            directory = store.results_dir / input_id / algorithm_id
+            if directory.is_symlink():
+                raise MemberSelectionStorageError(input_id, algorithm_id)
+            try:
+                with os.scandir(directory) as entries:
+                    for entry in entries:
+                        if not entry.is_dir(follow_symlinks=False):
+                            continue
+                        selector = Path(entry.path) / "selected.json"
+                        try:
+                            mode = selector.lstat().st_mode
+                        except FileNotFoundError:
+                            continue
+                        if not SHA256_PATTERN.fullmatch(entry.name) or not stat.S_ISREG(mode):
+                            raise MemberSelectionStorageError(input_id, algorithm_id)
+                        paths.add(selector)
+            except FileNotFoundError:
+                continue
+    return paths
+
+
+def _snapshot_member_selections(
+    store: LabStore, input_ids: tuple[str, ...], algorithm_ids: tuple[str, ...],
+) -> dict[Path, bytes]:
+    before: dict[Path, bytes] = {}
+    for selector in _member_selection_paths(store, input_ids, algorithm_ids):
+        parts = selector.relative_to(store.results_dir).parts
+        with os.fdopen(open_regular_no_follow(selector), "rb") as stream:
+            content = stream.read(16 * 1024 + 1)
+        if len(content) > 16 * 1024:
+            raise MemberSelectionStorageError(parts[0], parts[1])
+        before[selector] = content
+    return before
+
+
+def _restore_member_selections(
+    store: LabStore, input_ids: tuple[str, ...], algorithm_ids: tuple[str, ...], before: dict[Path, bytes],
+) -> None:
+    """Keep immutable attempts, but undo selectors from an unpublished build."""
+
+    changed_dirs: set[Path] = set()
+    for selector in _member_selection_paths(store, input_ids, algorithm_ids) - before.keys():
+        with directory_no_follow(selector.parent) as directory:
+            os.unlink(selector.name, dir_fd=directory)
+            os.fsync(directory)
+        changed_dirs.add(selector.parent)
+    for selector, content in before.items():
+        # Recovery cannot follow a replaced results/input/algorithm/identity
+        # ancestor into another tree. Keep the fd for the replace and sync.
+        with directory_no_follow(selector.parent) as directory:
+            temporary = f".selected.json.{os.getpid()}.{os.urandom(4).hex()}.tmp"
+            try:
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+                with os.fdopen(os.open(temporary, flags, 0o600, dir_fd=directory), "wb") as stream:
+                    stream.write(content)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, selector.name,
+                           src_dir_fd=directory, dst_dir_fd=directory)
+                os.fsync(directory)
+            finally:
+                try:
+                    os.unlink(temporary, dir_fd=directory)
+                except FileNotFoundError:
+                    pass
+        changed_dirs.add(selector.parent)
+    if changed_dirs:
+        store.bump_generation()
+
+
 def read_current(store: LabStore, cohort_id: str) -> CohortGeneration | None:
     """Pin one complete immutable generation with a single pointer read."""
 
     directory = _cohort_dir(store, cohort_id)
     pointer = _read_cohort_json(directory / "current.json", cohort_id)
     if pointer is None:
-        if _generation_versions(directory, cohort_id):
+        versions = _generation_versions(directory, cohort_id)
+        pending = store._pending_reader_overlay()
+        if (pending is not None and pending.cohort_id == cohort_id
+                and pending.old_version is None):
+            return None
+        if versions and not set(versions).issubset(_aborted_generation_versions(directory, cohort_id)):
             raise _storage_problem(
                 cohort_id, "current.json",
                 fix="If the member roster is intact, run lab cohort build with the same --root to publish a new generation; otherwise restore current.json from a known-good backup",
@@ -481,13 +1038,35 @@ def list_cohorts(store: LabStore) -> tuple[CohortListing, ...]:
     return tuple(rows)
 
 
+@contextmanager
+def _cohort_run_log(store: LabStore, run_id: str, cohort_id: str, kind: str) -> Iterator[Any]:
+    """Give a cohort build one complete run lifecycle, including failures."""
+
+    log = store.run_log(run_id)
+    log.append("run_start", command="cohort build", cohort_id=cohort_id, kind=kind)
+    try:
+        yield log
+    except KeyboardInterrupt:
+        log.append("run_end", status="interrupted", exit_code=6)
+        raise
+    except LabProblem as problem:
+        log.append("run_end", status="blocked", exit_code=problem.exit_code, code=problem.code)
+        raise
+    except Exception as exc:
+        log.append("run_end", status="internal_error", exit_code=7, error=type(exc).__name__)
+        raise
+    else:
+        log.append("run_end", status="ok", exit_code=0)
+
+
 def build_cohort(store: LabStore, cohort_id: str, *, kind: str = "internal_cohort") -> CohortGeneration:
     """Publish a full snapshot atomically, preserving every older generation."""
 
-    with store.writer("cohort build", new_run_id()):
+    run_id = new_run_id()
+    with store.writer("cohort build", run_id) as lock, _cohort_run_log(store, run_id, cohort_id, kind) as log:
         directory = _cohort_dir(store, cohort_id)
-        if _read_cohort_json(directory / "current.json", cohort_id) is not None:
-            read_current(store, cohort_id)
+        old_generation = (read_current(store, cohort_id)
+                          if _read_cohort_json(directory / "current.json", cohort_id) is not None else None)
         generations = directory / "generations"
         versions = _generation_versions(directory, cohort_id)
         if (versions or (directory / "current.json").exists()) and not (directory / "members.json").is_file():
@@ -495,13 +1074,96 @@ def build_cohort(store: LabStore, cohort_id: str, *, kind: str = "internal_cohor
         members = tuple(member_from_store(store, source_id) for source_id in read_roster(store, cohort_id))
         version = max(versions, default=0) + 1
         snapshot = CohortGeneration(cohort_id=cohort_id, version=version, kind=kind, members=members)
+        selected_input_ids: tuple[str, ...] = ()
+        selected_algorithm_ids: tuple[str, ...] = ()
+        selections_before: dict[Path, bytes] | None = None
+        journal_started = False
+        if kind == "internal_cohort":
+            inputs = pon_inputs_for_members(store, members)
+            if len(inputs) >= 10:
+                from .pon import build_panels
+                from .pon_consumer import member_recompute_plan, recompute_member
+                from .registry import registry_entries
+                from .runner import DEFAULT_TIMEOUT_S
+
+                built = build_panels(store, inputs)
+                annotated = tuple(member.model_copy(update={
+                    "pon_asset_sha256": built.loo_asset_sha256s.get(member.source_id),
+                }) for member in members)
+                pending = CohortGeneration(
+                    cohort_id=cohort_id, version=version, kind=kind, members=annotated,
+                    pon_n=built.pon_n, pon_asset_sha256=built.full_asset_sha256,
+                    pon_build=built.provenance(),
+                )
+                selected_input_ids = tuple(
+                    member.input_id for member in members if member.source_id in built.source_ids
+                )
+                selected_algorithm_ids = tuple(
+                    item.algorithm.id for item in member_recompute_plan(registry_entries())
+                )
+                try:
+                    selections_before = _snapshot_member_selections(
+                        store, selected_input_ids, selected_algorithm_ids,
+                    )
+                except MemberSelectionStorageError as exc:
+                    raise _member_selection_problem(cohort_id, exc.input_id, exc.algorithm_id) from exc
+                store.begin_cohort_selection_transaction(
+                    cohort_id=cohort_id,
+                    old_version=old_generation.version if old_generation is not None else None,
+                    new_version=version, run_id=run_id,
+                    input_ids=selected_input_ids, algorithm_ids=selected_algorithm_ids,
+                    before=selections_before,
+                )
+                journal_started = True
+                try:
+                    updated = {
+                        source_id: recompute_member(
+                            store, pending, source_id, lock=lock, log=log, run_id=run_id,
+                            timeout_s=DEFAULT_TIMEOUT_S,
+                        )
+                        for source_id in built.source_ids
+                    }
+                    snapshot = CohortGeneration(
+                        cohort_id=cohort_id, version=version, kind=kind,
+                        members=tuple(updated.get(member.source_id, member) for member in annotated),
+                        pon_n=built.pon_n, pon_asset_sha256=built.full_asset_sha256,
+                        pon_build=built.provenance(),
+                    )
+                except BaseException:
+                    store.recover_pending_cohort_selection()
+                    raise
 
         def write(staging: Path) -> None:
             (staging / "generation.json").write_bytes(canonical_json_bytes(snapshot.model_dump(mode="json", by_alias=True)))
 
-        store.publish_directory(generations, str(version), write)
-        write_atomic(directory / "current.json", canonical_json_bytes({"version": version}))
+        try:
+            # PoN recomputation returns fresh members. Capture the exact final
+            # selected histograms only after those replacements are known.
+            snapshot = snapshot.model_copy(update={
+                "members": capture_density_vectors(store, snapshot.members),
+            })
+            store.publish_directory(generations, str(version), write)
+        except BaseException:
+            if journal_started:
+                store.recover_pending_cohort_selection()
+            raise
+        try:
+            write_atomic(directory / "current.json", canonical_json_bytes({"version": version}))
+            _fsync_dir(directory)
+        except BaseException:
+            # A visible new pointer with a failed directory sync is an
+            # uncertain commit. Retain the journal until a later writer can
+            # confirm that pointer durably or restore the old selection.
+            if journal_started and store._cohort_pointer_version(cohort_id) == (
+                old_generation.version if old_generation is not None else None
+            ):
+                store.recover_pending_cohort_selection()
+            raise
+        # Readers pin a generation epoch around their selector scan.
+        # Notify immediately after the durable commit boundary.
         store.bump_generation()
+        if journal_started:
+            store.recover_pending_cohort_selection()
         return snapshot
 
 
@@ -532,7 +1194,7 @@ def project_sample_metric(
     generation = read_current(store, cohort_id)
     if generation is None:
         return None
-    target = member_from_store(store, target_source_id)
+    target, _ = member_for_generation_or_independent(store, generation, target_source_id)
     result = next((item for item in target.results if item.algorithm_id == algorithm_id), None)
     if result is None:
         return None
@@ -543,6 +1205,6 @@ def project_sample_metric(
 
 
 __all__ = [
-    "CohortListing", "add_sample", "build_cohort", "list_cohorts", "member_from_store", "pon_inputs_for_members",
-    "project_current_metric", "project_sample_metric", "read_current", "read_roster",
+    "CohortListing", "add_sample", "build_cohort", "list_cohorts", "member_for_generation", "member_for_generation_or_independent", "member_from_store", "pon_dependent_algorithms", "pon_inputs_for_members",
+    "project_current_metric", "project_sample_metric", "read_current", "read_roster", "remove_sample",
 ]

@@ -1,10 +1,18 @@
 # Traceback runner contracts
 
-Status: first-wave synthetic contract, unapproved for real data.
+Status: v1 development contract; synthetic path and unqualified local-BAM
+path. No production or clinical qualification.
 
-These contracts support local development and orchestration tests only. They do
-not qualify a protocol, MinION hardware, Dorado, hg38 assets, scientific
-thresholds, or processing of real genomic data.
+Current scope: this page describes `traceback_runner` v1 contracts and the
+development report-bundle boundary. `traceback lab` has a separate unsigned
+algorithm/result envelope and store; its method contracts and operator commands
+are documented in `docs/LAB-GUIDE.md`. A Lab result is not a v1 signed runner
+bundle, and neither surface establishes release qualification.
+
+These contracts support local development and the bounded local-BAM path in
+`docs/OPERATOR-GUIDE.md`. They do not qualify a protocol, MinION hardware,
+Dorado, hg38 assets, scientific thresholds, or use of real genomic data for a
+release claim.
 
 ## Boundary rules
 

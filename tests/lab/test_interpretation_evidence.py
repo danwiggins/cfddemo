@@ -118,6 +118,42 @@ def test_breakpoint_motifs_entry_uses_valid_end_denominator_without_a_range() ->
     assert "10 bp inclusive" in note
 
 
+def test_donor_and_clock_supporting_metrics_disclose_lab_origin() -> None:
+    library = load_library()
+    expected = {
+        ("dd-cfdna-chry", "chry_nonpar_reads"):
+            "ONT; this Lab's D21 non-PAR chrY supporting count",
+        ("dd-cfdna-chry", "chry_reads_per_million"):
+            "ONT; this Lab's D21 non-PAR chrY supporting rate",
+        ("epi-clock", "cg02228185_modified_fraction"):
+            "ONT cfDNA; this Lab's per-site 5mC+5hmC call fraction",
+        ("epi-clock", "cg25809905_modified_fraction"):
+            "ONT cfDNA; this Lab's per-site 5mC+5hmC call fraction",
+        ("epi-clock", "pde4c_upstream_of_cg17861230_modified_fraction"):
+            "ONT cfDNA; this Lab's per-site 5mC+5hmC call fraction",
+    }
+    for (algorithm_id, metric_id), platform in expected.items():
+        entry = library.entry(algorithm_id, metric_id)
+        assert entry is not None
+        assert entry.tier == entry["origin_tier"] == "SPECULATIVE"
+        assert entry["origin_platform"] == platform
+        assert entry["reference"] == {"kind": "none"}
+        assert entry["citations"] == []
+        assert not entry.citation_verified
+
+
+def test_lionheart_citation_check_does_not_transfer_illumina_performance() -> None:
+    entry = load_library().entry("lionheart", "cell_types_scored")
+    assert entry is not None and entry.citation_verified
+    assert entry.tier == "SPECULATIVE"
+    assert entry["origin_tier"] == "NEWER"
+    assert "paired-end short-read" in entry["origin_platform"]
+    assert entry["performance"] is None
+    assert "No validated ONT performance" in entry["performance_missing_reason"]
+    assert entry["citations"] == ["doi:10.1038/s41467-025-66503-3"]
+    assert "no fixed paper count" in entry["citation_checked"]["note"]
+
+
 def test_one_sided_c1_envelope_explains_missing_group() -> None:
     """A null delta with a counted molecule must not say no molecules existed."""
 

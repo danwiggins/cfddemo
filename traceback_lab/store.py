@@ -25,6 +25,9 @@ old state or the new state, never a mix.
 from __future__ import annotations
 
 import fcntl
+import base64
+import binascii
+import errno
 import json
 import os
 import re
@@ -35,6 +38,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -45,7 +49,7 @@ from traceback_runner.serialization import canonical_json_bytes
 
 from . import STORE_VERSION
 from .envelope import ResultEnvelope
-from .file_access import open_regular_no_follow
+from .file_access import directory_no_follow, open_regular_no_follow, write_atomic_no_follow
 from .identity import ALGORITHM_ID_PATTERN, SHA256_PATTERN
 from .problems import LabProblem
 
@@ -56,6 +60,11 @@ STAGING_PREFIX = ".staging-"
 ARTIFACT_INDEX_SCHEMA = "traceback.lab.artifact-index.v1"
 UPSTREAM_SELECTIONS_SCHEMA = "traceback.lab.upstream-selections.v1"
 MAX_UPSTREAM_SELECTIONS_BYTES = 16 * 1024
+MAX_RESULT_SELECTION_BYTES = 4 * 1024
+MAX_COHORT_SELECTION_JOURNAL_BYTES = 64 * 1024 * 1024
+COHORT_SELECTION_JOURNAL_SCHEMA = "traceback.lab.cohort-selection-journal.v1"
+
+MAX_EXECUTION_PLAN_BYTES = 64 * 1024
 _RUN_ID = r"^r-\d{8}-\d{4}-[0-9a-f]{4,8}$"
 _ATTEMPT_ID = r"^a-\d{8}T\d{12}-[0-9a-f]{8}$"
 
@@ -86,6 +95,26 @@ def _validated_upstream_selections(value: Any) -> tuple[dict[str, str], ...] | N
 
 class ResultOrderUnavailable(OSError):
     """Attempt publication order cannot be read safely."""
+
+
+class SelectionSnapshotChanged(ResultOrderUnavailable):
+    """A selector publication crossed one logical read; retry the whole read."""
+
+
+@dataclass(frozen=True)
+class CohortSelectionJournal:
+    cohort_id: str
+    old_version: int | None
+    new_version: int
+    input_ids: frozenset[str]
+    algorithm_ids: frozenset[str]
+    before: Mapping[tuple[str, str, str], bytes]
+
+
+@dataclass
+class SelectionReadSnapshot:
+    cohort_epoch: int
+    overlay: CohortSelectionJournal | None
 
 
 class ResultPublishUncertain(LabProblem):
@@ -231,6 +260,12 @@ class LabStore:
     def __init__(self, root: Path) -> None:
         self.root = Path(os.path.abspath(root))
         self.lab = self.root / "lab"
+        self._writer_selection_view: ContextVar[bool] = ContextVar(
+            f"writer-selection-view-{id(self)}", default=False,
+        )
+        self._selection_read_snapshot: ContextVar[SelectionReadSnapshot | None] = ContextVar(
+            f"selection-read-snapshot-{id(self)}", default=None,
+        )
 
     # -- layout -----------------------------------------------------------
     @property
@@ -252,6 +287,14 @@ class LabStore:
     @property
     def last_run_file(self) -> Path:
         return self.lab / "last_run.json"
+
+    @property
+    def cohort_selection_journal_file(self) -> Path:
+        return self.lab / "pending-cohort-selections.json"
+
+    @property
+    def cohort_selection_epoch_file(self) -> Path:
+        return self.lab / "cohort-selection-epoch"
 
     def last_run_id(self) -> str | None:
         try:
@@ -338,6 +381,362 @@ class LabStore:
         write_atomic(self.generation_file, f"{value}\n".encode("ascii"))
         return value
 
+    def cohort_selection_epoch(self) -> int:
+        """Read the durable cohort transaction epoch, independent of UI updates."""
+
+        try:
+            descriptor = open_regular_no_follow(self.cohort_selection_epoch_file)
+        except FileNotFoundError:
+            return 0
+        except OSError as exc:
+            raise ResultOrderUnavailable("cohort selection epoch is unsafe") from exc
+        try:
+            with os.fdopen(descriptor, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 32:
+                    raise ValueError("cohort selection epoch is invalid")
+                raw = stream.read(33)
+            if not re.fullmatch(rb"(?:0|[1-9][0-9]{0,18})\n", raw):
+                raise ValueError("cohort selection epoch is invalid")
+            value = int(raw)
+            if value > 2**63 - 1:
+                raise ValueError("cohort selection epoch is too large")
+            return value
+        except (OSError, ValueError) as exc:
+            raise ResultOrderUnavailable("cohort selection epoch is malformed") from exc
+
+    def bump_cohort_selection_epoch(self) -> int:
+        """Publish a cohort transaction boundary under the existing writer lock."""
+
+        value = self.cohort_selection_epoch() + 1
+        if value > 2**63 - 1:
+            raise ResultOrderUnavailable("cohort selection epoch is exhausted")
+        write_atomic_no_follow(self.cohort_selection_epoch_file, f"{value}\n".encode("ascii"))
+        return value
+
+    def _read_cohort_selection_journal(self) -> CohortSelectionJournal | None:
+        """Read one bounded, path-free preimage journal; malformed state is unsafe."""
+
+        try:
+            descriptor = open_regular_no_follow(self.cohort_selection_journal_file)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise ResultOrderUnavailable("cohort selection journal is unsafe") from exc
+        try:
+            with os.fdopen(descriptor, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                        or info.st_size > MAX_COHORT_SELECTION_JOURNAL_BYTES):
+                    raise ValueError("journal is not a bounded regular file")
+                raw = stream.read(MAX_COHORT_SELECTION_JOURNAL_BYTES + 1)
+            data = json.loads(raw)
+            if (not isinstance(data, dict) or set(data) != {
+                    "schema", "cohort_id", "old_version", "new_version", "run_id",
+                    "input_ids", "algorithm_ids", "before",
+            } or data["schema"] != COHORT_SELECTION_JOURNAL_SCHEMA
+                    or not isinstance(data["cohort_id"], str)
+                    or not re.fullmatch(r"[a-z][a-z0-9-]{0,39}", data["cohort_id"])
+                    or not isinstance(data["run_id"], str)
+                    or not re.fullmatch(_RUN_ID, data["run_id"])
+                    or type(data["new_version"]) is not int or data["new_version"] < 1
+                    or (data["old_version"] is not None and (
+                        type(data["old_version"]) is not int
+                        or data["old_version"] < 1
+                        or data["old_version"] >= data["new_version"]
+                    ))):
+                raise ValueError("journal header is invalid")
+            inputs, algorithms, rows = data["input_ids"], data["algorithm_ids"], data["before"]
+            if (not isinstance(inputs, list) or not inputs or inputs != sorted(set(inputs))
+                    or any(not isinstance(value, str) or not SHA256_PATTERN.fullmatch(value) for value in inputs)
+                    or not isinstance(algorithms, list) or not algorithms or algorithms != sorted(set(algorithms))
+                    or any(not isinstance(value, str) or not ALGORITHM_ID_PATTERN.fullmatch(value)
+                           for value in algorithms)
+                    or not isinstance(rows, list)):
+                raise ValueError("journal scope is invalid")
+            before: dict[tuple[str, str, str], bytes] = {}
+            for row in rows:
+                if not isinstance(row, dict) or set(row) != {"input_id", "algorithm_id", "parameters_sha256", "content"}:
+                    raise ValueError("journal selector row is invalid")
+                input_id, algorithm_id, identity = row["input_id"], row["algorithm_id"], row["parameters_sha256"]
+                if (not isinstance(input_id, str) or input_id not in inputs
+                        or not isinstance(algorithm_id, str) or algorithm_id not in algorithms
+                        or not isinstance(identity, str) or not SHA256_PATTERN.fullmatch(identity)
+                        or not isinstance(row["content"], str)):
+                    raise ValueError("journal selector identity is invalid")
+                key = (input_id, algorithm_id, identity)
+                if key in before:
+                    raise ValueError("journal selector is duplicated")
+                content = base64.b64decode(row["content"], validate=True)
+                if len(content) > MAX_RESULT_SELECTION_BYTES:
+                    raise ValueError("journal selector is too large")
+                selection = json.loads(content)
+                if (not isinstance(selection, dict) or not isinstance(selection.get("attempt_id"), str)
+                        or not re.fullmatch(_ATTEMPT_ID, selection["attempt_id"])):
+                    raise ValueError("journal selector content is invalid")
+                self._publication_order(selection)
+                before[key] = content
+            return CohortSelectionJournal(
+                data["cohort_id"], data["old_version"], data["new_version"],
+                frozenset(inputs), frozenset(algorithms), before,
+            )
+        except (ValueError, TypeError, KeyError, RecursionError, OSError, binascii.Error) as exc:
+            raise ResultOrderUnavailable("cohort selection journal is malformed") from exc
+
+    def _cohort_pointer_version(self, cohort_id: str) -> int | None:
+        pointer = self.lab / "cohorts" / cohort_id / "current.json"
+        try:
+            descriptor = open_regular_no_follow(pointer)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise ResultOrderUnavailable("cohort current pointer is unsafe") from exc
+        try:
+            with os.fdopen(descriptor, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 4096:
+                    raise ValueError("cohort pointer is invalid")
+                data = json.loads(stream.read(4097))
+            if (not isinstance(data, dict) or set(data) != {"version"}
+                    or type(data["version"]) is not int or data["version"] < 1):
+                raise ValueError("cohort pointer is invalid")
+            return data["version"]
+        except (OSError, ValueError, TypeError) as exc:
+            raise ResultOrderUnavailable("cohort current pointer is invalid") from exc
+
+    def _pending_reader_overlay(self) -> CohortSelectionJournal | None:
+        journal = self._read_cohort_selection_journal()
+        if journal is None:
+            return None
+        current = self._cohort_pointer_version(journal.cohort_id)
+        if current == journal.old_version:
+            return journal
+        if current == journal.new_version:
+            return None
+        raise ResultOrderUnavailable("cohort selection journal disagrees with current generation")
+
+    @contextmanager
+    def selection_read_context(self) -> Iterator[None]:
+        """Pin one selector view; callers retry a logical read on epoch change."""
+
+        if self._writer_selection_view.get() or self._selection_read_snapshot.get() is not None:
+            yield
+            return
+        # This counter advances only at cohort transaction boundaries. Ordinary
+        # result publications remain visible without invalidating other reads.
+        cohort_epoch = self.cohort_selection_epoch()
+        overlay = self._pending_reader_overlay()
+        if self.cohort_selection_epoch() != cohort_epoch:
+            raise SelectionSnapshotChanged("cohort selections changed before read")
+        token = self._selection_read_snapshot.set(SelectionReadSnapshot(cohort_epoch, overlay))
+        try:
+            yield
+            # The pointer may become visible just before the writer bumps the
+            # epoch. An old preimage view cannot cross that commit boundary.
+            if (overlay is not None
+                    and self._cohort_pointer_version(overlay.cohort_id) != overlay.old_version):
+                raise SelectionSnapshotChanged("cohort current generation changed during read")
+            if self.cohort_selection_epoch() != cohort_epoch:
+                raise SelectionSnapshotChanged("cohort selections changed during read")
+        finally:
+            self._selection_read_snapshot.reset(token)
+
+    def _selector_override(
+        self, input_id: str, algorithm_id: str, identity: str,
+    ) -> tuple[bool, bytes | None]:
+        if self._writer_selection_view.get():
+            return False, None
+        snapshot = self._selection_read_snapshot.get()
+        journal = snapshot.overlay if snapshot is not None else self._pending_reader_overlay()
+        if journal is None or input_id not in journal.input_ids or algorithm_id not in journal.algorithm_ids:
+            return False, None
+        return True, journal.before.get((input_id, algorithm_id, identity))
+
+    def _selector_bytes(self, input_id: str, algorithm_id: str, identity: str) -> bytes | None:
+        epoch = self.cohort_selection_epoch() if self._selection_read_snapshot.get() is None else None
+        overridden, content = self._selector_override(input_id, algorithm_id, identity)
+        if overridden:
+            if epoch is not None and self.cohort_selection_epoch() != epoch:
+                raise SelectionSnapshotChanged("cohort selections changed during selector read")
+            return content
+        selector = self.result_dir(input_id, algorithm_id, identity) / "selected.json"
+        content = None
+        try:
+            with os.fdopen(open_regular_no_follow(selector), "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size <= MAX_RESULT_SELECTION_BYTES:
+                    content = stream.read(MAX_RESULT_SELECTION_BYTES + 1)
+        except OSError:
+            pass
+        if epoch is not None and self.cohort_selection_epoch() != epoch:
+            raise SelectionSnapshotChanged("cohort selections changed during selector read")
+        return content
+
+    def selection_visible(self, input_id: str, algorithm_id: str, identity: str) -> bool:
+        """Whether a selector exists in the pinned reader view, even if invalid."""
+
+        overridden, content = self._selector_override(input_id, algorithm_id, identity)
+        if overridden:
+            return content is not None
+        # Scanners pass literal directory entry names, including malformed
+        # names that must remain reportable as unreadable storage.
+        if any(name in ("", ".", "..") or Path(name).name != name
+               for name in (input_id, algorithm_id, identity)):
+            return False
+        selector = self.results_dir / input_id / algorithm_id / identity / "selected.json"
+        try:
+            os.lstat(selector)
+            return True
+        except FileNotFoundError:
+            return False
+
+    def begin_cohort_selection_transaction(
+        self, *, cohort_id: str, old_version: int | None, new_version: int,
+        run_id: str, input_ids: tuple[str, ...], algorithm_ids: tuple[str, ...],
+        before: Mapping[Path, bytes],
+    ) -> None:
+        """Durably pin all selector preimages before member recomputation."""
+
+        if not self._writer_selection_view.get():
+            raise RuntimeError("cohort selector transaction needs the writer lock")
+        if (not re.fullmatch(r"[a-z][a-z0-9-]{0,39}", cohort_id)
+                or not re.fullmatch(_RUN_ID, run_id)
+                or type(new_version) is not int or new_version < 1
+                or (old_version is not None and (
+                    type(old_version) is not int or old_version < 1 or old_version >= new_version
+                ))
+                or not input_ids or not algorithm_ids
+                or any(not SHA256_PATTERN.fullmatch(value) for value in input_ids)
+                or any(not ALGORITHM_ID_PATTERN.fullmatch(value) for value in algorithm_ids)):
+            raise ValueError("cohort selector transaction has invalid scope")
+        if self._cohort_pointer_version(cohort_id) != old_version:
+            raise ResultOrderUnavailable("cohort current pointer changed before selector transaction")
+        journal_path = self.cohort_selection_journal_file
+        if journal_path.exists() or journal_path.is_symlink():
+            raise ResultOrderUnavailable("another cohort selection journal is pending")
+        inputs, algorithms = sorted(set(input_ids)), sorted(set(algorithm_ids))
+        rows = []
+        for selector, content in sorted(before.items()):
+            try:
+                parts = selector.relative_to(self.results_dir).parts
+            except ValueError as exc:
+                raise ValueError("selector preimage is outside Lab results") from exc
+            if (len(parts) != 4 or parts[3] != "selected.json"
+                    or parts[0] not in inputs or parts[1] not in algorithms
+                    or not SHA256_PATTERN.fullmatch(parts[2])):
+                raise ValueError("selector preimage is outside the recompute scope")
+            if len(content) > MAX_RESULT_SELECTION_BYTES:
+                raise LabProblem(
+                    "TBX-LAB-022",
+                    cause=(f"stored cohort {cohort_id} has an invalid {parts[1]} result selection "
+                           f"for input {parts[0][:12]}"),
+                    fix="Restore the selected result file from a known-good backup, then retry cohort build",
+                    data={"cohort_id": cohort_id, "input_id": parts[0],
+                          "algorithm_id": parts[1], "field": "member result selection"},
+                )
+            try:
+                selection = json.loads(content)
+                if (not isinstance(selection, dict) or not isinstance(selection.get("attempt_id"), str)
+                        or not re.fullmatch(_ATTEMPT_ID, selection["attempt_id"])):
+                    raise ValueError("selector preimage has no valid attempt")
+                self._publication_order(selection)
+            except (ValueError, TypeError, RecursionError) as exc:
+                raise LabProblem(
+                    "TBX-LAB-022",
+                    cause=(f"stored cohort {cohort_id} has an invalid {parts[1]} result selection "
+                           f"for input {parts[0][:12]}"),
+                    fix="Restore the selected result file from a known-good backup, then retry cohort build",
+                    data={"cohort_id": cohort_id, "input_id": parts[0],
+                          "algorithm_id": parts[1], "field": "member result selection"},
+                ) from exc
+            rows.append({
+                "input_id": parts[0], "algorithm_id": parts[1],
+                "parameters_sha256": parts[2],
+                "content": base64.b64encode(content).decode("ascii"),
+            })
+        payload = canonical_json_bytes({
+            "schema": COHORT_SELECTION_JOURNAL_SCHEMA,
+            "cohort_id": cohort_id, "old_version": old_version,
+            "new_version": new_version, "run_id": run_id,
+            "input_ids": inputs, "algorithm_ids": algorithms, "before": rows,
+        })
+        if len(payload) > MAX_COHORT_SELECTION_JOURNAL_BYTES:
+            raise ValueError("cohort selector journal exceeds its safety limit")
+        write_atomic_no_follow(journal_path, payload)
+        # Readers that began before the journal existed must retry. No member
+        # selector can change before this notification succeeds.
+        self.bump_cohort_selection_epoch()
+
+    def recover_pending_cohort_selection(self) -> None:
+        """Under the writer lock, finish or undo a killed cohort transaction."""
+
+        journal = self._read_cohort_selection_journal()
+        if journal is None:
+            return
+        current = self._cohort_pointer_version(journal.cohort_id)
+        if current == journal.old_version:
+            from .cohorts import MemberSelectionStorageError, _restore_member_selections
+
+            before = {
+                self.result_dir(input_id, algorithm_id, identity) / "selected.json": content
+                for (input_id, algorithm_id, identity), content in journal.before.items()
+            }
+            try:
+                _restore_member_selections(
+                    self, tuple(sorted(journal.input_ids)), tuple(sorted(journal.algorithm_ids)), before,
+                )
+            except MemberSelectionStorageError as exc:
+                raise ResultOrderUnavailable("pending cohort member selector storage is invalid") from exc
+            except OSError as exc:
+                if exc.errno not in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
+                    raise
+                raise ResultOrderUnavailable("pending cohort member selector path is unsafe") from exc
+            if current is None:
+                self._record_aborted_first_generation(journal.cohort_id, journal.new_version)
+        elif current != journal.new_version:
+            raise ResultOrderUnavailable("cohort journal has neither its old nor new current pointer")
+        else:
+            # A killed writer may have made the new pointer visible without
+            # confirming its directory sync. Make that commit durable before
+            # discarding the undo journal.
+            with directory_no_follow(self.lab / "cohorts" / journal.cohort_id) as directory:
+                os.fsync(directory)
+            from .cohorts import read_current
+
+            generation = read_current(self, journal.cohort_id)
+            if generation is None or generation.version != journal.new_version:
+                raise ResultOrderUnavailable("committed cohort generation is incomplete")
+        self.bump_cohort_selection_epoch()
+        with directory_no_follow(self.lab) as directory:
+            os.unlink(self.cohort_selection_journal_file.name, dir_fd=directory)
+            os.fsync(directory)
+
+    def _record_aborted_first_generation(self, cohort_id: str, version: int) -> None:
+        """Distinguish an orphan unpublished generation from a lost pointer."""
+
+        generation_dir = self.lab / "cohorts" / cohort_id / "generations" / str(version)
+        if not generation_dir.is_dir() or generation_dir.is_symlink():
+            return
+        marker = self.lab / "cohorts" / cohort_id / "aborted-generations.json"
+        try:
+            with os.fdopen(open_regular_no_follow(marker), "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 64 * 1024:
+                    raise ValueError("aborted-generation marker is unsafe")
+                data = json.loads(stream.read(64 * 1024 + 1))
+        except FileNotFoundError:
+            data = {"schema": "traceback.lab.aborted-generations.v1", "versions": []}
+        except (OSError, ValueError, TypeError) as exc:
+            raise ResultOrderUnavailable("aborted cohort generation marker is malformed") from exc
+        if (not isinstance(data, dict) or set(data) != {"schema", "versions"}
+                or data["schema"] != "traceback.lab.aborted-generations.v1"
+                or not isinstance(data["versions"], list)
+                or any(type(item) is not int or item < 1 for item in data["versions"])
+                or data["versions"] != sorted(set(data["versions"]))):
+            raise ResultOrderUnavailable("aborted cohort generation marker is malformed")
+        data["versions"] = sorted(set((*data["versions"], version)))
+        write_atomic_no_follow(marker, canonical_json_bytes(data))
+
     # -- active heartbeat -------------------------------------------------
     def read_active(self, *, now: float | None = None) -> ActiveRun | None:
         """Parse ``active.json`` without touching the lock (D22)."""
@@ -388,13 +787,29 @@ class LabStore:
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as exc:
                 raise self._busy_problem() from exc
+            # Recover a killed cohort build before this writer changes any
+            # public pointer, run-log head, or active heartbeat.
+            try:
+                self.recover_pending_cohort_selection()
+            except ResultOrderUnavailable as exc:
+                raise LabProblem(
+                    "TBX-LAB-022",
+                    cause="pending cohort selection transaction cannot be safely recovered",
+                    fix=("Inspect ROOT/lab/pending-cohort-selections.json, ROOT/lab/cohort-selection-epoch, "
+                         "the matching cohort pointer and generation, and scoped member result selectors; "
+                         "restore damaged files from a known-good backup before retrying"),
+                    data={"field": "pending cohort selection transaction",
+                          "journal": "pending-cohort-selections.json"},
+                ) from exc
             lock = WriterLock(self, command, run_id, step, heartbeat_s)
             # One small pointer so readers find the newest run without a scan.
             write_atomic(self.last_run_file, canonical_json_bytes({"run_id": run_id, "command": command}))
             lock.start()
+            token = self._writer_selection_view.set(True)
             try:
                 yield lock
             finally:
+                self._writer_selection_view.reset(token)
                 lock.stop()
                 fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
         finally:
@@ -660,6 +1075,7 @@ class LabStore:
         artifacts_dir: Path | None = None,
         attempt_id: str | None = None,
         upstream_selections: Sequence[Mapping[str, str]] | None = None,
+        execution_plan: Mapping[str, Any] | None = None,
     ) -> str:
         """Publish one immutable attempt, then select it (callers hold the lock).
 
@@ -688,6 +1104,9 @@ class LabStore:
             })
             if len(upstream_bytes) > MAX_UPSTREAM_SELECTIONS_BYTES:
                 raise ValueError("upstream selections exceed the readable metadata limit")
+        plan_bytes = canonical_json_bytes(execution_plan) if execution_plan is not None else None
+        if plan_bytes is not None and len(plan_bytes) > MAX_EXECUTION_PLAN_BYTES:
+            raise ValueError("execution plan exceeds the readable metadata limit")
         for relative in files:
             parts = Path(relative).parts
             if Path(relative).is_absolute() or ".." in parts or not parts:
@@ -697,6 +1116,8 @@ class LabStore:
             (staging / "result.json").write_bytes(envelope.to_bytes())
             if upstream_bytes is not None:
                 (staging / "upstream_selections.json").write_bytes(upstream_bytes)
+            if plan_bytes is not None:
+                (staging / "execution_plan.json").write_bytes(plan_bytes)
             if artifacts_dir is not None:
                 for path in artifacts_dir.rglob("*"):
                     if path.is_symlink():
@@ -770,6 +1191,11 @@ class LabStore:
         """Keep selected/replaced attempts, the last success, and the newest
         failed attempts for Trust/QC (D35). Unknown order never triggers deletion."""
 
+        # A pending cohort journal may point at an older attempt of this same
+        # execution identity. Retain all immutable attempts until commit or
+        # rollback has made that preimage unnecessary.
+        if self.cohort_selection_journal_file.exists() or self.cohort_selection_journal_file.is_symlink():
+            return
         try:
             with os.scandir(attempts) as entries:
                 published = [
@@ -804,6 +1230,18 @@ class LabStore:
         artifacts = selected[0] / "artifacts"
         return artifacts if artifacts.is_dir() and not artifacts.is_symlink() else None
 
+    def selected_result_artifacts(
+        self, input_id: str, algorithm_id: str, parameters_sha256: str
+    ) -> tuple[ResultEnvelope, Path] | None:
+        """Return the result and artifacts from one verified selected attempt."""
+        selected = self._selected_result(input_id, algorithm_id, parameters_sha256)
+        if selected is None:
+            return None
+        artifacts = selected[0] / "artifacts"
+        if not artifacts.is_dir() or artifacts.is_symlink():
+            return None
+        return selected[1], artifacts
+
     def selected_attempt(
         self, input_id: str, algorithm_id: str, parameters_sha256: str
     ) -> Path | None:
@@ -820,6 +1258,12 @@ class LabStore:
         attempt = self.selected_attempt(input_id, algorithm_id, parameters_sha256)
         if attempt is None:
             return None
+        return self.upstream_selections_at(attempt)
+
+    @staticmethod
+    def upstream_selections_at(attempt: Path) -> tuple[dict[str, str], ...] | None:
+        """Read consumed upstream attempts from a validated attempt snapshot."""
+
         path = attempt / "upstream_selections.json"
         try:
             descriptor = open_regular_no_follow(path)
@@ -831,7 +1275,7 @@ class LabStore:
                 if len(raw) > MAX_UPSTREAM_SELECTIONS_BYTES:
                     return None
                 data = json.loads(raw)
-        except (OSError, ValueError, TypeError):
+        except (OSError, ValueError, TypeError, RecursionError):
             return None
         if not isinstance(data, dict) or data.get("schema") != UPSTREAM_SELECTIONS_SCHEMA:
             return None
@@ -916,14 +1360,16 @@ class LabStore:
         self, input_id: str, algorithm_id: str, parameters_sha256: str
     ) -> tuple[Path, ResultEnvelope, int | None] | None:
         directory = self.result_dir(input_id, algorithm_id, parameters_sha256)
-        selector = directory / "selected.json"
         try:
-            if selector.is_symlink():
+            raw = self._selector_bytes(input_id, algorithm_id, parameters_sha256)
+            if raw is None:
                 return None
-            data = json.loads(selector.read_bytes())
+            data = json.loads(raw)
             attempt_id = str(data["attempt_id"])
             publication_order = self._publication_order(data)
-        except (OSError, ValueError, KeyError, TypeError):
+        except ResultOrderUnavailable:
+            raise
+        except (OSError, ValueError, KeyError, TypeError, RecursionError):
             return None
         if not re.fullmatch(_ATTEMPT_ID, attempt_id):
             return None
@@ -978,6 +1424,40 @@ class LabStore:
 
         selected = self._selected_result(input_id, algorithm_id, parameters_sha256)
         return (selected[1], selected[2]) if selected is not None else None
+
+    def selected_result_with_attempt_and_order(
+        self, input_id: str, algorithm_id: str, parameters_sha256: str
+    ) -> tuple[str, ResultEnvelope, int | None] | None:
+        """Read an immutable attempt ID alongside the selected result."""
+
+        selected = self._selected_result(input_id, algorithm_id, parameters_sha256)
+        return (selected[0].name, selected[1], selected[2]) if selected is not None else None
+
+    def selection_order_hint(
+        self, input_id: str, algorithm_id: str, parameters_sha256: str
+    ) -> int | None:
+        """Read a selector's order without treating its attempt as a valid result."""
+
+        try:
+            raw = self._selector_bytes(input_id, algorithm_id, parameters_sha256)
+            if raw is None or len(raw) > MAX_RESULT_SELECTION_BYTES:
+                return None
+            data = json.loads(raw)
+            if (not isinstance(data, dict) or not isinstance(data.get("attempt_id"), str)
+                    or not re.fullmatch(_ATTEMPT_ID, data["attempt_id"])):
+                return None
+            return self._publication_order(data)
+        except ResultOrderUnavailable:
+            raise
+        except (OSError, ValueError, TypeError, RecursionError):
+            return None
+
+    def selected_result_snapshot(
+        self, input_id: str, algorithm_id: str, parameters_sha256: str
+    ) -> tuple[Path, ResultEnvelope, int | None] | None:
+        """Return one validated attempt path, envelope and publication order."""
+
+        return self._selected_result(input_id, algorithm_id, parameters_sha256)
 
     def read_result(
         self, input_id: str, algorithm_id: str, parameters_sha256: str

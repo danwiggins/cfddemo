@@ -11,8 +11,11 @@ from traceback_lab.algorithms.long_tail import LONG_TAIL
 from traceback_lab.algorithms.modbase_qc import MODBASE_QC
 from traceback_lab.algorithms.mtdna import MTDNA
 from traceback_lab.algorithms.sex_check import HG38_CHRY_LENGTH, SEX_CHECK, _non_n_bases, call_sex
+from traceback_lab.envelope import Metric, ResultEnvelope, provenance
 from traceback_lab.modbase import mm_codes, mm_skip_modes
-from traceback_lab.registry import Ready, Skip
+from traceback_lab.registry import Ready, Skip, load_registry
+from traceback_lab.sample_metadata import with_sex_assertion
+from traceback_lab.views import InputView, SampleView, sex_check_view
 
 from .bam_fixtures import Read, context_for, values
 
@@ -158,6 +161,27 @@ def test_sex_check_zero_chry_reads_is_female(tmp_path: Path) -> None:
     ctx = context_for(tmp_path, SEX_CONTIGS, _sex_reads(0), eligible_reads=600_000)
     got = values(SEX_CHECK.run(ctx, tmp_path / "o"))
     assert got["chry_chrx_ratio"] == 0.0 and got["call"] == "female"
+
+
+def test_registered_sex_check_output_flows_to_preanalytic_view(tmp_path: Path) -> None:
+    assert any(algorithm is SEX_CHECK for algorithm in load_registry())
+    ctx = context_for(tmp_path, SEX_CONTIGS, _sex_reads(20), eligible_reads=600_000)
+    assert isinstance(SEX_CHECK.preflight(ctx), Ready)
+    produced = SEX_CHECK.run(ctx, tmp_path / "out")
+    envelope = ResultEnvelope(
+        algorithm_id=SEX_CHECK.id, algorithm_version=SEX_CHECK.version, status="ok",
+        provenance=provenance(
+            tool="sex-check", source_id="a" * 64, input_id="b" * 64,
+            parameters_sha256="c" * 64, reference_id="synth",
+        ),
+        metrics=[Metric.model_validate(row) for row in produced.metrics],
+    )
+    assert next(row.value for row in envelope.metrics if row.metric_id == "call") == "male"
+    full = InputView("full", "b" * 64, None, {}, {SEX_CHECK.id: envelope})
+    for declared, state in (("M", "concordant"), ("F", "mismatch")):
+        metadata = with_sex_assertion({}, declared)["operator_metadata"]
+        sample = SampleView("a" * 64, "a" * 12, False, full, operator_metadata=metadata)
+        assert sex_check_view(sample)["state"] == state
 
 
 def test_sex_check_skips_below_depth_and_without_chry(tmp_path: Path) -> None:

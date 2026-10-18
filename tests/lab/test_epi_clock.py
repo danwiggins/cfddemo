@@ -79,6 +79,23 @@ def test_clock_map_requires_exact_model_and_immutable_sha(tmp_path: Path) -> Non
         inspect_map(store)
 
 
+def test_clock_cli_refuses_duplicate_source_label_before_publication(tmp_path: Path, capsys) -> None:
+    raw = _map_bytes().replace(
+        b'"source_label": "test fixture only"',
+        b'"source_label": "reviewed", "source_label": "unreviewed"',
+    )
+    source = tmp_path / "map.json"
+    source.write_bytes(raw)
+    root = tmp_path / "root"
+    assert lab_main(["asset", "register-clock-map", "--file", str(source),
+                     "--sha256", hashlib.sha256(raw).hexdigest(),
+                     "--root", str(root), "--json"]) != 0
+    response = json.loads(capsys.readouterr().out)
+    assert response["status"] == "blocked"
+    assert "invalid JSON" in response["data"]["cause"]
+    assert not (root / "lab" / "assets" / "epi-clock-map").exists()
+
+
 def test_clock_registration_publish_failure_is_blocked(tmp_path: Path, monkeypatch, capsys) -> None:
     source = tmp_path / "map.json"
     source.write_bytes(_map_bytes())

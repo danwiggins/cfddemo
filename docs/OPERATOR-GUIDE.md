@@ -1,12 +1,13 @@
 # Traceback operator guide
 
-Status: first development wave; synthetic data, plus one unqualified local-BAM
-path (see "Real local BAM (unqualified)"). Nothing here is qualified or for
-clinical use.
+Status: development-signed synthetic and unqualified local-BAM workflows.
+The signed CLI can run fragment length, cell origin, and optional ichorCNA
+copy number. Nothing here is qualified or for clinical use.
 
-This guide covers the local CLI implemented for the synthetic vertical slice.
+This guide covers the signed local CLI and its development trust model.
 It does not qualify hardware, MinKNOW, Dorado, a wet-lab protocol, a reference,
-or a real-data workflow. The existing Streamlit evidence demo is unchanged.
+or a real-data workflow. The public Streamlit evidence demo and the
+[unsigned Lab workflow](LAB-GUIDE.md) are separate.
 
 ## First five minutes
 
@@ -315,9 +316,9 @@ uv run traceback serve --root "$R"
      (TBX-MOD-001 WARN, normal after the alignment command above). The run
      continues and the report says `name_and_length_only`.
    - `partial`: modification tags (`MM`/`ML`/`MN`) are absent or
-     contradictory (TBX-MOD-001/002). Fragment measurement continues; only
-     future methylation work is ineligible. Most aligned BAMs without
-     modification calls are `partial`.
+     contradictory (TBX-MOD-001/002). Fragment measurement continues;
+     cell-origin readiness needs supported modification calls. Most aligned
+     BAMs without modification calls are `partial`.
    - `blocked`: a BAM or reference check failed (TBX-BAM-001 to 004). `run`
      will refuse; see the code in the table below. An unaligned BAM gives
      TBX-BAM-003 and the alignment command; a contig mismatch lists the first
@@ -409,8 +410,11 @@ the same record and the same output.
   the method it resolves now (reference, tool, asset or setting) is not the
   one the job was admitted under.
 
-Cell origin has no stages in this version yet: asking for it refuses that
-analysis with TBX-RUN-011 and runs the rest.
+Cell origin has registered stages. It needs a supported modified-base input,
+a declared model, the pinned modkit toolchain, and a registered Loyfer atlas;
+`preflight --analysis cell-origin` reports its readiness, and the
+[troubleshooting table](#troubleshooting) gives recovery commands.
+Each analysis still gets its own signed, unqualified record or its own refusal.
 
 ### Copy number (ichorCNA, optional)
 
@@ -550,7 +554,7 @@ says otherwise. Exit codes are listed under "Stable exit codes".
 | <a id="tbx-auth-local-003"></a>TBX-AUTH-LOCAL-003 | 3 | A store under `R/method-authority/REF/METHOD/DEFINITION_SHA256` fails its pinned SHA-256, location or replay check, or `R/method-authority` itself is not a private directory. A damaged store hides only the records bound to it; `R/authority` and every other store are unaffected | Restore the named store directory (or `R/method-authority`) from a backup; never remove `R/authority` for this code |
 | <a id="tbx-job-001"></a>TBX-JOB-001 | 6 | The local run failed without a record for an unexpected reason | `traceback status JOB_ID --root R` and `traceback logs JOB_ID --root R`, fix the stated cause, then `retry` and `resume` |
 | <a id="tbx-job-003"></a>TBX-JOB-003 | 3 | `resume`: the job was admitted under another method definition than the one ROOT resolves now (the reference, a tool, an asset or a `--modbase-model` setting changed), or the settings kept for it under `R/analysis-config` are missing or damaged; nothing was resumed | Run the input again with `traceback run`; the current method is a new job, and the old job keeps its committed stages |
-| <a id="tbx-run-011"></a>TBX-RUN-011 | 3 | `run --analysis`: this version has no stages for that analysis (copy number arrives in a later version); no job was created for it, and the other analyses still ran | Run the other analyses without it, for example `--analysis fragment` |
+| <a id="tbx-run-011"></a>TBX-RUN-011 | 3 | `run --analysis`: a named analysis has no registered stages in this build; no job was created for it, and the other analyses still ran | Check the installed build and run the available analyses, for example `--analysis fragment` |
 | <a id="tbx-job-002"></a>TBX-JOB-002 | 3 | Another traceback process holds this job's worker lease (it is running, or stopped less than a lease length ago); prints the `JOB_ID` | Wait for it, or check `traceback status JOB_ID --root R` |
 | <a id="tbx-label-001"></a>TBX-LABEL-001 | 3 | `R/labels` is a symbolic link or a file, so no label can be written (the site would not show one either) | Remove `R/labels` (labels are unsigned notes) and set the label again |
 | <a id="tbx-cat-003"></a>TBX-CAT-003 | 3 | `catalog export`: the `--csv` file already exists; nothing was written | Choose a new file name, or move the existing file |

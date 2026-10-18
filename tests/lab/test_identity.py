@@ -67,10 +67,16 @@ def test_platform_separates_input_result_and_cohort_identities() -> None:
     assert identity.parameters_sha256(**_params()) != identity.parameters_sha256(
         **_params(), platform="illumina",
     )
+    assert identity.parameters_sha256(**_params()) == identity.parameters_sha256(
+        **_params(), platform="ont",
+    )
     shared = dict(algorithm_id="depth", algorithm_version="1", parameters={}, tools=[],
                   reference_sha256=B, aligner_identity={"kind": "pre-aligned"})
     assert identity.cohort_compat_key(**shared, platform="ont") != identity.cohort_compat_key(
         **shared, platform="illumina",
+    )
+    assert identity.cohort_compat_key(**shared) == identity.cohort_compat_key(
+        **shared, platform="ont",
     )
 
 

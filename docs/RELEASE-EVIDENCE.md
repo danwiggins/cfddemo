@@ -2,8 +2,15 @@
 
 Status: Sprint 02 development contract. Synthetic evidence only.
 
+Current boundary: `traceback_runner.product_gates` still fixes the local
+report's `e12_dependency_state` to `blocked_unavailable_not_implemented` and release
+controls to disabled, even though the protected longitudinal read model and
+browser routes exist in `evidence_inspector` and the local web surface. Those
+research features do not supply independent external-release authority.
+
 These additive contracts do not change historical v1 runner or signature
-bytes. They do not enable real input, a qualification probe, scientific
+bytes. They do not themselves enable the separately available unqualified
+local-BAM input path, a qualification probe, scientific
 qualification, production keys, or execution authorization.
 
 ## Contract separation

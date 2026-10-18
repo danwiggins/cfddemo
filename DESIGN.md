@@ -1,6 +1,10 @@
 # Traceback local operator design
 
-Status: implementation design for the first synthetic development wave.
+Status: historical implementation design for the first synthetic development wave.
+
+The boundaries below describe that signed-runner wave, not the current Lab
+subsystem. See [LAB-GUIDE](docs/LAB-GUIDE.md) for unsigned research analysis
+and [OPERATOR-GUIDE](docs/OPERATOR-GUIDE.md) for the current signed workflow.
 
 ## Boundary
 

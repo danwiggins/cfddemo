@@ -36,9 +36,10 @@ LICENSES_FILE = HERE / "licenses.yaml"
 
 TIERS = ("PROVEN", "NEWER", "SPECULATIVE")
 REFERENCE_KINDS = ("none", "published_mean", "published_range", "internal_cohort", "provisional_external")
-STABILITY_KINDS = ("proportion", "relative", "absolute", "scales_with_depth")
+STABILITY_KINDS = ("proportion", "relative", "absolute", "scales_with_depth", "unvalidated")
 VALUE_KINDS = ("proportion", "positive", "count", "signed", "vector", "categorical")
-NOT_INTERPRETABLE_REASONS = ("depth", "qc", "no_pon", "below_lod", "missing_channel")
+NOT_INTERPRETABLE_REASONS = ("depth", "qc", "no_pon", "below_lod", "missing_channel",
+                           "no_stability_verdict", "comparison_unavailable")
 NO_REFERENCE_REASONS = ("none_published", "cohort_too_small", "no_library_entry")
 RANGE_STATES = ("in_range", "above_typical", "markedly_above", "below_typical", "markedly_below")
 OUT_OF_RANGE = ("markedly_above", "markedly_below", "above_typical", "below_typical")
@@ -79,8 +80,7 @@ class Entry:
 
     @property
     def citation_verified(self) -> bool:
-        checked = self.raw.get("citation_checked")
-        return isinstance(checked, Mapping) and all(checked.get(key) for key in ("by", "date"))
+        return _citation_check_is_complete(self.raw.get("citation_checked"))
 
     @property
     def stability(self) -> dict[str, Any] | None:
@@ -117,6 +117,13 @@ def _require(condition: bool, where: str, message: str) -> None:
         raise LibraryError(f"{where}: {message}")
 
 
+def _citation_check_is_complete(checked: Any) -> bool:
+    return isinstance(checked, Mapping) and all(
+        isinstance(checked.get(key), str) and checked[key].strip()
+        for key in ("by", "date", "note")
+    )
+
+
 def _validate_entry(raw: Mapping[str, Any], licenses: Mapping[str, Any]) -> Entry:
     where = f"{raw.get('algorithm_id')}/{raw.get('metric_id')}"
     for key in ("algorithm_id", "metric_id", "label", "tier", "reference", "headline", "value_kind"):
@@ -148,13 +155,15 @@ def _validate_entry(raw: Mapping[str, Any], licenses: Mapping[str, Any]) -> Entr
              where, "citations must be nonempty strings")
     checked = raw.get("citation_checked")
     if checked is not None:
-        _require(isinstance(checked, Mapping) and checked.get("by") and checked.get("date"), where, "citation_checked needs by and date")
+        _require(_citation_check_is_complete(checked), where, "citation_checked needs nonblank by, date and note")
     stability = raw.get("stability")
     if raw["value_kind"] in ("vector", "categorical"):
         stability = None
     elif stability is None:
-        _require(raw["value_kind"] in _DEFAULT_STABILITY, where, "a signed metric needs an explicit stability")
-        stability = dict(_DEFAULT_STABILITY[raw["value_kind"]])
+        if raw["value_kind"] in _DEFAULT_STABILITY:
+            stability = dict(_DEFAULT_STABILITY[raw["value_kind"]])
+        else:
+            _require(False, where, "a signed metric needs an explicit stability")
     if stability is not None:
         _require(stability.get("kind") in STABILITY_KINDS, where, f"stability kind in {STABILITY_KINDS}")
         if stability["kind"] in ("absolute", "relative", "scales_with_depth"):
@@ -473,13 +482,13 @@ def license_callouts(entries: Iterable[Entry | None], library: Library) -> list[
 
 __all__ = [
     "COHORT_MIN",
+    "OUT_OF_RANGE",
     "Cohort",
     "Entry",
-    "InterpretedMetric",
     "Interpretation",
+    "InterpretedMetric",
     "Library",
     "LibraryError",
-    "OUT_OF_RANGE",
     "bootstrap_p95_interval",
     "classify",
     "findings_sort_key",

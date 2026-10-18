@@ -5,7 +5,10 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import os
 import subprocess
+import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -21,6 +24,7 @@ from traceback_lab.identity_pair import (
     pairs_for_sample,
 )
 from traceback_lab.identity_sites import IdentitySitesError, inspect_sites, register_sites
+from traceback_lab.pipeline import PipelineResult, StageOutcome
 from traceback_lab.registry import InputContext, Skip
 from traceback_lab.store import LabStore
 
@@ -219,10 +223,13 @@ def test_extract_refuses_changed_planned_sites_or_tool(tmp_path, monkeypatch) ->
 
 
 def test_pair_tsv_requires_exact_opaque_names_and_finite_metrics() -> None:
-    header = b"#sample_a\tsample_b\trelatedness\tibs0\tibs2\tconcordance\tn\n"
+    header = b"#sample_a\tsample_b\trelatedness\tibs0\tibs2\thom_concordance\tn\n"
     a, b = "a" * 64, "b" * 64
     values = parse_pair_tsv(header + f"{a}\t{b}\t0.48\t1\t20\t0.99\t21\n".encode(), a, b)
     assert values == {"relatedness": 0.48, "concordance": 0.99, "ibs0": 1, "ibs2": 20, "n": 21}
+    with pytest.raises(IdentityPairError, match="complete pair"):
+        parse_pair_tsv(header.replace(b"hom_concordance", b"concordance") +
+                       f"{a}\t{b}\t0.48\t1\t20\t0.99\t21\n".encode(), a, b)
     with pytest.raises(IdentityPairError, match="names"):
         parse_pair_tsv(header + f"private-name\t{b}\t0.48\t1\t20\t0.99\t21\n".encode(), a, b)
     with pytest.raises(IdentityPairError, match="invalid"):
@@ -277,22 +284,25 @@ def test_pair_attempt_binds_both_selected_fingerprints_and_caches(tmp_path, monk
     monkeypatch.setattr(pair, "source_ids", lambda _: [a, b])
     monkeypatch.setattr(pair, "resolve_prefix", lambda value, _: SimpleNamespace(state="found", value=a if value.startswith("a") else b))
     monkeypatch.setattr(pair, "inspect_sites", lambda _: SimpleNamespace(file=tmp_path / "sites.vcf.gz", sha256="f" * 64))
-    monkeypatch.setattr(pair, "somalier_tool", lambda: ("somalier", "0.2.19"))
+    monkeypatch.setattr(pair, "somalier_tool", lambda: ("/usr/bin/somalier", "0.2.19"))
     monkeypatch.setattr(pair, "_selected_sketch", lambda _, source, **kwargs: sketches[source])
     calls = []
 
-    def fake_run(argv, **kwargs):
+    def fake_run(stages, **kwargs):
+        assert len(stages) == 1 and stages[0].name == "somalier-relate"
+        argv = stages[0].argv
         assert argv[1] == "relate" and kwargs["env"]["SOMALIER_REPORT_ALL_PAIRS"] == "1"
+        assert kwargs["timeout_s"] == pair.SOMALIER_COMPARE_TIMEOUT_S
         assert argv[argv.index("--min-depth") + 1] == "7"
         assert argv[argv.index("--min-ab") + 1] == "0.3"
         prefix = argv[argv.index("--output-prefix") + 1]
         with open(prefix + ".pairs.tsv", "wb") as stream:
-            stream.write(("#sample_a\tsample_b\trelatedness\tibs0\tibs2\tconcordance\tn\n"
+            stream.write(("#sample_a\tsample_b\trelatedness\tibs0\tibs2\thom_concordance\tn\n"
                           f"{sketches[a].input_id}\t{sketches[b].input_id}\t0.5\t0\t10\t0.95\t10\n").encode())
         calls.append(argv)
-        return subprocess.CompletedProcess(argv, 0)
+        return PipelineResult([StageOutcome("somalier-relate", returncode=0)], 0.1, None)
 
-    monkeypatch.setattr(pair.subprocess, "run", fake_run)
+    monkeypatch.setattr(pair, "run_pipeline", fake_run)
     with store.writer("identity compare", "r-20261016-0000-aabb", step="relate"):
         first = compare_pair(store, a[:12], b[:12])
         cached = compare_pair(store, b[:12], a[:12])
@@ -313,6 +323,53 @@ def test_pair_attempt_binds_both_selected_fingerprints_and_caches(tmp_path, monk
     assert len(calls) == 3
     assert first["participants"][0]["source_id"] == a
     assert first["interpretation"].startswith("exploratory")
+
+
+def test_pair_timeout_kills_somalier_grandchild_and_cleans_private_scratch(tmp_path, monkeypatch) -> None:
+    from traceback_lab import identity_pair as pair
+
+    store = LabStore(tmp_path / "root")
+    a, b = "a" * 64, "b" * 64
+    sketches = {
+        a: SelectedSketch(a, "c" * 64, "a-20261016T000000000000-aaaaaaaa", "e" * 64,
+                          hashlib.sha256(b"sketch a").hexdigest(), b"sketch a"),
+        b: SelectedSketch(b, "d" * 64, "a-20261016T000000000000-bbbbbbbb", "e" * 64,
+                          hashlib.sha256(b"sketch b").hexdigest(), b"sketch b"),
+    }
+    pidfile = tmp_path / "grandchild.pid"
+    launcher = tmp_path / "fake-somalier"
+    launcher.write_text(
+        f"#!{sys.executable}\n"
+        "import os, subprocess, sys, time\n"
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(600)'])\n"
+        f"open({str(pidfile)!r}, 'w').write(str(child.pid))\n"
+        "time.sleep(600)\n"
+    )
+    launcher.chmod(0o700)
+    monkeypatch.setattr(pair, "source_ids", lambda _: [a, b])
+    monkeypatch.setattr(pair, "resolve_prefix", lambda value, _: SimpleNamespace(state="found", value=a if value.startswith("a") else b))
+    monkeypatch.setattr(pair, "inspect_sites", lambda _: SimpleNamespace(file=tmp_path / "sites.vcf.gz", sha256="f" * 64))
+    monkeypatch.setattr(pair, "somalier_tool", lambda: (str(launcher), "synthetic"))
+    monkeypatch.setattr(pair, "_selected_sketch", lambda _, source, **kwargs: sketches[source])
+    monkeypatch.setattr(pair, "SOMALIER_COMPARE_TIMEOUT_S", 2)
+
+    with store.writer("identity compare", "r-20261016-0000-aabb", step="relate"):
+        with pytest.raises(IdentityPairError, match="could not complete") as failure:
+            compare_pair(store, a[:12], b[:12])
+    assert str(tmp_path) not in str(failure.value)
+    assert pidfile.is_file()
+    child = int(pidfile.read_text())
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("Somalier grandchild outlived pair comparison timeout")
+    assert list((store.lab / "tmp").iterdir()) == []
+    assert not (store.lab / "identity-pairs").exists()
 
 
 def test_pair_refuses_symlinked_temporary_directory(tmp_path, monkeypatch) -> None:

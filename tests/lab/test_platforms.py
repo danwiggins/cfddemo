@@ -99,6 +99,44 @@ def test_derived_platform_skip_is_persisted_and_shown_in_depth_curve(
     assert row["cells"][0]["state"] == "skipped" and row["cells"][0]["reason"] == "platform"
 
 
+@pytest.mark.parametrize("method,platform", [("finaletoolkit", "ont"), ("microbial", "illumina")])
+def test_dynamic_tool_platform_skip_uses_static_identity_without_probes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, method: str, platform: str,
+) -> None:
+    import traceback_lab.algorithms.finaletoolkit_xcheck as finale_module
+    import traceback_lab.algorithms.microbial as microbial_module
+    from traceback_lab.registry import PlanItem, execution_identity
+    from traceback_lab.runner import RunTarget, run_plan
+    from traceback_lab.scrub import Scrubber
+    from traceback_lab.store import LabStore
+
+    if method == "finaletoolkit":
+        algorithm = finale_module.FINALETOOLKIT_XCHECK
+        monkeypatch.setattr(finale_module, "_tool", lambda *_: pytest.fail("platform skip probed finale"))
+    else:
+        algorithm = microbial_module.MICROBIAL
+        monkeypatch.setattr(microbial_module, "_tool", lambda *_: pytest.fail("platform skip probed microbial"))
+    store = LabStore(tmp_path / "store")
+    store.ensure()
+    log = store.run_log("r-20261017-1200-aaaa")
+    target = RunTarget(input_id="a" * 64, source_id="b" * 64, input_dir=tmp_path,
+                       reference_id="hg38", reference_sha256="c" * 64,
+                       platform=platform, eligible_reads=5_000_000)
+    expected = execution_identity(
+        algorithm, reference_sha256=target.reference_sha256,
+        platform=platform if platform != "ont" else None,
+        tool_pins=[pin.identity() for pin in algorithm.platform_skip_tools],
+    )
+    plan = [PlanItem(algorithm, False)]
+    entries: dict[str, str] = {}
+    first, = run_plan(store, None, log, target, plan, entries,
+                      run_id=log.run_id, scrubber=Scrubber(root=store.root))
+    second, = run_plan(store, None, log, target, plan, entries,
+                       run_id=log.run_id, scrubber=Scrubber(root=store.root))
+    assert (first.status, first.skip_reason, first.parameters_sha256) == ("skipped", "platform", expected)
+    assert second.parameters_sha256 == expected and second.attempt_id == first.attempt_id
+
+
 def test_each_unaligned_chunk_must_declare_the_platform() -> None:
     from traceback_lab.ingest import Chunk, ChunkSet, _refuse_mixed_models
     from traceback_lab.problems import LabProblem
@@ -212,6 +250,7 @@ def test_stored_view_qualifies_unverified_platform_before_rerun(
     if expected == "skipped":
         assert sample.full.results["fragment-size"].skip_reason == "platform"
     response = LabApi(store).sample(source_id[:12])
+    assert response["platform"] == sample.platform
     visible = next(item for item in response["algorithms"] if item["algorithm_id"] == "fragment-size")
     assert visible["status"] == expected
     if expected == "skipped":
@@ -290,6 +329,14 @@ def test_unaligned_non_ont_is_refused_before_alignment(
     payload = json.loads(capsys.readouterr().out)
     assert code == 3
     assert payload["data"]["code"] == "TBX-LAB-024"
+    data = payload["data"]
+    assert data["cause"] and data["fix"] and isinstance(data["retryable"], bool)
+    assert data["docs"] == "docs/LAB-GUIDE.md#tbx-lab-024"
+    code = signed_cli.main(["lab", "run", str(chunk), "--root", str(root), "--dry-run"])
+    human = capsys.readouterr().out
+    assert code == 3 and "TBX-LAB-024" in human
+    for label in ("CODE", "CAUSE", "FIX", "RETRYABLE", "DOCS"):
+        assert any(line.startswith(label) for line in human.splitlines()), label
 
 
 def _prealigned_world(tmp_path: Path, platforms: tuple[str | None, ...]) -> tuple[Path, Path]:
@@ -364,6 +411,9 @@ def test_prealigned_writer_requires_one_bam_even_when_one_declares_ont(tmp_path:
 def test_stored_platform_mismatch_is_same_typed_refusal(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], dry_run: bool, tamper: str,
 ) -> None:
+    from traceback_lab.store import LabStore
+    from traceback_lab.views import load_sample
+
     root, bam_path = _prealigned_world(tmp_path, ("ILLUMINA",))
     code = signed_cli.main([
         "lab", "run", str(bam_path), "--root", str(root), "--reference", "hg38",
@@ -391,14 +441,10 @@ def test_stored_platform_mismatch_is_same_typed_refusal(
     assert payload["data"]["code"] == "TBX-LAB-024"
     assert payload["data"]["input_id"] == input_id
     assert "fresh ROOT" in payload["data"]["fix"]
-    if tamper == "list":
-        from traceback_lab.store import LabStore
-        from traceback_lab.views import load_sample
-
-        sample = load_sample(LabStore(root), source_id)
-        assert sample is not None
-        assert sample.full.results
-        assert all(result.status == "skipped" for result in sample.full.results.values())
+    sample = load_sample(LabStore(root), source_id)
+    assert sample is not None and sample.full.results
+    assert all(result.status == "skipped" and result.skip_reason == "platform"
+               for result in sample.full.results.values())
 
 
 def test_cohort_refuses_mismatched_stored_platform(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -427,8 +473,37 @@ def test_valid_dry_run_reports_platform_in_sample(tmp_path: Path, capsys: pytest
     root, bam_path = _prealigned_world(tmp_path, ("ILLUMINA",))
     code = signed_cli.main([
         "lab", "run", str(bam_path), "--root", str(root), "--reference", "hg38",
-        "--dry-run", "--json",
+        "--dry-run", "--controls", "--json",
     ])
     payload = json.loads(capsys.readouterr().out)
     assert code == 0, payload
     assert payload["data"]["sample"]["platform"] == "illumina"
+    decisions = {row["algorithm_id"]: row["decision"] for row in payload["data"]["plan"]}
+    assert decisions["copy-number"] == "skip expected (platform)"
+    assert decisions["read-summary"] == "decided after alignment"
+    assert payload["data"]["controls"]["cna_skipped"] == "platform"
+
+
+def test_simulate_cna_refuses_illumina_before_work(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from traceback_lab import simulate_command
+
+    root, bam_path = _prealigned_world(tmp_path, ("ILLUMINA",))
+    code = signed_cli.main([
+        "lab", "run", str(bam_path), "--root", str(root), "--reference", "hg38",
+        "--only", "short-read-fragment-size", "--no-downsample", "--no-controls", "--json",
+    ])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0, payload
+
+    def unexpected(*_args, **_kwargs):
+        pytest.fail("simulation work started before platform refusal")
+
+    monkeypatch.setattr(simulate_command, "run_plan", unexpected)
+    monkeypatch.setattr(simulate_command, "cna_specs", unexpected)
+    code = signed_cli.main(["lab", "simulate", "cna", "latest", "--root", str(root), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 3
+    assert payload["data"]["code"] == "TBX-LAB-024"
+    assert payload["data"]["platform"] == "illumina"

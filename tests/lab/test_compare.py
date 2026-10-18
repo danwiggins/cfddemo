@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from traceback_lab import cohorts
 from traceback_lab.cohort_contracts import CohortGeneration, CohortMember, CohortResult
 from traceback_lab.cohorts import CohortListing
 from traceback_lab.envelope import Metric, ResultEnvelope, provenance
@@ -49,7 +50,7 @@ def test_compare_pins_one_generation_and_gates_after_leave_one_out(
     generation = CohortGeneration(cohort_id="healthy", version=7, kind=kind, members=members)
     reads = []
     monkeypatch.setattr(web_api, "read_current", lambda store, cohort_id: (reads.append(cohort_id), generation)[1])
-    monkeypatch.setattr(web_api, "member_from_store", lambda store, source_id: members[0])
+    monkeypatch.setattr(cohorts, "member_for_generation", lambda store, generation, source_id: members[0])
     envelope = ResultEnvelope(
         algorithm_id="fragment-size", algorithm_version="1", status="ok",
         provenance=provenance(
@@ -137,7 +138,7 @@ def test_compare_rejects_changed_full_input_or_source(
         aligner_identity="minimap2 2.28; samtools 1.20",
         results=(_result(target_source, 101.0),),
     )
-    monkeypatch.setattr(web_api, "member_from_store", lambda store, source_id: target)
+    monkeypatch.setattr(cohorts, "member_for_generation", lambda store, generation, source_id: target)
     api = web_api.LabApi(LabStore(tmp_path))
     monkeypatch.setattr(api, "_resolve", lambda id12: (_TARGET, []))
     monkeypatch.setattr(api, "_id12s", lambda: {_TARGET: _TARGET[:12]})
@@ -259,9 +260,9 @@ def test_compare_target_unavailable_has_no_metrics(tmp_path, monkeypatch) -> Non
         "TBX-LAB-020", cause="stored source record is malformed",
         fix="Restore the source record matching its filename before cohort add/build",
     )
-    def unavailable(store, source_id):
+    def unavailable(store, generation, source_id):
         raise problem
-    monkeypatch.setattr(web_api, "member_from_store", unavailable)
+    monkeypatch.setattr(cohorts, "member_for_generation", unavailable)
     api = web_api.LabApi(LabStore(tmp_path))
     monkeypatch.setattr(api, "_resolve", lambda id12: (_TARGET, []))
     monkeypatch.setattr(api, "_id12s", lambda: {_TARGET: _TARGET[:12]})
@@ -384,6 +385,19 @@ def test_compare_and_joint_panel_render_in_native_tables(tmp_path, monkeypatch) 
             ], profile_path, ok=lambda page: 'data-ready="1"' in page and all(text in page for text in want), timeout=90)
 
         compare = dom("compare", "compare-profile", "Comparison against healthy:7")
+        citation_payload = web_api.LabApi(LabStore(tmp_path)).compare(id12, "healthy")
+        original_compare = web_api.LabApi.compare
+        citation_rows = []
+        for label, checked in (("Unchecked citation probe", False), ("Checked citation probe", True)):
+            row = dict(citation_payload["metrics"][0])
+            row["label"] = label
+            row["entry"] = {**row["entry"], "citations": [], "citation_checked": checked}
+            citation_rows.append(row)
+        monkeypatch.setattr(web_api.LabApi, "compare", lambda self, value, cohort: {
+            **citation_payload, "metrics": citation_rows,
+        })
+        citation_dom = dom("compare", "citation-profile", "Unchecked citation probe", "Checked citation probe")
+        monkeypatch.setattr(web_api.LabApi, "compare", original_compare)
         problem = {
             "code": "TBX-LAB-022", "summary": "Cohort generation unavailable",
             "cause": "selected generation cannot be verified",
@@ -434,6 +448,11 @@ def test_compare_and_joint_panel_render_in_native_tables(tmp_path, monkeypatch) 
     assert compare.count('tabindex="0" role="region"') >= 2
     assert "Published mean: 167 bp" in compare and "Original evidence tier:" in compare
     assert "https://doi.org/10.1234%2Fsynthetic" in compare
+    unchecked_block = citation_dom.split("Unchecked citation probe", 1)[1].split("Checked citation probe", 1)[0]
+    checked_block = citation_dom.split("Checked citation probe", 1)[1]
+    assert "Citations: none" in unchecked_block and "UNVERIFIED citation" in unchecked_block
+    assert "Citations: none" in checked_block
+    assert "UNVERIFIED citation" not in checked_block.split("Citations: none", 1)[1][:100]
     assert 'data-csp-violations="0"' in compare
     assert "Comparison against healthy:7" in with_broken
     assert 'value="healthy"' in with_broken and 'value="broken"' not in with_broken

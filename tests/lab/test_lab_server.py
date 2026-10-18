@@ -8,6 +8,7 @@ import http.client
 import io
 import json
 import os
+import re
 import signal
 import shutil
 import socket
@@ -24,8 +25,10 @@ from types import SimpleNamespace
 import pytest
 import websocket
 
-from traceback_lab.envelope import Metric, ResultEnvelope, provenance
+from traceback_lab.envelope import Depth, Metric, ResultEnvelope, provenance
 from traceback_lab.store import LabStore
+from traceback_lab.store import ResultOrderUnavailable
+from traceback_lab import views
 from traceback_lab.web import api as api_module
 from traceback_lab.web.server import CSP, RunningLabServer
 from traceback_runner import cli as signed_cli
@@ -80,6 +83,22 @@ def _get(server, path, cookie, **headers):
     return response, data
 
 
+def test_selection_read_unavailable_is_sanitized_and_actionable(tmp_path, monkeypatch) -> None:
+    with RunningLabServer(LabStore(tmp_path)) as running:
+        cookie = _session(running)
+
+        def fail_selection(_id12):
+            raise ResultOrderUnavailable("private path /sensitive/results/selected.json")
+
+        monkeypatch.setattr(running.app.api, "sample", fail_selection)
+        response, body = _get(running, "/api/samples/" + "a" * 12, cookie)
+    assert response.status == 503
+    error = json.loads(body)["error"]
+    assert error["code"] == "TBX-LAB-WEB-SELECTION-UNAVAILABLE"
+    assert "Retry" in error["fix"] and "restore" in error["fix"]
+    assert b"/sensitive/" not in body
+
+
 def test_binds_loopback_and_sends_the_narrow_csp(server) -> None:
     assert server.httpd.server_address[0] == "127.0.0.1"
     response, body = _request(server, "GET", "/")
@@ -87,6 +106,35 @@ def test_binds_loopback_and_sends_the_narrow_csp(server) -> None:
     assert response.getheader("Content-Security-Policy") == CSP
     assert "'unsafe-inline'" not in CSP
     assert b"<script>" not in body and b"style=" not in body
+
+
+def test_asset_connections_fit_the_listen_queue_when_accept_is_delayed(tmp_path) -> None:
+    """A browser's burst of asset connections must survive a busy accept loop."""
+
+    with RunningLabServer(LabStore(tmp_path)) as running:
+        original_accept = running.httpd.get_request
+        accepting = threading.Event()
+        release = threading.Event()
+
+        def delayed_accept():
+            accepting.set()
+            assert release.wait(10), "asset burst did not release the accept loop"
+            return original_accept()
+
+        running.httpd.get_request = delayed_accept
+        sockets = []
+        try:
+            sockets.append(socket.create_connection(("127.0.0.1", running.port), timeout=1))
+            assert accepting.wait(2), "server did not enter accept"
+            # The first connection is held at accept; further requests queue at
+            # the kernel listen socket, just as CSS and script requests do.
+            for _ in range(12):
+                sockets.append(socket.create_connection(("127.0.0.1", running.port), timeout=0.5))
+            assert len(sockets) == 13
+        finally:
+            for connection in sockets:
+                connection.close()
+            release.set()
 
 
 def test_foreign_host_and_forwarded_headers_are_403(server) -> None:
@@ -128,6 +176,95 @@ def test_status_samples_and_sample(server) -> None:
     assert payload["preanalytic_sex"]["reason"] == "no_assertion"
     text = json.dumps(payload)
     assert "/Users/" not in text and "chunks" not in text.lower().replace("excluded_chunks", "")
+
+
+def test_missing_library_metric_is_counted_in_trust_qc(server, monkeypatch, tmp_path) -> None:
+    """D7: a real read-side join keeps an unknown metric and counts it on both routes."""
+
+    if _chrome() is None:
+        pytest.skip("no Chrome/Chromium for the D7 DOM check")
+    source_id = next(iter(server.app.api._id12s()))
+    sample = views.load_sample(server.app.store, source_id)
+    assert sample is not None
+    result = sample.full.results["fragment-size"]
+    assert result.status == "ok"
+    sample.full.results["fragment-size"] = result.model_copy(update={
+        "metrics": [*result.metrics, Metric(metric_id="missing_library_fixture", value=0.123)],
+    })
+    original = views.load_sample
+    monkeypatch.setattr(api_module.views, "load_sample",
+                        lambda store, source: sample if source == source_id else original(store, source))
+
+    payload = server.app.api.sample(sample.id12)
+    assert payload["library_health"]["no_library_entry"] == 1
+    unknown = next(metric for algorithm in payload["algorithms"]
+                   if algorithm["algorithm_id"] == "fragment-size"
+                   for metric in algorithm["metrics"] if metric["metric_id"] == "missing_library_fixture")
+    assert (unknown["state"], unknown["reason"], unknown["value"]) == (
+        "no_reference", "no_library_entry", 0.123)
+
+    for route, expected in (("findings", "missing_library_fixture"),
+                            ("trust-qc", "no_library_entry: 1")):
+        profile = tmp_path / route
+        dom = _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{sample.id12}/{route}"],
+            profile, ok=lambda page, expected=expected: 'data-ready="1"' in page and expected in page,
+        )
+        assert expected in dom
+        if route == "findings":
+            assert "No reference" in dom and "no library entry" in dom
+
+
+def _sample_with_unvalidated_wps(server, monkeypatch):
+    """Keep the real stored sample and add WPS measurements at each control depth."""
+    api = api_module.LabApi(server.app.store)
+    sample = views.load_sample(server.app.store, next(iter(api._id12s())))
+    assert sample is not None
+    for view in [sample.full, *sample.derived]:
+        source = next(envelope for envelope in view.results.values() if envelope.status == "ok")
+        value = 0.7 if view is sample.full else 0.4
+        wps = source.model_copy(update={
+            "algorithm_id": "wps",
+            "depth": Depth(eligible_reads=1_000_000, approx_depth_x=200 * view.fraction),
+            "metrics": [Metric(metric_id="qualifying_fragment_depth_x", value=value)],
+            "panels": [],
+        })
+        # The read-side sample depth comes from the first result; put the
+        # injected WPS measurement first so this fixture exercises its gate.
+        view.results = {"wps": wps, **{key: result for key, result in view.results.items() if key != "wps"}}
+    original = views.load_sample
+    monkeypatch.setattr(api_module.views, "load_sample", lambda store, source_id: sample if source_id == sample.source_id else original(store, source_id))
+    return sample.id12
+
+
+def test_sample_api_keeps_unvalidated_wps_values_without_stability_verdict(server, monkeypatch) -> None:
+    id12 = _sample_with_unvalidated_wps(server, monkeypatch)
+    payload = json.loads(_get(server, f"/api/samples/{id12}", _session(server))[1])
+    panel = next(p for p in payload["stability"] if p["algorithm_id"] == "wps" and p["metric_id"] == "qualifying_fragment_depth_x")
+    assert panel["verdict"] == "stability not validated"
+    assert panel["points"][0]["value"] == 0.4
+    assert panel["points"][0]["state"] == "ok_unvalidated"
+    assert panel["points"][0]["deviation"] is None
+    assert panel["split"]["stable"] is None
+    assert not any(p["algorithm_id"] == "wps" and p["metric_id"] == "qualifying_fragment_depth_x" for p in payload.get("defended", {}).get("rows", []))
+
+
+def test_stability_dom_names_unvalidated_wps_without_false_verdict(server, tmp_path, monkeypatch) -> None:
+    if _chrome() is None:
+        pytest.skip("no Chrome/Chromium for the headless Stability check")
+    id12 = _sample_with_unvalidated_wps(server, monkeypatch)
+    dom = _dom_cdp(
+        [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
+         f"--user-data-dir={tmp_path / 'profile'}", "--window-size=1280,800",
+         server.issue_link() + f"&route=/sample/{id12}/stability"], tmp_path / "profile",
+        ok=lambda page: 'data-ready="1"' in page and "Stability: every point" in page,
+    )
+    assert ("<strong>WPS-eligible 120–180 bp aligned-fragment depth</strong>"
+            " — stability not validated") in dom
+    assert "no split-half stability verdict" in dom
+    assert "No validated stability deviation scale; numeric values are in the table." in dom
+    assert "0.4" in dom
 
 
 def test_sample_api_explains_unavailable_somalier(server, monkeypatch) -> None:
@@ -416,8 +553,14 @@ def _read_debug_port(path: Path) -> str | None:
     return lines[0]
 
 
-def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90, action: str | None = None) -> str:
-    """Wait for one Chrome page's caller-defined DOM state through DevTools."""
+def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90,
+             action: str | None = None, interact=None,
+             viewport: tuple[int, int] | None = None) -> str:
+    """Wait for one Chrome page, optionally setting its CSS viewport before load.
+
+    Chrome can clamp ``--window-size=360,740`` to a wider inner viewport. CDP
+    emulation before navigation lets load-time layout probes test actual 360px.
+    """
 
     deadline = time.monotonic() + timeout
     events: deque[str] = deque(maxlen=8)
@@ -428,7 +571,7 @@ def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90, action:
     with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
         process = subprocess.Popen(
             [*argv[:-1], "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0",
-             argv[-1]],
+             "about:blank" if viewport else argv[-1]],
             stdout=stdout, stderr=stderr, start_new_session=os.name != "nt",
         )
         try:
@@ -443,7 +586,9 @@ def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90, action:
                             targets = json.load(response)
                         target_url = next(
                             (target["webSocketDebuggerUrl"] for target in targets
-                             if target.get("type") == "page" and target.get("url", "").startswith("http://127.0.0.1:")),
+                            if target.get("type") == "page" and (
+                                target.get("url", "").startswith("http://127.0.0.1:") or
+                                (viewport is not None and target.get("url") == "about:blank"))),
                             None,
                         )
                     except (OSError, ValueError, KeyError):
@@ -485,6 +630,15 @@ def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90, action:
 
             command("Runtime.enable")
             command("Log.enable")
+            if viewport is not None:
+                width, height = viewport
+                command("Emulation.setDeviceMetricsOverride", {
+                    "width": width, "height": height, "deviceScaleFactor": 1, "mobile": False,
+                })
+                assert evaluate("window.innerWidth") == width, "CDP did not set the requested CSS viewport"
+                destination = urllib.parse.urlsplit(argv[-1])
+                assert destination.scheme == "http" and destination.hostname == "127.0.0.1"
+                command("Page.navigate", {"url": argv[-1]})
             action_done = False
             def read_state() -> dict:
                 nonlocal dom, action_done
@@ -502,6 +656,9 @@ def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90, action:
                 }
 
             _wait_for_dom(read_state, timeout=max(0, deadline - time.monotonic()))
+            if interact is not None:
+                interact(command, evaluate)
+                dom = evaluate("document.documentElement?.outerHTML ?? ''")
         except Exception as exc:
             failure = exc
             if connection is not None:
@@ -638,13 +795,14 @@ def test_headless_page_renders_a_chart_with_zero_csp_violations(server, tmp_path
          server.issue_link() + f"&route=/sample/{id12}/trust-qc"], tmp_path / "profile",
         ok=lambda page: 'data-ready="1"' in page and 'class="echart"' in page and 'data-rendered="1"' in page
             and "step_end read-summary status=ok" in page,
-        action="(() => { const link = [...document.querySelectorAll('#main a')].find(a => a.textContent === 'Run log line →'); if (!link) return false; link.click(); return true; })()",
+        action="(() => { const button = document.querySelector('#main button[aria-label=\"Run log line for read-summary\"]'); if (!button) return false; button.click(); return true; })()",
     )
     assert 'data-ready="1"' in dom, dom[:500]
     assert 'data-csp-violations="0"' in dom
     assert 'data-rendered="1"' in dom  # the ECharts density panel drew under the CSP
     assert "Data table" in dom
     assert "Run log line →" in dom
+    assert 'aria-label="Run log line for read-summary"' in dom
     assert "step_end read-summary status=ok" in dom
     assert "Research use only. Not CLIA-validated. Not a diagnosis." in dom
     assert "FLAG: PII" in dom
@@ -658,10 +816,14 @@ def test_headless_page_renders_a_chart_with_zero_csp_violations(server, tmp_path
     [
         ({"state": "mismatch", "reason": None, "declared": "M", "observed": "female"},
          "Pre-analytic mismatch: operator-declared M differs from the measured chrX/chrY call (female)"),
-        ({"state": "no_verdict", "reason": "no_definite_call", "declared": "M", "observed": None},
-         "No definite measured chrX/chrY call is available; no comparison verdict."),
+        ({"state": "no_verdict", "reason": "no_measurement", "declared": "M", "observed": None},
+         "No measured chrX/chrY call is available; no comparison verdict."),
+        ({"state": "no_verdict", "reason": "indeterminate_call", "declared": "M", "observed": "indeterminate"},
+         "Measured chrX/chrY call is indeterminate; no comparison verdict."),
+        ({"state": "concordant", "reason": None, "declared": "M", "observed": "male"},
+         "Operator assertion (M) and measured chrX/chrY call (male) agree."),
         ({"state": "no_verdict", "reason": "malformed_metadata", "declared": None, "observed": "female",
-          "problem": {"code": "TBX-LAB-023", "fix": "Restore the local sample record from a known-good backup before rerunning"}},
+          "problem": {"code": "TBX-LAB-023", "fix": "Restore the local sample record from a known-good backup before setting --sex again; reruns without --sex may continue"}},
          "Stored operator sex assertion metadata is malformed; no comparison verdict."),
         ({"state": "unexpected", "reason": None, "declared": "M", "observed": "male"},
          "Comparison state is unavailable; no comparison verdict."),
@@ -799,7 +961,41 @@ def test_torn_first_event_without_active_writer_is_unavailable(tmp_path) -> None
     assert status["run_log_unavailable"] == {"run_id": run_id, "reason": "malformed_or_empty"}
 
 
+def test_torn_final_log_append_preserves_interrupted_status(tmp_path) -> None:
+    store = LabStore(tmp_path)
+    run_id = "r-20261015-0101-abcd"
+    with store.writer("run", run_id, step="bam-qc"):
+        log = store.run_log(run_id)
+        log.append("run_start", command="run")
+        log.append("sample", source_id="a" * 64, input_id="b" * 64)
+        log.append("step_start", step="bam-qc")
+    with log.path.open("ab") as stream:
+        stream.write(b'{"event":"step_end"')
+    status = api_module.LabApi(store).status()
+    assert status["run_log_unavailable"] is None
+    assert status["interrupted"] == {"run_id": run_id, "step": "bam-qc",
+                                     "source_id": "a" * 64, "input_id": "b" * 64}
+
+
+def test_run_log_reader_only_ignores_an_unterminated_final_fragment(tmp_path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    run_id = "r-20261015-0101-abcd"
+    log = store.run_log(run_id)
+    log.append("run_start", command="run")
+    prefix = log.path.read_bytes()
+    log.path.write_bytes(prefix + b'{"event":')
+    assert api_module._run_events(store, run_id)[1] is None
+    log.path.write_bytes(prefix + b'{"event":\n')
+    assert api_module._run_events(store, run_id) == ([], "malformed_or_empty")
+    log.path.write_bytes(prefix + b'{"event":\n' + prefix)
+    assert api_module._run_events(store, run_id) == ([], "malformed_or_empty")
+    log.path.write_bytes(prefix + b'{"event":"step_end","run_id":"' + b"e" * 25 + b'"}')
+    assert api_module._run_events(store, run_id) == ([], "malformed_or_empty")
+
+
 @pytest.mark.parametrize(("damage", "reason"), (
+    ("missing", "missing"),
     ("oversized", "unreadable_or_over_1mib"),
     ("too_many_lines", "over_4096_lines"),
     ("malformed", "malformed_or_empty"),
@@ -816,7 +1012,9 @@ def test_status_reports_unavailable_latest_log_without_claiming_interruption(tmp
         log.append("run_start", command=command)
         log.append("step_start", step="bam-qc")
     path = store.runs_dir / f"{run_id}.jsonl"
-    if damage == "oversized":
+    if damage == "missing":
+        path.unlink()
+    elif damage == "oversized":
         path.write_bytes(b"x" * (1024 * 1024 + 1))
     elif damage == "too_many_lines":
         path.write_bytes(b"{}\n" * 4097)
@@ -839,12 +1037,23 @@ def test_status_reports_unavailable_latest_log_without_claiming_interruption(tmp
     assert status["run_log_unavailable"] == {"run_id": run_id, "reason": reason}
 
 
-def test_status_does_not_require_run_logs_from_other_writer_commands(tmp_path) -> None:
+@pytest.mark.parametrize(("command", "step"), (
+    ("cohort add", None), ("cohort remove", None),
+    ("asset register-clock-map", "epi-clock-map"),
+    ("asset griffin-register", "griffin"),
+    ("asset end-catalogues-register", "aligned-ends"),
+    ("microbial db add", "database"),
+    ("fetal register", "fetal-fraction"),
+    ("fetal chrY register", "fetal-fraction-chry"),
+    ("donor register", "dd-cfdna-chry"),
+))
+def test_status_does_not_require_run_logs_from_other_writer_commands(tmp_path, command, step) -> None:
     store = LabStore(tmp_path)
     run_id = "r-20261015-0101-abcd"
-    with store.writer("cohort add", run_id):
+    with store.writer(command, run_id, step=step):
         active = api_module.LabApi(store).status()
-        assert active["active"]["command"] == "cohort add"
+        assert active["active"]["command"] == command
+        assert active["active"]["step"] == step
         assert active["run_log_unavailable"] is None
     ended = api_module.LabApi(store).status()
     assert ended["active"] is None and ended["interrupted"] is None
@@ -887,6 +1096,60 @@ def test_status_does_not_echo_malformed_nonanalysis_run_id(tmp_path, monkeypatch
     assert "invalid/secret" not in json.dumps(status)
 
 
+def test_status_keeps_derived_step_and_hides_malformed_heartbeat_labels(tmp_path, monkeypatch) -> None:
+    store = LabStore(tmp_path)
+    run_id = "r-20261015-0101-abcd"
+    monkeypatch.setattr(store, "status", lambda: {"generation": 0, "active": {
+        "command": "run", "run_id": run_id, "step": "bam-qc@split-A",
+    }})
+    assert api_module.LabApi(store).status()["active"]["step"] == "bam-qc@split-A"
+    monkeypatch.setattr(store, "status", lambda: {"generation": 0, "active": {
+        "command": "private/sentinel", "run_id": run_id, "step": "private/sentinel",
+    }})
+    status = api_module.LabApi(store).status()
+    assert status["active"]["command"] is None and status["active"]["step"] is None
+    assert "private/sentinel" not in json.dumps(status)
+
+
+def test_status_hides_malformed_interrupted_step(tmp_path) -> None:
+    store = LabStore(tmp_path)
+    run_id = "r-20261015-0101-abcd"
+    with store.writer("run", run_id):
+        log = store.run_log(run_id)
+        log.append("run_start", command="run")
+        log.append("step_start", step="private/sentinel")
+    status = api_module.LabApi(store).status()
+    assert status["interrupted"]["step"] is None
+    assert "private/sentinel" not in json.dumps(status)
+
+
+def test_sample_api_hides_malformed_result_name_but_reports_damage(tmp_path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    source_id, input_id = "a" * 64, "b" * 64
+    store.sources_dir.mkdir(parents=True, exist_ok=True)
+    (store.sources_dir / f"{source_id}.json").write_text(json.dumps({
+        "source_id": source_id, "example": True,
+        "inputs": [{"input_id": input_id, "used_utc": "2026-10-16T00:00:00Z"}],
+    }))
+    manifest = store.inputs_dir / input_id / "manifest.json"
+    manifest.parent.mkdir(parents=True, exist_ok=True)
+    manifest.write_text(json.dumps({"input_id": input_id}))
+    malformed = store.results_dir / input_id / "private.sentinel" / ("c" * 64)
+    malformed.mkdir(parents=True)
+    (malformed / "selected.json").write_text('{"attempt_id":"invalid"}')
+    known = store.results_dir / input_id / "fragment-size" / ("d" * 64)
+    known.mkdir(parents=True)
+    (known / "selected.json").write_text('{"attempt_id":"invalid"}')
+    api = api_module.LabApi(store)
+    sample = api.sample(source_id[:12])
+    row = api.samples()["samples"][0]
+    assert sample["malformed_result_selections"] and row["malformed_result_selections"]
+    assert sample["unreadable_results"] == row["unreadable_results"] == ["fragment-size"]
+    assert "private.sentinel" not in json.dumps(sample)
+    assert "private.sentinel" not in json.dumps(row)
+
+
 def test_status_reports_deeply_nested_latest_run_pointer_without_crashing(tmp_path) -> None:
     store = LabStore(tmp_path)
     store.ensure()
@@ -920,7 +1183,7 @@ def test_recent_run_candidates_are_bounded_and_do_not_use_unbounded_run_ids(tmp_
 
 
 @pytest.mark.skipif(_chrome() is None, reason="no Chrome/Chromium for the headless Trust/QC check")
-@pytest.mark.parametrize("kind", ("active", "active-pending", "active-before-sample", "interrupted",
+@pytest.mark.parametrize("kind", ("active", "active-pending", "active-derived", "active-before-sample", "interrupted",
                                   "active-unlogged-prior-badlog", "active-unlogged-prior-interrupted"))
 @pytest.mark.parametrize("selected", ("a", "c"))
 def test_trust_qc_run_note_is_scoped_without_replacing_result_status(tmp_path, kind, selected) -> None:
@@ -941,10 +1204,12 @@ def test_trust_qc_run_note_is_scoped_without_replacing_result_status(tmp_path, k
             "library_health": {"no_library_entry": 0, "unverified_citations": 0,
                                "version": "fixture", "error": None},
         }
-    marker = {"run_id": "r-20261015-0101-abcd", "step": "bam-qc",
+    marker = {"run_id": "r-20261015-0101-abcd", "command": "run", "step": "bam-qc",
               "source_id": source_a, "input_id": input_a}
     if kind == "active-pending":
         marker["step"] = "read-summary"
+    if kind == "active-derived":
+        marker["step"] = "bam-qc@split-A"
     shown_marker = {key: value for key, value in marker.items()
                     if kind not in ("active-before-sample", "active-unlogged-prior-badlog",
                                     "active-unlogged-prior-interrupted") or key not in ("source_id", "input_id")}
@@ -952,12 +1217,12 @@ def test_trust_qc_run_note_is_scoped_without_replacing_result_status(tmp_path, k
         shown_marker["step"] = None
     prior_run_id = "r-20261015-0101-eeee"
     if kind.startswith("active-unlogged"):
-        shown_marker = {"run_id": "r-20261015-0101-dddd", "step": "cohort add"}
+        shown_marker = {"run_id": "r-20261015-0101-dddd", "command": "cohort add", "step": "cohort add"}
     with RunningLabServer(LabStore(tmp_path / "root")) as running:
         running.app.api.status = lambda: {
             "generation": 1, "active": {**shown_marker, "started_utc": "2026-10-16T00:00:00Z"} if kind.startswith("active") else None,
             "interrupted": shown_marker if kind == "interrupted" else (
-                {"run_id": prior_run_id, "step": "read-summary"}
+                {"run_id": prior_run_id, "step": "read-summary", "source_id": source_a, "input_id": input_a}
                 if kind == "active-unlogged-prior-interrupted" else None),
             "run_log_unavailable": {"run_id": prior_run_id, "reason": "malformed_or_empty"}
             if kind == "active-unlogged-prior-badlog" else None,
@@ -976,18 +1241,25 @@ def test_trust_qc_run_note_is_scoped_without_replacing_result_status(tmp_path, k
                 not kind.startswith("active-unlogged") or prior_run_id in page),
         )
     run_table = dom.split("<h2>Run</h2>", 1)[1].split("</table>", 1)[0]
-    assert '<th scope="row">bam-qc</th><td>ok' in run_table
+    assert re.search(r'<th scope="row">bam-qc</th><td[^>]*>ok(?:\s|<)', run_table)
     if kind == "active-pending":
         assert ("Latest run in progress during read-summary; no result was published for this step." in dom) == (selected == "a")
+    if kind == "active-derived":
+        assert "step: bam-qc@split-A" in dom
+        assert "no result was published for this step" not in run_table
     note = "latest run " + ("interrupted" if kind == "interrupted" else "in progress")
     assert (note in run_table) == (selected == "a" and kind in ("active", "interrupted"))
     if kind == "active-before-sample":
         assert "step: starting" in dom and "step: null" not in dom
+    if kind.startswith("active-unlogged"):
+        assert "Lab cohort add is in progress" in dom
+        assert "A Lab run is in progress" not in dom
     if kind == "active-unlogged-prior-badlog":
         assert f"Run log for {prior_run_id} is unavailable (log malformed or empty)" in dom
         assert "Run log status unavailable" not in dom
     if kind == "active-unlogged-prior-interrupted":
         assert f"Earlier run ({prior_run_id}) stopped during read-summary" in dom
+        assert ("Earlier run interrupted during read-summary; no result was published for this step." in dom) == (selected == "a")
 
 
 @pytest.mark.skipif(_chrome() is None, reason="no Chrome/Chromium for the headless Trust/QC check")
@@ -1081,9 +1353,18 @@ def test_run_log_line_is_authenticated_matched_and_allowlisted(tmp_path, monkeyp
         assert payload == {"found": True, "run_id": run_id, "line": 3, "step": "sex-check",
                            "utc": payload["utc"], "status": "ok", "skip_reason": None,
                            "duration_s": 1.25}
+        pinned = f"{path}/{input_id}/{identity}/{attempt_id}"
+        assert json.loads(_get(running, pinned, cookie)[1])["run_id"] == run_id
+        assert _get(running, f"{path}/{'e' * 64}/{identity}/{attempt_id}", cookie)[0].status == 404
+        assert _get(running, f"{path}/{input_id}/{'d' * 64}/{attempt_id}", cookie)[0].status == 404
+        assert _get(running, f"{path}/{input_id}/{identity}/a-20261015T010100000000-deadbeef", cookie)[0].status == 404
+        with log.path.open("ab") as stream:
+            stream.write(b'{"event":"step_end"')
+        assert json.loads(_get(running, path, cookie)[1])["line"] == 3
         assert "/secret/path" not in data.decode()
         sample.full.results["sex-check"] = _selected_sex_result(source_id, input_id, "d" * 64)
         assert _get(running, path, cookie)[0].status == 404
+        assert _get(running, pinned, cookie)[0].status == 404
         sample.full.results["sex-check"] = result
         sample.full.input_id = "e" * 64
         assert _get(running, path, cookie)[0].status == 404
@@ -1102,6 +1383,7 @@ def test_run_log_line_uses_only_the_selected_attempt(tmp_path, monkeypatch) -> N
                attempt_id=first, status="ok")
     second = store.publish_result(result, input_id=input_id)
     new = store.run_log("r-20261015-0101-0001")
+    new.append("run_start", command="run")
     new.append("sample", source_id=source_id, input_id=input_id)
     new.append("step_end", step="sex-check", parameters_sha256=identity, input_id=input_id,
                attempt_id=second, status="ok")
@@ -1112,7 +1394,10 @@ def test_run_log_line_uses_only_the_selected_attempt(tmp_path, monkeypatch) -> N
     monkeypatch.setattr(api_module.views, "load_sample", lambda _store, _source: sample)
     api = api_module.LabApi(store)
     assert api.run_log_line(source_id[:12], "sex-check")["run_id"] == new.run_id
+    assert api.run_log_line(source_id[:12], "sex-check", input_id, identity, first) == {"found": False}
+    assert api.run_log_line(source_id[:12], "sex-check", input_id, identity, second)["run_id"] == new.run_id
     latest = store.run_log("r-20261015-0101-0000")
+    latest.append("run_start", command="run")
     latest.append("sample", source_id=source_id, input_id=input_id)
     latest.append("step_end", step="sex-check", parameters_sha256=identity, input_id=input_id,
                   attempt_id=second, status="ok")
@@ -1121,6 +1406,7 @@ def test_run_log_line_uses_only_the_selected_attempt(tmp_path, monkeypatch) -> N
     latest.path.unlink()
     new.path.unlink()
     legacy = store.run_log("r-20261015-0101-bbbb")
+    legacy.append("run_start", command="run")
     legacy.append("sample", source_id=source_id, input_id=input_id)
     legacy.append("step_end", step="sex-check", parameters_sha256=identity, input_id=input_id, status="ok")
     assert api.run_log_line(source_id[:12], "sex-check") == {"found": False}

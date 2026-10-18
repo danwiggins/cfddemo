@@ -1,11 +1,22 @@
-# Synthetic runner durability and recovery
+# Local runner durability and recovery
 
-Status: first implementation wave; synthetic inputs and in-process stages only.
+Status: v1 runner recovery contract, first proven with synthetic inputs;
+subsequently used by an unqualified local-BAM path.
 
-This runner proves local orchestration behavior. It does **not** provide OCI
+Current scope: this document records `traceback_runner.runner.Runner`'s v1
+receipt and recovery contract. The separately implemented Lab runner uses
+`traceback_lab.runner.run_plan` and a per-algorithm worker process with a
+default 3,600-second timeout. It records `ok`, `skipped`, or `failed` attempts;
+missing or failed work and affected dependents can recompute on rerun. Those
+Lab attempts are unsigned research outputs and do not inherit this runner's
+signed-record or receipt-adoption claims. See `docs/LAB-GUIDE.md` for the Lab
+operator path.
+
+This runner provides local orchestration and is used by the unqualified
+local-BAM path in `docs/OPERATOR-GUIDE.md`. It does **not** provide OCI
 isolation, zero-egress enforcement, secret stripping, production signing,
-qualified hardware execution, real genomic processing, or scientific/protocol
-qualification. Real-data execution remains disabled.
+qualified hardware execution, or scientific/protocol qualification. Its
+real-input output is development-signed, local, and unqualified.
 
 ## Public interface
 
@@ -100,8 +111,8 @@ and qualification evidence.
 - Disk-pressure, timeout, and OOM enforcement.
 - Signed workflow resolution and signed result bundles.
 - Reviewed expand/contract migrations and active-job rollback exercises.
-- Real modBAM/POD5, Dorado, hg38, workstation, scientific, and protocol
-  qualification.
+- POD5/Dorado, exact reference and workstation, scientific, and protocol
+  qualification. The available local-BAM path is unqualified.
 
 ### Recovery review hardening
 
@@ -113,6 +124,12 @@ job-specific incomplete private trees are quarantined under that same lock.
 No original absolute source locator is persisted for automatic recapture.
 Missing or changed attached snapshots fail closed rather than being silently
 recreated from mutable source data.
+`backup(destination)` saves only SQLite; attached snapshot trees need a separate
+backup. When restoring an attached sealed snapshot, preserve its exact
+POSIX modes: `0555` for the snapshot root and nested directories, and `0444`
+for the manifest and every input file. Verification refuses mode drift even
+when file bytes still match. Restore the original sealed tree from a trusted
+backup; do not change permissions on a live snapshot merely to pass recovery.
 
 Private-attempt classification and quarantine run inside one SQLite write
 transaction, excluding concurrent lease grants. Current unexpired attempt
