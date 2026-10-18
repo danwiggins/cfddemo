@@ -1098,6 +1098,51 @@ def test_sigterm_is_an_interrupt_too(lab_world, shared_mmi, tmp_path) -> None:
     assert json.loads(out)["data"]["code"] == "TBX-LAB-015"
 
 
+@pytest.mark.parametrize("signum", [signal.SIGINT, signal.SIGTERM])
+def test_interrupt_during_read_only_preflight_has_problem_and_no_root(tmp_path, signum) -> None:
+    root = tmp_path / "missing-root"
+    ready = tmp_path / "preflight-ready"
+    script = textwrap.dedent(
+        """
+        import os
+        import sys
+        import time
+        from pathlib import Path
+        from traceback_lab import run_command
+        from traceback_runner.cli import main
+
+        def held_preflight(*_args, **_kwargs):
+            Path(os.environ["LAB_TEST_READY"]).write_text("ready")
+            time.sleep(60)
+
+        run_command._preflight_budget = held_preflight
+        sys.exit(main(sys.argv[1:]))
+        """
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-c", script, "lab", "run", "--example", "--root", str(root), "--json"],
+        cwd=REPO, env={**os.environ, "LAB_TEST_READY": str(ready), "PYTHONPATH": str(REPO)},
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        deadline = time.time() + 30
+        while not ready.exists() and time.time() < deadline and process.poll() is None:
+            time.sleep(0.05)
+        assert ready.exists(), process.communicate(timeout=5)
+        process.send_signal(signum)
+        out, err = process.communicate(timeout=10)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.communicate(timeout=10)
+    assert process.returncode == 6, (out, err)
+    problem = json.loads(out)["data"]
+    assert problem["code"] == "TBX-LAB-015"
+    assert problem["step"] == "preflight"
+    assert problem["retryable"] is True
+    assert not root.exists()
+
+
 def test_index_from_another_reference_is_refused_before_publish(lab_world, capsys, monkeypatch, tmp_path) -> None:
     _registry(monkeypatch)
     from traceback_lab.synthetic import write_reference
@@ -1169,6 +1214,30 @@ def _tiny_aligned_bam(lab_world, *, read_group: dict | None = None) -> Path:
     return bam
 
 
+def test_cold_exact_preflight_reports_hashing_on_json_stderr(lab_world, capsys, monkeypatch) -> None:
+    from traceback_lab.ingest import Budget
+
+    _registry(monkeypatch, "SUMMARY")
+    bam = _tiny_aligned_bam(lab_world)
+    real_budget = run_module.disk_budget
+    calls = 0
+
+    def force_exact(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return Budget({"upper": 1}, 0) if calls == 1 else real_budget(*args, **kwargs)
+
+    monkeypatch.setattr(run_module, "disk_budget", force_exact)
+    previous_term = signal.getsignal(signal.SIGTERM)
+    code, out, err = _lab(capsys, "run", str(bam), "--root", str(lab_world["root"]), "--json")
+    assert code == 0, (out, err)
+    assert json.loads(out)["status"] == "ok"
+    assert "preflight  checking exact disk budget" in err
+    assert "preflight  hashing chunk 1/1" in err
+    assert calls >= 3  # cheap bound, exact read-only check, and locked recheck
+    assert signal.getsignal(signal.SIGTERM) is previous_term
+
+
 @pytest.mark.parametrize("cache_seeded", [False, True])
 def test_low_disk_refusal_leaves_registered_root_unchanged(lab_world, capsys, monkeypatch, cache_seeded) -> None:
     """AC4: a rejected new input must not change even Lab bookkeeping."""
@@ -1193,12 +1262,14 @@ def test_low_disk_refusal_leaves_registered_root_unchanged(lab_world, capsys, mo
 
     before = inventory()
     monkeypatch.setattr(run_module, "disk_budget", lambda *_args, **_kwargs: Budget({"aligned": 1024}, 0))
+    previous_term = signal.getsignal(signal.SIGTERM)
     code, payload = _json(capsys, "run", str(bam), "--root", str(root))
     assert code == 3 and payload["data"]["code"] == "TBX-LAB-010"
     assert payload["data"]["required_bytes"] == 1024
     assert payload["data"]["free_bytes"] == 0
     assert payload["data"]["step"] == "ingest"
     assert inventory() == before
+    assert signal.getsignal(signal.SIGTERM) is previous_term
 
 
 def test_prealigned_cold_hash_once_then_reuses_under_low_disk(lab_world, capsys, monkeypatch) -> None:
