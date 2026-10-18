@@ -23,6 +23,7 @@ from .ingest import (
     GIB,
     AlignedInput,
     ChunkSet,
+    _check_regular,
     align,
     aligner_argv_identity,
     cached_sha256,
@@ -555,7 +556,10 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
             samtools, minimap2 = find_samtools(), find_minimap2()
             low, high = estimate_align_minutes(chunkset.total_bytes)
             reason = "new source"
-            existing = args.mmi if args.mmi is not None else mmi_path(store, reference)
+            existing = (
+                _check_regular(args.mmi.absolute(), 0, args.mmi.name)
+                if args.mmi is not None else mmi_path(store, reference)
+            )
             if samtools.version and minimap2.version and existing.is_file():
                 cache = store.load_hash_cache()
                 key = store.strong_hash_cache_key(existing)
@@ -708,7 +712,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     input_platform = _declared_platform(chunkset)
                     with_sex_assertion(source_record(store, chunkset.source_id) or {}, args.sex)
                     reference = resolve_reference(store.root, args.reference_id, example=args.example)
-                    verify_reference_source(store, reference, write_cache=True)
+                    reference_proof = verify_reference_source(store, reference, write_cache=True)
                     reference_id, reference_sha256 = reference.reference_id, reference.sha256
                     example = bool(args.example)
                     progress(
@@ -734,7 +738,10 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                         if input_manifest(store, prealigned_id) is None:
                             budget = disk_budget(store, chunkset, mmi_needed=False, fasta_bytes=0)
                             require_budget(budget, "ingest")
-                        aligned = ingest_prealigned(store, chunkset, reference, progress=progress)
+                        aligned = ingest_prealigned(
+                            store, chunkset, reference, reference_proof=reference_proof,
+                            progress=progress,
+                        )
                     else:
                         samtools, minimap2 = require_aligner_tools()
                         # Reuse needs no disk: decide reuse before the budget.
@@ -765,13 +772,16 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                             store,
                             reference,
                             minimap2,
+                            reference_proof=reference_proof,
                             override=args.mmi,
                             scrubber=scrubber,
                             timeout_s=ALIGN_TIMEOUT_S,
                             echo=_echo(args.verbose),
                             progress=progress,
                         )
-                        verify_reference_source(store, reference, write_cache=True)
+                        verify_reference_source(
+                            store, reference, write_cache=True, expected_proof=reference_proof,
+                        )
                         if change is not None and not reusable:
                             low, high = estimate_align_minutes(chunkset.total_bytes)
                             warnings.append(_aligner_warning(change, low, high))
@@ -787,6 +797,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                             minimap2=minimap2,
                             mmi=mmi,
                             mmi_sha256=mmi_sha,
+                            reference_proof=reference_proof,
                             threads=args.threads,
                             sort_mem=args.sort_mem,
                             timeout_s=ALIGN_TIMEOUT_S,

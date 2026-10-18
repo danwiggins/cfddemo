@@ -43,7 +43,10 @@ from .store import MAX_EXECUTION_PLAN_BYTES, LabStore, RunLog, WriterLock, open_
 DEFAULT_TIMEOUT_S = 3600.0
 
 
-def _verify_target_reference(store: LabStore, target: RunTarget, *, write_cache: bool) -> None:
+def _verify_target_reference(
+    store: LabStore, target: RunTarget, *, write_cache: bool,
+    expected_proof: str | None = None,
+) -> str | None:
     """Guard both cached selections and new workers against reference drift."""
 
     if not target.reference_integrity_required:
@@ -68,7 +71,9 @@ def _verify_target_reference(store: LabStore, target: RunTarget, *, write_cache:
             cause="run target FASTA path differs from the current reference registration",
             fix="Restore the original reference registration for this stored input",
         )
-    verify_reference_source(store, reference, write_cache=write_cache)
+    return verify_reference_source(
+        store, reference, write_cache=write_cache, expected_proof=expected_proof,
+    )
 
 
 def _cached_plan_matches(attempt: Path | None, expected: Mapping[str, Any], *, required: bool) -> bool:
@@ -254,7 +259,7 @@ def run_plan(
     done: dict[str, StepResult] = dict(upstream_results or {})
     scratch_root = store.lab / "tmp" / run_id
     for item in items:
-        _verify_target_reference(store, target, write_cache=lock is not None)
+        reference_proof = _verify_target_reference(store, target, write_cache=lock is not None)
         algorithm = item.algorithm
         platform_rejected = target.platform not in algorithm.requires.platforms
         pon_unavailable = target.extras.get("pon_unavailable") if algorithm.id == "copy-number" else None
@@ -496,7 +501,10 @@ def run_plan(
                         peak_disk=outcome.peak_disk_bytes,
                     )
                 else:
-                    _verify_target_reference(store, target, write_cache=lock is not None)
+                    _verify_target_reference(
+                        store, target, write_cache=lock is not None,
+                        expected_proof=reference_proof,
+                    )
                     attempt_id = store.publish_result(
                         envelope,
                         input_id=target.input_id,
