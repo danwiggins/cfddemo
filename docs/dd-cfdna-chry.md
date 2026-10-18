@@ -55,12 +55,17 @@ Keep patient identifiers out of free-text labels; the Lab stores those labels
 in the private contract and does not echo them in CLI output. The registration
 directory itself is sensitive transplant-related metadata, so protect the Lab
 root accordingly.
+
 Synthetic calibration needs `--allow-synthetic` at registration. That option
-reserves the input's calibration slot through the Lab registration path for mechanics-only testing;
-it does not permit a numeric donor-fraction result. If an existing registration
-is damaged, restore its exact original bytes from backup. A different
-calibration requires a new input identity; the Lab registration path does not
-overwrite existing provenance. Protect the Lab root and its backups from direct edits.
+reserves that input ID's immutable calibration slot in this ROOT for mechanics-only
+testing; it does not permit a numeric donor-fraction result. Re-ingesting the
+same BAM with the same reference and alignment inputs in this ROOT reproduces
+its source and input IDs and does not free the slot. A separate fresh ROOT can
+hold an operator-verified calibration for those same identities without
+overwriting the synthetic registration; the IDs are derived from the input
+bytes and reference/alignment identity, independent of ROOT. If an existing
+registration is damaged, restore its exact original bytes from backup. Protect
+the Lab root and its backups from direct edits.
 
 The estimator counts eligible read starts on hg38 chrY outside its two
 pseudoautosomal intervals. It divides that count by all eligible reads on

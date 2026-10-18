@@ -16,14 +16,6 @@ keep names, gestational dates, and other patient identifiers out of the contract
 including its free-text protocol label. The Lab does not attempt to detect them
 and does not echo that label in CLI output:
 
-The current adapter uses uncorrected, combined-strand 50 kb NIPTeR bins and
-rejects a control RDS with a different correction or strand layout. Its own
-eligibility gate counts Lab reads; NIPTeR performs its package-defined BAM
-binning, so the operator must verify equivalent filtering in the control and
-test sample before treating z-scores as comparable. The BAM must have canonical
-hg38 `chr1`–`chr22`, `chrX`, `chrY` order and all primary-chromosome lengths because
-NIPTeR's binning assumes chromosome order.
-
 ```json
 {
   "schema": "traceback.lab.fetal-contract.v1",
@@ -41,6 +33,14 @@ NIPTeR's binning assumes chromosome order.
   "nipter_version": "1.0.2"
 }
 ```
+
+The current adapter uses uncorrected, combined-strand 50 kb NIPTeR bins and
+rejects a control RDS with a different correction or strand layout. Its own
+eligibility gate counts Lab reads; NIPTeR performs its package-defined BAM
+binning, so the operator must verify equivalent filtering in the control and
+test sample before treating z-scores as comparable. The BAM must have canonical
+hg38 `chr1`–`chr22`, `chrX`, `chrY` order and all primary-chromosome lengths because
+NIPTeR's binning assumes chromosome order.
 
 `fetal_sex` may be `male`, `female`, or `unknown`; it is an explicit assertion,
 not an inference by this adapter. `control_n` must be at least ten and is
