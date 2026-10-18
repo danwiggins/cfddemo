@@ -5,3 +5,4 @@ traceback_lab/pon_scripts/validatePanelOfNormals.R -text whitespace=-trailing-sp
 traceback_runner/toolchain_locks/*.lock -text
 traceback_runner/toolchain_locks/runIchorCNA.R -text
 tests/lab/fixtures/griffin/*.tsv text eol=lf
+tests/lab/data/finaletoolkit_110_*.tsv text eol=lf
