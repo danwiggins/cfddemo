@@ -381,7 +381,6 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
     store.check_version()
     from .pon_consumer import require_built_cohort, require_cohort_input
 
-    cohort = require_built_cohort(store, args.cohort) if args.cohort is not None else None
     entries = registry.registry_entries()
     items = registry.plan([alg for _, alg in entries], only=_only(args.only), profile=args.profile)
     plan_rows = [
@@ -550,8 +549,9 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
                 f"ALIGN     {reason}" + ("" if reason == "reused" else f" · estimate {low:.0f}-{high:.0f} min")
                 + (" · minimap2 index built first" if mmi_needed else "")
             )
-    if cohort is not None:
+    if args.cohort is not None:
         require_cohort_input(args.cohort, platform=platform, example=example)
+        cohort = require_built_cohort(store, args.cohort)
         compatibility = "after alignment" if alignment_required else "during run"
         data["cohort"] = {
             "id": cohort.cohort_id, "version": cohort.version_id,

@@ -160,11 +160,12 @@ def test_example_preview_rejects_explicit_cohort_before_generating_files(
     assert _snapshot(tmp_path) == {}
 
 
+@pytest.mark.parametrize("panel", ["missing", "built"])
 @pytest.mark.parametrize("input_kind,expected_code", [("illumina", "TBX-LAB-024"), ("example", "TBX-LAB-021")])
 @pytest.mark.parametrize("only", [None, "bam-qc"])
 def test_stored_preview_refuses_ineligible_explicit_panel_without_writes(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], input_kind: str,
-    expected_code: str, only: str | None,
+    expected_code: str, only: str | None, panel: str,
 ) -> None:
     import pysam
 
@@ -182,7 +183,8 @@ def test_stored_preview_refuses_ineligible_explicit_panel_without_writes(
         with pysam.AlignmentFile(str(directory / "aligned.bam"), "wb", header=header):
             pass
     manifest_path.write_text(json.dumps(manifest))
-    _publish_built_panel(store)
+    if panel == "built":
+        _publish_built_panel(store)
     with store.writer("cohort build", new_run_id()):
         before = _snapshot(tmp_path)
         code, payload = _dry_run(capsys, store, source_id, only=only)
