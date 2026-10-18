@@ -27,6 +27,7 @@ import websocket
 
 from traceback_lab.envelope import Depth, Metric, ResultEnvelope, provenance
 from traceback_lab.store import LabStore
+from traceback_lab.store import ResultOrderUnavailable
 from traceback_lab import views
 from traceback_lab.web import api as api_module
 from traceback_lab.web.server import CSP, RunningLabServer
@@ -80,6 +81,22 @@ def _session(server) -> str:
 def _get(server, path, cookie, **headers):
     response, data = _request(server, "GET", path, headers={"Cookie": cookie, **headers})
     return response, data
+
+
+def test_selection_read_unavailable_is_sanitized_and_actionable(tmp_path, monkeypatch) -> None:
+    with RunningLabServer(LabStore(tmp_path)) as running:
+        cookie = _session(running)
+
+        def fail_selection(_id12):
+            raise ResultOrderUnavailable("private path /sensitive/results/selected.json")
+
+        monkeypatch.setattr(running.app.api, "sample", fail_selection)
+        response, body = _get(running, "/api/samples/" + "a" * 12, cookie)
+    assert response.status == 503
+    error = json.loads(body)["error"]
+    assert error["code"] == "TBX-LAB-WEB-SELECTION-UNAVAILABLE"
+    assert "Retry" in error["fix"] and "restore" in error["fix"]
+    assert b"/sensitive/" not in body
 
 
 def test_binds_loopback_and_sends_the_narrow_csp(server) -> None:

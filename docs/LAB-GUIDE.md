@@ -850,6 +850,13 @@ panel construction or member recomputation fails, no new generation is
 selected and any previously selected generation remains current. The
 read-side fallback that retains independent comparisons when an existing
 panel later becomes unavailable does not apply to building a generation.
+Member selector changes are protected by a durable cohort selection journal.
+If a build process is killed, readers continue to see the old selections while
+the old generation is current. The next Lab writer restores those selections
+before starting new work, or confirms the new generation if its pointer was
+already published. Immutable result attempts remain available for inspection.
+If the journal is damaged, selection reads fail closed and writers stop until
+the damaged storage is repaired from a known-good backup.
 `pon_n` counts all panel sources; a selected member panel uses `pon_n - 1`
 sources. A nonmember uses the full panel. Both copy-number and instability
 still require 2M eligible reads on the target input. Copy-number also enforces

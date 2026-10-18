@@ -35,7 +35,7 @@ from traceback_runner.web.auth import (
     build_loopback_config,
 )
 
-from ..store import LabStore
+from ..store import LabStore, ResultOrderUnavailable
 from . import api
 
 STATIC = Path(__file__).resolve().parent / "static"
@@ -232,6 +232,12 @@ class _Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": {"code": "TBX-LAB-WEB-404"}})
         except BoundaryDenied as denied:
             self._json(denied.status_code, {"error": {"code": denied.code}})
+        except ResultOrderUnavailable:
+            self._json(503, {"error": {
+                "code": "TBX-LAB-WEB-SELECTION-UNAVAILABLE",
+                "message": "Current result selections are unavailable.",
+                "fix": "Retry; if this persists, inspect Lab storage and restore damaged selection files from a known-good backup.",
+            }})
         except Exception:  # noqa: BLE001 - never leak internals
             self._json(500, {"error": {"code": "TBX-LAB-WEB-500"}})
 

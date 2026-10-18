@@ -43,7 +43,7 @@ from ..interpretation.engine import (
     qc_band,
 )
 from ..problems import LabProblem
-from ..store import LabStore, summarize_run
+from ..store import LabStore, ResultOrderUnavailable, SelectionSnapshotChanged, summarize_run
 from ..tf_concordance import report_tf_concordance
 
 _LOGGED_SAMPLE_COMMANDS = frozenset({"run", "simulate cna", "simulate split", "cohort build"})
@@ -562,6 +562,15 @@ class LabApi:
         return interpreted, projections
 
     def samples(self) -> dict[str, Any]:
+        for _ in range(3):
+            try:
+                with self.store.selection_read_context():
+                    return self._samples_once()
+            except SelectionSnapshotChanged:
+                continue
+        raise ResultOrderUnavailable("sample selections kept changing during read")
+
+    def _samples_once(self) -> dict[str, Any]:
         library = self.libraries.get()
         cohort_snapshot = self._published_sample_cohort()
         rows = []
@@ -619,6 +628,15 @@ class LabApi:
         return None, [mapping[value] for value in match.candidates]
 
     def sample(self, id12: str) -> dict[str, Any]:
+        for _ in range(3):
+            try:
+                with self.store.selection_read_context():
+                    return self._sample_once(id12)
+            except SelectionSnapshotChanged:
+                continue
+        raise ResultOrderUnavailable("sample selections kept changing during read")
+
+    def _sample_once(self, id12: str) -> dict[str, Any]:
         source_id, candidates = self._resolve(id12)
         if source_id is None:
             return {"found": False, "candidates": candidates}
@@ -782,6 +800,18 @@ class LabApi:
     def run_log_line(self, id12: str, algorithm_id: str,
                      expected_input_id: str | None = None, expected_identity: str | None = None,
                      expected_attempt_id: str | None = None) -> dict[str, Any]:
+        for _ in range(3):
+            try:
+                with self.store.selection_read_context():
+                    return self._run_log_line_once(id12, algorithm_id, expected_input_id,
+                                                   expected_identity, expected_attempt_id)
+            except SelectionSnapshotChanged:
+                continue
+        raise ResultOrderUnavailable("result selections kept changing during run-log read")
+
+    def _run_log_line_once(self, id12: str, algorithm_id: str,
+                           expected_input_id: str | None = None, expected_identity: str | None = None,
+                           expected_attempt_id: str | None = None) -> dict[str, Any]:
         """Return a bounded, allowlisted step-end line for the selected full result."""
 
         source_id, _ = self._resolve(id12)
@@ -862,6 +892,15 @@ class LabApi:
         return {"cohorts": rows, "unavailable": unavailable}
 
     def compare(self, id12: str, cohort_id: str) -> dict[str, Any]:
+        for _ in range(3):
+            try:
+                with self.store.selection_read_context():
+                    return self._compare_once(id12, cohort_id)
+            except SelectionSnapshotChanged:
+                continue
+        raise ResultOrderUnavailable("cohort selections kept changing during comparison")
+
+    def _compare_once(self, id12: str, cohort_id: str) -> dict[str, Any]:
         source_id, candidates = self._resolve(id12)
         if source_id is None:
             return {"found": False, "candidates": candidates}
@@ -1007,6 +1046,15 @@ class LabApi:
                 "metrics": rows, "unscored": unscored}
 
     def compare_samples(self, id12_a: str, id12_b: str) -> dict[str, Any]:
+        for _ in range(3):
+            try:
+                with self.store.selection_read_context():
+                    return self._compare_samples_once(id12_a, id12_b)
+            except SelectionSnapshotChanged:
+                continue
+        raise ResultOrderUnavailable("result selections kept changing during sample comparison")
+
+    def _compare_samples_once(self, id12_a: str, id12_b: str) -> dict[str, Any]:
         """Compare two distinct current full-input snapshots, B minus A.
 
         This is cross-sectional: source IDs identify samples, not visits or
@@ -1149,6 +1197,15 @@ class LabApi:
 
     # -- artifacts (D34 containment) -------------------------------------------------
     def artifact(self, id12: str, label: str, algorithm_id: str, panel_id: str) -> bytes | None:
+        for _ in range(3):
+            try:
+                with self.store.selection_read_context():
+                    return self._artifact_once(id12, label, algorithm_id, panel_id)
+            except SelectionSnapshotChanged:
+                continue
+        raise ResultOrderUnavailable("result selections kept changing during artifact read")
+
+    def _artifact_once(self, id12: str, label: str, algorithm_id: str, panel_id: str) -> bytes | None:
         source_id, _ = self._resolve(id12)
         if source_id is None:
             return None

@@ -17,7 +17,6 @@ definition).  Above this run's depth there are no cells; the library's
 from __future__ import annotations
 
 import math
-import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,7 +30,7 @@ from .problems import LabProblem
 from .registry import load_registry
 from .sample_metadata import sex_assertion, sex_concordance
 from .stability import Side, band_at, deviation, stable
-from .store import LabStore
+from .store import LabStore, ResultOrderUnavailable, SelectionSnapshotChanged
 
 CELL_STATES = ("ok_usable", "ok_unvalidated", "ok_unstable", "not_interpretable", "unavailable", "skipped", "failed")
 _ROW_ORDER = {state: index for index, state in enumerate(CELL_STATES)}
@@ -67,6 +66,19 @@ def _selected_results_with_unreadable(
     store: LabStore, input_id: str, identities: Mapping[str, str] | None = None,
     *, issues: dict[str, set[str]] | None = None,
 ) -> tuple[dict[str, ResultEnvelope], set[str], set[str], dict[str, str]]:
+    for _ in range(3):
+        try:
+            with store.selection_read_context():
+                return _selected_results_with_unreadable_once(store, input_id, identities, issues=issues)
+        except SelectionSnapshotChanged:
+            continue
+    raise ResultOrderUnavailable("result selections kept changing during read")
+
+
+def _selected_results_with_unreadable_once(
+    store: LabStore, input_id: str, identities: Mapping[str, str] | None = None,
+    *, issues: dict[str, set[str]] | None = None,
+) -> tuple[dict[str, ResultEnvelope], set[str], set[str], dict[str, str]]:
     """The selected result per algorithm for one input.
 
     Without ``identities`` the latest published execution identity wins; with them (a
@@ -92,30 +104,22 @@ def _selected_results_with_unreadable(
             continue
         for identity_dir in sorted(algorithm_dir.iterdir()):
             if wanted is not None and identity_dir.name != wanted:
-                try:
-                    os.lstat(identity_dir / "selected.json")
-                except FileNotFoundError:
-                    pass
-                except OSError:
-                    pass
-                else:
+                if store.selection_visible(input_id, algorithm_dir.name, identity_dir.name):
                     stale.add(algorithm_dir.name)
                 continue
             try:
                 selected = store.selected_result_with_attempt_and_order(
                     input_id, algorithm_dir.name, identity_dir.name,
                 )
+            except ResultOrderUnavailable:
+                raise
             except (OSError, ValueError):
                 selected = None
             if selected is None:
                 # A present but invalid selector may be the newest identity.
                 # Showing another identity would silently return stale data.
-                try:
-                    os.lstat(identity_dir / "selected.json")
-                except FileNotFoundError:
+                if not store.selection_visible(input_id, algorithm_dir.name, identity_dir.name):
                     continue
-                except OSError:
-                    pass
                 order = store.selection_order_hint(input_id, algorithm_dir.name, identity_dir.name)
                 if algorithm_dir.name not in invalid_orders:
                     invalid_orders[algorithm_dir.name] = order

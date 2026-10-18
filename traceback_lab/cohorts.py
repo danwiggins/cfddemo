@@ -23,6 +23,7 @@ from traceback_runner.serialization import canonical_json_bytes
 
 from .cohort_contracts import CohortGeneration, CohortMember, CohortResult, MetricProjection, project_metric
 from .cohort_density import capture_density_vectors
+from .file_access import directory_no_follow
 from .identity import SHA256_PATTERN, canonical_sha256, cohort_compat_key
 from .ingest import resolve_sample, source_ids
 from .problems import LabProblem
@@ -114,6 +115,29 @@ def _generation_versions(directory: Path, cohort_id: str) -> tuple[int, ...]:
         except ValueError as exc:
             raise _storage_problem(cohort_id, "generation name") from exc
     return tuple(sorted(versions))
+
+
+def _aborted_generation_versions(directory: Path, cohort_id: str) -> frozenset[int]:
+    """Known unpublished first-build generations survive for inspection."""
+
+    path = directory / "aborted-generations.json"
+    try:
+        with os.fdopen(open_regular_no_follow(path), "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 64 * 1024:
+                raise ValueError("invalid aborted-generation marker")
+            data = json.loads(stream.read(64 * 1024 + 1))
+    except FileNotFoundError:
+        return frozenset()
+    except (OSError, ValueError, TypeError) as exc:
+        raise _storage_problem(cohort_id, "aborted-generations.json") from exc
+    if (not isinstance(data, dict) or set(data) != {"schema", "versions"}
+            or data["schema"] != "traceback.lab.aborted-generations.v1"
+            or not isinstance(data["versions"], list)
+            or any(type(version) is not int or version < 1 for version in data["versions"])
+            or data["versions"] != sorted(set(data["versions"]))):
+        raise _storage_problem(cohort_id, "aborted-generations.json")
+    return frozenset(data["versions"])
 
 
 def read_roster(store: LabStore, cohort_id: str) -> tuple[str, ...]:
@@ -733,13 +757,30 @@ def _restore_member_selections(
 
     changed_dirs: set[Path] = set()
     for selector in _member_selection_paths(store, input_ids, algorithm_ids) - before.keys():
-        selector.unlink()
+        with directory_no_follow(selector.parent) as directory:
+            os.unlink(selector.name, dir_fd=directory)
+            os.fsync(directory)
         changed_dirs.add(selector.parent)
     for selector, content in before.items():
-        write_atomic(selector, content)
+        # Recovery cannot follow a replaced results/input/algorithm/identity
+        # ancestor into another tree. Keep the fd for the replace and sync.
+        with directory_no_follow(selector.parent) as directory:
+            temporary = f".selected.json.{os.getpid()}.{os.urandom(4).hex()}.tmp"
+            try:
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+                with os.fdopen(os.open(temporary, flags, 0o600, dir_fd=directory), "wb") as stream:
+                    stream.write(content)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.replace(temporary, selector.name,
+                           src_dir_fd=directory, dst_dir_fd=directory)
+                os.fsync(directory)
+            finally:
+                try:
+                    os.unlink(temporary, dir_fd=directory)
+                except FileNotFoundError:
+                    pass
         changed_dirs.add(selector.parent)
-    for directory in changed_dirs:
-        _fsync_dir(directory)
     if changed_dirs:
         store.bump_generation()
 
@@ -750,7 +791,12 @@ def read_current(store: LabStore, cohort_id: str) -> CohortGeneration | None:
     directory = _cohort_dir(store, cohort_id)
     pointer = _read_cohort_json(directory / "current.json", cohort_id)
     if pointer is None:
-        if _generation_versions(directory, cohort_id):
+        versions = _generation_versions(directory, cohort_id)
+        pending = store._pending_reader_overlay()
+        if (pending is not None and pending.cohort_id == cohort_id
+                and pending.old_version is None):
+            return None
+        if versions and not set(versions).issubset(_aborted_generation_versions(directory, cohort_id)):
             raise _storage_problem(
                 cohort_id, "current.json",
                 fix="If the member roster is intact, run lab cohort build with the same --root to publish a new generation; otherwise restore current.json from a known-good backup",
@@ -840,8 +886,8 @@ def build_cohort(store: LabStore, cohort_id: str, *, kind: str = "internal_cohor
     run_id = new_run_id()
     with store.writer("cohort build", run_id) as lock, _cohort_run_log(store, run_id, cohort_id, kind) as log:
         directory = _cohort_dir(store, cohort_id)
-        if _read_cohort_json(directory / "current.json", cohort_id) is not None:
-            read_current(store, cohort_id)
+        old_generation = (read_current(store, cohort_id)
+                          if _read_cohort_json(directory / "current.json", cohort_id) is not None else None)
         generations = directory / "generations"
         versions = _generation_versions(directory, cohort_id)
         if (versions or (directory / "current.json").exists()) and not (directory / "members.json").is_file():
@@ -852,6 +898,7 @@ def build_cohort(store: LabStore, cohort_id: str, *, kind: str = "internal_cohor
         selected_input_ids: tuple[str, ...] = ()
         selected_algorithm_ids: tuple[str, ...] = ()
         selections_before: dict[Path, bytes] | None = None
+        journal_started = False
         if kind == "internal_cohort":
             inputs = pon_inputs_for_members(store, members)
             if len(inputs) >= 10:
@@ -878,6 +925,14 @@ def build_cohort(store: LabStore, cohort_id: str, *, kind: str = "internal_cohor
                 selections_before = _snapshot_member_selections(
                     store, selected_input_ids, selected_algorithm_ids,
                 )
+                store.begin_cohort_selection_transaction(
+                    cohort_id=cohort_id,
+                    old_version=old_generation.version if old_generation is not None else None,
+                    new_version=version, run_id=run_id,
+                    input_ids=selected_input_ids, algorithm_ids=selected_algorithm_ids,
+                    before=selections_before,
+                )
+                journal_started = True
                 try:
                     updated = {
                         source_id: recompute_member(
@@ -893,9 +948,7 @@ def build_cohort(store: LabStore, cohort_id: str, *, kind: str = "internal_cohor
                         pon_build=built.provenance(),
                     )
                 except BaseException:
-                    _restore_member_selections(
-                        store, selected_input_ids, selected_algorithm_ids, selections_before,
-                    )
+                    store.recover_pending_cohort_selection()
                     raise
 
         def write(staging: Path) -> None:
@@ -908,14 +961,27 @@ def build_cohort(store: LabStore, cohort_id: str, *, kind: str = "internal_cohor
                 "members": capture_density_vectors(store, snapshot.members),
             })
             store.publish_directory(generations, str(version), write)
-            write_atomic(directory / "current.json", canonical_json_bytes({"version": version}))
         except BaseException:
-            if selections_before is not None:
-                _restore_member_selections(
-                    store, selected_input_ids, selected_algorithm_ids, selections_before,
-                )
+            if journal_started:
+                store.recover_pending_cohort_selection()
             raise
+        try:
+            write_atomic(directory / "current.json", canonical_json_bytes({"version": version}))
+            _fsync_dir(directory)
+        except BaseException:
+            # A visible new pointer with a failed directory sync is an
+            # uncertain commit. Retain the journal until a later writer can
+            # confirm that pointer durably or restore the old selection.
+            if journal_started and store._cohort_pointer_version(cohort_id) == (
+                old_generation.version if old_generation is not None else None
+            ):
+                store.recover_pending_cohort_selection()
+            raise
+        # Readers pin a generation epoch around their selector scan.
+        # Notify immediately after the durable commit boundary.
         store.bump_generation()
+        if journal_started:
+            store.recover_pending_cohort_selection()
         return snapshot
 
 
