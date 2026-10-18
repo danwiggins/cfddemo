@@ -94,6 +94,24 @@ def test_registration_is_input_scoped_immutable_and_cli_inspectable(tmp_path: Pa
         register_contract(store, path, digest)
 
 
+def test_donor_cli_refuses_duplicate_attestation_before_publication(tmp_path: Path, capsys) -> None:
+    path, _ = _file(tmp_path)
+    raw = path.read_bytes().replace(
+        b'"male_donor_attested": true',
+        b'"male_donor_attested": false, "male_donor_attested": true',
+    )
+    path.write_bytes(raw)
+    store = LabStore(tmp_path / "root")
+    _stored_input(store)
+    assert lab_main(["donor", "register", "--file", str(path),
+                     "--sha256", hashlib.sha256(raw).hexdigest(),
+                     "--root", str(store.root), "--json"]) != 0
+    response = json.loads(capsys.readouterr().out)
+    assert response["status"] == "blocked"
+    assert "invalid JSON" in response["data"]["cause"]
+    assert not (store.lab / "assets" / "dd-cfdna-chry" / INPUT).exists()
+
+
 @pytest.mark.parametrize("manifest_change", [
     {"source_id": "d" * 64}, {"reference_sha256": "e" * 64},
 ])

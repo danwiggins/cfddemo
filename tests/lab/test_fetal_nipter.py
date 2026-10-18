@@ -227,6 +227,26 @@ def test_fetal_cli_register_and_inspect_keep_external_path_private(tmp_path: Pat
     assert str(control) not in json.dumps(inspected)
 
 
+def test_prenatal_cli_refuses_duplicate_attestation_before_publication(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    path, _, _ = _contract(tmp_path)
+    raw = path.read_bytes().replace(
+        b'"control_euploid_attested": true',
+        b'"control_euploid_attested": false, "control_euploid_attested": true',
+    )
+    path.write_bytes(raw)
+    store = LabStore(tmp_path / "root")
+    _stored_input(store)
+    assert lab_main(["fetal", "register", "--file", str(path),
+                     "--sha256", hashlib.sha256(raw).hexdigest(),
+                     "--root", str(store.root), "--json"]) != 0
+    response = json.loads(capsys.readouterr().out)
+    assert response["status"] == "blocked"
+    assert "invalid JSON" in response["data"]["cause"]
+    assert not (store.lab / "assets" / "fetal-fraction" / INPUT).exists()
+
+
 @pytest.mark.parametrize("manifest_change", [
     {"source_id": "d" * 64}, {"reference_sha256": "e" * 64},
 ])

@@ -15,6 +15,7 @@ from traceback_runner.serialization import canonical_json_bytes
 
 from .assets import AssetError, _check_contained, _regular_source
 from .file_access import open_regular_no_follow
+from .registration_json import load_registration_json
 
 if TYPE_CHECKING:
     from .store import LabStore
@@ -85,7 +86,7 @@ def _finite_number(value: object) -> float | None:
 
 def _parse(raw: bytes) -> DonorContract:
     try:
-        data = json.loads(raw)
+        data = load_registration_json(raw)
     except (UnicodeError, ValueError, RecursionError) as exc:
         raise DonorContractError("donor calibration is invalid JSON") from exc
     if not isinstance(data, dict) or set(data) != _FIELDS or data.get("schema") != SCHEMA:
