@@ -18,6 +18,7 @@ from .file_access import open_regular_no_follow
 from .ingest import input_manifest, resolve_reference
 from .interpretation.engine import COHORT_MIN
 from .microbial_db import MicrobialDbError, MicrobialDbReceiptChanged, RECEIPT_RECOVERY, inspect_database
+from .platforms import for_input
 from .problems import LabProblem
 from .registry import execution_identity
 from .store import LabStore
@@ -168,14 +169,17 @@ def profile_for_sample(store: LabStore, sample: SampleView, generation: CohortGe
     identity = envelope.provenance.parameters_sha256
     try:
         manifest = input_manifest(store, input_id)
+        validated_platform = (for_input(manifest, store.inputs_dir / input_id / "aligned.bam")
+                              if isinstance(manifest, dict) else None)
     except (OSError, ValueError, TypeError):
         manifest = None
+        validated_platform = None
     if (not isinstance(manifest, dict)
             or manifest.get("input_id") != input_id
             or manifest.get("source_id") != sample.source_id
             or manifest.get("reference_id") != envelope.provenance.reference_id
             or manifest.get("reference_sha256") != reference.sha256
-            or manifest.get("platform") != sample.platform):
+            or validated_platform != sample.platform):
         return {"state": "stale", "reason": "Stored microbial input manifest differs from this result; restore the recorded input or rerun microbial profiling",
                 "taxa": []}
     if (envelope.algorithm_version != MICROBIAL.version

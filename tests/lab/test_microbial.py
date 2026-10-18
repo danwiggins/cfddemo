@@ -118,6 +118,7 @@ def _stub_profile_plan(monkeypatch, store: LabStore, sample: SampleView, artifac
         "reference_id": measured.provenance.reference_id,
         "reference_sha256": reference_sha256, "platform": sample.platform,
     })
+    monkeypatch.setattr(view, "for_input", lambda _manifest, _bam: sample.platform)
     monkeypatch.setattr(view, "_execution_plan", lambda _attempt: plan)
     monkeypatch.setattr(view, "execution_identity", lambda *_args, **_kwargs:
                         measured.provenance.parameters_sha256)
@@ -182,6 +183,26 @@ def test_planned_result_resolves_into_sample_profile_without_identity_stubs(
     assert profile["candidate_unmapped_reads"] == 1
     assert profile["microbial_rpm_primary"] == 500_000
     assert profile["taxa"][0]["taxid"] == 562
+
+    manifest_path = store.inputs_dir / sample.full.input_id / "manifest.json"
+    original_manifest = manifest_path.read_bytes()
+    for kind in ("prealigned", "aligned"):
+        legacy_manifest = json.loads(original_manifest)
+        legacy_manifest["kind"] = kind
+        legacy_manifest.pop("platform")
+        legacy_bytes = json.dumps(legacy_manifest).encode()
+        manifest_path.write_bytes(legacy_bytes)
+        legacy_sample = load_sample(store, source)
+        assert legacy_sample is not None and legacy_sample.platform == "ont"
+        assert profile_for_sample(store, legacy_sample, None, None, "not_built")["taxa"][0]["taxid"] == 562
+        assert manifest_path.read_bytes() == legacy_bytes
+    mismatched_manifest = json.loads(original_manifest)
+    mismatched_manifest["platform"] = "illumina"
+    mismatch_bytes = json.dumps(mismatched_manifest).encode()
+    manifest_path.write_bytes(mismatch_bytes)
+    assert profile_for_sample(store, sample, None, None, "not_built")["state"] == "stale"
+    assert manifest_path.read_bytes() == mismatch_bytes
+    manifest_path.write_bytes(original_manifest)
 
     payload = LabApi(store).sample(source[:12])
     microbial = next(row for row in payload["algorithms"] if row["algorithm_id"] == "microbial")
