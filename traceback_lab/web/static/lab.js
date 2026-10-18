@@ -782,6 +782,17 @@
       await exchangeBootstrap();
       state.route = parseRoute();
       render();
+      const baselineController = new AbortController();
+      const baselineDeadline = setTimeout(() => baselineController.abort(), Math.max(100, POLL_MS * 0.8));
+      try {
+        const baseline = await api("/api/status", baselineController.signal);
+        state.generationAtLoad = baseline.generation;
+        state.lastStatus = baseline;
+      } catch (error) {
+        if (error.session) throw error;
+      } finally {
+        clearTimeout(baselineDeadline);
+      }
       const listing = await api("/api/samples");
       state.samples = listing.samples;
       state.defaultSampleId12 = listing.default_sample_id12 !== undefined
@@ -790,8 +801,8 @@
       state.completionHistoryUnavailable = !!listing.completion_history_unavailable;
       state.loading = false;
       setStatus("");
-      await poll();
       await navigate();
+      await poll();
     } catch (error) {
       state.loading = false;
       setStatus("");

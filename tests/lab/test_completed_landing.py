@@ -11,6 +11,8 @@ from tests.lab.test_landing import _dom, needs_chrome
 from traceback_lab import completed_runs
 from traceback_lab.completed_runs import record_completion
 from traceback_lab.store import LabStore
+from traceback_lab import views
+from traceback_lab.web import api as api_module
 from traceback_lab.web.api import LabApi
 from traceback_lab.web.server import RunningLabServer
 
@@ -273,3 +275,182 @@ def test_valid_run_wins_when_saved_pointer_has_later_file_mtime(tmp_path) -> Non
     listing = api.samples()
     assert listing["default_sample_id12"] == source[:12]
     assert listing["completion_history_unavailable"] is False
+
+
+def test_listing_retries_when_completion_publishes_after_log_scan(tmp_path, monkeypatch) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    source, older, newer = "a" * 64, "8" * 64, "9" * 64
+    _source(store, source, (older, "2026-10-17T10:00:00Z"),
+            (newer, "2026-10-18T10:00:00Z"))
+    first, second = "r-20261017-1000-abcd", "r-20261018-1000-abcd"
+    _run(store, first, source, older, "2026-10-17T10:00:00Z")
+    record_completion(store, first, source, older)
+    real_snapshot = api_module.completion_snapshot
+    calls = 0
+
+    def publish_after_snapshot(target):
+        nonlocal calls
+        calls += 1
+        snapshot = real_snapshot(target)
+        if calls == 1:
+            _run(store, second, source, newer, "2026-10-18T10:00:00Z")
+            record_completion(store, second, source, newer)
+        return snapshot
+
+    monkeypatch.setattr(api_module, "completion_snapshot", publish_after_snapshot)
+    listing = LabApi(store).samples()
+    assert calls == 2
+    assert listing["default_sample_id12"] == source[:12]
+    assert listing["completion_history_unavailable"] is False
+    assert listing["samples"][0]["run_utc"] == "2026-10-18T10:00:00Z"
+
+
+def test_detail_retries_when_completion_publishes_after_log_scan(tmp_path, monkeypatch) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    source, older, newer = "a" * 64, "8" * 64, "9" * 64
+    _source(store, source, (older, "2026-10-17T10:00:00Z"))
+    first, second = "r-20261017-1000-abcd", "r-20261018-1000-abcd"
+    _run(store, first, source, older, "2026-10-17T10:00:00Z")
+    record_completion(store, first, source, older)
+    real_completed = views.completed_for_source
+    calls = 0
+
+    def publish_after_scan(target, source_id, record):
+        nonlocal calls
+        calls += 1
+        selected = real_completed(target, source_id, record)
+        if calls == 1:
+            _source(store, source, (older, "2026-10-17T10:00:00Z"),
+                    (newer, "2026-10-18T10:00:00Z"))
+            _run(store, second, source, newer, "2026-10-18T10:00:00Z")
+            record_completion(store, second, source, newer)
+        return selected
+
+    monkeypatch.setattr(views, "completed_for_source", publish_after_scan)
+    detail = LabApi(store).sample(source[:12])
+    assert calls == 2
+    assert detail["full_input_id"] == newer
+    assert detail["found"] is True
+
+
+def test_newer_source_claim_blocks_root_when_global_pointer_is_stale(tmp_path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    older, newer = "a" * 64, "b" * 64
+    old_input, new_input = "8" * 64, "9" * 64
+    _source(store, older, (old_input, "2026-10-17T10:00:00Z"))
+    _source(store, newer, (new_input, "2026-10-18T10:00:00Z"))
+    first, second = "r-20261017-1000-abcd", "r-20261018-1000-abcd"
+    _run(store, first, older, old_input, "2026-10-17T10:00:00Z")
+    record_completion(store, first, older, old_input)
+    pointer = (store.lab / "last_completed_run.json").read_bytes()
+    _run(store, second, newer, new_input, "2026-10-18T10:00:00Z")
+    record_completion(store, second, newer, new_input)
+    (store.runs_dir / f"{second}.jsonl").unlink()
+    (store.lab / "last_completed_run.json").write_bytes(pointer)
+
+    listing = LabApi(store).samples()
+    assert listing["default_sample_id12"] is None
+    assert listing["completion_history_unavailable"] is True
+    assert LabApi(store).sample(older[:12])["full_input_id"] == old_input
+
+
+@needs_chrome
+def test_initial_status_baseline_detects_publication_during_listing(tmp_path) -> None:
+    store = LabStore(tmp_path / "root")
+    store.ensure()
+    source, input_id = "a" * 64, "8" * 64
+    _source(store, source, (input_id, "2026-10-17T10:00:00Z"))
+    run_id = "r-20261017-1000-abcd"
+    _run(store, run_id, source, input_id, "2026-10-17T10:00:00Z")
+    record_completion(store, run_id, source, input_id)
+
+    with RunningLabServer(store) as server:
+        original = server.app.api.samples
+
+        def publish_during_listing():
+            listing = original()
+            store.bump_generation()
+            return listing
+
+        server.app.api.samples = publish_during_listing
+        dom = _dom(server, tmp_path / "browser", route="/",
+                   want=lambda page: "Results changed on disk since this page loaded." in page)
+    assert "Results changed on disk since this page loaded." in dom
+    assert ">Reload</button>" in dom
+
+
+def test_valid_newer_log_wins_over_stale_pointer_file_mtime(tmp_path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    source, older, newer = "a" * 64, "8" * 64, "9" * 64
+    utc = "2026-10-17T10:00:00Z"
+    _source(store, source, (older, utc), (newer, utc))
+    first, second = "r-20261017-1000-abcd", "r-20261017-1000-abce"
+    _run(store, first, source, older, utc)
+    record_completion(store, first, source, older)
+    _run(store, second, source, newer, utc)
+    os.utime(store.runs_dir / f"{first}.jsonl", ns=(1, 1))
+    os.utime(store.runs_dir / f"{second}.jsonl", ns=(8, 8))
+
+    api = LabApi(store)
+    assert api.sample(source[:12])["full_input_id"] == newer
+    listing = api.samples()
+    assert listing["default_sample_id12"] == source[:12]
+    assert listing["completion_history_unavailable"] is False
+
+
+def test_detail_retries_when_source_record_changes_during_completed_scan(tmp_path, monkeypatch) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    source, older, newer = "a" * 64, "8" * 64, "9" * 64
+    first, second = "r-20261017-1000-abcd", "r-20261018-1000-abcd"
+    _source(store, source, (older, "2026-10-17T10:00:00Z"))
+    _run(store, first, source, older, "2026-10-17T10:00:00Z")
+    record_completion(store, first, source, older)
+    real_completed = views.completed_for_source
+    calls = 0
+
+    def publish_during_scan(target, source_id, record):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            _source(store, source, (older, "2026-10-17T10:00:00Z"),
+                    (newer, "2026-10-18T10:00:00Z"))
+            _run(store, second, source, newer, "2026-10-18T10:00:00Z")
+            record_completion(store, second, source, newer)
+        return real_completed(target, source_id, record)
+
+    monkeypatch.setattr(views, "completed_for_source", publish_during_scan)
+    detail = LabApi(store).sample(source[:12])
+    assert calls == 2
+    assert detail["full_input_id"] == newer
+
+
+def test_listing_retries_when_source_inputs_change_after_snapshot(tmp_path, monkeypatch) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    source, older, newer = "a" * 64, "8" * 64, "9" * 64
+    _source(store, source, (older, "2026-10-17T10:00:00Z"))
+    second = "r-20261018-1000-abcd"
+    _run(store, second, source, newer, "2026-10-18T10:00:00Z")
+    record_completion(store, second, source, newer)
+    real_source = views.source_record
+    calls = 0
+
+    def add_input_after_read(target, source_id):
+        nonlocal calls
+        calls += 1
+        record = real_source(target, source_id)
+        if calls == 1:
+            _source(store, source, (older, "2026-10-17T10:00:00Z"),
+                    (newer, "2026-10-18T10:00:00Z"))
+        return record
+
+    monkeypatch.setattr(views, "source_record", add_input_after_read)
+    listing = LabApi(store).samples()
+    assert calls == 3
+    assert listing["default_sample_id12"] == source[:12]
+    assert listing["samples"][0].get("state") != "completed_input_unavailable"

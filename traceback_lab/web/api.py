@@ -583,12 +583,15 @@ class LabApi:
         cohort_snapshot = self._published_sample_cohort()
         completion_index, completed = completion_snapshot(self.store)
         rows = []
+        source_history_unavailable = False
         for source_id, id12 in self._id12s().items():
             record = source_record(self.store, source_id) or {}
             sample = views.load_sample(self.store, source_id, completion_index=completion_index)
             if sample is None:
                 unavailable = completion_index.get(source_id)
                 uncertain = completion_history_unavailable(self.store, source_id, record, unavailable)
+                if uncertain and completion_history_unavailable(self.store, source_id, record, completed):
+                    source_history_unavailable = True
                 if uncertain or unavailable is not None:
                     rows.append({
                         "id12": id12,
@@ -642,7 +645,8 @@ class LabApi:
                 }
             )
         rows.sort(key=lambda row: row["run_utc"], reverse=True)
-        history_unavailable = global_completion_history_unavailable(self.store, completed)
+        history_unavailable = (source_history_unavailable
+                               or global_completion_history_unavailable(self.store, completed))
         default_id12 = self._id12s().get(completed["source_id"]) if completed else None
         if history_unavailable or default_id12 not in {
             row["id12"] for row in rows if row.get("state") not in (

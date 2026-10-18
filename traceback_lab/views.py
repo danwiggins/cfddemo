@@ -192,14 +192,30 @@ class SampleView:
 
 def load_sample(store: LabStore, source_id: str, *,
                 completion_index: Mapping[str, Mapping[str, Any]] | None = None) -> SampleView | None:
-    record = source_record(store, source_id)
-    if record is None:
-        return None
-    inputs = sorted(record.get("inputs", []), key=lambda entry: entry.get("used_utc", ""), reverse=True)
-    completed = (completion_index.get(source_id) if completion_index is not None
-                 else completed_for_source(store, source_id, record))
-    if completion_history_unavailable(store, source_id, record, completed):
-        return None
+    for _ in range(3):
+        record = source_record(store, source_id)
+        if record is None:
+            return None
+        completed = (completion_index.get(source_id) if completion_index is not None
+                     else completed_for_source(store, source_id, record))
+        try:
+            if completion_history_unavailable(store, source_id, record, completed):
+                return None
+        except SelectionSnapshotChanged:
+            if completion_index is not None:
+                raise  # the listing must refresh every row and its default together
+            continue
+        inputs = sorted(record.get("inputs", []), key=lambda entry: entry.get("used_utc", ""), reverse=True)
+        if completed is not None and not any(
+            entry.get("input_id") == completed["input_id"] for entry in inputs
+        ):
+            if source_record(store, source_id) != record:
+                if completion_index is not None:
+                    raise SelectionSnapshotChanged("source inputs changed during listing")
+                continue
+        break
+    else:
+        raise ResultOrderUnavailable("completed runs kept changing during sample read")
     completed_input = completed["input_id"] if completed else None
     if completed_input:
         if (not any(entry.get("input_id") == completed_input for entry in inputs)
