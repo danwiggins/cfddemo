@@ -30,8 +30,8 @@ These are the Figure 2c strings as transcribed from the original image. CpG
 offsets are zero-based indices of the `C` from the 5′ end of each printed
 string. The selected model offset is 20 for ASPA, 20 for ITGA2B, and 34 for
 PDE4C. In the PDE4C string, the figure underlines CpGs at offsets 20
-(`cg17861230`, array probe) and 34 (the fitted model site); the CpG at offset
-8 is not underlined.
+(`cg17861230`, array probe) and 34 (the fitted model site); the CpGs at
+offsets 8 and 11 are not underlined.
 
 | Site | Figure 2c sequence (5′→3′) | Orientation relative to forward reference | Model CpG offset |
 |---|---|---|---:|
@@ -61,6 +61,8 @@ and chromosome 19 to `NC_000019.10`. Its SHA-256 is
 `15f83782257f61c12f30f51bb990cb0e7f598073babd2f93fcf16de0ab0c6138`.
 The original Figure 2 TIFF SHA-256 is
 `d0c5ab4e37a9adb027d5af23c9d5a76f013b44865ccdfcfd80bb67c62b452cc4`.
+The cited supplementary PDF SHA-256 is
+`b206e952cc578b521fc431c54452b5ec6391720cdfe36845a9eb0b2b6d6562d1`.
 The Illumina manifest SHA-256 is
 `9b729b2e905ae6d02df777c06380980ef3f502a2990b05cda9169332c2e8e7a2`.
 
@@ -77,7 +79,13 @@ Illumina `Forward_Sequence` after replacing `[CG]` with `CG`. In build 37,
 its C must equal `MAPINFO`; in GRCh38 it must equal the 1-based C above.
 Exact-match the transcribed Figure 2c strings to GRCh38, reverse-complementing
 for ASPA and ITGA2B, and verify the selected offsets at the listed model
-positions.
+positions. For a probe flank matched at zero-based index `m` in the forward
+reference window, its 1-based C is `START + m + index_of("[CG]")` in the
+original manifest string. For a printed Figure 2c string of length `L` with
+selected offset `k`, match that string (forward) or its reverse complement
+(reverse) at index `m` in the forward reference window. The 1-based forward C
+is `START + m + k` for forward strings and `START + m + L - 2 - k` for reverse
+strings: the printed G pairs with the forward C. Subtract one for `pos0`.
 
 | Accession | Interval | Saved FASTA response SHA-256 | Uppercase sequence-only SHA-256 |
 |---|---|---|---|
