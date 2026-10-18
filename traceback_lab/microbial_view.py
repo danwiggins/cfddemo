@@ -239,7 +239,11 @@ def profile_for_sample(store: LabStore, sample: SampleView, generation: CohortGe
     },):
         return {"state": "stale", "reason": "Selected read-summary attempt differs from the microbial producer plan; rerun microbial profiling",
                 "taxa": []}
-    profile = _read_profile(attempt / "artifacts" / "microbial_profile.json")
+    artifacts = attempt / "artifacts"
+    if not artifacts.is_dir() or artifacts.is_symlink():
+        return {"state": "stored_profile_unavailable", "reason": "Selected microbial artifacts are unavailable or unsafe",
+                "taxa": []}
+    profile = _read_profile(artifacts / "microbial_profile.json")
     if (profile is None or profile.get("source_id") != sample.source_id
             or profile.get("input_id") != sample.full.input_id
             or profile.get("database_sha256") != database.sha256
