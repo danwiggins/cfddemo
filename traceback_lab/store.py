@@ -112,7 +112,7 @@ class CohortSelectionJournal:
 
 @dataclass
 class SelectionReadSnapshot:
-    generation: int
+    cohort_epoch: int
     overlay: CohortSelectionJournal | None
 
 
@@ -291,6 +291,10 @@ class LabStore:
     def cohort_selection_journal_file(self) -> Path:
         return self.lab / "pending-cohort-selections.json"
 
+    @property
+    def cohort_selection_epoch_file(self) -> Path:
+        return self.lab / "cohort-selection-epoch"
+
     def last_run_id(self) -> str | None:
         try:
             value = json.loads(self.last_run_file.read_bytes()).get("run_id")
@@ -374,6 +378,39 @@ class LabStore:
 
         value = self.generation() + 1
         write_atomic(self.generation_file, f"{value}\n".encode("ascii"))
+        return value
+
+    def cohort_selection_epoch(self) -> int:
+        """Read the durable cohort transaction epoch, independent of UI updates."""
+
+        try:
+            descriptor = open_regular_no_follow(self.cohort_selection_epoch_file)
+        except FileNotFoundError:
+            return 0
+        except OSError as exc:
+            raise ResultOrderUnavailable("cohort selection epoch is unsafe") from exc
+        try:
+            with os.fdopen(descriptor, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 32:
+                    raise ValueError("cohort selection epoch is invalid")
+                raw = stream.read(33)
+            if not re.fullmatch(rb"(?:0|[1-9][0-9]{0,18})\n", raw):
+                raise ValueError("cohort selection epoch is invalid")
+            value = int(raw)
+            if value > 2**63 - 1:
+                raise ValueError("cohort selection epoch is too large")
+            return value
+        except (OSError, ValueError) as exc:
+            raise ResultOrderUnavailable("cohort selection epoch is malformed") from exc
+
+    def bump_cohort_selection_epoch(self) -> int:
+        """Publish a cohort transaction boundary under the existing writer lock."""
+
+        value = self.cohort_selection_epoch() + 1
+        if value > 2**63 - 1:
+            raise ResultOrderUnavailable("cohort selection epoch is exhausted")
+        write_atomic_no_follow(self.cohort_selection_epoch_file, f"{value}\n".encode("ascii"))
         return value
 
     def _read_cohort_selection_journal(self) -> CohortSelectionJournal | None:
@@ -484,13 +521,13 @@ class LabStore:
         if self._writer_selection_view.get() or self._selection_read_snapshot.get() is not None:
             yield
             return
-        # Begin's epoch bump precedes all selector changes; commit's bump
-        # follows its durable pointer. This catches a create/commit/delete ABA.
-        generation = self.generation()
+        # This counter advances only at cohort transaction boundaries. Ordinary
+        # result publications remain visible without invalidating other reads.
+        cohort_epoch = self.cohort_selection_epoch()
         overlay = self._pending_reader_overlay()
-        if self.generation() != generation:
+        if self.cohort_selection_epoch() != cohort_epoch:
             raise SelectionSnapshotChanged("cohort selections changed before read")
-        token = self._selection_read_snapshot.set(SelectionReadSnapshot(generation, overlay))
+        token = self._selection_read_snapshot.set(SelectionReadSnapshot(cohort_epoch, overlay))
         try:
             yield
             # The pointer may become visible just before the writer bumps the
@@ -498,7 +535,7 @@ class LabStore:
             if (overlay is not None
                     and self._cohort_pointer_version(overlay.cohort_id) != overlay.old_version):
                 raise SelectionSnapshotChanged("cohort current generation changed during read")
-            if self.generation() != generation:
+            if self.cohort_selection_epoch() != cohort_epoch:
                 raise SelectionSnapshotChanged("cohort selections changed during read")
         finally:
             self._selection_read_snapshot.reset(token)
@@ -515,20 +552,22 @@ class LabStore:
         return True, journal.before.get((input_id, algorithm_id, identity))
 
     def _selector_bytes(self, input_id: str, algorithm_id: str, identity: str) -> bytes | None:
-        epoch = self.generation() if self._selection_read_snapshot.get() is None else None
+        epoch = self.cohort_selection_epoch() if self._selection_read_snapshot.get() is None else None
         overridden, content = self._selector_override(input_id, algorithm_id, identity)
         if overridden:
+            if epoch is not None and self.cohort_selection_epoch() != epoch:
+                raise SelectionSnapshotChanged("cohort selections changed during selector read")
             return content
         selector = self.result_dir(input_id, algorithm_id, identity) / "selected.json"
+        content = None
         try:
             with os.fdopen(open_regular_no_follow(selector), "rb") as stream:
                 info = os.fstat(stream.fileno())
-                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > MAX_RESULT_SELECTION_BYTES:
-                    return None
-                content = stream.read(MAX_RESULT_SELECTION_BYTES + 1)
+                if stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and info.st_size <= MAX_RESULT_SELECTION_BYTES:
+                    content = stream.read(MAX_RESULT_SELECTION_BYTES + 1)
         except OSError:
-            return None
-        if epoch is not None and self.generation() != epoch:
+            pass
+        if epoch is not None and self.cohort_selection_epoch() != epoch:
             raise SelectionSnapshotChanged("cohort selections changed during selector read")
         return content
 
@@ -583,9 +622,17 @@ class LabStore:
                 raise ValueError("selector preimage is outside Lab results") from exc
             if (len(parts) != 4 or parts[3] != "selected.json"
                     or parts[0] not in inputs or parts[1] not in algorithms
-                    or not SHA256_PATTERN.fullmatch(parts[2])
-                    or len(content) > MAX_RESULT_SELECTION_BYTES):
+                    or not SHA256_PATTERN.fullmatch(parts[2])):
                 raise ValueError("selector preimage is outside the recompute scope")
+            if len(content) > MAX_RESULT_SELECTION_BYTES:
+                raise LabProblem(
+                    "TBX-LAB-022",
+                    cause=(f"stored cohort {cohort_id} has an invalid {parts[1]} result selection "
+                           f"for input {parts[0][:12]}"),
+                    fix="Restore the selected result file from a known-good backup, then retry cohort build",
+                    data={"cohort_id": cohort_id, "input_id": parts[0],
+                          "algorithm_id": parts[1], "field": "member result selection"},
+                )
             try:
                 selection = json.loads(content)
                 if (not isinstance(selection, dict) or not isinstance(selection.get("attempt_id"), str)
@@ -593,7 +640,14 @@ class LabStore:
                     raise ValueError("selector preimage has no valid attempt")
                 self._publication_order(selection)
             except (ValueError, TypeError, RecursionError) as exc:
-                raise ValueError("selector preimage is invalid") from exc
+                raise LabProblem(
+                    "TBX-LAB-022",
+                    cause=(f"stored cohort {cohort_id} has an invalid {parts[1]} result selection "
+                           f"for input {parts[0][:12]}"),
+                    fix="Restore the selected result file from a known-good backup, then retry cohort build",
+                    data={"cohort_id": cohort_id, "input_id": parts[0],
+                          "algorithm_id": parts[1], "field": "member result selection"},
+                ) from exc
             rows.append({
                 "input_id": parts[0], "algorithm_id": parts[1],
                 "parameters_sha256": parts[2],
@@ -610,7 +664,7 @@ class LabStore:
         write_atomic_no_follow(journal_path, payload)
         # Readers that began before the journal existed must retry. No member
         # selector can change before this notification succeeds.
-        self.bump_generation()
+        self.bump_cohort_selection_epoch()
 
     def recover_pending_cohort_selection(self) -> None:
         """Under the writer lock, finish or undo a killed cohort transaction."""
@@ -644,6 +698,7 @@ class LabStore:
             generation = read_current(self, journal.cohort_id)
             if generation is None or generation.version != journal.new_version:
                 raise ResultOrderUnavailable("committed cohort generation is incomplete")
+        self.bump_cohort_selection_epoch()
         with directory_no_follow(self.lab) as directory:
             os.unlink(self.cohort_selection_journal_file.name, dir_fd=directory)
             os.fsync(directory)

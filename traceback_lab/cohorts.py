@@ -42,6 +42,26 @@ _ROSTER_SCHEMA = "traceback.lab.cohort-roster.v1"
 _VERSION_NAME = re.compile(r"^[1-9][0-9]*$")
 
 
+class MemberSelectionStorageError(ValueError):
+    """A stored member selector cannot be safely journaled or restored."""
+
+    def __init__(self, input_id: str, algorithm_id: str) -> None:
+        self.input_id = input_id
+        self.algorithm_id = algorithm_id
+        super().__init__("member result selection storage is invalid")
+
+
+def _member_selection_problem(cohort_id: str, input_id: str, algorithm_id: str) -> LabProblem:
+    return LabProblem(
+        "TBX-LAB-022",
+        cause=(f"stored cohort {cohort_id} has an invalid {algorithm_id} result selection "
+               f"for input {input_id[:12]}"),
+        fix="Restore the selected result file from a known-good backup, then retry cohort build",
+        data={"cohort_id": cohort_id, "input_id": input_id, "algorithm_id": algorithm_id,
+              "field": "member result selection"},
+    )
+
+
 @dataclass(frozen=True)
 class CohortListing:
     """One cohort's pinned generation or its independent storage problem."""
@@ -876,7 +896,7 @@ def _member_selection_paths(
         for algorithm_id in algorithm_ids:
             directory = store.results_dir / input_id / algorithm_id
             if directory.is_symlink():
-                raise ValueError("member result directory is a symlink")
+                raise MemberSelectionStorageError(input_id, algorithm_id)
             try:
                 with os.scandir(directory) as entries:
                     for entry in entries:
@@ -888,7 +908,7 @@ def _member_selection_paths(
                         except FileNotFoundError:
                             continue
                         if not stat.S_ISREG(mode):
-                            raise ValueError("member result selection is not a regular file")
+                            raise MemberSelectionStorageError(input_id, algorithm_id)
                         paths.add(selector)
             except FileNotFoundError:
                 continue
@@ -900,10 +920,11 @@ def _snapshot_member_selections(
 ) -> dict[Path, bytes]:
     before: dict[Path, bytes] = {}
     for selector in _member_selection_paths(store, input_ids, algorithm_ids):
+        parts = selector.relative_to(store.results_dir).parts
         with os.fdopen(open_regular_no_follow(selector), "rb") as stream:
             content = stream.read(16 * 1024 + 1)
         if len(content) > 16 * 1024:
-            raise ValueError("member result selection is too large")
+            raise MemberSelectionStorageError(parts[0], parts[1])
         before[selector] = content
     return before
 
@@ -1080,9 +1101,12 @@ def build_cohort(store: LabStore, cohort_id: str, *, kind: str = "internal_cohor
                 selected_algorithm_ids = tuple(
                     item.algorithm.id for item in member_recompute_plan(registry_entries())
                 )
-                selections_before = _snapshot_member_selections(
-                    store, selected_input_ids, selected_algorithm_ids,
-                )
+                try:
+                    selections_before = _snapshot_member_selections(
+                        store, selected_input_ids, selected_algorithm_ids,
+                    )
+                except MemberSelectionStorageError as exc:
+                    raise _member_selection_problem(cohort_id, exc.input_id, exc.algorithm_id) from exc
                 store.begin_cohort_selection_transaction(
                     cohort_id=cohort_id,
                     old_version=old_generation.version if old_generation is not None else None,

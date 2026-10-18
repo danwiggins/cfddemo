@@ -12,6 +12,7 @@ from tests.lab.test_cohort_store import _sample
 from traceback_lab import cohorts, pon, pon_consumer
 from traceback_lab.cohorts import add_sample, build_cohort, read_current
 from traceback_lab.envelope import ResultEnvelope, provenance
+from traceback_lab.problems import LabProblem
 from traceback_lab.store import (MAX_COHORT_SELECTION_JOURNAL_BYTES, LabStore,
                                  ResultOrderUnavailable, SelectionSnapshotChanged)
 from traceback_lab.views import selected_results
@@ -312,3 +313,83 @@ def test_unsafe_journal_blocks_readers_and_next_writer(
             pass
     assert selector.read_bytes() == original
     assert read_current(store, "healthy-v1") == previous
+
+
+def test_unrelated_result_publication_does_not_invalidate_cohort_reader(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reader = LabStore(tmp_path)
+    writer = LabStore(tmp_path)
+    writer.ensure()
+    result = ResultEnvelope(
+        algorithm_id="fragment-size", algorithm_version="1", status="ok",
+        provenance=provenance(
+            tool="fixture", parameters_sha256="a" * 64, source_id="b" * 64,
+            input_id="c" * 64, reference_id="synthetic",
+        ),
+    )
+    before = reader.cohort_selection_epoch()
+    with reader.selection_read_context():
+        writer.publish_result(result, input_id="c" * 64)
+    assert reader.cohort_selection_epoch() == before
+    assert writer.generation() > 0
+    # A direct selector read also tolerates an unrelated UI generation bump
+    # between its two epoch checks.
+    from traceback_lab import store as store_module
+
+    selector = writer.result_dir("c" * 64, "fragment-size", "a" * 64) / "selected.json"
+    original_open = store_module.open_regular_no_follow
+    crossed = False
+
+    def open_during_publish(path):
+        nonlocal crossed
+        if path == selector and not crossed:
+            crossed = True
+            writer.bump_generation()
+        return original_open(path)
+
+    monkeypatch.setattr(store_module, "open_regular_no_follow", open_during_publish)
+    assert reader.read_result("c" * 64, "fragment-size", "a" * 64) is not None
+    assert crossed
+
+
+def test_journal_begin_and_recovery_cannot_hide_from_reader(tmp_path: Path) -> None:
+    reader = LabStore(tmp_path)
+    writer = LabStore(tmp_path)
+    writer.ensure()
+    with pytest.raises(SelectionSnapshotChanged):
+        with reader.selection_read_context():
+            with writer.writer("cohort build", "r-20261017-0007-abcd"):
+                writer.begin_cohort_selection_transaction(
+                    cohort_id="healthy-v1", old_version=None, new_version=1,
+                    run_id="r-20261017-0007-abcd", input_ids=("a" * 64,),
+                    algorithm_ids=("copy-number",), before={},
+                )
+                writer.recover_pending_cohort_selection()
+    assert not writer.cohort_selection_journal_file.exists()
+    assert reader.cohort_selection_epoch() == 2
+
+
+@pytest.mark.parametrize("damage", ["malformed", "oversized", "symlink"])
+def test_malformed_member_selector_is_actionable_cohort_problem(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str,
+) -> None:
+    store, sources, previous, input_id, result = _fixture(tmp_path, monkeypatch)
+    selector = store.result_dir(input_id, "copy-number", "8" * 64) / "selected.json"
+    if damage == "malformed":
+        selector.write_bytes(b"not json")
+    elif damage == "oversized":
+        selector.write_bytes(b"x" * (16 * 1024 + 1))
+    else:
+        selector.unlink()
+        target = tmp_path / "external-selector"
+        target.write_bytes(b"external sentinel")
+        selector.symlink_to(target)
+    with pytest.raises(LabProblem) as caught:
+        build_cohort(store, "healthy-v1")
+    assert caught.value.code == "TBX-LAB-022"
+    assert caught.value.data["input_id"] == input_id
+    assert caught.value.data["algorithm_id"] == "copy-number"
+    assert "Restore" in caught.value.fix
+    assert read_current(store, "healthy-v1") == previous
+    assert not store.cohort_selection_journal_file.exists()

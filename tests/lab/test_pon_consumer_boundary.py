@@ -1146,13 +1146,14 @@ def test_requested_panel_keeps_exact_upstream_attempts(tmp_path, monkeypatch) ->
 @pytest.mark.parametrize("changes", [1, 3])
 def test_cohort_result_read_retries_whole_changed_epoch(tmp_path, monkeypatch, changes) -> None:
     store = LabStore(tmp_path)
+    store.ensure()
     calls = 0
 
     def read_once(*_args, **_kwargs):
         nonlocal calls
         calls += 1
         if calls <= changes:
-            store.bump_generation()
+            store.bump_cohort_selection_epoch()
         return ("settled",)
 
     monkeypatch.setattr(cohorts, "_selected_results_once", read_once)
