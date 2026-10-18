@@ -124,6 +124,12 @@ job-specific incomplete private trees are quarantined under that same lock.
 No original absolute source locator is persisted for automatic recapture.
 Missing or changed attached snapshots fail closed rather than being silently
 recreated from mutable source data.
+`backup(destination)` saves only SQLite; attached snapshot trees need a separate
+backup. When restoring an attached sealed snapshot, preserve its exact
+POSIX modes: `0555` for the snapshot root and nested directories, and `0444`
+for the manifest and every input file. Verification refuses mode drift even
+when file bytes still match. Restore the original sealed tree from a trusted
+backup; do not change permissions on a live snapshot merely to pass recovery.
 
 Private-attempt classification and quarantine run inside one SQLite write
 transaction, excluding concurrent lease grants. Current unexpired attempt

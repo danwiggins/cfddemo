@@ -840,11 +840,16 @@ percentile denominator.
 For a verified internal cohort with at least ten eligible aligned members,
 `cohort build` creates one full panel and one leave-one-out panel per member.
 It recomputes each member's copy-number, instability, and arm-summary results against that
-member's panel before publishing the generation. `pon_n` counts all panel
-sources; a selected member panel uses `pon_n - 1` sources. A nonmember uses
-the full panel. Both copy-number and instability still require 2M eligible
-reads on the target input. Copy-number also enforces the signed 1M counted-read
-floor after filtering, with or without a panel.
+member's panel before publishing the generation. This build requires the
+installed ichorCNA toolchain and registered copy-number method assets. If
+panel construction or member recomputation fails, no new generation is
+selected and any previously selected generation remains current. The
+read-side fallback that retains independent comparisons when an existing
+panel later becomes unavailable does not apply to building a generation.
+`pon_n` counts all panel sources; a selected member panel uses `pon_n - 1`
+sources. A nonmember uses the full panel. Both copy-number and instability
+still require 2M eligible reads on the target input. Copy-number also enforces
+the signed 1M counted-read floor after filtering, with or without a panel.
 The corrected copy-number method version does not reuse older copy-number or
 dependent instability attempts. Rerun affected inputs and rebuild existing
 cohorts to restore current-version comparisons. The sample view marks selected
