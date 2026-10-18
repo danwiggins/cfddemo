@@ -1177,19 +1177,48 @@ def _verify_source_identities(
                 os.close(owned_parent)
 
 
-def _seal_tree(root: Path) -> None:
-    for item in sorted(root.rglob("*"), reverse=True):
-        item.chmod(0o555 if item.is_dir() else 0o444)
-    root.chmod(0o555)
+def _seal_bundle_descendants(bundle_fd: int) -> None:
+    """Seal and sync the exact bundle entries without sealing its root yet."""
 
-
-def _fsync_tree(root: Path) -> None:
-    for directory in (root / "charts", root / "measurements", root):
-        descriptor = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    for relative in _inventory(bundle_fd):
+        descriptor, owned_parent = _open_file_at(bundle_fd, relative)
         try:
+            if stat.S_IMODE(os.fstat(descriptor).st_mode) != 0o444:
+                os.fchmod(descriptor, 0o444)
             os.fsync(descriptor)
         finally:
             os.close(descriptor)
+            if owned_parent is not None:
+                os.close(owned_parent)
+    for name in _NESTED_DIRECTORIES:
+        descriptor = _open_directory_at(bundle_fd, name)
+        try:
+            if stat.S_IMODE(os.fstat(descriptor).st_mode) != 0o555:
+                os.fchmod(descriptor, 0o555)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    os.fsync(bundle_fd)
+
+
+def _seal_object_root(object_fd: int) -> None:
+    if stat.S_IMODE(os.fstat(object_fd).st_mode) != 0o555:
+        os.fchmod(object_fd, 0o555)
+    os.fsync(object_fd)
+
+
+def _require_child_inode(parent_fd: int, name: str, held_fd: int) -> None:
+    """Reject a path swap between a descriptor-bound seal and its catalog row."""
+
+    try:
+        observed = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except OSError:
+        raise CatalogFilesystemError("catalog object changed during publish") from None
+    if (
+        not stat.S_ISDIR(observed.st_mode)
+        or _inode_identity(observed) != _inode_identity(os.fstat(held_fd))
+    ):
+        raise CatalogFilesystemError("catalog object changed during publish")
 
 
 def _remove_tree(root: Path) -> None:
@@ -1202,6 +1231,55 @@ def _remove_tree(root: Path) -> None:
             pass
     root.chmod(0o700)
     shutil.rmtree(root)
+
+
+def _publish_sealed_object(
+    objects_fd: int,
+    temporary: Path,
+    object_name: str,
+    bundle_sha256: str,
+    manifest_sha256: str,
+) -> None:
+    """Publish the verified bytes before a catalog row can point at them.
+
+    Darwin's exclusive directory rename requires a writable source root. Keep
+    that private root at 0700 until the rename, then seal the same inode through
+    its open descriptor. A matching orphan from an interrupted publish is
+    sealed and synced on retry without replacing its inode.
+    """
+
+    temporary_fd = _open_directory_at(objects_fd, temporary.name)
+    try:
+        _seal_bundle_descendants(temporary_fd)
+        try:
+            rename_directory_exclusive_at(objects_fd, temporary.name, object_name)
+        except FileExistsError:
+            try:
+                existing_fd = _open_directory_at(objects_fd, object_name)
+            except OSError:
+                raise CatalogConflict("catalog object identity conflicts") from None
+            try:
+                existing_sha256, existing_manifest, _ = _copy_exact_bundle(
+                    existing_fd, None
+                )
+                if (
+                    existing_sha256 != bundle_sha256
+                    or existing_manifest != manifest_sha256
+                ):
+                    raise CatalogConflict("catalog object identity conflicts")
+                _seal_bundle_descendants(existing_fd)
+                _seal_object_root(existing_fd)
+                _require_child_inode(objects_fd, object_name, existing_fd)
+            finally:
+                os.close(existing_fd)
+            _remove_tree(temporary)
+        else:
+            _require_child_inode(objects_fd, object_name, temporary_fd)
+            _seal_object_root(temporary_fd)
+            _require_child_inode(objects_fd, object_name, temporary_fd)
+        os.fsync(objects_fd)
+    finally:
+        os.close(temporary_fd)
 
 
 class ResultCatalog:
@@ -2146,33 +2224,15 @@ class ResultCatalog:
                     manifest_sha256=manifest_sha256,
                     capability=capability,
                 )
-                _fsync_tree(temporary)
-                _seal_tree(temporary)
                 _RC_VALIDATE_STORAGE(self)
-                parent_fd = self._objects_fd
                 try:
-                    try:
-                        rename_directory_exclusive_at(
-                            parent_fd, temporary.name, object_path.name
-                        )
-                        os.fsync(parent_fd)
-                    except FileExistsError:
-                        try:
-                            existing_fd = _open_directory_at(parent_fd, object_path.name)
-                        except OSError:
-                            raise CatalogConflict("catalog object identity conflicts")
-                        try:
-                            existing_sha256, existing_manifest, _ = _copy_exact_bundle(
-                                existing_fd, None
-                            )
-                        finally:
-                            os.close(existing_fd)
-                        if (
-                            existing_sha256 != bundle_sha256
-                            or existing_manifest != manifest_sha256
-                        ):
-                            raise CatalogConflict("catalog object identity conflicts")
-                        _remove_tree(temporary)
+                    _publish_sealed_object(
+                        self._objects_fd,
+                        temporary,
+                        object_path.name,
+                        bundle_sha256,
+                        manifest_sha256,
+                    )
                 finally:
                     _RC_VALIDATE_STORAGE(self)
                 _RC_FAULT(self, "after_object_publish")
@@ -2319,34 +2379,15 @@ class ResultCatalog:
                     manifest_sha256=manifest_sha256,
                     capability=capability,
                 )
-                _fsync_tree(temporary)
-                _seal_tree(temporary)
                 _RC_VALIDATE_STORAGE(self)
                 try:
-                    try:
-                        rename_directory_exclusive_at(
-                            self._objects_fd, temporary.name, object_path.name
-                        )
-                        os.fsync(self._objects_fd)
-                    except FileExistsError:
-                        try:
-                            existing_fd = _open_directory_at(
-                                self._objects_fd, object_path.name
-                            )
-                        except OSError:
-                            raise CatalogConflict("catalog object identity conflicts")
-                        try:
-                            existing_sha256, existing_manifest, _ = _copy_exact_bundle(
-                                existing_fd, None
-                            )
-                        finally:
-                            os.close(existing_fd)
-                        if (
-                            existing_sha256 != bundle_sha256
-                            or existing_manifest != manifest_sha256
-                        ):
-                            raise CatalogConflict("catalog object identity conflicts")
-                        _remove_tree(temporary)
+                    _publish_sealed_object(
+                        self._objects_fd,
+                        temporary,
+                        object_path.name,
+                        bundle_sha256,
+                        manifest_sha256,
+                    )
                 finally:
                     _RC_VALIDATE_STORAGE(self)
                 _RC_FAULT(self, "after_object_publish")
