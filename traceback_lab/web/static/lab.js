@@ -253,6 +253,7 @@
     }
     if (route.name === "home" && !route.id12 && state.completionHistoryUnavailable) {
       main.append(h("h1", { class: "view-title" }, "Completion history unavailable"),
+        window.TracebackLabViews.landingCliaPanel(),
         h("p", { class: "problem" }, "The latest recorded completion cannot be verified. Restore its run log or rerun the sample before viewing a default result."),
         h("ul", {}, ...state.samples.map((row) => h("li", {},
           h("a", { href: `#/?sample=${row.id12}` }, row.id12)))));
@@ -260,6 +261,7 @@
     }
     if (route.name === "home" && !route.id12 && state.completedInputUnavailable) {
       main.append(h("h1", { class: "view-title" }, "Latest completed input unavailable"),
+        window.TracebackLabViews.landingCliaPanel(),
         h("p", { class: "problem" }, "The latest completed run's primary input cannot be read. Restore that input or rerun the sample."),
         h("ul", {}, ...state.samples.map((row) => h("li", {},
           h("a", { href: `#/?sample=${row.id12}` }, row.id12)))));
@@ -271,6 +273,7 @@
     }
     if (route.name === "home" && !route.id12 && !state.defaultSampleId12) {
       main.append(h("h1", { class: "view-title" }, "No completed Lab run yet"),
+        window.TracebackLabViews.landingCliaPanel(),
         h("p", { class: "empty" }, "The registered samples below have no completed analysis run. A running or interrupted analysis can be opened explicitly."),
         h("ul", {}, ...state.samples.map((row) => h("li", {},
           h("a", { href: `#/?sample=${row.id12}` }, row.id12)))));
