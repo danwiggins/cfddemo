@@ -6,3 +6,4 @@ traceback_runner/toolchain_locks/*.lock -text
 traceback_runner/toolchain_locks/runIchorCNA.R -text
 tests/lab/fixtures/griffin/*.tsv text eol=lf
 tests/lab/data/finaletoolkit_110_*.tsv text eol=lf
+docs/assets/weidner-3-grch38-map.json text eol=lf

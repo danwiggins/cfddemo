@@ -48,9 +48,10 @@ Published cfDNA research has explored age-related methylation and tissue
 composition, which makes those questions worth testing. It does not validate
 our three-site implementation. [cfDNA methylation and aging study](https://pubmed.ncbi.nlm.nih.gov/38869474/)
 
-**The immediate limitation is site coverage and mapping.** Our adapter needs a
-verified hg38 assay-site map, including the correct PDE4C site upstream of
-`cg17861230`; that array probe itself is not a substitute. It requires at least
+**The immediate limitation is site coverage and assay transfer.** A verified
+[hg38 assay-site map](epi-clock.md) is available for explicit operator
+registration, including the correct PDE4C site upstream of `cg17861230`;
+that array probe itself is not a substitute. The adapter requires at least
 five million eligible reads and five usable calls at each site. Five calls is
 only a completeness check: one changed call at PDE4C can move the arithmetic by
 about 33 years at that coverage. The Lab must not present such a number as a
