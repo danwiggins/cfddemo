@@ -979,6 +979,40 @@ def test_pon_input_selection_uses_only_verified_full_aligned_inputs(store: LabSt
     assert selected[0].reference_sha256 == _sha(900)
 
 
+def test_completed_input_projection_pins_prior_input_without_changing_build_selection(store: LabStore) -> None:
+    source_id = _sample(store, 1)
+    completed_input, active_input = _sha(101), _sha(201)
+    add_sample(store, "healthy", source_id)
+    generation = build_cohort(store, "healthy")
+    original = store.inputs_dir / completed_input
+    active = store.inputs_dir / active_input
+    active.mkdir(parents=True)
+    manifest = json.loads((original / "manifest.json").read_text())
+    manifest["input_id"] = active_input
+    (active / "manifest.json").write_text(json.dumps(manifest))
+    (active / "aligned.bam").write_bytes((original / "aligned.bam").read_bytes())
+    source_path = store.sources_dir / f"{source_id}.json"
+    record = json.loads(source_path.read_text())
+    record["inputs"].append({"input_id": active_input, "kind": "aligned",
+                             "used_utc": "2026-10-18T00:00:00Z"})
+    source_path.write_text(json.dumps(record))
+
+    assert cohorts.member_from_store(store, source_id).input_id == active_input
+    pinned = cohorts.member_from_store(store, source_id, input_id=completed_input)
+    assert pinned.input_id == completed_input
+    assert any(result.algorithm_id == "fragment-size" for result in pinned.results)
+    target, problem = cohorts.member_for_generation_or_independent(
+        store, generation, source_id, input_id=completed_input,
+    )
+    assert problem is None and target.input_id == completed_input
+    assert cohorts.member_for_generation_or_independent(store, generation, source_id)[0].input_id == active_input
+    with pytest.raises(LabProblem, match="TBX-LAB-020"):
+        cohorts.member_from_store(store, source_id, input_id=_sha(999))
+    (original / "manifest.json").unlink()
+    with pytest.raises(LabProblem, match="TBX-LAB-020"):
+        cohorts.member_from_store(store, source_id, input_id=completed_input)
+
+
 @pytest.mark.parametrize("location", ["sources_dir", "input_dir"])
 def test_cohort_add_refuses_symlinked_metadata_directory(store: LabStore, location: str) -> None:
     source_id = _sample(store, 1)

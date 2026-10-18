@@ -351,27 +351,37 @@ def _validate_full_manifest(manifest: Any, input_id: str, source_id: str) -> dic
     return manifest
 
 
-def _full_input(store: LabStore, record: dict[str, Any]) -> tuple[str, dict[str, Any]] | None:
+def _full_input(
+    store: LabStore, record: dict[str, Any], *, input_id: str | None = None,
+) -> tuple[str, dict[str, Any]] | None:
     source_id = record.get("source_id")
     if not isinstance(source_id, str) or not SHA256_PATTERN.fullmatch(source_id):
         raise _invalid_input("unknown", "source_id")
     inputs = record.get("inputs", [])
     if not isinstance(inputs, list):
         raise _invalid_input("unknown", "source inputs")
+    if input_id is not None and (
+        not isinstance(input_id, str) or not SHA256_PATTERN.fullmatch(input_id)
+    ):
+        raise _invalid_input(input_id if isinstance(input_id, str) else "unknown", "input_id")
     for item in reversed(inputs):
         if not isinstance(item, dict):
             raise _invalid_input("unknown", "source input entry")
-        input_id = item.get("input_id")
-        if not isinstance(input_id, str) or not SHA256_PATTERN.fullmatch(input_id):
+        candidate_id = item.get("input_id")
+        if not isinstance(candidate_id, str) or not SHA256_PATTERN.fullmatch(candidate_id):
             raise _invalid_input("unknown", "input_id")
+        if input_id is not None and candidate_id != input_id:
+            continue
         if item.get("kind") not in ("aligned", "prealigned"):
-            raise _invalid_input(input_id, "source input kind")
-        manifest_path = store.inputs_dir / input_id / "manifest.json"
-        manifest = _read_stored_metadata(manifest_path, _invalid_input(input_id, "manifest"))
-        manifest = _validate_full_manifest(manifest, input_id, source_id)
+            raise _invalid_input(candidate_id, "source input kind")
+        manifest_path = store.inputs_dir / candidate_id / "manifest.json"
+        manifest = _read_stored_metadata(manifest_path, _invalid_input(candidate_id, "manifest"))
+        manifest = _validate_full_manifest(manifest, candidate_id, source_id)
         if manifest["kind"] != item["kind"]:
-            raise _invalid_input(input_id, "source/manifest kind")
-        return input_id, manifest
+            raise _invalid_input(candidate_id, "source/manifest kind")
+        return candidate_id, manifest
+    if input_id is not None:
+        raise _invalid_input(input_id, "source input identity")
     return None
 
 
@@ -780,14 +790,17 @@ def _selected_results(
     raise ResultOrderUnavailable("cohort result selections kept changing during read")
 
 
-def member_from_store(store: LabStore, source_id: str, *, pon_selection: Any | None = None) -> CohortMember:
-    """Pin current full-input result attempts for one admitted source."""
+def member_from_store(
+    store: LabStore, source_id: str, *, pon_selection: Any | None = None,
+    input_id: str | None = None,
+) -> CohortMember:
+    """Pin one full input; cohort writers use the newest when none is specified."""
 
     record = _checked_source_record(store, source_id)
     if record.get("example"):
         raise LabProblem("TBX-LAB-021", cause=f"{source_id[:12]} is an EXAMPLE sample",
                          fix="Add a real kit sample", data={"id12": source_id[:12]})
-    selected = _full_input(store, record)
+    selected = _full_input(store, record, input_id=input_id)
     if selected is None:
         raise ValueError("admitted source has no full aligned input")
     input_id, manifest = selected
@@ -798,14 +811,18 @@ def member_from_store(store: LabStore, source_id: str, *, pon_selection: Any | N
                                           and pon_selection.target_excluded else None))
 
 
-def member_for_generation(store: LabStore, generation: CohortGeneration, source_id: str) -> CohortMember:
+def member_for_generation(
+    store: LabStore, generation: CohortGeneration, source_id: str, *,
+    input_id: str | None = None,
+) -> CohortMember:
     """Read a target under one pinned generation's PoN protocol."""
 
+    input_kwargs = {"input_id": input_id} if input_id is not None else {}
     if generation.pon_asset_sha256 is None:
-        return member_from_store(store, source_id)
+        return member_from_store(store, source_id, **input_kwargs)
     from .pon_consumer import selection_for_generation
 
-    selected = _full_input(store, _checked_source_record(store, source_id))
+    selected = _full_input(store, _checked_source_record(store, source_id), input_id=input_id)
     if selected is None:
         raise ValueError("admitted source has no full aligned input")
     input_id, manifest = selected
@@ -814,7 +831,7 @@ def member_for_generation(store: LabStore, generation: CohortGeneration, source_
         store, generation, source_id=source_id,
         reference_sha256=manifest["reference_sha256"], aligner_identity=label,
     )
-    return member_from_store(store, source_id, pon_selection=selection)
+    return member_from_store(store, source_id, pon_selection=selection, **input_kwargs)
 
 
 def pon_dependent_algorithms() -> set[str]:
@@ -833,12 +850,14 @@ def pon_dependent_algorithms() -> set[str]:
 
 
 def member_for_generation_or_independent(
-    store: LabStore, generation: CohortGeneration, source_id: str,
+    store: LabStore, generation: CohortGeneration, source_id: str, *,
+    input_id: str | None = None,
 ) -> tuple[CohortMember, LabProblem | None]:
     """Keep independent metrics when only the selected PoN method is unavailable."""
 
+    input_kwargs = {"input_id": input_id} if input_id is not None else {}
     try:
-        return member_for_generation(store, generation, source_id), None
+        return member_for_generation(store, generation, source_id, **input_kwargs), None
     except LabProblem as problem:
         protocol_drift = (
             problem.data.get("field") == "panel of normals"
@@ -851,7 +870,7 @@ def member_for_generation_or_independent(
         # PoN binding remains unavailable. Retain only results whose methods
         # do not consume copy-number; their own cohort keys still gate comparison.
         dependent = pon_dependent_algorithms()
-        target = member_from_store(store, source_id)
+        target = member_from_store(store, source_id, **input_kwargs)
         return target.model_copy(update={
             "results": tuple(result for result in target.results
                              if result.algorithm_id not in dependent),
