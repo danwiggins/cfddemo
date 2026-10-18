@@ -451,7 +451,6 @@ def run_plan(
                 disk_path=scratch,
             )
             if outcome.ok:
-                _verify_target_reference(store, target, write_cache=lock is not None)
                 try:
                     produced = json.loads((scratch / "output.json").read_bytes())
                     if not isinstance(produced, dict):
@@ -497,6 +496,7 @@ def run_plan(
                         peak_disk=outcome.peak_disk_bytes,
                     )
                 else:
+                    _verify_target_reference(store, target, write_cache=lock is not None)
                     attempt_id = store.publish_result(
                         envelope,
                         input_id=target.input_id,

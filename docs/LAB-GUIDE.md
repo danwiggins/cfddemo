@@ -983,7 +983,7 @@ samtools or minimap2 is missing or older than 1.20 / 2.28, and the input is unal
 
 No reference is registered (exit 3), or several are and `--reference` was not given (exit 2, listing the IDs). Register one with `traceback reference register --fasta hg38.fa --id hg38 --root R`, or add `--reference ID`. The `lab-example` reference is never picked by default for real input.
 
-A changed registered FASTA or `.fai` also blocks a Lab run under this code. The Lab verifies the FASTA SHA-256 and indexed contig M5 values against the registration on first use, then reuses that proof while the FASTA and `.fai` file identities and change times remain stable; `--dry-run` never writes the proof cache. Restore the original files or register the correct reference in a new ROOT. This check does not establish which reference a historical prealigned BAM used: its `@SQ` validation checks names and lengths, not M5. It cannot retroactively qualify previously published results.
+A changed registered FASTA or `.fai` also blocks a Lab run under this code. The Lab verifies the FASTA SHA-256 and indexed contig M5 values against the registration on first use, then reuses that proof while the FASTA and `.fai` file identities and change times remain stable; `--dry-run` never writes the proof cache. Restore the original files or register the correct reference in a new ROOT. This detects ordinary local edits and replacements, but is not a defense against a same-user process deliberately changing files during a read. This check does not establish which reference a historical prealigned BAM used: its `@SQ` validation checks names and lengths, not M5. It cannot retroactively qualify previously published results or attempts.
 
 ### TBX-LAB-005
 
