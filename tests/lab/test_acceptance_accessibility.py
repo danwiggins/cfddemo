@@ -37,7 +37,7 @@ def test_landing_responsive_clia_and_single_column_geometry(size, tmp_path) -> N
     with _server(tmp_path, _sample()) as server:
         profile = tmp_path / "browser-profile"
 
-        def inspect(command, evaluate) -> None:
+        def inspect(_command, evaluate) -> None:
             observed.update(evaluate("""(() => {
               const panel = document.querySelector('#main .clia-panel');
               const band = document.querySelector('#main .landing-band');
@@ -693,6 +693,11 @@ def test_disconnected_page_blocks_fetch_controls_until_reconnected(tmp_path) -> 
                 pytest.fail("three missed polls did not mark the page disconnected")
             assert evaluate(f"document.activeElement === {button}")
             assert evaluate(f"{button}.getAttribute('aria-disabled') === 'true'")
+            assert evaluate("""(() => {
+              const other = [...document.querySelectorAll('button[data-requires-server]')]
+                .filter((control) => control !== document.activeElement);
+              return other.length > 0 && other.every((control) => control.disabled);
+            })()""")
             assert evaluate("document.getElementById('sample-switcher').disabled")
             assert evaluate("!document.getElementById('key-button').disabled")
             evaluate(f"{button}.click()")
@@ -706,6 +711,8 @@ def test_disconnected_page_blocks_fetch_controls_until_reconnected(tmp_path) -> 
             else:
                 pytest.fail("the page did not reconnect")
             assert evaluate(f"!{button}.disabled && !document.getElementById('sample-switcher').disabled")
+            assert evaluate("""[...document.querySelectorAll('button[data-requires-server]')]
+              .every((control) => !control.disabled && !control.hasAttribute('aria-disabled'))""")
             evaluate(f"{button}.click()")
             assert evaluate("window.runLogFetches === 1")
 
@@ -718,6 +725,15 @@ def test_disconnected_page_blocks_fetch_controls_until_reconnected(tmp_path) -> 
             else:
                 pytest.fail("the page did not disconnect again")
             assert evaluate("document.activeElement === document.getElementById('sample-switcher')")
+            evaluate("""(() => {
+              const select = document.getElementById('sample-switcher');
+              window.selectedBeforeDisconnect = select.value;
+              window.hashBeforeDisconnect = location.hash;
+              select.add(new Option('Synthetic second sample', 'ffffffffffff'));
+            })()""")
+            _key(command, "ArrowDown", "ArrowDown", 40)
+            assert evaluate("document.getElementById('sample-switcher').value === window.selectedBeforeDisconnect")
+            assert evaluate("location.hash === window.hashBeforeDisconnect")
             _key(command, "Tab", "Tab", 9)
             assert evaluate("document.activeElement === document.getElementById('key-button')")
             _key(command, "Enter", "Enter", 13)
@@ -800,11 +816,22 @@ def test_disconnected_navigation_keeps_url_and_view_in_sync(tmp_path) -> None:
                 time.sleep(0.2)
             else:
                 pytest.fail("the page did not disconnect again")
-            evaluate("history.back()")
+            evaluate("""(() => {
+              window.backHashes = [];
+              window.backAfterHash = null;
+              window.addEventListener('popstate', () => {
+                window.backHashes.push(location.hash);
+                setTimeout(() => { window.backAfterHash = location.hash; }, 0);
+              }, {once: true});
+              history.back();
+            })()""")
             for _ in range(20):
-                if evaluate("location.hash.endsWith('/stability')"):
+                if evaluate("window.backAfterHash !== null"):
                     break
                 time.sleep(0.05)
+            assert evaluate("window.backHashes.length === 1")
+            assert evaluate("window.backHashes[0].endsWith('/trust-qc')")
+            assert evaluate("window.backAfterHash.endsWith('/stability')")
             assert evaluate("location.hash.endsWith('/stability')")
             assert evaluate("document.querySelector('#main h1')?.textContent === 'Stability'")
 
