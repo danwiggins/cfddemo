@@ -207,13 +207,21 @@ def bind_target(
             reference_sha256=target.reference_sha256, aligner_identity=aligner_label,
         )
     except LabProblem as problem:
+        protocol_mismatch = (
+            problem.data.get("field") == "panel of normals"
+            and problem.data.get("reason") == "protocol_mismatch"
+        )
         if (cohort_id is not None or problem.code != "TBX-LAB-020"
-                or problem.data.get("field") not in ("toolchain", "method assets")):
+                or (problem.data.get("field") not in ("toolchain", "method assets")
+                    and not protocol_mismatch)):
             raise
         # Preserve the built panel's fail-closed boundary: the runner must
         # publish a CN skip, never reuse or execute an uncorrected CN result.
         target.extras["pon_unavailable"] = {
-            "reason_code": "missing_toolchain" if problem.data["field"] == "toolchain" else "missing_asset",
+            "reason_code": (
+                "protocol_mismatch" if protocol_mismatch else
+                "missing_toolchain" if problem.data["field"] == "toolchain" else "missing_asset"
+            ),
             "message": f"built panel unavailable: {problem.cause}",
         }
         return list(items)

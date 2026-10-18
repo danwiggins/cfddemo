@@ -890,8 +890,13 @@ implicit `healthy-v1` is unbuilt, copy-number keeps its no-PoN baseline.
 If a built implicit panel's toolchain or registered method assets are missing,
 copy-number records `missing_toolchain` or `missing_asset`, its dependents
 skip upstream, and independent algorithms continue. An older uncorrected
-copy-number result is never reused. Other panel verification failures stop
-the run rather than silently substituting no-PoN copy number.
+copy-number result is never reused. If the built implicit panel's protocol
+does not match this input (including a prealigned ONT input with unknown
+alignment provenance or an input realigned after a tool upgrade), copy-number
+records `protocol_mismatch`, its dependents skip upstream, and independent
+algorithms continue. The no-PoN copy-number baseline is never substituted.
+Damaged panel bytes, an invalid leave-one-out binding, or other panel
+verification failures stop the run.
 An explicit `--cohort` is checked even when `--only` omits copy-number.
 
 If a selected cohort cannot be verified, **Compare** lists it as unavailable

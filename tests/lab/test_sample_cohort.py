@@ -179,7 +179,8 @@ def test_unavailable_pon_keeps_independent_comparison_but_refuses_copy_number(
     ).model_copy(update={"pon_asset_sha256": "d" * 64})
     problem = LabProblem(
         "TBX-LAB-020", cause=cause,
-        fix="Restore the matching ichor toolchain", data={"field": field},
+        fix="Restore the matching ichor toolchain",
+        data={"field": field, **({"reason": "protocol_mismatch"} if field == "panel of normals" else {})},
     )
     monkeypatch.setattr(web_api, "read_current", lambda store, cohort_id: generation)
     monkeypatch.setattr(cohorts, "member_for_generation", lambda *args: (_ for _ in ()).throw(problem))

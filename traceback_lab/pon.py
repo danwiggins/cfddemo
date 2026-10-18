@@ -110,8 +110,11 @@ class PonSelection:
         return len(self.panel_source_ids)
 
 
-def _problem(cause: str, fix: str) -> LabProblem:
-    return LabProblem("TBX-LAB-020", cause=cause, fix=fix, data={"field": "panel of normals"})
+def _problem(cause: str, fix: str, *, reason: str | None = None) -> LabProblem:
+    data = {"field": "panel of normals"}
+    if reason is not None:
+        data["reason"] = reason
+    return LabProblem("TBX-LAB-020", cause=cause, fix=fix, data=data)
 
 
 def _sha256(path: Path) -> str:
@@ -349,18 +352,6 @@ def binding_for(
     provenance = generation.pon_build
     if provenance is None or generation.pon_n < MIN_PON_N:
         raise _problem("the selected cohort has no qualified PoN build record", "Rebuild the cohort with a verified panel")
-    if (provenance.reference_sha256 != reference_sha256
-            or provenance.aligner_identity != aligner_identity
-            or provenance.builder_source_sha256 != BUILDER_SOURCE_SHA256
-            or provenance.builder_sha256 != BUILDER_SHA256
-            or provenance.validator_sha256 != VALIDATOR_SHA256
-            or provenance.toolchain_lock_sha256 != toolchain_lock_sha256
-            or provenance.counting_parameters_sha256 != counting_parameters_sha256
-            or provenance.gc_sha256 != gc_sha256
-            or provenance.map_sha256 != map_sha256
-            or provenance.centromere_sha256 != centromere_sha256
-            or (grid_sha256 is not None and provenance.grid_sha256 != grid_sha256)):
-        raise _problem("the selected PoN does not match this copy-number protocol", "Use the matching reference and toolchain or rebuild the cohort")
     member = next((item for item in generation.members if item.source_id == source_id), None)
     target_excluded = source_id in provenance.source_ids
     loo_by_source = dict(provenance.loo_asset_sha256s)
@@ -381,6 +372,24 @@ def binding_for(
         raise _problem("the selected PoN asset is missing or unsafe", "Restore the immutable panel asset") from exc
     if actual != digest:
         raise _problem("the selected PoN asset changed", "Restore the immutable panel asset")
+    # Check the selected generation and exact panel bytes before classifying
+    # ordinary protocol drift. A drifted input must not conceal tampering.
+    if (provenance.reference_sha256 != reference_sha256
+            or provenance.aligner_identity != aligner_identity
+            or provenance.builder_source_sha256 != BUILDER_SOURCE_SHA256
+            or provenance.builder_sha256 != BUILDER_SHA256
+            or provenance.validator_sha256 != VALIDATOR_SHA256
+            or provenance.toolchain_lock_sha256 != toolchain_lock_sha256
+            or provenance.counting_parameters_sha256 != counting_parameters_sha256
+            or provenance.gc_sha256 != gc_sha256
+            or provenance.map_sha256 != map_sha256
+            or provenance.centromere_sha256 != centromere_sha256
+            or (grid_sha256 is not None and provenance.grid_sha256 != grid_sha256)):
+        raise _problem(
+            "the selected PoN does not match this copy-number protocol",
+            "Use the matching reference and toolchain or rebuild the cohort",
+            reason="protocol_mismatch",
+        )
     return PonSelection(
         generation.cohort_id, generation.version_id, "lab_loo_v1", digest, path,
         generation.pon_n, provenance.reference_sha256, provenance.aligner_identity,

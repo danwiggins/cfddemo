@@ -640,7 +640,7 @@ def test_missing_registered_panel_asset_becomes_lab_unavailable_problem(
     assert caught.value.data["field"] == "method assets"
 
 
-@pytest.mark.parametrize("reason", ["missing_toolchain", "missing_asset"])
+@pytest.mark.parametrize("reason", ["missing_toolchain", "missing_asset", "protocol_mismatch"])
 def test_unavailable_panel_skip_cannot_reuse_uncorrected_cached_copy_number(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reason: str,
 ) -> None:

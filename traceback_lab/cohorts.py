@@ -640,7 +640,7 @@ def member_for_generation_or_independent(
     except LabProblem as problem:
         protocol_drift = (
             problem.data.get("field") == "panel of normals"
-            and problem.cause == "the selected PoN does not match this copy-number protocol"
+            and problem.data.get("reason") == "protocol_mismatch"
         )
         if (generation.pon_asset_sha256 is None or problem.code != "TBX-LAB-020"
                 or (problem.data.get("field") not in ("toolchain", "method assets")
