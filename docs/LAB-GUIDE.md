@@ -450,11 +450,21 @@ one-base intervals
 and `U` or `D` in column four. `U` means the lower-coordinate aligned end;
 `D` means the higher-coordinate aligned end. Both files use chr1–chr22 and
 numeric chromosome order, contain no header or extra columns, and must each
-be at most 64 MiB. Filter raw peak files to these columns and autosomes,
-then sort numerically by chromosome and position (for example,
-`sort -k1.4,1n -k2,2n`) and thin centers before registration; the Lab does
-not silently discard overlapping peaks or convert genome builds. Confirm the
-source build and convert any 1-based source positions before registration:
+be at most 64 MiB. Filter raw peak files to these columns and autosomes.
+Sort centers by chromosome and their integer midpoint, and preferred ends by
+chromosome and start:
+
+```bash
+awk 'BEGIN { OFS="\t" } { print $1, $2, $3, int(($2+$3)/2) }' centers.bed |
+  sort -k1.4,1n -k4,4n | cut -f1-3 > centers.sorted.bed
+sort -k1.4,1n -k2,2n preferred-ends.bed > preferred-ends.sorted.bed
+```
+
+Thin centers separately until consecutive midpoints on each chromosome are
+more than 200 bp apart; sorting alone does not remove overlapping profiles.
+The Lab does not silently discard overlapping peaks or convert genome builds.
+Confirm the source build and convert any 1-based source positions before
+registration:
 a wrong build or one-base shift can produce a plausible but incorrect score.
 A U and D site may share
 one coordinate, but duplicate sites in the same direction are rejected. Both files
