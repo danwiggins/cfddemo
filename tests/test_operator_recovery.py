@@ -4,7 +4,11 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import stat
+import subprocess
+import sys
 import time
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -137,6 +141,187 @@ def test_interrupted_copy_exposes_no_partial_final_then_retry_recovers(tmp_path,
     code, result = invoke(capsys, "demo", "--root", tmp_path)
     assert code == 0
     assert len(list((tmp_path / "records").iterdir())) == 1
+
+
+def test_published_record_keeps_signed_bytes_and_sealed_descendants(tmp_path, capsys):
+    code, result = invoke(capsys, "demo", "--root", tmp_path)
+    assert code == 0
+    published = tmp_path / result["data"]["bundle"]
+    runner = Runner(tmp_path / "runner", synthetic_enabled=True)
+    source = cli._signed_bundle_from_outputs(runner, result["data"]["job_id"])
+    assert stat.S_IMODE(published.lstat().st_mode) == 0o555
+    for member in source.rglob("*"):
+        relative = member.relative_to(source)
+        copy = published / relative
+        expected = 0o555 if member.is_dir() else 0o444
+        assert stat.S_IMODE(copy.lstat().st_mode) == expected
+        if member.is_file():
+            assert copy.read_bytes() == member.read_bytes()
+    trust = load_development_trust((tmp_path / cli._TRUST_RELATIVE).read_bytes())
+    verify_bundle(published, trust)
+
+
+@pytest.mark.parametrize("crash_point", ["after_rename", "before_parent_fsync"])
+def test_process_crash_during_record_publication_reuses_and_syncs(
+    tmp_path, capsys, crash_point,
+):
+    script = """
+import os
+import sys
+from pathlib import Path
+from traceback_runner import cli
+
+root, point = Path(sys.argv[1]), sys.argv[2]
+if point == "after_rename":
+    real_rename = cli._rename_directory_exclusive
+    def crash(source, destination):
+        real_rename(source, destination)
+        os._exit(81)
+    cli._rename_directory_exclusive = crash
+else:
+    real_fsync = cli._fsync_directory
+    def crash(path):
+        if path == root / "records":
+            os._exit(82)
+        real_fsync(path)
+    cli._fsync_directory = crash
+cli.main(["demo", "--root", str(root), "--json"])
+raise AssertionError("crash injection did not fire")
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path), crash_point],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == (81 if crash_point == "after_rename" else 82), (
+        completed.stdout + completed.stderr
+    )
+    records = tmp_path / "records"
+    candidates = list(records.iterdir())
+    assert len(candidates) == 1
+    published = candidates[0]
+    assert stat.S_IMODE(published.lstat().st_mode) == (
+        0o700 if crash_point == "after_rename" else 0o555
+    )
+    signed_bytes = {
+        path.relative_to(published): path.read_bytes()
+        for path in published.rglob("*") if path.is_file()
+    }
+    real_fsync = cli._fsync_directory
+    synced = []
+    def observe(path):
+        synced.append(path)
+        real_fsync(path)
+    with patch.object(cli, "_fsync_directory", observe):
+        code, result = invoke(capsys, "demo", "--root", tmp_path)
+    assert code == 0
+    assert tmp_path / result["data"]["bundle"] == published
+    assert list(records.iterdir()) == [published]
+    assert stat.S_IMODE(published.lstat().st_mode) == 0o555
+    assert {
+        path.relative_to(published): path.read_bytes()
+        for path in published.rglob("*") if path.is_file()
+    } == signed_bytes
+    assert published in synced and records in synced
+    trust = load_development_trust((tmp_path / cli._TRUST_RELATIVE).read_bytes())
+    verify_bundle(published, trust)
+
+
+@pytest.mark.parametrize("kind", ["file", "directory"])
+def test_writable_descendant_is_preserved_and_recovered_sibling_is_sealed(
+    tmp_path, capsys, kind,
+):
+    _, first = invoke(capsys, "demo", "--root", tmp_path)
+    original = tmp_path / first["data"]["bundle"]
+    member = next(path for path in original.rglob("*") if (
+        path.is_file() if kind == "file" else path.is_dir()
+    ))
+    writable_mode = 0o644 if kind == "file" else 0o755
+    member.chmod(writable_mode)
+    code, second = invoke(capsys, "demo", "--root", tmp_path)
+    assert code == 0
+    recovered = tmp_path / second["data"]["bundle"]
+    assert recovered != original
+    assert stat.S_IMODE(member.lstat().st_mode) == writable_mode
+    assert stat.S_IMODE(recovered.lstat().st_mode) == 0o555
+    assert stat.S_IMODE((recovered / member.relative_to(original)).lstat().st_mode) == (
+        0o444 if kind == "file" else 0o555
+    )
+
+
+def test_recovered_record_seals_copied_descendants_from_writable_source(tmp_path, capsys):
+    _, first = invoke(capsys, "demo", "--root", tmp_path)
+    original = tmp_path / first["data"]["bundle"]
+    runner = Runner(tmp_path / "runner", synthetic_enabled=True)
+    source = cli._signed_bundle_from_outputs(runner, first["data"]["job_id"])
+    source_file = next(path for path in source.rglob("*") if path.is_file())
+    source_file.chmod(0o644)
+    original_file = original / source_file.relative_to(source)
+    original_file.chmod(0o644)
+
+    code, second = invoke(capsys, "demo", "--root", tmp_path)
+    assert code == 0
+    recovered = tmp_path / second["data"]["bundle"]
+    assert recovered != original
+    assert stat.S_IMODE(source_file.lstat().st_mode) == 0o644
+    assert stat.S_IMODE(original_file.lstat().st_mode) == 0o644
+    assert stat.S_IMODE((recovered / source_file.relative_to(source)).lstat().st_mode) == 0o444
+    trust = load_development_trust((tmp_path / cli._TRUST_RELATIVE).read_bytes())
+    verify_bundle(recovered, trust)
+
+    code, third = invoke(capsys, "demo", "--root", tmp_path)
+    assert code == 0 and third["data"]["bundle"] == second["data"]["bundle"]
+    assert len(list((tmp_path / "records").iterdir())) == 2
+
+
+def test_matching_candidate_fsync_failure_propagates_without_sibling(tmp_path, capsys):
+    _, first = invoke(capsys, "demo", "--root", tmp_path)
+    published = tmp_path / first["data"]["bundle"]
+    with patch.object(cli, "_fsync_directory", side_effect=OSError("sync failed")):
+        code, result = invoke(capsys, "demo", "--root", tmp_path)
+    assert code == cli.ExitCode.RETRYABLE_FAILURE
+    assert result["data"]["code"] == "TBX-JOB-001"
+    assert result["data"]["retryable"]
+    assert list((tmp_path / "records").iterdir()) == [published]
+
+
+def test_new_publication_fsync_failure_reuses_sealed_record(tmp_path, capsys):
+    real_fsync = cli._fsync_directory
+    records = tmp_path / "records"
+    def fail_destination_sync(path):
+        if path.parent == records and not path.name.startswith(".record-"):
+            raise OSError("destination sync failed")
+        real_fsync(path)
+    with patch.object(cli, "_fsync_directory", fail_destination_sync):
+        code, result = invoke(capsys, "demo", "--root", tmp_path)
+    assert code == cli.ExitCode.RETRYABLE_FAILURE
+    assert result["data"]["retryable"]
+    published = next(records.iterdir())
+    assert stat.S_IMODE(published.lstat().st_mode) == 0o555
+    code, result = invoke(capsys, "demo", "--root", tmp_path)
+    assert code == 0
+    assert tmp_path / result["data"]["bundle"] == published
+    assert list(records.iterdir()) == [published]
+
+
+def test_publication_collision_preserves_winner_and_cleans_staging(tmp_path, capsys):
+    real_rename = cli._rename_directory_exclusive
+    def collide(source, destination):
+        destination.mkdir()
+        real_rename(source, destination)
+    with patch.object(cli, "_rename_directory_exclusive", collide):
+        code, _ = invoke(capsys, "demo", "--root", tmp_path)
+    assert code == cli.ExitCode.RETRYABLE_FAILURE
+    records = tmp_path / "records"
+    assert len(list(records.iterdir())) == 1
+    assert list(next(records.iterdir()).iterdir()) == []
+    assert not list(records.glob(".record-*"))
+    code, result = invoke(capsys, "demo", "--root", tmp_path)
+    assert code == 0
+    assert len(list(records.iterdir())) == 2
+    assert "-recovered-" in result["data"]["bundle"]
 
 
 def test_invalid_existing_record_preserved_and_valid_sibling_reused(tmp_path, capsys):
