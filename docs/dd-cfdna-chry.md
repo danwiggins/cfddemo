@@ -55,12 +55,25 @@ Keep patient identifiers out of free-text labels; the Lab stores those labels
 in the private contract and does not echo them in CLI output. The registration
 directory itself is sensitive transplant-related metadata, so protect the Lab
 root accordingly.
+
 Synthetic calibration needs `--allow-synthetic` at registration. That option
-reserves the input's calibration slot through the Lab registration path for mechanics-only testing;
-it does not permit a numeric donor-fraction result. If an existing registration
-is damaged, restore its exact original bytes from backup. A different
-calibration requires a new input identity; the Lab registration path does not
-overwrite existing provenance. Protect the Lab root and its backups from direct edits.
+reserves that input ID's immutable calibration slot in this ROOT for mechanics-only
+testing; it does not permit a numeric donor-fraction result. Repeating the
+original ingest in this ROOT with the same ordered BAM chunks and exclusions
+(or the same prealigned BAM), registered reference, and processing identity
+reproduces the same source and input IDs; it does not free the slot. For
+Lab-aligned chunks, processing identity includes the minimap2 index, tool
+versions, and arguments. For a prealigned BAM, its verified platform
+declaration also matters: Illumina has a distinct input ID. The declaration
+must match the BAM; it is not a way to clear a slot.
+
+To register an operator-verified calibration for the same input, register the
+same reference and repeat the original ingestion mode and processing identity
+in a separate fresh ROOT, then register the calibration there. The IDs contain
+no ROOT path, so the synthetic registration and its provenance remain intact.
+The CLI's "use a new input" refusal applies to a different registration in the
+same ROOT. If an existing registration is damaged, restore its exact original
+bytes from backup. Protect the Lab root and its backups from direct edits.
 
 The estimator counts eligible read starts on hg38 chrY outside its two
 pseudoautosomal intervals. It divides that count by all eligible reads on
