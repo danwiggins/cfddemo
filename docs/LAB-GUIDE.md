@@ -323,12 +323,13 @@ of 1 can coexist with different absolute frequencies. The artifact and Signals
 show their maximum absolute frequency difference as a diagnostic, without an
 additional acceptance cutoff.
 
-**Exploratory epi-clock.** Verify the three hg38 assay-site coordinates, then
-follow the [epi-clock map instructions](epi-clock.md) to prepare the JSON map and
-its SHA-256. Register and inspect it with:
+**Exploratory epi-clock.** Review the three verified hg38 assay-site coordinates
+and their [provenance](epi-clock-coordinate-provenance.md), then use the
+[pinned map and SHA-256](epi-clock.md) for explicit registration. Register and
+inspect it with:
 
 ```bash
-traceback lab asset register-clock-map --file MAP.json --sha256 HEX_SHA256 --root ROOT
+traceback lab asset register-clock-map --file docs/assets/weidner-3-grch38-map.json --sha256 ba5ce4d1f2313f6e39b5ff50fd19823ea96e7edec68ea611db5dcbff1b0f21df --root ROOT
 traceback lab asset inspect-clock-map --root ROOT
 ```
 

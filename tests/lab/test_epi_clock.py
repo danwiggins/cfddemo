@@ -49,11 +49,21 @@ def _map_bytes() -> bytes:
     }).encode()
 
 
-def test_documented_map_template_cannot_be_registered() -> None:
-    docs = (Path(__file__).parents[2] / "docs" / "epi-clock.md").read_text()
-    template = docs.split("```json\n", 1)[1].split("\n```", 1)[0]
-    with pytest.raises(ClockModelError, match="invalid assay site or hg38 C coordinate"):
-        _parse(template.encode(), "0" * 64)
+def test_documented_map_matches_registerable_pinned_asset() -> None:
+    docs_dir = Path(__file__).parents[2] / "docs"
+    docs = (docs_dir / "epi-clock.md").read_text()
+    documented = json.loads(docs.split("```json\n", 1)[1].split("\n```", 1)[0])
+    raw = (docs_dir / "assets" / "weidner-3-grch38-map.json").read_bytes()
+    assert documented == json.loads(raw)
+    digest = hashlib.sha256(raw).hexdigest()
+    assert digest in docs
+    model = _parse(raw, digest)
+    assert model.sites == (
+        ("cg02228185", "chr17", 3476272),
+        ("cg25809905", "chr17", 44390359),
+        ("pde4c_upstream_of_cg17861230", "chr19", 18233104),
+    )
+    assert model.sha256 == digest
 
 
 def test_array_probe_id_is_rejected_as_upstream_assay_site_label() -> None:

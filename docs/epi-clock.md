@@ -20,44 +20,59 @@ unmodified changes that site's fraction by 0.2 and the fitted arithmetic by
 `164.7 × 0.2 = 32.94` years. The gate therefore does not establish a precise
 age estimate; inspect each site's call count and split stability.
 
-The operator must provide a verified hg38 coordinate mapping for the two
-Illumina probe CpGs and the **upstream PDE4C assay CpG** used for the third
-coefficient in [Weidner et al. 2014](https://doi.org/10.1186/gb-2014-15-2-r24).
+The [verified GRCh38.p13 coordinate map](assets/weidner-3-grch38-map.json)
+provides the two Illumina probe CpGs and the **upstream PDE4C assay CpG** used
+for the third coefficient in [Weidner et al. 2014](https://doi.org/10.1186/gb-2014-15-2-r24).
+Its source sequence, assembly accessions, checksums, strand interpretation,
+and reproduction steps are recorded in the
+[coordinate provenance](epi-clock-coordinate-provenance.md). These are
+zero-based positions of the forward-reference `C` in each `CG`:
+
+| Assay site | Chromosome | `pos0` |
+|---|---|---:|
+| `cg02228185` (ASPA) | `chr17` | 3,476,272 |
+| `cg25809905` (ITGA2B) | `chr17` | 44,390,359 |
+| `pde4c_upstream_of_cg17861230` (PDE4C) | `chr19` | 18,233,104 |
+
 The coefficient asset labels that third coefficient `cg17861230`, but the
 paper's fitted pyrosequencing equation measures a nearby CpG upstream of that
 array probe. Registering the `cg17861230` probe coordinate for the third site
-would apply the coefficient to the wrong CpG. There is deliberately no built-in guess or automatic
-liftover. The JSON file must be at most 8 KiB, with exactly these fields:
+would apply the coefficient to the wrong CpG. The array probe is at `chr19`
+`pos0` 18,233,090, 14 bases before the assay CpG on the forward reference.
+PDE4C is on the reverse strand, so the selected site is upstream in gene
+orientation. There is no automatic registration or liftover. The pinned map
+uses this schema, with exactly these fields:
 
 ```json
 {
   "schema": "traceback.lab.epi-clock-map.v2",
   "model_id": "Weidner-3",
   "genome_build": "hg38",
-  "source_label": "name of verified annotation and version",
+  "source_label": "Weidner2014-IlluminaHM450v1.2-NCBI-GRCh38p13",
   "sites": [
-    {"cpg_id": "cg02228185", "chrom": null, "pos0": null},
-    {"cpg_id": "cg25809905", "chrom": null, "pos0": null},
-    {"cpg_id": "pde4c_upstream_of_cg17861230", "chrom": null, "pos0": null}
+    {"cpg_id": "cg02228185", "chrom": "chr17", "pos0": 3476272},
+    {"cpg_id": "cg25809905", "chrom": "chr17", "pos0": 44390359},
+    {"cpg_id": "pde4c_upstream_of_cg17861230", "chrom": "chr19", "pos0": 18233104}
   ]
 }
 ```
 
-The null values above make this template **unregisterable** until the real
-assay-site coordinates have been verified. Supply the actual chromosome and zero-based position of the
-forward-reference C for each measured CpG. Only
-autosomes are accepted. The registration checks structure, unique positions,
+Only autosomes are accepted. Registration checks structure, unique positions,
 and exact bytes; at run time the adapter checks the [GRCh38 primary-assembly
 chromosome lengths](https://www.ncbi.nlm.nih.gov/grc/human/data?asm=GRCh38)
 in both the aligned input and reference FASTA, and checks the FASTA
-for `CG` at all three positions. Those checks cannot establish that a site ID
-was mapped to the correct locus. The operator must verify that mapping against
-the named annotation, and qualification remains pending until that evidence is
-available.
+for `CG` at all three positions. Those runtime checks alone cannot establish
+site identity; the linked provenance records the independent coordinate
+cross-check. This does not qualify the age model on ONT cfDNA.
 
-Register with `traceback lab asset register-clock-map --file MAP.json --sha256
-HEX_SHA256 --root ROOT`, then inspect with `traceback lab asset
-inspect-clock-map --root ROOT`. Registration is immutable within a Lab root.
+After reviewing the map, register its exact bytes with:
+
+```bash
+traceback lab asset register-clock-map --file docs/assets/weidner-3-grch38-map.json --sha256 ba5ce4d1f2313f6e39b5ff50fd19823ea96e7edec68ea611db5dcbff1b0f21df --root ROOT
+traceback lab asset inspect-clock-map --root ROOT
+```
+
+Registration is immutable within a Lab root.
 If a registered coordinate is wrong, use a new Lab root with a corrected,
 independently verified map; the existing registration cannot be replaced.
 If registration reports an uncertain publication outcome, inspect the map in
