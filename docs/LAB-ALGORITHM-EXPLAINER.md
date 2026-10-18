@@ -222,8 +222,8 @@ can affect it; it is not a direct measurement of mitochondrial function.
 **Measures:** genomic gains/losses, segments, ploidy and a model-based tumour
 fraction through ichorCNA. **What we learn:** whether the data support broad
 copy-number structure and what fraction the fitted model attributes to that
-structure. A verified, protocol-matched panel of normals is needed for the
-qualified comparison. Low signal, model ambiguity and whole-genome doubling
+structure. A verified, protocol-matched panel of normals is needed for a
+technically comparable PoN-corrected result. Low signal, model ambiguity and whole-genome doubling
 can complicate estimates; absence of a signal does not rule out cancer.
 
 ### 21. Genomic instability (`instability`)
@@ -377,7 +377,7 @@ abnormality cutoff. Distinct sources do not prove independent donors.
 
 **TF concordance and Agreement** compare copy-number, methylation, fragment-size
 and mitochondrial observations. They help reveal agreement, disagreement and
-possible confounding. The views distinguish raw plots from qualified paired
+possible confounding. The views distinguish raw plots from compatible paired
 results and refuse a stale copy-number binding for the selected cohort.
 Shared inputs mean agreement is not independent confirmation.
 
