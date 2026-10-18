@@ -1121,6 +1121,164 @@ def test_existing_input_reruns_even_when_the_disk_is_now_short(lab_world, capsys
     assert _json(capsys, *argv)[0] == 0
 
 
+def _tiny_aligned_bam(lab_world) -> Path:
+    with pysam.FastaFile(str(lab_world["fasta"])) as reference:
+        contigs = [{"SN": name, "LN": length} for name, length in
+                   zip(reference.references, reference.lengths)]
+    bam = lab_world["tmp"] / "one-aligned.bam"
+    header = pysam.AlignmentHeader.from_dict({
+        "HD": {"VN": "1.6", "SO": "coordinate"}, "SQ": contigs,
+        "RG": [{"ID": "synthetic", "PL": "ONT"}],
+    })
+    with pysam.AlignmentFile(str(bam), "wb", header=header) as output:
+        read = pysam.AlignedSegment(header)
+        read.query_name = "synthetic"
+        read.query_sequence = "A" * 100
+        read.query_qualities = pysam.qualitystring_to_array("I" * 100)
+        read.reference_id = 0
+        read.reference_start = 0
+        read.mapping_quality = 60
+        read.cigarstring = "100M"
+        read.set_tag("RG", "synthetic")
+        output.write(read)
+    return bam
+
+
+@pytest.mark.parametrize("cache_seeded", [False, True])
+def test_low_disk_refusal_leaves_registered_root_unchanged(lab_world, capsys, monkeypatch, cache_seeded) -> None:
+    """AC4: a rejected new input must not change even Lab bookkeeping."""
+    from traceback_lab.ingest import Budget
+
+    _registry(monkeypatch, "SUMMARY")
+    root = lab_world["root"]
+    bam = _tiny_aligned_bam(lab_world)
+    if cache_seeded:
+        from traceback_lab.ingest import inspect_chunks
+
+        inspect_chunks([bam], LabStore(root))
+
+    def inventory() -> dict[str, tuple[str, bytes | None]]:
+        return {
+            str(path.relative_to(root)): (
+                "link" if path.is_symlink() else "dir" if path.is_dir() else "file",
+                path.read_bytes() if path.is_file() and not path.is_symlink() else None,
+            )
+            for path in root.rglob("*")
+        }
+
+    before = inventory()
+    monkeypatch.setattr(run_module, "disk_budget", lambda *_args, **_kwargs: Budget({"aligned": 1024}, 0))
+    code, payload = _json(capsys, "run", str(bam), "--root", str(root))
+    assert code == 3 and payload["data"]["code"] == "TBX-LAB-010"
+    assert payload["data"]["required_bytes"] == 1024
+    assert payload["data"]["free_bytes"] == 0
+    assert payload["data"]["step"] == "ingest"
+    assert inventory() == before
+
+
+def test_prealigned_cold_hash_once_then_reuses_under_low_disk(lab_world, capsys, monkeypatch) -> None:
+    from traceback_lab import ingest
+
+    _registry(monkeypatch, "SUMMARY")
+    bam = _tiny_aligned_bam(lab_world)
+    original_hash = ingest._sha256_file
+    hashed = []
+
+    def counted(path):
+        hashed.append(path)
+        return original_hash(path)
+
+    monkeypatch.setattr(ingest, "_sha256_file", counted)
+    argv = ("run", str(bam), "--root", str(lab_world["root"]))
+    first_code, first = _json(capsys, *argv)
+    assert first_code == 0, first
+    assert hashed.count(bam) == 1
+    first_hashes = list(hashed)
+
+    monkeypatch.setattr(run_module, "disk_budget", lambda *_args, **_kwargs: ingest.Budget({"aligned": 1024}, 0))
+    second_code, second = _json(capsys, *argv)
+    assert second_code == 0, second
+    assert hashed == first_hashes
+
+
+def test_capacity_drop_after_read_only_preflight_is_checked_under_lock(lab_world, capsys, monkeypatch) -> None:
+    from traceback_lab.ingest import Budget
+
+    _registry(monkeypatch, "SUMMARY")
+    bam = _tiny_aligned_bam(lab_world)
+    calls = []
+
+    def changing_budget(*_args, **_kwargs):
+        calls.append(1)
+        return Budget({"aligned": 1024}, 1024 if len(calls) == 1 else 0)
+
+    monkeypatch.setattr(run_module, "disk_budget", changing_budget)
+    code, payload = _json(capsys, "run", str(bam), "--root", str(lab_world["root"]))
+    assert code == 3 and payload["data"]["code"] == "TBX-LAB-010"
+    assert payload["data"]["step"] == "ingest"
+    assert len(calls) == 2
+    assert not list(LabStore(lab_world["root"]).inputs_dir.glob("*/manifest.json"))
+
+
+@pytest.mark.parametrize("mmi_present", [False, True])
+def test_low_disk_unaligned_refusal_leaves_root_unchanged(lab_world, capsys, monkeypatch, mmi_present) -> None:
+    """The read-only gate includes alignment with or without a cached index."""
+    from traceback_lab.ingest import Budget
+
+    _registry(monkeypatch, "SUMMARY")
+    root = lab_world["root"]
+    before = {str(path.relative_to(root)): path.read_bytes() if path.is_file() else None
+              for path in root.rglob("*")}
+    monkeypatch.setattr(run_module, "disk_budget", lambda *_args, **_kwargs: Budget({"align": 1024}, 0))
+    monkeypatch.setattr(run_module, "require_aligner_tools", lambda: (
+        SimpleNamespace(version="samtools-test"), SimpleNamespace(version="minimap2-test")))
+    mmi = lab_world["tmp"] / "external.mmi"
+    if mmi_present:
+        mmi.write_bytes(b"index identity")
+    argv = ("run", str(lab_world["chunks"]), "--root", str(root))
+    if mmi_present:
+        argv += ("--mmi", str(mmi))
+    code, payload = _json(capsys, *argv)
+    assert code == 3 and payload["data"]["code"] == "TBX-LAB-010"
+    assert payload["data"]["step"] == "align"
+    assert {str(path.relative_to(root)): path.read_bytes() if path.is_file() else None
+            for path in root.rglob("*")} == before
+
+
+def test_low_disk_unprepared_example_does_not_create_root(tmp_path, capsys, monkeypatch) -> None:
+    root = tmp_path / "missing-root"
+    monkeypatch.setattr(run_module.shutil, "disk_usage", lambda _path: SimpleNamespace(free=0))
+    code, payload = _json(capsys, "run", "--example", "--root", str(root))
+    assert code == 3 and payload["data"]["code"] == "TBX-LAB-010"
+    assert payload["data"]["step"] == "example"
+    assert payload["data"]["free_bytes"] == 0
+    assert not root.exists()
+
+
+def test_partial_example_without_registration_uses_generation_preflight(lab_world, capsys, monkeypatch) -> None:
+    """A marker and chunks alone do not mean prepare can be skipped."""
+    from traceback_lab.example import CHUNKS, CONTIG_LENGTH, MARKER, READS_PER_CHUNK, SEED, example_dir
+
+    root = lab_world["root"]
+    base = example_dir(root)
+    chunks = base / "chunks"
+    chunks.mkdir(parents=True)
+    for number in range(CHUNKS):
+        (chunks / f"partial_{number}.bam").write_bytes(b"")
+    (base / "example.json").write_text(json.dumps({
+        "schema": MARKER, "seed": SEED, "contig_length": CONTIG_LENGTH,
+        "reads_per_chunk": READS_PER_CHUNK, "chunks": CHUNKS,
+    }))
+    before = {str(path.relative_to(root)): path.read_bytes() if path.is_file() else None
+              for path in root.rglob("*")}
+    monkeypatch.setattr(run_module.shutil, "disk_usage", lambda _path: SimpleNamespace(free=0))
+    code, payload = _json(capsys, "run", "--example", "--root", str(root))
+    assert code == 3 and payload["data"]["code"] == "TBX-LAB-010"
+    assert payload["data"]["step"] == "example"
+    assert {str(path.relative_to(root)): path.read_bytes() if path.is_file() else None
+            for path in root.rglob("*")} == before
+
+
 def test_enospc_while_copying_a_prealigned_bam_is_tbx_lab_011(lab_world, capsys, monkeypatch, shared_mmi, tmp_path) -> None:
     _registry(monkeypatch)
     import errno
