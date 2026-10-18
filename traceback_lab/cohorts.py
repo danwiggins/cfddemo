@@ -28,7 +28,8 @@ from .identity import SHA256_PATTERN, canonical_sha256, cohort_compat_key
 from .ingest import resolve_sample, source_ids
 from .problems import LabProblem
 from .registry import execution_identity, load_registry
-from .store import (MAX_EXECUTION_PLAN_BYTES, LabStore, _fsync_dir, new_run_id,
+from .store import (MAX_EXECUTION_PLAN_BYTES, LabStore, ResultOrderUnavailable,
+                    SelectionSnapshotChanged, _fsync_dir, new_run_id,
                     open_regular_no_follow, write_atomic)
 from .views import selected_result_snapshots
 
@@ -369,6 +370,21 @@ def _aligner(manifest: dict[str, Any], input_id: str) -> tuple[str, dict[str, An
     }
 
 
+def _execution_plan(attempt: Path) -> dict[str, Any] | None:
+    """Read a producer plan only from a bounded, regular attempt file."""
+
+    try:
+        with os.fdopen(open_regular_no_follow(attempt / "execution_plan.json"), "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                    or info.st_size > MAX_EXECUTION_PLAN_BYTES):
+                return None
+            plan = json.loads(stream.read(MAX_EXECUTION_PLAN_BYTES + 1))
+    except (OSError, ValueError, TypeError, RecursionError):
+        return None
+    return plan if isinstance(plan, dict) else None
+
+
 def _recorded_selection(
     store: LabStore, input_id: str, algorithm: Any, attempt: Path, latest: Any,
     manifest: dict[str, Any],
@@ -378,12 +394,7 @@ def _recorded_selection(
     """Select a result by its recorded effective identity, without live probes."""
     identity = latest.provenance.parameters_sha256
     try:
-        with os.fdopen(open_regular_no_follow(attempt / "execution_plan.json"), "rb") as stream:
-            info = os.fstat(stream.fileno())
-            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
-                    or info.st_size > MAX_EXECUTION_PLAN_BYTES):
-                return None
-            plan = json.loads(stream.read(MAX_EXECUTION_PLAN_BYTES + 1))
+        plan = _execution_plan(attempt)
         if (not isinstance(plan, dict)
                 or plan.get("schema") != "traceback.lab.execution-plan.v1"
                 or plan.get("algorithm_id") != algorithm.id
@@ -431,6 +442,110 @@ def _recorded_selection(
     return identity, latest, plan
 
 
+def _pon_scoped_snapshot(
+    store: LabStore, input_id: str, algorithm: Any, *,
+    reference_sha256: str, platform: str, pon_sha256: str,
+    upstream: list[dict[str, str]], legacy_identity: str | None,
+) -> tuple[Path, Any] | None:
+    """Choose the latest selected attempt in one requested PoN dependency scope.
+
+    Another cohort's panel may be newer globally. An unreadable selector or
+    producer plan with unknown scope still blocks an older match, since it
+    could be a damaged newer result for this same panel.
+    """
+
+    algorithm_id = algorithm.id
+    base = store.results_dir / input_id / algorithm_id
+    if base.is_symlink():
+        return None
+    try:
+        identities = sorted(base.iterdir())
+    except FileNotFoundError:
+        return None
+    except OSError:
+        return None
+    matches: list[tuple[int | None, Path, Any]] = []
+    unknown_orders: list[int | None] = []
+    for identity_dir in identities:
+        if identity_dir.is_symlink():
+            unknown_orders.append(None)
+            continue
+        try:
+            visible = store.selection_visible(input_id, algorithm_id, identity_dir.name)
+        except SelectionSnapshotChanged:
+            raise
+        except OSError:
+            return None
+        if not visible:
+            continue
+        if not SHA256_PATTERN.fullmatch(identity_dir.name) or not identity_dir.is_dir():
+            unknown_orders.append(None)
+            continue
+        order_hint = store.selection_order_hint(input_id, algorithm_id, identity_dir.name)
+        selected = store.selected_result_snapshot(input_id, algorithm_id, identity_dir.name)
+        if selected is None:
+            unknown_orders.append(order_hint)
+            continue
+        attempt, envelope, order = selected
+        plan = _execution_plan(attempt)
+        if plan is None:
+            try:
+                (attempt / "execution_plan.json").lstat()
+            except FileNotFoundError:
+                if identity_dir.name == legacy_identity:
+                    matches.append((order, attempt, envelope))
+                else:
+                    unknown_orders.append(order)
+            else:
+                unknown_orders.append(order)
+            continue
+        if (plan.get("schema") != "traceback.lab.execution-plan.v1"
+                or plan.get("algorithm_id") != algorithm_id
+                or plan.get("algorithm_version") != algorithm.version
+                or plan.get("input_id") != input_id
+                or plan.get("reference_sha256") != reference_sha256
+                or plan.get("platform") != platform
+                or not isinstance(plan.get("parameters"), dict)
+                or not isinstance(plan.get("upstream"), list)
+                or not isinstance(plan.get("tools"), list)
+                or not isinstance(plan.get("asset_sha256s"), list)):
+            unknown_orders.append(order)
+            continue
+        try:
+            recorded_identity = execution_identity(
+                algorithm, reference_sha256=reference_sha256,
+                upstream=plan["upstream"], asset_sha256s=plan["asset_sha256s"],
+                platform=platform if platform != "ont" else None,
+                tool_pins=plan["tools"], parameters=plan["parameters"],
+            )
+        except (ValueError, TypeError, KeyError, RecursionError):
+            unknown_orders.append(order)
+            continue
+        if recorded_identity != envelope.provenance.parameters_sha256:
+            unknown_orders.append(order)
+            continue
+        if algorithm_id == "copy-number":
+            parameters = plan["parameters"]
+            in_scope = (parameters.get("pon_policy") == "lab_loo_v1"
+                        and parameters.get("pon_sha256") == pon_sha256)
+        else:
+            in_scope = plan["upstream"] == upstream
+        if in_scope:
+            matches.append((order, attempt, envelope))
+    if not matches or (len(matches) > 1 and any(order is None for order, _, _ in matches)):
+        return None
+    chosen_order = max(order or 0 for order, _, _ in matches)
+    newest = [(attempt, envelope) for order, attempt, envelope in matches
+              if (order or 0) == chosen_order]
+    if len(newest) != 1:
+        return None
+    attempt, envelope = newest[0]
+    if any(order is None or chosen_order is None or order >= chosen_order
+           for order in unknown_orders):
+        return None
+    return attempt, envelope
+
+
 def _consumed_attempts_current(
     store: LabStore, attempt: Path, upstream: list[dict[str, str]],
     snapshots: dict[str, tuple[Path, Any]], input_id: str,
@@ -455,7 +570,7 @@ def _consumed_attempts_current(
     return True
 
 
-def _selected_results(
+def _selected_results_once(
     store: LabStore, input_id: str, manifest: dict[str, Any], *, pon_selection: Any | None = None,
 ) -> tuple[CohortResult, ...]:
     """Snapshot only selected status-ok results on the full input."""
@@ -482,15 +597,13 @@ def _selected_results(
     found: list[CohortResult] = []
     identities: dict[str, str] = {}
     latest_results = selected_result_snapshots(store, input_id)
+    chosen_snapshots = dict(latest_results)
+    pon_dependent = pon_dependent_algorithms() if pon_selection is not None else set()
     for algorithm in load_registry():
         if algorithm.id == "copy-number" and pon_selection is not None:
             from .pon_consumer import bind_copy_number_algorithm
 
             algorithm = bind_copy_number_algorithm(algorithm, pon_selection)
-        snapshot = latest_results.get(algorithm.id)
-        if snapshot is None or snapshot[1].status != "ok":
-            continue
-        attempt, latest = snapshot
         supported = getattr(getattr(algorithm, "requires", None), "platforms", frozenset({"ont"}))
         if platform not in supported:
             continue
@@ -500,6 +613,10 @@ def _selected_results(
         ]
         if len(upstream) != len(algorithm.upstream):
             continue
+        if algorithm.id not in pon_dependent:
+            snapshot = latest_results.get(algorithm.id)
+            if snapshot is None or snapshot[1].status != "ok":
+                continue
         assets_of = getattr(algorithm, "asset_sha256s", None)
         scoped_assets_of = getattr(algorithm, "asset_sha256s_for_input", None)
         identity_assets = getattr(algorithm, "identity_assets", None)
@@ -508,6 +625,30 @@ def _selected_results(
             assets = (None if callable(identity_assets) else
                       list(scoped_assets_of(store.root, input_id)) if callable(scoped_assets_of) else
                       list(assets_of(store.root) if callable(assets_of) else ()))
+            legacy_identity = None
+            if algorithm.id in pon_dependent and not any(callable(hook) for hook in (
+                identity_tools, identity_assets, getattr(algorithm, "identity_parameters", None),
+            )):
+                legacy_identity = execution_identity(
+                    algorithm, reference_sha256=manifest["reference_sha256"], upstream=upstream,
+                    asset_sha256s=assets or (), platform=platform if platform != "ont" else None,
+                )
+        except (OSError, ValueError, KeyError, LabProblem):
+            continue
+        if algorithm.id in pon_dependent:
+            snapshot = _pon_scoped_snapshot(
+                store, input_id, algorithm,
+                reference_sha256=manifest["reference_sha256"], platform=platform,
+                pon_sha256=pon_selection.pon_sha256, upstream=upstream,
+                legacy_identity=legacy_identity,
+            )
+            # A globally selected result from another panel must not satisfy
+            # a downstream dependency in this requested generation.
+            chosen_snapshots.pop(algorithm.id, None)
+        if snapshot is None or snapshot[1].status != "ok":
+            continue
+        attempt, latest = snapshot
+        try:
             stored = _recorded_selection(store, input_id, algorithm, attempt, latest, manifest,
                                          upstream, assets, platform)
             if stored is not None:
@@ -545,12 +686,13 @@ def _selected_results(
         if chosen is None or chosen.status != "ok":
             continue
         if algorithm.upstream and not _consumed_attempts_current(
-            store, attempt, upstream, latest_results, input_id,
+            store, attempt, upstream, chosen_snapshots, input_id,
         ):
             continue
         if chosen.algorithm_version != algorithm.version or chosen.provenance.source_id != manifest["source_id"]:
             continue
         identities[algorithm.id] = identity
+        chosen_snapshots[algorithm.id] = (attempt, chosen)
         metrics = {
             metric.metric_id: metric.value
             for metric in chosen.metrics
@@ -600,6 +742,22 @@ def _selected_results(
                       if metric.metric_id in metrics and metric.n is not None},
         ))
     return tuple(found)
+
+
+def _selected_results(
+    store: LabStore, input_id: str, manifest: dict[str, Any], *, pon_selection: Any | None = None,
+) -> tuple[CohortResult, ...]:
+    """Read generic and PoN-scoped selectors under one stable store epoch."""
+
+    for _ in range(3):
+        try:
+            with store.selection_read_context():
+                return _selected_results_once(
+                    store, input_id, manifest, pon_selection=pon_selection,
+                )
+        except SelectionSnapshotChanged:
+            continue
+    raise ResultOrderUnavailable("cohort result selections kept changing during read")
 
 
 def member_from_store(store: LabStore, source_id: str, *, pon_selection: Any | None = None) -> CohortMember:

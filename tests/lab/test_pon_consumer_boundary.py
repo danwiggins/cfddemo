@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -967,8 +968,8 @@ def test_failed_generation_publish_restores_member_selections(
 
 
 @pytest.mark.parametrize("selected_panel", [None, "a" * 64, "b" * 64])
-def test_recorded_cn_plan_cannot_override_requested_panel(tmp_path, monkeypatch, selected_panel) -> None:
-    """A valid historical identity cannot replace the panel requested now."""
+def test_requested_panel_uses_its_selected_identity(tmp_path, monkeypatch, selected_panel) -> None:
+    """Another cohort's newer panel does not hide this panel's selected attempt."""
     store = LabStore(tmp_path)
     source_id = _sample(store, 1)
     input_id = f"{101:064x}"
@@ -978,10 +979,12 @@ def test_recorded_cn_plan_cannot_override_requested_panel(tmp_path, monkeypatch,
     monkeypatch.setattr(cohorts, "load_registry", lambda: [algorithm])
     requested = SimpleNamespace(pon_policy="lab_loo_v1", pon_sha256="a" * 64)
 
-    def publish(panel):
+    def publish(panel, *, revision=None):
         producer = (pon_consumer.bind_copy_number_algorithm(
             algorithm, SimpleNamespace(pon_policy="lab_loo_v1", pon_sha256=panel),
         ) if panel is not None else algorithm)
+        if revision is not None:
+            producer = replace(producer, parameters={**producer.parameters, "fixture_revision": revision})
         identity = execution_identity(producer, reference_sha256=manifest["reference_sha256"])
         store.publish_result(ResultEnvelope(
             algorithm_id=producer.id, algorithm_version=producer.version, status="ok",
@@ -1000,11 +1003,162 @@ def test_recorded_cn_plan_cannot_override_requested_panel(tmp_path, monkeypatch,
     current_identity = publish(selected_panel)
     selected = cohorts._selected_results(store, input_id, manifest, pon_selection=requested)
     assert [row.parameters_sha256 for row in selected] == (
-        [current_identity] if selected_panel == requested.pon_sha256 else []
+        [current_identity] if selected_panel == requested.pon_sha256 else [old_identity]
     )
-    # Rejected latest identities never fall back to the older valid PoN attempt.
     assert store.selected_attempt(input_id, algorithm.id, old_identity) is not None
+    requested_b = SimpleNamespace(pon_policy="lab_loo_v1", pon_sha256="b" * 64)
+    selected_b = cohorts._selected_results(store, input_id, manifest, pon_selection=requested_b)
+    assert [row.parameters_sha256 for row in selected_b] == (
+        [current_identity] if selected_panel == requested_b.pon_sha256 else []
+    )
     independent = cohorts._selected_results(store, input_id, manifest)
     assert [row.parameters_sha256 for row in independent] == (
         [current_identity] if selected_panel is None else []
     )
+    if selected_panel == "b" * 64:
+        malformed = store.results_dir / input_id / algorithm.id / "not-a-digest"
+        malformed.mkdir()
+        (malformed / "selected.json").write_text("{")
+        assert cohorts._selected_results(store, input_id, manifest, pon_selection=requested) == ()
+        shutil.rmtree(malformed)
+        # A damaged newer plan or selector of unknown scope may supersede A.
+        damaged_a = publish("a" * 64, revision="newer")
+        damaged_attempt = store.selected_attempt(input_id, algorithm.id, damaged_a)
+        assert damaged_attempt is not None
+        plan_path = damaged_attempt / "execution_plan.json"
+        original_plan = plan_path.read_bytes()
+        forged_scope = json.loads(original_plan)
+        forged_scope["parameters"]["pon_sha256"] = "b" * 64
+        plan_path.write_text(json.dumps(forged_scope))
+        assert cohorts._selected_results(store, input_id, manifest, pon_selection=requested) == ()
+        plan_path.write_text("{")
+        assert cohorts._selected_results(store, input_id, manifest, pon_selection=requested) == ()
+        plan_path.write_bytes(original_plan)
+        (store.result_dir(input_id, algorithm.id, damaged_a) / "selected.json").write_text("{")
+        assert cohorts._selected_results(store, input_id, manifest, pon_selection=requested) == ()
+        # With no A identity at all, B must never satisfy an A request.
+        shutil.rmtree(store.result_dir(input_id, algorithm.id, damaged_a))
+        shutil.rmtree(store.result_dir(input_id, algorithm.id, old_identity))
+        assert cohorts._selected_results(store, input_id, manifest, pon_selection=requested) == ()
+
+
+def test_requested_panel_keeps_exact_upstream_attempts(tmp_path, monkeypatch) -> None:
+    """A/B cohorts may share one input, but their dependent attempts cannot mix."""
+    store = LabStore(tmp_path)
+    source_id = _sample(store, 1)
+    input_id = f"{101:064x}"
+    manifest = json.loads((store.inputs_dir / input_id / "manifest.json").read_bytes())
+    reference = manifest["reference_sha256"]
+    read_summary = SimpleNamespace(
+        id="read-summary", version="1", parameters={}, tools=[], upstream=(),
+        requires=SimpleNamespace(platforms=frozenset({"ont"})),
+    )
+    copy_number = replace(cn_module.COPY_NUMBER, upstream=())
+    instability = SimpleNamespace(
+        id="instability", version="1", parameters={}, tools=[], upstream=("copy-number",),
+        requires=SimpleNamespace(platforms=frozenset({"ont"})),
+    )
+    arm_summary = SimpleNamespace(
+        id="arm-summary", version="1", parameters={}, tools=[],
+        upstream=("read-summary", "copy-number"),
+        requires=SimpleNamespace(platforms=frozenset({"ont"})),
+    )
+    monkeypatch.setattr(type(copy_number), "asset_sha256s", lambda self, root: [])
+    monkeypatch.setattr(
+        cohorts, "load_registry", lambda: [read_summary, copy_number, instability, arm_summary],
+    )
+
+    def publish(algorithm, upstream_ids=(), consumed=()):
+        upstream = [
+            {"algorithm_id": name, "parameters_sha256": identity}
+            for name, identity in upstream_ids
+        ]
+        identity = execution_identity(algorithm, reference_sha256=reference, upstream=upstream)
+        store.publish_result(ResultEnvelope(
+            algorithm_id=algorithm.id, algorithm_version=algorithm.version, status="ok",
+            provenance=provenance(
+                tool="fixture", parameters_sha256=identity, source_id=source_id,
+                input_id=input_id, reference_id="synthetic",
+            ),
+        ), input_id=input_id, execution_plan={
+            "schema": "traceback.lab.execution-plan.v1", "algorithm_id": algorithm.id,
+            "algorithm_version": algorithm.version, "input_id": input_id,
+            "reference_sha256": reference, "platform": "ont",
+            "parameters": algorithm.parameters,
+            "tools": [tool.identity() for tool in algorithm.tools], "asset_sha256s": [],
+            "upstream": upstream,
+        }, upstream_selections=list(consumed))
+        attempt = store.selected_attempt(input_id, algorithm.id, identity)
+        assert attempt is not None
+        return identity, attempt
+
+    read_id, read_attempt = publish(read_summary)
+    panel_attempts = {}
+    for panel in ("a" * 64, "b" * 64):
+        bound = pon_consumer.bind_copy_number_algorithm(
+            copy_number, SimpleNamespace(pon_policy="lab_loo_v1", pon_sha256=panel),
+        )
+        cn_id, cn_attempt = publish(bound)
+        cn_upstream = (("copy-number", cn_id),)
+        cn_consumed = ({
+            "algorithm_id": "copy-number", "input_id": input_id,
+            "parameters_sha256": cn_id, "attempt_id": cn_attempt.name,
+        },)
+        inst_id, inst_attempt = publish(instability, cn_upstream, cn_consumed)
+        arm_upstream = (("read-summary", read_id), ("copy-number", cn_id))
+        arm_consumed = tuple(sorted((*cn_consumed, {
+            "algorithm_id": "read-summary", "input_id": input_id,
+            "parameters_sha256": read_id, "attempt_id": read_attempt.name,
+        }), key=lambda row: row["algorithm_id"]))
+        arm_id, arm_attempt = publish(arm_summary, arm_upstream, arm_consumed)
+        panel_attempts[panel] = (cn_id, inst_id, arm_id, cn_attempt, inst_attempt, arm_attempt)
+
+    for panel in ("a" * 64, "b" * 64):
+        selected = cohorts._selected_results(
+            store, input_id, manifest,
+            pon_selection=SimpleNamespace(pon_policy="lab_loo_v1", pon_sha256=panel),
+        )
+        assert {row.algorithm_id: row.parameters_sha256 for row in selected} == {
+            "read-summary": read_id,
+            "copy-number": panel_attempts[panel][0],
+            "instability": panel_attempts[panel][1],
+            "arm-summary": panel_attempts[panel][2],
+        }
+
+    # The A plans still name A, but their consumed attempt metadata now names
+    # B. Neither dependent result can be used under A after this tampering.
+    a = panel_attempts["a" * 64]
+    b = panel_attempts["b" * 64]
+    for attempt in (a[4], a[5]):
+        path = attempt / "upstream_selections.json"
+        payload = json.loads(path.read_bytes())
+        for row in payload["selections"]:
+            if row["algorithm_id"] == "copy-number":
+                row.update(parameters_sha256=b[0], attempt_id=b[3].name)
+        path.write_text(json.dumps(payload))
+    selected_a = cohorts._selected_results(
+        store, input_id, manifest,
+        pon_selection=SimpleNamespace(pon_policy="lab_loo_v1", pon_sha256="a" * 64),
+    )
+    assert {row.algorithm_id for row in selected_a} == {"read-summary", "copy-number"}
+
+
+@pytest.mark.parametrize("changes", [1, 3])
+def test_cohort_result_read_retries_whole_changed_epoch(tmp_path, monkeypatch, changes) -> None:
+    store = LabStore(tmp_path)
+    calls = 0
+
+    def read_once(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls <= changes:
+            store.bump_generation()
+        return ("settled",)
+
+    monkeypatch.setattr(cohorts, "_selected_results_once", read_once)
+    if changes == 1:
+        assert cohorts._selected_results(store, "a" * 64, {}) == ("settled",)
+    else:
+        with pytest.raises(cohorts.ResultOrderUnavailable, match="kept changing"):
+            cohorts._selected_results(store, "a" * 64, {})
+    assert calls == (2 if changes == 1 else 3)
