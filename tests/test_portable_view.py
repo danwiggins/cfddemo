@@ -573,6 +573,79 @@ def test_postrename_root_seal_failure_quarantines_owned_directory(
     assert not list(tmp_path.glob(".artifact.*"))
 
 
+@pytest.mark.skipif(not hasattr(os, "fork"), reason="process crash requires POSIX fork")
+def test_process_death_after_rename_leaves_unsealed_unverifiable_destination(
+    integrated_request: PortableViewBuildRequest,
+    trust_context: PortableTrustContext,
+    tmp_path: Path,
+) -> None:
+    view, table = build_portable_view(integrated_request, trust_context=trust_context)
+    destination = tmp_path / "artifact"
+    child = os.fork()
+    if child == 0:
+        original_rename = portable.rename_directory_exclusive_at
+
+        def crash_after_rename(parent_fd: int, source: str, target: str) -> None:
+            original_rename(parent_fd, source, target)
+            if target == destination.name:
+                os._exit(83)
+
+        portable.rename_directory_exclusive_at = crash_after_rename
+        try:
+            publish_portable_view(
+                destination,
+                view=view,
+                accessible_table=table,
+                trust_context=trust_context,
+                source_identity_verifier=lambda: view.source_identities,
+            )
+        except BaseException:
+            os._exit(84)
+        os._exit(85)
+
+    _, status = os.waitpid(child, 0)
+    assert os.WIFEXITED(status) and os.WEXITSTATUS(status) == 83
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o700
+    assert {path.name for path in destination.iterdir()} == set(portable._FILES)
+    assert all(stat.S_IMODE(path.stat().st_mode) == 0o400 for path in destination.iterdir())
+    original_inode = destination.stat().st_ino
+    with pytest.raises(PortableViewTamperError):
+        verify_portable_view(destination, trust_context=trust_context)
+
+    lock = tmp_path / ".artifact.publish.lock"
+    assert lock.is_file()
+    with pytest.raises(PortableViewConflictError):
+        publish_portable_view(
+            destination,
+            view=view,
+            accessible_table=table,
+            trust_context=trust_context,
+            source_identity_verifier=lambda: view.source_identities,
+        )
+    lock.unlink()
+    with pytest.raises(PortableViewConflictError):
+        publish_portable_view(
+            destination,
+            view=view,
+            accessible_table=table,
+            trust_context=trust_context,
+            source_identity_verifier=lambda: view.source_identities,
+        )
+    assert destination.stat().st_ino == original_inode
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o700
+    assert not list(tmp_path.glob(".artifact.*"))
+
+    fresh = tmp_path / "fresh"
+    publish_portable_view(
+        fresh,
+        view=view,
+        accessible_table=table,
+        trust_context=trust_context,
+        source_identity_verifier=lambda: view.source_identities,
+    )
+    verify_portable_view(fresh, trust_context=trust_context)
+
+
 def test_source_change_and_destination_race_fail_closed_without_stage_leaks(
     integrated_request: PortableViewBuildRequest,
     trust_context: PortableTrustContext,
