@@ -680,6 +680,7 @@
         const since = state.lastOk ? state.lastOk.toTimeString().slice(0, 5) : "page load";
         setStatus(`Lab server not responding since ${since}. What you see may be out of date. Restart \`traceback lab serve --open\`; it opens a fresh page.`);
         document.body.classList.add("dimmed");
+        restoreRenderedRoute();
         setControlsEnabled(false);
       }
     } finally {
@@ -696,6 +697,13 @@
     }
     for (const link of document.querySelectorAll("a[href^='#/']")) setLinkEnabled(link, enabled);
     document.body.dataset.disconnected = enabled ? "0" : "1";
+  }
+  function restoreRenderedRoute() {
+    if (!state.renderedHash || location.hash === state.renderedHash) return;
+    // Cancel a sample fetch that started before disconnection. Its late answer
+    // must not replace the route the reader was actually viewing.
+    state.navigationRevision += 1;
+    history.replaceState(null, "", location.pathname + location.search + state.renderedHash);
   }
   document.addEventListener("click", (event) => {
     if (document.body.dataset.disconnected !== "1" || !(event.target instanceof Element) ||
@@ -720,9 +728,7 @@
   window.addEventListener("hashchange", (event) => {
     if (document.body.dataset.disconnected !== "1") return;
     event.stopImmediatePropagation();
-    if (state.renderedHash && location.hash !== state.renderedHash) {
-      history.replaceState(null, "", location.pathname + location.search + state.renderedHash);
-    }
+    restoreRenderedRoute();
   }, true);
 
   // -- start ----------------------------------------------------------------------------

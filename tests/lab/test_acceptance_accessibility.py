@@ -797,8 +797,8 @@ def test_disconnected_navigation_keeps_url_and_view_in_sync(tmp_path) -> None:
 
 
 @needs_chrome
-def test_late_route_links_are_disabled_until_status_recovers(tmp_path) -> None:
-    """A sample fetch begun before disconnection cannot add an active route link."""
+def test_pending_navigation_is_cancelled_when_status_disconnects(tmp_path) -> None:
+    """A held sample response cannot move the URL ahead of the visible route."""
 
     phase = {"down": False}
     with _server(tmp_path, _sample()) as server:
@@ -817,6 +817,7 @@ def test_late_route_links_are_disabled_until_status_recovers(tmp_path) -> None:
 
         def inspect(_command, evaluate) -> None:
             evaluate("""(() => {
+              window.trustHash = location.hash;
               const original = window.fetch;
               window.fetch = (...args) => String(args[0]) === '/api/samples/aaaaaaaaaaaa'
                 ? new Promise((resolve) => { window.releaseUnknownSample = () => resolve(new Response(
@@ -838,14 +839,12 @@ def test_late_route_links_are_disabled_until_status_recovers(tmp_path) -> None:
                 time.sleep(0.2)
             else:
                 pytest.fail("the page did not disconnect")
+            assert evaluate("location.hash === window.trustHash")
+            assert evaluate("document.querySelector('#main h1')?.textContent === 'Trust / QC'")
             evaluate("window.releaseUnknownSample()")
-            for _ in range(20):
-                if evaluate("document.querySelector('#main h1')?.textContent === 'Unknown sample'"):
-                    break
-                time.sleep(0.05)
-            else:
-                pytest.fail("late unknown-sample route did not render")
-            assert evaluate("document.querySelector('#main a[href=\"#/\"]')?.getAttribute('aria-disabled') === 'true'")
+            time.sleep(0.1)
+            assert evaluate("location.hash === window.trustHash")
+            assert evaluate("document.querySelector('#main h1')?.textContent === 'Trust / QC'")
             assert evaluate("document.querySelector('.lab-banner a')?.getAttribute('aria-disabled') === 'true'")
             assert evaluate("document.querySelector('.lab-title')?.getAttribute('aria-disabled') === 'true'")
             phase["down"] = False
@@ -855,7 +854,9 @@ def test_late_route_links_are_disabled_until_status_recovers(tmp_path) -> None:
                 time.sleep(0.2)
             else:
                 pytest.fail("the page did not reconnect")
-            assert evaluate("document.querySelector('#main a[href=\"#/\"]')?.hasAttribute('aria-disabled') === false")
+            assert evaluate("location.hash === window.trustHash")
+            assert evaluate("document.querySelector('#main h1')?.textContent === 'Trust / QC'")
+            assert evaluate("!document.querySelector('.lab-title')?.hasAttribute('aria-disabled')")
 
         profile = tmp_path / "browser-profile"
         _dom_cdp(
