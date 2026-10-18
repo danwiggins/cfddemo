@@ -999,16 +999,18 @@ class LabApi:
         except LabProblem as problem:
             if problem.code == "TBX-LAB-021":
                 return {**base, "state": "example_unscorable", "metrics": [], "unscored": []}
-            return {**base, "state": "target_unavailable", "metrics": [], "unscored": [],
-                    "problem": _recovery_problem(problem)}
-        except ValueError as exc:
-            if str(exc) != "admitted source has no full aligned input":
-                raise
-            problem = LabProblem(
-                "TBX-LAB-017", cause=f"sample {id12} has no stored full aligned input",
-                fix="Inspect `traceback lab runs`, restore the sample's full input if needed, "
-                    "then rerun from its original input and reload Compare",
-            )
+            if (problem.code == "TBX-LAB-020"
+                    and problem.data.get("input_id") == sample.full.input_id
+                    and problem.data.get("field") in ("source input identity", "manifest")):
+                repair = ("source record entry" if problem.data["field"] == "source input identity"
+                          else "input manifest")
+                problem = LabProblem(
+                    "TBX-LAB-020", cause=problem.cause,
+                    fix=(f"Restore the pinned {repair} for input {sample.full.input_id[:12]} "
+                         "from a known-good backup, or rerun the sample from its original input, "
+                         "then reload Compare"),
+                    data=problem.data,
+                )
             return {**base, "state": "target_unavailable", "metrics": [], "unscored": [],
                     "problem": _recovery_problem(problem)}
         # Both reads must describe the same full input. A newer run may become

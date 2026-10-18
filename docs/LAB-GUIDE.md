@@ -135,8 +135,10 @@ Any in-place repair requires an offline backup and operator review first.
 It does not change the measured `sex-check` ratio, source or input identity, or
 cached results. Recording a new assertion advances the local page's change
 counter, including on a fully cached run; repeating the same assertion does
-not. Trust/QC compares a definite male/female call with the assertion at read
-time as a pre-analytic check. An absent assertion, unavailable measured call
+not. That change can prompt Reload without a newly completed analysis run; it
+does not change which primary input the landing selects. Trust/QC compares a
+definite male/female call with the assertion at read time as a pre-analytic
+check. An absent assertion, unavailable measured call
 (including a skipped or failed check), and a measured indeterminate call have
 distinct no-verdict explanations. The page marks the check as privacy-sensitive
 and does not present it as a diagnostic sex or gender determination. A conflicting
@@ -758,6 +760,10 @@ that default. A different registered sample can be opened explicitly with
 `#/?sample=<id12>`; selecting the same source during its rerun still shows
 that source's last completed primary input until the newer run completes. If
 no run has completed, the landing lists registered samples without selecting one.
+The displayed run date is the completed run's terminal timestamp. Results
+come from the currently selected immutable attempts for that completed input,
+so a later attempt selection can change shown metrics after Reload without
+changing the completed input or run date.
 If a completed run's primary input is missing, restore that input or rerun the
 sample. If recorded completion history cannot be verified because a run log is
 missing or unreadable, restore the log or rerun; the landing does not substitute

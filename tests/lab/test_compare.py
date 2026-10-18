@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.lab.test_cohort_store import _sample, _sha
 from traceback_lab import cohorts
 from traceback_lab.cohort_contracts import CohortGeneration, CohortMember, CohortResult
 from traceback_lab.cohorts import CohortListing
@@ -273,29 +274,52 @@ def test_compare_target_unavailable_has_no_metrics(tmp_path, monkeypatch) -> Non
     assert payload["cohort_version"] == "healthy:7"
     assert payload["metrics"] == [] and payload["unscored"] == []
     assert payload["problem"]["code"] == "TBX-LAB-020"
+    assert payload["problem"]["fix"] == problem.fix
 
 
-def test_compare_missing_full_input_has_prose_recovery(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("disappearance", ("source_membership", "manifest"))
+def test_compare_pinned_input_disappearing_after_view_has_specific_recovery(
+    tmp_path, monkeypatch, disappearance,
+) -> None:
     store = LabStore(tmp_path)
-    store.sources_dir.mkdir(parents=True)
-    (store.sources_dir / f"{_TARGET}.json").write_text(json.dumps({
-        "source_id": _TARGET, "example": False, "inputs": [],
-    }))
+    source_id = _sample(store, 1)
+    input_id = _sha(101)
     generation = CohortGeneration(cohort_id="healthy", version=7, members=())
-    monkeypatch.setattr(web_api, "read_current", lambda store, cohort_id: generation)
-    monkeypatch.setattr(web_api.views, "load_sample", lambda store, source_id: SimpleNamespace(example=False, full=SimpleNamespace(input_id=f"{101:064x}")))
-    monkeypatch.setattr(cohorts, "member_for_generation", lambda store, generation, source_id, **_: (
-        _ for _ in ()
-    ).throw(ValueError("admitted source has no full aligned input")))
+    generation_dir = store.lab / "cohorts" / "healthy" / "generations" / "7"
+    generation_dir.mkdir(parents=True)
+    (generation_dir / "generation.json").write_text(generation.model_dump_json(by_alias=True))
+    (generation_dir.parent.parent / "current.json").write_text('{"version":7}')
     api = web_api.LabApi(store)
-    monkeypatch.setattr(api, "_resolve", lambda id12: (_TARGET, []))
-    monkeypatch.setattr(api, "_id12s", lambda: {_TARGET: _TARGET[:12]})
+    assert api.compare(source_id[:12], "healthy")["state"] == "ready"
+    real_load = web_api.views.load_sample
+    loaded = []
 
-    payload = api.compare(_TARGET[:12], "healthy")
+    def disappear_after_view(target_store, target_source):
+        sample = real_load(target_store, target_source)
+        assert sample is not None and sample.full.input_id == input_id
+        loaded.append(sample.full.input_id)
+        if disappearance == "source_membership":
+            path = store.sources_dir / f"{source_id}.json"
+            record = json.loads(path.read_text())
+            record["inputs"] = []
+            path.write_text(json.dumps(record))
+        else:
+            (store.inputs_dir / input_id / "manifest.json").unlink()
+        return sample
 
-    assert payload["state"] == "target_unavailable" and payload["metrics"] == []
+    monkeypatch.setattr(web_api.views, "load_sample", disappear_after_view)
+
+    payload = api.compare(source_id[:12], "healthy")
+
+    assert loaded == [input_id]
+    assert payload["state"] == "target_unavailable"
+    assert payload["cohort_version"] == "healthy:7"
+    assert payload["metrics"] == [] and payload["unscored"] == []
+    assert payload["problem"]["code"] == "TBX-LAB-020"
+    assert input_id[:12] in payload["problem"]["cause"]
     assert "original input" in payload["problem"]["fix"]
-    assert "--root R" not in payload["problem"]["fix"] and "ID12" not in payload["problem"]["fix"]
+    assert "Compare" in payload["problem"]["fix"]
+    assert "cohort build" not in payload["problem"]["fix"]
 
 
 def test_example_is_explicitly_unscorable(tmp_path, monkeypatch) -> None:
