@@ -222,12 +222,14 @@ an advisory warning in human and JSON output. This does not block a run; a
 full hg38 alignment may be slow or fail for lack of memory.
 
 **Preflight limits.** A dry run can report a known disk shortfall, but it does
-not reserve space. The live run checks the budget again under the writer lock,
-after ROOT and run bookkeeping have begun; a shortfall found there is recorded
-as TBX-LAB-010. Early argument and setup refusals can happen before `run_start`
-and therefore may not appear in `traceback lab runs`. Free space or inputs can
-change between a preview and the locked check, so rerun after addressing the
-reported cause even if an earlier preview passed.
+not reserve space. A live run first checks known requirements and disk capacity
+read-only, before creating ROOT or run bookkeeping; a known shortfall is refused
+there. It checks the budget again under the writer lock. If capacity drops in
+between, that later TBX-LAB-010 refusal may leave run bookkeeping. Early
+argument and setup refusals can happen before `run_start` and therefore may
+not appear in `traceback lab runs`. Free space or inputs can change between a
+preview and the locked check, so rerun after addressing the reported cause
+even if an earlier preview passed.
 
 **Interruption.** Ctrl-C (or SIGTERM) stops the current step, kills its tools
 and exits 6. Completed results are kept; rerun the same command.
@@ -752,8 +754,10 @@ used for `lab run`; on an empty ROOT the server says so.
 
 Bare `#/` opens the primary input from the most recently completed `lab run`
 (`ok` or `partial_failure`). An active or interrupted rerun does not replace
-that default; choose its sample explicitly with `#/?sample=<id12>`. If no run
-has completed, the landing lists registered samples without selecting one.
+that default. A different registered sample can be opened explicitly with
+`#/?sample=<id12>`; selecting the same source during its rerun still shows
+that source's last completed primary input until the newer run completes. If
+no run has completed, the landing lists registered samples without selecting one.
 If a completed run's primary input is missing, restore that input or rerun the
 sample. If recorded completion history cannot be verified because a run log is
 missing or unreadable, restore the log or rerun; the landing does not substitute
