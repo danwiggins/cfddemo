@@ -373,7 +373,7 @@ def test_journal_begin_and_recovery_cannot_hide_from_reader(tmp_path: Path) -> N
     assert reader.cohort_selection_epoch() == 2
 
 
-@pytest.mark.parametrize("damage", ["malformed", "oversized", "symlink"])
+@pytest.mark.parametrize("damage", ["malformed", "oversized", "symlink", "invalid_identity"])
 def test_malformed_member_selector_is_actionable_cohort_problem(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, damage: str,
 ) -> None:
@@ -383,11 +383,15 @@ def test_malformed_member_selector_is_actionable_cohort_problem(
         selector.write_bytes(b"not json")
     elif damage == "oversized":
         selector.write_bytes(b"x" * (16 * 1024 + 1))
-    else:
+    elif damage == "symlink":
         selector.unlink()
         target = tmp_path / "external-selector"
         target.write_bytes(b"external sentinel")
         selector.symlink_to(target)
+    else:
+        invalid = store.results_dir / input_id / "copy-number" / "not-a-digest" / "selected.json"
+        invalid.parent.mkdir()
+        invalid.write_bytes(selector.read_bytes())
     with pytest.raises(LabProblem) as caught:
         build_cohort(store, "healthy-v1")
     assert caught.value.code == "TBX-LAB-022"

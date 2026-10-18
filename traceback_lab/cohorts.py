@@ -907,7 +907,7 @@ def _member_selection_paths(
                             mode = selector.lstat().st_mode
                         except FileNotFoundError:
                             continue
-                        if not stat.S_ISREG(mode):
+                        if not SHA256_PATTERN.fullmatch(entry.name) or not stat.S_ISREG(mode):
                             raise MemberSelectionStorageError(input_id, algorithm_id)
                         paths.add(selector)
             except FileNotFoundError:
