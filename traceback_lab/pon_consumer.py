@@ -164,6 +164,25 @@ def selection_from_payload(payload: dict[str, Any], root: Path, reference_sha256
     return selection
 
 
+def require_cohort_input(cohort_id: str | None, *, platform: str, example: bool) -> None:
+    """Reject input kinds that cannot use an explicitly selected ONT panel."""
+
+    if cohort_id is not None and example:
+        raise LabProblem(
+            "TBX-LAB-021",
+            cause="an EXAMPLE input cannot use a real cohort panel",
+            fix="Omit --cohort for EXAMPLE, or use a real ONT input",
+            data={"cohort_id": cohort_id, "field": "EXAMPLE"},
+        )
+    if cohort_id is not None and platform != "ont":
+        raise LabProblem(
+            "TBX-LAB-024",
+            cause="the selected ONT panel cannot be applied to a non-ONT input",
+            fix="Use a real ONT input for this cohort, or omit --cohort",
+            data={"cohort_id": cohort_id, "field": "platform"},
+        )
+
+
 def bind_target(
     store: LabStore, items: Sequence[PlanItem], target: Any, manifest: dict[str, Any],
     *, cohort_id: str | None,
@@ -173,20 +192,7 @@ def bind_target(
     has_copy_number = any(item.algorithm.id == "copy-number" for item in items)
     if not has_copy_number and cohort_id is None:
         return list(items)
-    if cohort_id is not None and target.example:
-        raise LabProblem(
-            "TBX-LAB-021",
-            cause="an EXAMPLE input cannot use a real cohort panel",
-            fix="Omit --cohort for EXAMPLE, or use a real ONT input",
-            data={"cohort_id": cohort_id, "field": "EXAMPLE"},
-        )
-    if cohort_id is not None and target.platform != "ont":
-        raise LabProblem(
-            "TBX-LAB-024",
-            cause="the selected ONT panel cannot be applied to a non-ONT input",
-            fix="Use a real ONT input for this cohort, or omit --cohort",
-            data={"cohort_id": cohort_id, "field": "platform"},
-        )
+    require_cohort_input(cohort_id, platform=target.platform, example=target.example)
     if cohort_id is None and (target.platform != "ont" or target.example):
         # The implicit ONT kit panel does not apply to short-read or EXAMPLE
         # inputs. Explicit --cohort still validates or refuses its selection.

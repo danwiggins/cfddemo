@@ -16,6 +16,7 @@ from typing import Any
 from traceback_runner.cli import _local_envelope, _result, _with_human
 
 from . import registry
+from .cohort_command import _cohort_id
 from .identity import SHA256_PATTERN, aligned_input_id, prealigned_input_id
 from .ingest import (
     EXAMPLE_REFERENCE_ID,
@@ -77,7 +78,7 @@ def add_run_parser(commands: Any, common: Callable[[argparse.ArgumentParser], No
     run.add_argument("--reference", dest="reference_id", metavar="ID", help="registered reference id")
     run.add_argument("--profile", choices=("all", "fast"), default="all")
     run.add_argument("--only", metavar="A,B", help="only these algorithms (overrides --profile)")
-    run.add_argument("--cohort", metavar="ID", help="use this built protocol-matched cohort's panel of normals")
+    run.add_argument("--cohort", type=_cohort_id, metavar="ID", help="use this built protocol-matched cohort's panel of normals")
     run.add_argument("--downsample", default="0.5,0.25,0.1", metavar="F,F,F", help="depth-curve fractions (default 0.5,0.25,0.1)")
     run.add_argument("--no-downsample", action="store_true", help="skip the depth curve")
     run.add_argument("--controls", dest="controls", action="store_true", default=True, help="run the positive controls (default)")
@@ -378,7 +379,7 @@ def _memory_warning_lines(warning: dict[str, Any]) -> list[str]:
 
 def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str], None]) -> tuple[int, dict[str, Any]]:
     store.check_version()
-    from .pon_consumer import require_built_cohort
+    from .pon_consumer import require_built_cohort, require_cohort_input
 
     cohort = require_built_cohort(store, args.cohort) if args.cohort is not None else None
     entries = registry.registry_entries()
@@ -394,6 +395,7 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
     if memory_warning:
         lines.extend(_memory_warning_lines(memory_warning))
     alignment_required = False
+    example = bool(args.example)
 
     def mark_platform_skips(platform: str) -> None:
         for row, item in zip(plan_rows, items):
@@ -407,6 +409,7 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
         source_id = resolve_sample(store, args.inputs[0])
         aligned, record = _stored_input(store, source_id)
         platform = _stored_platform(aligned)
+        example = bool(record.get("example"))
         reference_id, reference_sha256 = _stored_reference_binding(aligned)
         with_sex_assertion(record, args.sex)
         data["sample"] = {
@@ -548,6 +551,7 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
                 + (" · minimap2 index built first" if mmi_needed else "")
             )
     if cohort is not None:
+        require_cohort_input(args.cohort, platform=platform, example=example)
         compatibility = "after alignment" if alignment_required else "during run"
         data["cohort"] = {
             "id": cohort.cohort_id, "version": cohort.version_id,

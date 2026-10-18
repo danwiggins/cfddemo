@@ -158,3 +158,49 @@ def test_example_preview_rejects_explicit_cohort_before_generating_files(
     payload = json.loads(capsys.readouterr().out)
     assert code == 3 and payload["data"]["code"] == "TBX-LAB-021"
     assert _snapshot(tmp_path) == {}
+
+
+@pytest.mark.parametrize("input_kind,expected_code", [("illumina", "TBX-LAB-024"), ("example", "TBX-LAB-021")])
+@pytest.mark.parametrize("only", [None, "bam-qc"])
+def test_stored_preview_refuses_ineligible_explicit_panel_without_writes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], input_kind: str,
+    expected_code: str, only: str | None,
+) -> None:
+    import pysam
+
+    store = LabStore(tmp_path)
+    source_id = _sample(store, 20, example=input_kind == "example", aligned=input_kind != "illumina")
+    source = json.loads((store.sources_dir / f"{source_id}.json").read_text())
+    directory = store.inputs_dir / source["inputs"][0]["input_id"]
+    manifest_path = directory / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["reference_id"] = "synthetic"
+    if input_kind == "illumina":
+        manifest["platform"] = "illumina"
+        header = {"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 1000}],
+                  "RG": [{"ID": "one", "PL": "ILLUMINA"}]}
+        with pysam.AlignmentFile(str(directory / "aligned.bam"), "wb", header=header):
+            pass
+    manifest_path.write_text(json.dumps(manifest))
+    _publish_built_panel(store)
+    with store.writer("cohort build", new_run_id()):
+        before = _snapshot(tmp_path)
+        code, payload = _dry_run(capsys, store, source_id, only=only)
+        assert code == 3
+        assert payload["data"]["code"] == expected_code
+        assert _snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("command", [["run", "latest"], ["simulate", "cna", "latest"],
+                                     ["simulate", "split", "latest"]])
+@pytest.mark.parametrize("cohort_id", ["../outside", "Healthy", "a" * 41])
+def test_cohort_selection_rejects_malformed_ids_as_usage_without_writes(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], command: list[str], cohort_id: str,
+) -> None:
+    root = tmp_path / "unused"
+    code = signed_cli.main(["lab", *command, "--cohort", cohort_id, "--root", str(root), "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 2
+    assert payload["status"] == "usage"
+    assert "--cohort" in payload["data"]["usage"]
+    assert not root.exists()

@@ -17,6 +17,7 @@ from typing import Any
 from traceback_runner.cli import _local_envelope, _result, _with_human
 
 from . import registry
+from .cohort_command import _cohort_id
 from .controls import DEFAULT_TFS, TF_TOLERANCE, cna_specs, run_derived, split_specs, synthetic_summary
 from .identity import validate_fraction
 from .ingest import id12_for, resolve_sample
@@ -57,7 +58,7 @@ def add_simulate_parser(commands: Any, common: Callable[[argparse.ArgumentParser
     cna.add_argument("sample", metavar="ID12|latest")
     cna.add_argument("--tf", default=",".join(str(tf) for tf in DEFAULT_TFS), metavar="0.03,0.10,0.30")
     cna.add_argument("--force", action="store_true")
-    cna.add_argument("--cohort", metavar="ID", help="use this built protocol-matched cohort's panel of normals")
+    cna.add_argument("--cohort", type=_cohort_id, metavar="ID", help="use this built protocol-matched cohort's panel of normals")
     cna.add_argument("--verbose", action="store_true", help="stream tool stderr live (never stored)")
     cna.add_argument("--timeout-s", type=float, default=DEFAULT_TIMEOUT_S, metavar="S")
     common(cna)
@@ -65,7 +66,7 @@ def add_simulate_parser(commands: Any, common: Callable[[argparse.ArgumentParser
     halves = kinds.add_parser("split", help="split-half pseudo-replicate (sampling noise)")
     halves.add_argument("sample", metavar="ID12|latest")
     halves.add_argument("--force", action="store_true")
-    halves.add_argument("--cohort", metavar="ID", help="use this built protocol-matched cohort's panel of normals")
+    halves.add_argument("--cohort", type=_cohort_id, metavar="ID", help="use this built protocol-matched cohort's panel of normals")
     halves.add_argument("--verbose", action="store_true", help="stream tool stderr live (never stored)")
     halves.add_argument("--timeout-s", type=float, default=DEFAULT_TIMEOUT_S, metavar="S")
     common(halves)
