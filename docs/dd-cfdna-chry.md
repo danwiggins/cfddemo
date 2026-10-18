@@ -59,13 +59,16 @@ root accordingly.
 Synthetic calibration needs `--allow-synthetic` at registration. That option
 reserves that input ID's immutable calibration slot in this ROOT for mechanics-only
 testing; it does not permit a numeric donor-fraction result. Re-ingesting the
-same BAM with the same reference and alignment inputs in this ROOT reproduces
-its source and input IDs and does not free the slot. A separate fresh ROOT can
-hold an operator-verified calibration for those same identities without
-overwriting the synthetic registration; the IDs are derived from the input
-bytes and reference/alignment identity, independent of ROOT. If an existing
-registration is damaged, restore its exact original bytes from backup. Protect
-the Lab root and its backups from direct edits.
+same BAM bytes with the same registered reference and processing identity in
+this ROOT reproduces its source and input IDs and does not free the slot. For
+Lab-aligned input, processing identity includes the minimap2 index, tool
+versions, and arguments. For prealigned input, the Illumina platform
+declaration creates a distinct input ID.
+To register an operator-verified calibration for those same IDs, first ingest
+the BAM into a separate fresh ROOT, then register the calibration there. IDs
+do not include the ROOT path, so the synthetic registration and its provenance
+remain untouched. If an existing registration is damaged, restore its exact
+original bytes from backup. Protect the Lab root and its backups from direct edits.
 
 The estimator counts eligible read starts on hg38 chrY outside its two
 pseudoautosomal intervals. It divides that count by all eligible reads on
