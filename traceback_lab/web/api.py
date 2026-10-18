@@ -22,7 +22,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .. import views
-from ..completed_runs import completion_snapshot
+from ..completed_runs import completed_for_source, completion_snapshot
 from ..cohort_contracts import CohortGeneration, CohortMember, MetricProjection, project_metric
 from ..cohort_density import project_density_band
 from ..cohorts import list_cohorts, member_for_generation_or_independent, member_from_store, pon_dependent_algorithms, read_current
@@ -160,11 +160,11 @@ def _pon_dependent_algorithms() -> set[str]:
 
 
 def _cohort_target(
-    store: LabStore, generation: CohortGeneration, source_id: str,
+    store: LabStore, generation: CohortGeneration, source_id: str, *, input_id: str | None = None,
 ) -> tuple[CohortMember, LabProblem | None]:
     """Keep independent cohort metrics when only the PoN tools are missing."""
 
-    return member_for_generation_or_independent(store, generation, source_id)
+    return member_for_generation_or_independent(store, generation, source_id, input_id=input_id)
 
 
 class LibraryHolder:
@@ -502,7 +502,9 @@ class LabApi:
         if generation is None:
             return None, None, "not_built", None
         try:
-            target, pon_problem = _cohort_target(self.store, generation, source_id)
+            target, pon_problem = _cohort_target(
+                self.store, generation, source_id, input_id=sample.full.input_id,
+            )
         except LabProblem as error:
             return generation, None, "target_unavailable", _recovery_problem(error)
         except ValueError:
@@ -580,6 +582,17 @@ class LabApi:
             record = source_record(self.store, source_id) or {}
             sample = views.load_sample(self.store, source_id, completion_index=completion_index)
             if sample is None:
+                unavailable = completion_index.get(source_id)
+                if unavailable is not None:
+                    rows.append({
+                        "id12": id12, "state": "completed_input_unavailable",
+                        "run_utc": unavailable["completed_utc"], "depth_x": None,
+                        "example": bool(record.get("example")),
+                        "counts": {"ok": 0, "skipped": 0, "failed": 0},
+                        "outside_reference": 0, "controls": {"spike": None, "split": False},
+                        "cohort_state": "unavailable", "unreadable_results": [],
+                        "ambiguous_results": [],
+                    })
                 continue
             generation, target, cohort_state, cohort_problem = self._sample_cohort(
                 source_id, sample, cohort_snapshot,
@@ -623,7 +636,7 @@ class LabApi:
             )
         rows.sort(key=lambda row: row["run_utc"], reverse=True)
         default_id12 = self._id12s().get(completed["source_id"]) if completed else None
-        if default_id12 not in {row["id12"] for row in rows}:
+        if default_id12 not in {row["id12"] for row in rows if row.get("state") != "completed_input_unavailable"}:
             default_id12 = None
         return {"samples": rows, "default_sample_id12": default_id12,
                 "completed_input_unavailable": bool(completed and default_id12 is None),
@@ -651,6 +664,12 @@ class LabApi:
             return {"found": False, "candidates": candidates}
         sample = views.load_sample(self.store, source_id)
         if sample is None:
+            record = source_record(self.store, source_id) or {}
+            completed = completed_for_source(self.store, source_id, record)
+            if completed is not None:
+                return {"found": True, "state": "completed_input_unavailable",
+                        "id12": self._id12s()[source_id], "source_id": source_id,
+                        "run_utc": completed["completed_utc"]}
             return {"found": False, "candidates": []}
         library = self.libraries.get()
         record = source_record(self.store, source_id) or {}
@@ -759,7 +778,9 @@ class LabApi:
             "full_input_id": sample.full.input_id,
             "platform": sample.platform,
             "example": sample.example,
-            "run_utc": max((entry.get("used_utc", "") for entry in record.get("inputs", [])), default=""),
+            "run_utc": sample.completed_utc or max(
+                (entry.get("used_utc", "") for entry in record.get("inputs", [])), default="",
+            ),
             "depth": next((env.depth.model_dump() for env in sample.full.results.values() if env.depth), None),
             "excluded_chunks": record.get("excluded", []),
             "preanalytic_sex": views.sex_check_view(sample),
@@ -952,7 +973,9 @@ class LabApi:
         if sample.example:
             return {**base, "state": "example_unscorable", "metrics": [], "unscored": []}
         try:
-            target, pon_problem = _cohort_target(self.store, generation, source_id)
+            target, pon_problem = _cohort_target(
+                self.store, generation, source_id, input_id=sample.full.input_id,
+            )
         except LabProblem as problem:
             if problem.code == "TBX-LAB-021":
                 return {**base, "state": "example_unscorable", "metrics": [], "unscored": []}
@@ -1090,11 +1113,11 @@ class LabApi:
         if sample_a.example or sample_b.example:
             return {**base, "state": "example_unscorable", "metrics": [], "unscored": []}
         try:
-            selected_a = member_from_store(self.store, source_a)
+            selected_a = member_from_store(self.store, source_a, input_id=sample_a.full.input_id)
         except (LabProblem, ValueError):
             return {**base, "state": "sample_unavailable", "which": "a", "metrics": [], "unscored": []}
         try:
-            selected_b = member_from_store(self.store, source_b)
+            selected_b = member_from_store(self.store, source_b, input_id=sample_b.full.input_id)
         except (LabProblem, ValueError):
             return {**base, "state": "sample_unavailable", "which": "b", "metrics": [], "unscored": []}
         library = self.libraries.get()

@@ -7,10 +7,12 @@ import os
 
 import pytest
 
+from tests.lab.test_landing import _dom, needs_chrome
 from traceback_lab import completed_runs
 from traceback_lab.completed_runs import record_completion
 from traceback_lab.store import LabStore
 from traceback_lab.web.api import LabApi
+from traceback_lab.web.server import RunningLabServer
 
 
 def _source(store: LabStore, source: str, *inputs: tuple[str, str]) -> None:
@@ -58,6 +60,7 @@ def test_latest_completed_primary_survives_newer_active_and_blocked_runs(tmp_pat
     assert listing["default_sample_id12"] == source_a[:12]
     assert next(row for row in listing["samples"] if row["id12"] == source_a[:12])["run_utc"] == "2026-10-17T10:00:00Z"
     assert api.sample(source_a[:12])["full_input_id"] == old_a
+    assert api.sample(source_a[:12])["run_utc"] == "2026-10-17T10:00:00Z"
     assert api.sample(source_b[:12])["full_input_id"] == input_b  # explicit active fallback
 
     second = "r-20261018-1300-abcd"
@@ -124,9 +127,34 @@ def test_missing_completed_input_is_not_replaced_by_active_rerun(tmp_path) -> No
     _run(store, "r-20261017-1000-abcd", source, old, "2026-10-17T10:00:00Z")
     (store.inputs_dir / old / "manifest.json").unlink()
     api = LabApi(store)
-    assert api.sample(source[:12])["found"] is False
+    assert api.sample(source[:12])["state"] == "completed_input_unavailable"
     assert api.samples()["default_sample_id12"] is None
     assert api.samples()["completed_input_unavailable"] is True
+    assert api.samples()["samples"][0]["state"] == "completed_input_unavailable"
+
+
+@needs_chrome
+def test_older_missing_completed_input_stays_listed_and_explicit_route_names_problem(tmp_path) -> None:
+    store = LabStore(tmp_path / "root")
+    store.ensure()
+    unavailable, latest = "a" * 64, "b" * 64
+    old, active, current = "8" * 64, "9" * 64, "7" * 64
+    _source(store, unavailable, (old, "2026-10-17T10:00:00Z"),
+            (active, "2026-10-18T10:00:00Z"))
+    _source(store, latest, (current, "2026-10-18T11:00:00Z"))
+    _run(store, "r-20261017-1000-abcd", unavailable, old, "2026-10-17T10:00:00Z")
+    _run(store, "r-20261018-1100-abcd", latest, current, "2026-10-18T11:00:00Z")
+    (store.inputs_dir / old / "manifest.json").unlink()
+    api = LabApi(store)
+    listing = api.samples()
+    assert listing["default_sample_id12"] == latest[:12]
+    assert next(row for row in listing["samples"] if row["id12"] == unavailable[:12])["state"] == "completed_input_unavailable"
+    assert api.sample(unavailable[:12])["state"] == "completed_input_unavailable"
+    with RunningLabServer(store) as server:
+        dom = _dom(server, tmp_path / "browser", route=f"/?sample={unavailable[:12]}",
+                   want=lambda page: "Completed input unavailable" in page)
+    assert f"Sample {unavailable[:12]} exists" in dom
+    assert "Unknown sample" not in dom
 
 
 def test_failed_completion_pointer_write_does_not_promote_an_active_run(tmp_path, monkeypatch) -> None:

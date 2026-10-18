@@ -184,6 +184,7 @@ class SampleView:
     operator_metadata: dict[str, str] | None = None
     operator_metadata_problem: LabProblem | None = None
     platform: str = "ont"
+    completed_utc: str | None = None
 
     def by_transform(self, transform: str) -> list[InputView]:
         return [item for item in self.derived if item.transform == transform]
@@ -331,7 +332,7 @@ def load_sample(store: LabStore, source_id: str, *,
         metadata_problem = problem
     return SampleView(
         source_id, id12_for(store, source_id), bool(record.get("example")), full, derived,
-        assertion, metadata_problem, platform,
+        assertion, metadata_problem, platform, completed["completed_utc"] if completed else None,
     )
 
 

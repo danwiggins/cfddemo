@@ -936,16 +936,6 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     controls=controls["summary"], platform=target.platform,
                 )
                 log.append("run_end", status=payload["status"], exit_code=code)
-                try:
-                    record_completion(store, run_id, aligned.source_id, aligned.input_id)
-                except OSError:
-                    # The validated run log can rebuild either completion index.
-                    # Still notify an open browser when that index write fails.
-                    try:
-                        store.bump_generation()
-                    except OSError:
-                        pass
-                return code, payload
             except KeyboardInterrupt:
                 current = lock.step
                 log.append("run_end", status="interrupted", exit_code=6, step=current)
@@ -972,6 +962,17 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
             except Exception as exc:
                 log.append("run_end", status="internal_error", exit_code=7, error=type(exc).__name__, step=lock.step)
                 raise
+            else:
+                # Terminal evidence is durable. An interrupt in this advisory
+                # publication must not append a second, false run_end.
+                try:
+                    record_completion(store, run_id, aligned.source_id, aligned.input_id)
+                except (OSError, KeyboardInterrupt):
+                    try:
+                        store.bump_generation()
+                    except (OSError, KeyboardInterrupt):
+                        pass
+                return code, payload
     finally:
         signal.signal(signal.SIGTERM, previous_term)
 

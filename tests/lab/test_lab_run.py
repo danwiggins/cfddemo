@@ -207,6 +207,24 @@ def test_run_aligns_publishes_and_reruns_from_cache(lab_world, capsys, monkeypat
         assert str(chunks) not in text and "SYNTH0001" not in text
 
 
+def test_interrupt_during_completion_publication_keeps_terminal_run_ok(lab_world, capsys, monkeypatch) -> None:
+    _registry(monkeypatch, "SUMMARY", "COUNTER")
+
+    def interrupt_publication(*_args):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(run_module, "record_completion", interrupt_publication)
+    root, chunks = lab_world["root"], lab_world["chunks"]
+    code, out, _ = _lab(capsys, "run", str(chunks), "--root", str(root))
+    assert code == 0, out
+    logs = list((root / "lab" / "runs").glob("*.jsonl"))
+    assert len(logs) == 1
+    events = [json.loads(line) for line in logs[0].read_text().splitlines()]
+    ends = [event for event in events if event.get("event") == "run_end"]
+    assert len(ends) == 1 and ends[0]["status"] == "ok" and ends[0]["exit_code"] == 0
+    assert LabApi(LabStore(root)).samples()["default_sample_id12"] is not None
+
+
 def test_sex_assertion_is_local_metadata_and_does_not_rekey_results(
     lab_world, capsys, monkeypatch, shared_mmi,
 ) -> None:
@@ -234,7 +252,7 @@ def test_sex_assertion_is_local_metadata_and_does_not_rekey_results(
     code, asserted = _json(capsys, "run", "latest", "--sex", "M", "--root", str(root))
     assert code == 0 and asserted["data"]["sample"] == original
     assert all(step["cached"] for step in asserted["data"]["steps"])
-    assert store.generation() == generation + 1
+    assert store.generation() == generation + 2  # metadata update and completed-run notification
     assert {path.relative_to(store.results_dir): path.read_bytes()
             for path in store.results_dir.rglob("result.json")} == result_bytes
     from traceback_lab.views import load_sample, sex_check_view
@@ -255,10 +273,12 @@ def test_sex_assertion_is_local_metadata_and_does_not_rekey_results(
     assert source_record(LabStore(root), original["source_id"]) == record
     code, same = _json(capsys, "run", "latest", "--sex", "M", "--root", str(root))
     assert code == 0 and same["data"]["sample"] == original
-    assert store.generation() == generation + 1
+    assert store.generation() == generation + 3  # cached completion still notifies the browser
     code, reingested = _json(capsys, *args)
     assert code == 0 and reingested["data"]["sample"] == original
-    assert store.generation() == generation + 1
+    assert store.generation() == generation + 4
+    assert {path.relative_to(store.results_dir): path.read_bytes()
+            for path in store.results_dir.rglob("result.json")} == result_bytes
     assert source_record(LabStore(root), original["source_id"])["operator_metadata"] == record["operator_metadata"]
 
     code, conflict = _json(capsys, *args, "--sex", "F")
