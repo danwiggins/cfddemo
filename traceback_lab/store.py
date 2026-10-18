@@ -27,6 +27,7 @@ from __future__ import annotations
 import fcntl
 import base64
 import binascii
+import errno
 import json
 import os
 import re
@@ -674,15 +675,22 @@ class LabStore:
             return
         current = self._cohort_pointer_version(journal.cohort_id)
         if current == journal.old_version:
-            from .cohorts import _restore_member_selections
+            from .cohorts import MemberSelectionStorageError, _restore_member_selections
 
             before = {
                 self.result_dir(input_id, algorithm_id, identity) / "selected.json": content
                 for (input_id, algorithm_id, identity), content in journal.before.items()
             }
-            _restore_member_selections(
-                self, tuple(sorted(journal.input_ids)), tuple(sorted(journal.algorithm_ids)), before,
-            )
+            try:
+                _restore_member_selections(
+                    self, tuple(sorted(journal.input_ids)), tuple(sorted(journal.algorithm_ids)), before,
+                )
+            except MemberSelectionStorageError as exc:
+                raise ResultOrderUnavailable("pending cohort member selector storage is invalid") from exc
+            except OSError as exc:
+                if exc.errno not in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP):
+                    raise
+                raise ResultOrderUnavailable("pending cohort member selector path is unsafe") from exc
             if current is None:
                 self._record_aborted_first_generation(journal.cohort_id, journal.new_version)
         elif current != journal.new_version:
@@ -788,8 +796,8 @@ class LabStore:
                     "TBX-LAB-022",
                     cause="pending cohort selection transaction cannot be safely recovered",
                     fix=("Inspect ROOT/lab/pending-cohort-selections.json, ROOT/lab/cohort-selection-epoch, "
-                         "and the matching cohort pointer and generation; restore damaged files from a "
-                         "known-good backup before retrying"),
+                         "the matching cohort pointer and generation, and scoped member result selectors; "
+                         "restore damaged files from a known-good backup before retrying"),
                     data={"field": "pending cohort selection transaction",
                           "journal": "pending-cohort-selections.json"},
                 ) from exc

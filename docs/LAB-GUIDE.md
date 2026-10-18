@@ -1075,12 +1075,15 @@ Stored cohort metadata or an immutable generation is missing or malformed
 matching file from a known-good backup, then retry. The Lab does not replace
 the current pointer or repair a generation automatically. The backend listing
 reports each affected cohort separately so callers can retain intact cohorts.
-If a pending cohort selection transaction cannot be recovered, every Lab writer
-stops with this code before changing run or cohort pointers. Inspect
+Malformed transaction metadata or member selectors, and missing, symlinked or
+non-directory required selector ancestors, stop Lab writers with this code
+before changing run or cohort pointers. Inspect
 `ROOT/lab/pending-cohort-selections.json`, `ROOT/lab/cohort-selection-epoch`,
-and the matching cohort pointer and generation; restore damaged files from a
-known-good backup before retrying. Do not discard the pending journal without
-first establishing which generation was committed.
+the matching cohort pointer and generation, and the affected member result
+selectors; restore damaged files from a known-good backup before retrying.
+Unexpected filesystem I/O failures may still report an internal error. Do not
+discard the pending journal without first establishing which generation was
+committed.
 Finder's `.DS_Store` file is ignored; other unexpected generation entries
 must be inspected and moved aside manually after preserving them. If only the
 current pointer is missing and the member roster is intact, `lab cohort build`

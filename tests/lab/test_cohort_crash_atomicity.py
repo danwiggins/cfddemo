@@ -1,5 +1,6 @@
 """Crash and read-boundary checks for cohort member selector publication."""
 
+import errno
 import json
 import os
 import select
@@ -238,11 +239,15 @@ def test_recovery_rejects_symlinked_result_ancestor(
     outside_selector.parent.mkdir(parents=True)
     outside_selector.write_bytes(b"external sentinel")
     input_dir.symlink_to(outside, target_is_directory=True)
-    with pytest.raises((OSError, ValueError)):
+    before_last_run = store.last_run_file.read_bytes()
+    with pytest.raises(LabProblem) as caught:
         with store.writer("recover", "r-20261017-0004-abcd"):
             pass
+    assert caught.value.code == "TBX-LAB-022"
     assert outside_selector.read_bytes() == b"external sentinel"
     assert store.cohort_selection_journal_file.is_file()
+    assert store.last_run_file.read_bytes() == before_last_run
+    assert read_current(store, "healthy-v1") == previous
 
 
 def test_first_build_killed_after_generation_publish_remains_unbuilt(
@@ -449,3 +454,58 @@ def test_damaged_pending_journal_cli_refuses_with_repair_guidance_before_mutatio
     assert store.active_file.read_bytes() == b"prior active heartbeat"
     assert store.generation() == before_generation
     assert not store.runs_dir.exists()
+
+
+@pytest.mark.parametrize("damage", ["invalid_identity", "ancestor_symlink", "missing_ancestor", "eio"])
+def test_pending_recovery_maps_only_structural_selector_damage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str], damage: str,
+) -> None:
+    store, sources, previous, input_id, result = _fixture(tmp_path, monkeypatch)
+    selector = store.result_dir(input_id, "copy-number", "8" * 64) / "selected.json"
+    with store.writer("begin test transaction", "r-20261017-0008-abcd"):
+        store.begin_cohort_selection_transaction(
+            cohort_id="healthy-v1", old_version=previous.version,
+            new_version=previous.version + 1, run_id="r-20261017-0008-abcd",
+            input_ids=(input_id,), algorithm_ids=("copy-number",),
+            before={selector: selector.read_bytes()},
+        )
+    journal_before = store.cohort_selection_journal_file.read_bytes()
+    last_run_before = store.last_run_file.read_bytes()
+    pointer = store.lab / "cohorts" / "healthy-v1" / "current.json"
+    pointer_before = pointer.read_bytes()
+    if damage == "invalid_identity":
+        invalid = store.results_dir / input_id / "copy-number" / "not-a-digest" / "selected.json"
+        invalid.parent.mkdir()
+        invalid.write_bytes(selector.read_bytes())
+    elif damage == "ancestor_symlink":
+        input_dir = store.results_dir / input_id
+        input_dir.rename(tmp_path / "saved-result-input")
+        outside = tmp_path / "outside"
+        external = outside / "copy-number" / ("8" * 64) / "selected.json"
+        external.parent.mkdir(parents=True)
+        external.write_bytes(b"external sentinel")
+        input_dir.symlink_to(outside, target_is_directory=True)
+    elif damage == "missing_ancestor":
+        selector.parent.rename(tmp_path / "saved-selector-identity")
+    else:
+        def fail_io(*_args, **_kwargs):
+            raise OSError(errno.EIO, "injected disk I/O failure")
+
+        monkeypatch.setattr(cohorts, "_restore_member_selections", fail_io)
+    code = signed_cli.main([
+        "lab", "cohort", "build", "--cohort", "healthy-v1", "--root", str(tmp_path), "--json",
+    ])
+    payload = json.loads(capsys.readouterr().out)
+    assert (code, payload["data"]["code"]) == (
+        (7, "TBX-LAB-020") if damage == "eio" else (3, "TBX-LAB-022")
+    )
+    if damage != "eio":
+        assert "member result selectors" in payload["data"]["fix"]
+    assert store.cohort_selection_journal_file.read_bytes() == journal_before
+    assert store.last_run_file.read_bytes() == last_run_before
+    assert pointer.read_bytes() == pointer_before
+    assert not store.active_file.exists()
+    if damage == "ancestor_symlink":
+        assert external.read_bytes() == b"external sentinel"
+        assert str(external) not in json.dumps(payload)
