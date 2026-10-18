@@ -1092,6 +1092,15 @@ def _publish_verified_record(root: Path, verified: Any, source: Path) -> Path:
     from .bundles import LOCAL_RESULT_BUNDLE_VERSIONS, BundleError, verify_bundle
     from .signing import SigningError, load_development_trust
 
+    def sealed_descendants(directory: Path) -> bool:
+        # Signed bytes alone do not establish that a recovered copy is sealed.
+        for path in directory.rglob("*"):
+            mode = path.lstat().st_mode
+            expected = 0o555 if stat.S_ISDIR(mode) else 0o444 if stat.S_ISREG(mode) else None
+            if expected is None or stat.S_IMODE(mode) != expected:
+                return False
+        return True
+
     trust = load_development_trust((root / _TRUST_RELATIVE).read_bytes())
     records = root / "records"
     records.mkdir(parents=True, exist_ok=True)
@@ -1108,7 +1117,24 @@ def _publish_verified_record(root: Path, verified: Any, source: Path) -> Path:
     for candidate in [destination, *sorted(records.glob(f"{name}-recovered-*"))]:
         if candidate.exists() or candidate.is_symlink():
             try:
-                if verify_bundle(candidate, trust).manifest == verified.manifest:
+                if verify_bundle(candidate, trust).manifest != verified.manifest:
+                    continue
+                mode = candidate.lstat().st_mode
+                if (
+                    not stat.S_ISDIR(mode)
+                    or stat.S_IMODE(mode) not in {0o555, 0o700}
+                    or not sealed_descendants(candidate)
+                ):
+                    continue
+                if stat.S_IMODE(mode) == 0o700:
+                    candidate.chmod(0o555)
+                _fsync_directory(candidate)
+                _fsync_directory(records)
+                if (
+                    verify_bundle(candidate, trust).manifest == verified.manifest
+                    and stat.S_IMODE(candidate.lstat().st_mode) == 0o555
+                    and sealed_descendants(candidate)
+                ):
                     return candidate
             except (BundleError, SigningError):
                 pass
@@ -1117,6 +1143,9 @@ def _publish_verified_record(root: Path, verified: Any, source: Path) -> Path:
     staging = Path(tempfile.mkdtemp(prefix=".record-", dir=records))
     try:
         shutil.copytree(source, staging, dirs_exist_ok=True)
+        # copytree inherits the sealed source root's 0555 mode. Keep only the
+        # private staging root writable until the exclusive directory rename.
+        staging.chmod(0o700)
         if verify_bundle(staging, trust).manifest != verified.manifest:
             raise ValueError("copied record differs from verified source")
         for path in sorted(staging.rglob("*"), reverse=True):
@@ -1127,6 +1156,8 @@ def _publish_verified_record(root: Path, verified: Any, source: Path) -> Path:
                     os.fsync(handle.fileno())
         _fsync_directory(staging)
         _rename_directory_exclusive(staging, destination)
+        destination.chmod(0o555)
+        _fsync_directory(destination)
         _fsync_directory(records)
         return destination
     finally:
