@@ -312,8 +312,8 @@
           h("p", {}, `Provisional: this input excludes ${sample.excluded_chunks.length} truncated chunks; depth reflects the reads present.`),
           h("details", {}, h("summary", {}, `Excluded chunk indexes (${sample.excluded_chunks.length})`),
             h("p", {}, `Excluded chunk indexes: ${sample.excluded_chunks.join(", ")}.`)));
-        const heading = main.querySelector("h1");
-        if (heading) heading.after(notice); else main.prepend(notice);
+        const anchor = route.name === "home" ? main.querySelector(".clia-panel") : main.querySelector("h1");
+        if (anchor) anchor.after(notice); else main.prepend(notice);
       }
     };
     if (route.name === "home" && views.landing) { appendSample(views.landing(sample)); return; }

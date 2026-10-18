@@ -542,3 +542,30 @@ def test_unavailable_lens_does_not_gain_landing_panel(tmp_path, state) -> None:
     main = re.search(r"<main\b[^>]*>(.*?)</main>", dom, re.DOTALL)
     assert main is not None
     assert '<section class="clia-panel"' not in main.group(1)
+
+
+@needs_chrome
+def test_provisional_home_keeps_clia_before_excluded_chunk_notice(tmp_path) -> None:
+    store = LabStore(tmp_path / "root")
+    store.ensure()
+    source, input_id = "a" * 64, "8" * 64
+    run_id = "r-20261017-1000-abcd"
+    _source(store, source, (input_id, "2026-10-17T10:00:00Z"))
+    _run(store, run_id, source, input_id, "2026-10-17T10:00:00Z")
+    record_completion(store, run_id, source, input_id)
+
+    with RunningLabServer(store) as server:
+        original = server.app.api.sample
+
+        def provisional(id12):
+            return {**original(id12), "excluded_chunks": [2]}
+
+        server.app.api.sample = provisional
+        dom = _dom(server, tmp_path / "browser", route="/",
+                   want=lambda page: "Excluded chunk indexes" in page
+                   and page.count("FLAG: LEGAL — verify") == 4)
+    main = re.search(r"<main\b[^>]*>(.*?)</main>", dom, re.DOTALL)
+    assert main is not None
+    content = main.group(1)
+    assert content.index('<section class="clia-panel"') < content.index('<div class="status-line"')
+    assert content.index('<div class="status-line"') < content.index('class="headline"')
