@@ -41,7 +41,9 @@ would apply the coefficient to the wrong CpG. The array probe is at `chr19`
 `pos0` 18,233,090, 14 bases before the assay CpG on the forward reference.
 PDE4C is on the reverse strand, so the selected site is upstream in gene
 orientation. There is no automatic registration or liftover. The pinned map
-uses this schema, with exactly these fields:
+uses this schema, with exactly these fields. The JSON file must contain
+1–8192 bytes. `source_label` must contain 1–160 characters, with no slash,
+backslash, or character below U+0020:
 
 ```json
 {
