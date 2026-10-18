@@ -65,7 +65,8 @@ for `CG` at all three positions. Those runtime checks alone cannot establish
 site identity; the linked provenance records the independent coordinate
 cross-check. This does not qualify the age model on ONT cfDNA.
 
-After reviewing the map, register its exact bytes with:
+After reviewing the map, run these commands from the repository root to
+register its exact bytes:
 
 ```bash
 traceback lab asset register-clock-map --file docs/assets/weidner-3-grch38-map.json --sha256 ba5ce4d1f2313f6e39b5ff50fd19823ea96e7edec68ea611db5dcbff1b0f21df --root ROOT

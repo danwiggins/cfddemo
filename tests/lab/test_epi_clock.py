@@ -56,7 +56,8 @@ def test_documented_map_matches_registerable_pinned_asset() -> None:
     raw = (docs_dir / "assets" / "weidner-3-grch38-map.json").read_bytes()
     assert documented == json.loads(raw)
     digest = hashlib.sha256(raw).hexdigest()
-    assert digest in docs
+    for document in ("epi-clock.md", "LAB-GUIDE.md", "epi-clock-coordinate-provenance.md"):
+        assert digest in (docs_dir / document).read_text()
     model = _parse(raw, digest)
     assert model.sites == (
         ("cg02228185", "chr17", 3476272),

@@ -325,8 +325,8 @@ additional acceptance cutoff.
 
 **Exploratory epi-clock.** Review the three verified hg38 assay-site coordinates
 and their [provenance](epi-clock-coordinate-provenance.md), then use the
-[pinned map and SHA-256](epi-clock.md) for explicit registration. Register and
-inspect it with:
+[pinned map and SHA-256](epi-clock.md) for explicit registration. From the
+repository root, register and inspect it with:
 
 ```bash
 traceback lab asset register-clock-map --file docs/assets/weidner-3-grch38-map.json --sha256 ba5ce4d1f2313f6e39b5ff50fd19823ea96e7edec68ea611db5dcbff1b0f21df --root ROOT
