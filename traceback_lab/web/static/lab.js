@@ -47,6 +47,10 @@
       if (child === null || child === undefined || child === false) continue;
       el.append(child instanceof Node ? child : document.createTextNode(String(child)));
     }
+    // Async route content may arrive after the disconnected state was set.
+    if ((tag === "button" || tag === "select") && "data-requires-server" in (attrs || {})) {
+      el.disabled = document.body.dataset.disconnected === "1";
+    }
     return el;
   }
 
@@ -134,7 +138,7 @@
     let reload = status.querySelector("button.reload");
     if (action) {
       if (!reload) {
-        reload = h("button", { type: "button", class: "control reload", onclick: () => location.reload() }, action);
+        reload = h("button", { type: "button", class: "control reload", "data-requires-server": "", onclick: () => location.reload() }, action);
         status.append(h("span", { "data-reload-action": "" }, " ", reload));
       } else reload.textContent = action;
     } else if (reload) reload.closest("[data-reload-action]").remove();
@@ -397,6 +401,7 @@
         }
       };
       const logLink = canPin ? h("button", { type: "button", class: "control",
+        "data-requires-server": "",
         "aria-label": `Run log line for ${a.algorithm_id}`, onclick: async () => {
         if (state.lastStatus && state.generationAtLoad !== null && state.lastStatus.generation > state.generationAtLoad) {
           showLogLine("Results changed on disk; reload before viewing this run log line.");
@@ -640,6 +645,9 @@
   // Disconnected: the page stays readable but every control that would fetch is off.
   function setControlsEnabled(enabled) {
     document.getElementById("sample-switcher").disabled = !enabled;
+    for (const control of document.querySelectorAll("button[data-requires-server], select[data-requires-server]")) {
+      control.disabled = !enabled;
+    }
     for (const link of document.querySelectorAll("#lenses a, main a[href^='#/']")) {
       if (enabled) { link.removeAttribute("aria-disabled"); link.removeAttribute("tabindex"); link.classList.remove("disabled"); }
       else { link.setAttribute("aria-disabled", "true"); link.setAttribute("tabindex", "-1"); link.classList.add("disabled"); }

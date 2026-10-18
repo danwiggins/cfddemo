@@ -9,7 +9,12 @@ from pathlib import Path
 
 import pytest
 
-from tests.lab.test_acceptance_synthetic_routes import ID12, _run_marker, _sample, _server
+from tests.lab.test_acceptance_synthetic_routes import (
+    ID12,
+    _run_marker,
+    _sample,
+    _server,
+)
 from tests.lab.test_lab_server import _chrome, _dom_cdp
 from tests.lab.test_landing import _dom, needs_chrome
 
@@ -643,6 +648,69 @@ def test_live_status_changes_keep_focus_and_open_disclosure(tmp_path) -> None:
              f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/findings"],
             profile, ok=lambda d: 'data-ready="1"' in d and 'class="finding-card"' in d,
             interact=interact, timeout=180,
+        )
+
+
+@needs_chrome
+def test_disconnected_page_blocks_fetch_controls_until_reconnected(tmp_path) -> None:
+    """AC21: a stalled server must not leave the run-log fetch button live."""
+
+    phase = {"down": False}
+    with _server(tmp_path, _sample()) as server:
+        kind, source = server.app.assets["/assets/lab.js"]
+        server.app.assets["/assets/lab.js"] = (
+            kind, source.replace(b"const POLL_MS = 15000;", b"const POLL_MS = 500;"),
+        )
+        original_status = server.app.api.status
+
+        def status():
+            if phase["down"]:
+                raise OSError("synthetic disconnect")
+            return original_status()
+
+        server.app.api.status = status
+
+        def inspect(_command, evaluate) -> None:
+            evaluate("""(() => {
+              const original = window.fetch;
+              window.runLogFetches = 0;
+              window.fetch = (...args) => {
+                if (String(args[0]).includes('/run-log/')) window.runLogFetches += 1;
+                return original.apply(window, args);
+              };
+            })()""")
+            button = "document.querySelector('button[aria-label=\"Run log line for bam-qc\"]')"
+            assert evaluate(f"!!{button} && !{button}.disabled")
+
+            phase["down"] = True
+            for _ in range(40):
+                if evaluate("document.body.dataset.disconnected === '1'"):
+                    break
+                time.sleep(0.2)
+            else:
+                pytest.fail("three missed polls did not mark the page disconnected")
+            assert evaluate(f"{button}.disabled && document.getElementById('sample-switcher').disabled")
+            assert evaluate("!document.getElementById('key-button').disabled")
+            evaluate(f"{button}.click()")
+            assert evaluate("window.runLogFetches === 0")
+
+            phase["down"] = False
+            for _ in range(40):
+                if evaluate("document.body.dataset.disconnected === '0'"):
+                    break
+                time.sleep(0.2)
+            else:
+                pytest.fail("the page did not reconnect")
+            assert evaluate(f"!{button}.disabled && !document.getElementById('sample-switcher').disabled")
+            evaluate(f"{button}.click()")
+            assert evaluate("window.runLogFetches === 1")
+
+        profile = tmp_path / "browser-profile"
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/trust-qc"],
+            profile, ok=lambda d: 'data-ready="1"' in d and "Run log line for bam-qc" in d,
+            interact=inspect, timeout=90,
         )
 
 
