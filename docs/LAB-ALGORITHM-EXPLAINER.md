@@ -322,7 +322,7 @@ biological-age or longevity measurement; see the expanded discussion above.
 
 ## Prenatal and transplant research
 
-### 33. Prenatal chromosome screening (`fetal-fraction`)
+### 33. Prenatal chromosome dosage statistics (`fetal-fraction`)
 
 **Measures:** exploratory NIPTeR-based chromosome 13/18/21 dosage statistics
 against registered controls. **What we learn:** whether chromosome

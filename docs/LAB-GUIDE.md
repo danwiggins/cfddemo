@@ -814,11 +814,14 @@ non-EXAMPLE samples can be added. A repeat add of the same source is
 idempotent; rerunning an analysis does not create a new member.
 
 ```bash
-traceback lab cohort add ID12 --cohort healthy --root R
-traceback lab cohort remove ID12 --cohort healthy --root R
-traceback lab cohort build --cohort healthy --root R
+traceback lab cohort add ID12 --cohort healthy-v1 --root R
+# Repeat add for the other eligible cohort samples.
+traceback lab cohort build --cohort healthy-v1 --root R
 traceback lab serve --root R --open
 ```
+
+`healthy-v1` is the default cohort used by sample lenses and the implicit ONT
+panel; another cohort must be selected explicitly.
 
 `build` publishes an immutable generation and changes the current pointer
 atomically. Open **Compare** and choose that cohort; the page names the exact
