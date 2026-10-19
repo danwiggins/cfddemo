@@ -1030,7 +1030,7 @@ least two of the three review voices (engineering, Codex, design/operator).
       read IDs).
     - The call cap becomes a locked parameter, checked while streaming or
       bounded by modkit options.
-    - CO1 records the real BAM's row count against the cap.
+    - CO1 records the real BAM's row count against the cap privately; the PR reports only pass/fail.
 13. **ichorCNA determinism is shown, not assumed.**
     - `.RData` stays out of signed provenance unless shown to be byte-stable.
     - CI keeps a synthetic baseline per platform.
@@ -1044,8 +1044,9 @@ least two of the three review voices (engineering, Codex, design/operator).
     - **Copy number:** the tumour-fraction line, its lower-limit sentence, the
       reads and bins line and the PoN line come above the plot.
     - The operator label stays the h1, with the analysis line under it.
-15. **"Other" never reads as a cell type.** The row is "28 other contributors
-    combined (11 at 0%)":
+15. **"Other" never reads as a cell type.** The row is
+    `"<combined_count> other contributors combined (<zero_estimate_count> at 0%)"`,
+    with both counts derived from the selected record after its top-12 display selection:
     - always last, hatched and neutral;
     - no whisker;
     - non-zero values below 0.1% shown as "<0.1%";

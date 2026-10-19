@@ -449,7 +449,7 @@ Acceptance: a test enumerates every member of the enums used in `LocalRecordView
 
 Change (cut from four tiles to two values by the design review): the strip's header carries "Eligible of scanned" (`<eligible_count> of <records_scanned> (<eligible_share>%)`, filled from the signed record) and "Share over 1 kb"; "Share 150-200 bp" only when the policy has edges at 150 and 200; "most common bin" lives on the chart only. No colour encodes good or bad. Strip: scanned → each exclusion reason with count and % of scanned → eligible, as one horizontal bar plus a list. Numbers use thousands separators and one-decimal percentages.
 
-Acceptance: the strip values and the strip reconcile (exclusions + eligible = scanned) in a DOM test; the real-input [150,200) bin count and eligible total exactly equal the DoD's independent counts under the same locked contigs, flags, MAPQ and CIGAR rules, with span from reference-consuming CIGAR operations (M, D, N, =, X). The share calculated from those integers must also agree before display rounding; only pass/fail is reported in the PR. +2 tests. Rollback: revert.
+Acceptance: the strip values and the strip reconcile (exclusions + eligible = scanned) in a DOM test; the real-input [150,200) bin count and eligible total exactly equal the DoD's independent counts under the same locked contigs, flags, MAPQ and CIGAR rules, with reference-consuming span (M, D, N, =, X) restricted to `[1, 2**63 - 1]` bp. The share calculated from those integers must also agree before display rounding; only pass/fail is reported in the PR. +2 tests. Rollback: revert.
 
 #### C5. Catalog record table, labels, checkbox compare; jobs disclosure
 
@@ -564,7 +564,7 @@ Sequencing: B1 first because it silently returns wrong records. A0 before A1/A5/
 Manual evidence (kept in private operator receipts; PRs report only pass/fail):
 - The operator processes the real zip unaided from the guide and logs every intervention (where they had to read code, ask, or guess). Target for DoD-1: zero code reading.
 - Alignment wall time per GB, `run` times, eligible counts, screenshots at 1280 and 390 px.
-- The histogram of one real BAM cross-checked against an independent count (for example `samtools view -F 0xF04 -q 20`, restricted to policy contigs and records with a CIGAR, piped to an awk reference-span count): eligible and bin counts equal.
+- The histogram of one real BAM cross-checked against an independent count (for example `samtools view -F 0xF04 -q 20`, restricted to policy contigs and records with a CIGAR whose M/D/N/=/X reference span is within `[1, 2**63 - 1]` bp, piped to an awk span count): eligible and bin counts equal.
 
 ## Out of scope (follow-ups with triggers)
 
