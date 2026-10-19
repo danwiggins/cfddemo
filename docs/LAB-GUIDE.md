@@ -781,6 +781,12 @@ The run-status banner follows the latest Lab writer; a later cohort update or
 other writer can supersede an earlier interrupted-run banner. It does not
 serve as a history of every interrupted run.
 
+On a narrow screen, **Previous views** and **More views** move the lens list by
+one visible navigation width without changing the selected view. The active
+view is brought into sight after a link or browser Back/Forward navigation;
+the lens links remain keyboard reachable. On wider screens the links wrap and
+the scroll controls are hidden.
+
 ## What the page shows
 
 - **Landing (`#/`)**: the CLIA explainer (short version, "Read the full

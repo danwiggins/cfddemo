@@ -191,13 +191,70 @@
 
   function updateNavFade() {
     const nav = document.getElementById("lenses");
-    const overflow = !nav.hidden && nav.scrollWidth > nav.clientWidth + 1;
+    const wrapper = nav.closest(".lens-navigation");
+    if (wrapper) wrapper.hidden = nav.hidden;
+    // Measure against the full slot so a resize can remove controls once all
+    // labels fit without them; measuring the narrowed scroller would keep them.
+    const overflow = !nav.hidden && nav.scrollWidth > (wrapper?.clientWidth ?? nav.clientWidth) + 1;
     nav.classList.toggle("more-left", overflow && nav.scrollLeft > 1);
     nav.classList.toggle("more-right", overflow && nav.scrollLeft + nav.clientWidth < nav.scrollWidth - 1);
+    if (wrapper) {
+      wrapper.classList.toggle("has-overflow", overflow);
+      const setUnavailable = (control, unavailable) => {
+        // Linux Chrome blurs a focused button when disabled. Keep the edge
+        // control focused and aria-disabled until focus moves elsewhere.
+        control.disabled = unavailable && document.activeElement !== control;
+        if (unavailable) control.setAttribute("aria-disabled", "true");
+        else control.removeAttribute("aria-disabled");
+      };
+      setUnavailable(wrapper.querySelector(".lens-scroll-prev"), !overflow || nav.scrollLeft <= 1);
+      setUnavailable(wrapper.querySelector(".lens-scroll-next"), !overflow ||
+        nav.scrollLeft + nav.clientWidth >= nav.scrollWidth - 1);
+    }
+  }
+
+  function setupLensNavigation() {
+    const nav = document.getElementById("lenses");
+    const wrapper = h("div", { class: "lens-navigation" });
+    const previous = h("button", { type: "button", class: "lens-scroll-control lens-scroll-prev",
+      "aria-label": "Previous views", "aria-controls": "lenses",
+      onclick: () => {
+        if (previous.getAttribute("aria-disabled") === "true") return;
+        nav.scrollLeft -= nav.clientWidth;
+        updateNavFade();
+      } }, "‹");
+    const next = h("button", { type: "button", class: "lens-scroll-control lens-scroll-next",
+      "aria-label": "More views", "aria-controls": "lenses",
+      onclick: () => {
+        if (next.getAttribute("aria-disabled") === "true") return;
+        nav.scrollLeft += nav.clientWidth;
+        updateNavFade();
+      } }, "›");
+    nav.before(wrapper);
+    wrapper.append(previous, nav, next);
+    previous.addEventListener("blur", updateNavFade);
+    next.addEventListener("blur", updateNavFade);
+    nav.addEventListener("focusin", (event) => {
+      // Pointer focus can happen between mouse down and up. Moving the link
+      // then sends the click to the nav instead of activating its route.
+      if (!(event.target instanceof HTMLAnchorElement) || !event.target.matches(":focus-visible") ||
+          getComputedStyle(nav).flexWrap !== "nowrap") return;
+      const frame = nav.getBoundingClientRect();
+      const link = event.target.getBoundingClientRect();
+      // Keep focus clear of the 1.25rem edge fade as keyboard travel scrolls.
+      const fadeWidth = parseFloat(getComputedStyle(document.documentElement).fontSize) * 1.25;
+      if (link.left < frame.left + fadeWidth || link.right > frame.right - fadeWidth) {
+        nav.scrollLeft += link.left - frame.left - (nav.clientWidth - link.width) / 2;
+      }
+      updateNavFade();
+    });
   }
 
   function revealCurrentNav() {
     const nav = document.getElementById("lenses");
+    // The previous loading/home render hid the wrapper. Give it its final
+    // visible width and control slots before measuring the active link.
+    updateNavFade();
     const active = nav.querySelector('[aria-current="page"]');
     if (active && getComputedStyle(nav).flexWrap === "nowrap") {
       const navRect = nav.getBoundingClientRect();
@@ -227,6 +284,7 @@
       if (lens.count) label += lens.count(sample);
       nav.append(h("a", { href: `#/sample/${sample.id12}/${lens.id}`, "aria-current": lens.id === current ? "page" : null }, label));
     }
+    updateNavFade();
   }
 
   function render() {
@@ -787,6 +845,7 @@
   // -- start ----------------------------------------------------------------------------
   async function start() {
     setupKey();
+    setupLensNavigation();
     document.getElementById("lenses").addEventListener("scroll", updateNavFade, { passive: true });
     window.addEventListener("resize", revealCurrentNav);
     render();
