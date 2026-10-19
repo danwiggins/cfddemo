@@ -2227,40 +2227,66 @@ def test_keyboard_walk_reaches_every_revealed_control_and_signals_subtab(tmp_pat
             walked = []
 
             def reveal_all(label: str) -> None:
+                def summary_state(index: int, *, focus: bool = False) -> dict:
+                    return evaluate(f"""(() => {{
+                      const summary = document.querySelectorAll('#main details > summary')[{index}];
+                      if (summary.closest('[role="tabpanel"][hidden], [role="tabpanel"][aria-hidden="true"]'))
+                        return {{skip: 'inactive tab'}};
+                      for (let parent = summary.parentElement; parent; parent = parent.parentElement) {{
+                        if (parent.tagName === 'DETAILS' && !parent.open &&
+                            !parent.querySelector(':scope > summary')?.contains(summary))
+                          return {{skip: 'closed ancestor'}};
+                      }}
+                      const hiddenPanel = summary.closest('[hidden]');
+                      if (hiddenPanel) return {{skip: 'hidden panel', panel: hiddenPanel.id}};
+                      const visible = !!summary.getClientRects().length &&
+                        getComputedStyle(summary).visibility !== 'hidden';
+                      if ({str(focus).lower()} && visible) summary.focus();
+                      return {{visible, open: summary.parentElement.open,
+                        focused: document.activeElement === summary}};
+                    }})()""")
+
                 count = evaluate("document.querySelectorAll('#main details > summary').length")
-                for index in range(count):
-                    state = evaluate(f"""(() => {{ const summary = document.querySelectorAll('#main details > summary')[{index}];
-                      const exposedByDetails = (el) => {{
-                        for (let parent = el.parentElement; parent; parent = parent.parentElement) {{
+                button_count = evaluate("document.querySelectorAll('#main button[aria-controls]').length")
+                for _ in range(count + button_count + 1):
+                    changed = 0
+                    for index in range(count):
+                        state = summary_state(index, focus=True)
+                        if state.get("skip"):
+                            assert state["skip"] in ("inactive tab", "closed ancestor", "hidden panel"), (label, index, state)
+                            continue
+                        assert state["visible"] and state["focused"], (label, index, state)
+                        if not state["open"]:
+                            _key(command, "Enter", "Enter", 13)
+                            assert evaluate(f"document.querySelectorAll('#main details > summary')[{index}].parentElement.open"), (label, index)
+                            changed += 1
+                    controls = evaluate("""(() => {
+                      const exposedByDetails = (el) => {
+                        for (let parent = el.parentElement; parent; parent = parent.parentElement) {
                           if (parent.tagName === 'DETAILS' && !parent.open &&
                               !parent.querySelector(':scope > summary')?.contains(el)) return false;
-                        }}
+                        }
                         return true;
-                      }};
-                      if (!exposedByDetails(summary) || !summary.getClientRects().length) return {{hidden: true}};
-                      summary.focus(); return {{open: summary.parentElement.open}}; }})()""")
-                    if state.get("hidden"):
-                        continue
-                    if not state["open"]:
+                      };
+                      return [...document.querySelectorAll('#main button[aria-controls]')]
+                        .flatMap((button, index) => { const target = document.getElementById(button.getAttribute('aria-controls'));
+                          return target?.hidden && exposedByDetails(button) && button.getClientRects().length ? [index] : []; });
+                    })()""")
+                    for index in controls:
+                        button = f"document.querySelectorAll('#main button[aria-controls]')[{index}]"
+                        assert evaluate(f"{button}.focus(); document.activeElement === {button}"), (label, index)
                         _key(command, "Enter", "Enter", 13)
-                        assert evaluate(f"document.querySelectorAll('#main details > summary')[{index}].parentElement.open"), (label, index)
-                controls = evaluate("""(() => {
-                  const exposedByDetails = (el) => {
-                    for (let parent = el.parentElement; parent; parent = parent.parentElement) {
-                      if (parent.tagName === 'DETAILS' && !parent.open &&
-                          !parent.querySelector(':scope > summary')?.contains(el)) return false;
-                    }
-                    return true;
-                  };
-                  return [...document.querySelectorAll('#main button[aria-controls]')]
-                    .flatMap((button, index) => { const target = document.getElementById(button.getAttribute('aria-controls'));
-                      return target?.hidden && exposedByDetails(button) && button.getClientRects().length ? [index] : []; });
-                })()""")
-                for index in controls:
-                    button = f"document.querySelectorAll('#main button[aria-controls]')[{index}]"
-                    evaluate(f"{button}.focus()")
-                    _key(command, "Enter", "Enter", 13)
-                    assert evaluate(f"!document.getElementById({button}.getAttribute('aria-controls')).hidden"), (label, index)
+                        assert evaluate(f"!document.getElementById({button}.getAttribute('aria-controls')).hidden"), (label, index)
+                        changed += 1
+                    if not changed:
+                        break
+                else:
+                    pytest.fail(f"{label}: disclosures did not settle")
+                for index in range(count):
+                    state = summary_state(index)
+                    assert state.get("skip") in (None, "inactive tab", "closed ancestor"), (label, index, state)
+                    if not state.get("skip"):
+                        assert state["visible"] and state["open"], (label, index, state)
 
             def walk(label: str) -> None:
                 evaluate("document.querySelector('.skip-link').focus()")
