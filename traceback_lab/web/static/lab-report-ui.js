@@ -77,10 +77,13 @@
         referenceText = [kind, sourceName].filter(Boolean).join(": ") || null;
       }
       const guide = globalThis.TracebackLabViews?.signalDefinition?.(row.algorithm_id, row.metric_id) || null;
+      const nextSteps = entry.next_steps && typeof entry.next_steps === "object"
+        ? [metadataList(entry.next_steps.analytical), metadataList(entry.next_steps.clinical_setting)]
+          .filter(Boolean).join("; ") || null : null;
       metric[`${row.algorithm_id}/${row.metric_id}`] = {
         support: Number.isSafeInteger(source.n) && source.n >= 0 ? source.n : null,
         reference: referenceText,
-        confounders: metadataList(entry.confounders), nextSteps: metadataList(entry.next_steps),
+        confounders: metadataList(entry.confounders), nextSteps,
         guide: guide ? {
           definition: safeMetadata(guide.definition), denominator: safeMetadata(guide.denominator),
           limitation: safeMetadata(guide.limitation),
@@ -120,19 +123,13 @@
     const controller = new AbortController();
     pending = controller;
     renderPanel();
-    const deadline = setTimeout(() => controller.abort(), 10000);
     try {
       // This is the only sample request in the prepare action. No page cache,
       // artifact or status response can authorize an export.
-      const response = await fetch(`/api/samples/${id12}`, {
-        credentials: "same-origin", cache: "no-store", signal: controller.signal,
+      const sample = await lab.requestJson(`/api/samples/${id12}`, {
+        signal: controller.signal, timeoutMs: 10000,
+        isCurrent: () => token === requestToken && selected(id12, revision),
       });
-      if (!response.ok) throw Object.assign(new Error("The selected sample could not be refreshed."),
-        { code: response.status === 401 ? "session_expired" : "sample_unavailable" });
-      let sample;
-      try { sample = await response.json(); }
-      catch (_) { throw Object.assign(new Error("The fresh sample response was invalid."), { code: "invalid_response" }); }
-      if (controller.signal.aborted) throw Object.assign(new Error("deadline"), { name: "AbortError" });
       if (token !== requestToken || !selected(id12, revision)) return;
       if (!sample || sample.found !== true || sample.id12 !== id12) {
         throw Object.assign(new Error("The selected sample is unavailable for reporting."), { code: "sample_unavailable" });
@@ -146,14 +143,13 @@
     } catch (error) {
       if (token !== requestToken) return;
       const known = new Set(["invalid_report_identity", "no_report_rows", "report_too_many_rows", "report_too_large"]);
-      const copy = error?.name === "AbortError" ? "Report preparation timed out after 10 seconds. Try again."
-        : error?.code === "session_expired" ? "Session expired. Open a fresh Lab link from the serving terminal."
+      const copy = error?.kind === "timeout" ? "Report preparation timed out after 10 seconds. Try again."
+        : error?.kind === "session" ? "Session expired. Open a fresh Lab link from the serving terminal."
           : known.has(error?.code) ? error.message
-            : error?.code === "invalid_response" ? "The fresh sample response was invalid. Try again."
+            : error?.kind === "invalid" ? "The fresh sample response was invalid. Try again."
               : "The selected sample could not be refreshed. Try again.";
       message(copy, true);
     } finally {
-      clearTimeout(deadline);
       if (pending === controller) pending = null;
       if (token === requestToken) renderPanel();
     }
