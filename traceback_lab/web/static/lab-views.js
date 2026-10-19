@@ -798,6 +798,79 @@
   function methods(sample) {
     const out = [h("p", { class: "breadcrumb" }, `Lab › ${sample.id12} › Methods`), h("h1", { class: "view-title" }, "Methods"),
       h("p", {}, `Interpretation library v${sample.interpretation_version} · cohort ${sample.cohort_version || "none yet"} · provenance stamp only (no signing). `, flagPill("PII", "FLAG: PII — file paths often embed donor names. Hashes only, never paths."))];
+    out.push(recordedReadiness(sample));
+    const catalog = sample.catalog || [];
+    const counts = sample.method_counts || {};
+    const search = h("input", { id: "method-search", type: "search", autocomplete: "off",
+      "aria-label": "Search methods" });
+    const statuses = [...new Set(catalog.map((row) => row.status))].sort();
+    const status = h("select", { id: "method-status", "aria-label": "Filter methods by recorded result" },
+      h("option", { value: "" }, "All recorded results"),
+      ...statuses.map((value) => h("option", { value }, value)));
+    const families = [...new Set(catalog.map((row) => row.family).filter(Boolean))].sort();
+    const family = h("select", { id: "method-family", "aria-label": "Filter methods by family" },
+      h("option", { value: "" }, "All families"),
+      ...families.map((value) => h("option", { value }, value)));
+    const count = h("p", { role: "status", "aria-live": "polite" });
+    const catalogRows = h("div", { id: "method-catalog-results" });
+    const showCatalog = () => {
+      const needle = search.value.trim().toLocaleLowerCase();
+      const selected = catalog.filter((row) => {
+        if (status.value && row.status !== status.value) return false;
+        if (family.value && row.family !== family.value) return false;
+        return !needle || [row.algorithm_id, row.label, row.description, row.question,
+          row.limitations, ...(row.requirements || [])].some((value) =>
+          String(value || "").toLocaleLowerCase().includes(needle));
+      });
+      count.textContent = `${selected.length} of ${catalog.length} visible methods shown`;
+      if (!selected.length) {
+        catalogRows.replaceChildren(h("p", { class: "empty" },
+          "No methods match these filters. Clear the search or choose another recorded result or family."));
+        return;
+      }
+      catalogRows.replaceChildren(...selected.map((row) => {
+        const readFloor = row.min_eligible_reads
+          ? `Registry floor: ${fmt(row.min_eligible_reads)} eligible reads.`
+          : "No generic registry read floor; method-specific gates may still apply.";
+        const platforms = (row.platforms || []).map((value) => value === "ont" ? "ONT" : value === "illumina" ? "Illumina" : value).join(", ");
+        const requirements = row.requirements || [];
+        const recorded = row.status === "ok" ? "ran" : row.status;
+        const provenance = h("button", { type: "button", class: "control" }, "Go to recorded provenance");
+        provenance.addEventListener("click", () => document.getElementById("method-provenance")?.scrollIntoView());
+        return h("article", { class: "panel", id: `method-${row.algorithm_id}` },
+          h("h3", {}, row.label, " ", h("span", { class: "help" }, `(${row.algorithm_id})`)),
+          h("p", {}, row.description || "Method explanation unavailable."),
+          h("p", {}, `Family: ${row.family || "unclassified"} · Recorded result: ${recorded}`,
+            row.skip_reason ? ` (${row.skip_reason.replace(/_/g, " ")})` : ""),
+          h("details", {}, h("summary", {}, "Question, limits and prerequisites"),
+            h("p", {}, h("strong", {}, "Research question: "), row.question || "Not documented."),
+            h("p", {}, h("strong", {}, "Limits: "), row.limitations || "Not documented."),
+            h("p", {}, `Declared platforms: ${platforms || "unspecified"}. ${readFloor}`,
+              row.requires_mm_tags ? " MM tags required." : ""),
+            requirements.length ? h("ul", {}, ...requirements.map((item) => h("li", {}, item)))
+              : h("p", {}, "No additional registered asset is listed in the method explanation; a run can still have input-specific gates."),
+            row.min_depth_x ? h("p", {}, `Literature depth minimum: ${fmt(row.min_depth_x)}x; this is not a readiness verdict.`) : "",
+            h("p", {}, `Evidence note: ${row.footnote || "none published"}`,
+              row.footnote_source ? ` (${row.footnote_source})` : "",
+              row.citation_checked ? "" : " · UNVERIFIED citation"),
+            h("p", {}, h("a", { href: `#/sample/${sample.id12}/evidence` }, "Evidence, citations and licenses"),
+              " · ", provenance)));
+      }));
+    };
+    search.addEventListener("input", showCatalog);
+    status.addEventListener("change", showCatalog);
+    family.addEventListener("change", showCatalog);
+    const hidden = counts.hidden_processing_steps || [];
+    out.push(h("section", { class: "panel", "aria-labelledby": "method-catalog-title" },
+      h("h2", { id: "method-catalog-title" }, "Method catalog"),
+      h("p", {}, `${counts.visible_methods ?? catalog.length} visible methods from ${counts.registered_steps ?? catalog.length} registered steps. `,
+        `${hidden.length} processing steps (${hidden.join(", ") || "none"}) are hidden because they are shared intermediates, not biological results.`),
+      h("p", { class: "help" }, "Recorded result availability is input-specific. Current environment readiness is unknown until an explicit check; a past result does not prove tools or assets are still available."),
+      h("label", { for: "method-search" }, "Search methods"), search,
+      h("label", { for: "method-status" }, "Recorded result"), status,
+      h("label", { for: "method-family" }, "Family"), family,
+      count, catalogRows));
+    showCatalog();
     const rows = [];
     const seen = new Set();
     const firstUse = (id) => {
@@ -813,7 +886,8 @@
         const e = m.entry || {};
         const ref = e.reference || {};
         rows.push(h("tr", {},
-          h("th", { scope: "row" }, m.label), h("td", {}, fmt(m.value, m.unit)),
+          h("th", { scope: "row" }, m.label),
+          h("td", {}, L.fmtMetric ? L.fmtMetric(m, { algorithmId: a.algorithm_id }) : fmt(m.value, m.unit)),
           h("td", {}, a.provenance.tool, " ", a.provenance.tool_version),
           h("td", { class: "mono" }, h("details", {}, h("summary", {}, a.provenance.parameters_sha256.slice(0, 12)), provenance(sample, a.algorithm_id))),
           h("td", { class: "mono" }, a.provenance.input_id.slice(0, 12)),
@@ -824,12 +898,139 @@
           h("td", {}, ref.kind === "none" || !ref.kind ? "none" : `${ref.kind}${ref.source ? ": " + ref.source : ""}`)));
       }
     }
-    out.push(h("div", { class: "table-wrap", tabindex: "0", role: "region",
+    out.push(h("div", { class: "table-wrap", id: "method-provenance", tabindex: "0", role: "region",
       "aria-label": "Every number with its provenance" }, h("table", { class: "data-table" },
       h("caption", {}, "Every number with its provenance"),
       h("thead", {}, h("tr", {}, ...["Metric", "Value", "Tool", "Provenance stamp (parameters sha256)", "Input", "Reference", "Computed (UTC)", "License", "Citation", "Range source"].map((t) => h("th", { scope: "col" }, t)))),
       h("tbody", {}, ...rows))));
     return out;
+  }
+
+  const READINESS_GUIDE = "https://github.com/danwiggins/cfddemo/blob/main/docs/LAB-GUIDE.md#";
+  const READINESS_REASONS = {
+    missing_asset: ["Registered asset missing", "Check the method's registered asset or input-scoped calibration.", "one-time-setup-for-real-kits"],
+    asset_unavailable: ["Registered asset unavailable", "Inspect the selected asset registration before rerunning.", "one-time-setup-for-real-kits"],
+    invalid_asset: ["Registered asset malformed", "Restore the registered asset from a verified source before rerunning.", "one-time-setup-for-real-kits"],
+    platform: ["Input platform mismatch", "Use an input with a supported, declared platform for this method.", "tbx-lab-024"],
+    platform_unverified: ["Platform support unverified", "Review the method's platform and opt-in limits before attempting it.", "algorithms"],
+    depth: ["Insufficient recorded depth", "Review the recorded input gate and eligible-read support.", "algorithms"],
+    low_support: ["Insufficient marker support", "Review marker-level support and the method's documented limit.", "algorithms"],
+    missing_tags: ["Modification tags unavailable", "Check whether the input carries the required MM/ML calls and declared basecall model.", "running-on-a-kit"],
+    missing_channel: ["Modification channel unavailable", "Check whether the basecall model provides the required modification channel.", "algorithms"],
+    upstream: ["Upstream result unavailable", "Inspect and repair the preceding recorded step before rerunning this method.", "running-on-a-kit"],
+    missing_toolchain: ["Toolchain unavailable for recorded run", "Use the local doctor and method setup guide to check the required tools.", "one-time-setup-for-real-kits"],
+    reference: ["Reference incompatible or unavailable", "Check the registered reference and input compatibility.", "tbx-lab-004"],
+    example_reference: ["Synthetic example limit", "This method needs real input or resources that the synthetic example does not include.", "first-five-minutes"],
+    no_pon: ["Panel of normals unavailable", "Build or select a protocol-matched panel before relying on this result.", "building-a-lab-cohort"],
+    disk: ["Insufficient disk for recorded run", "Check the disk budget and retry only after capacity is available.", "tbx-lab-010"],
+  };
+
+  function recordedReadiness(sample) {
+    const state = L.state;
+    const refreshState = state.readinessRefresh || {};
+    const key = `${sample.id12}:${sample.full_input_id || "unknown"}`;
+    const remembered = refreshState[key] || {};
+    const panel = h("section", { class: "panel", id: "recorded-readiness", "aria-labelledby": "recorded-readiness-title" },
+      h("h2", { id: "recorded-readiness-title" }, "Readiness for this recorded run"),
+      h("p", {}, `Recorded input ${sample.full_input_id ? sample.full_input_id.slice(0, 12) : "unknown"} · platform ${sample.platform || "unknown"} · interpretation v${sample.interpretation_version || "unknown"}${sample.example ? " · EXAMPLE (synthetic)" : ""}.`),
+      h("p", { class: "help" }, "Recorded result availability describes the selected run, not current tool or asset readiness. A skipped, failed or absent method is not a negative biological finding."),
+      h("p", {}, "Current environment has not been checked here. Run traceback lab doctor --root <ROOT> locally."),
+      h("p", {}, "Current environment checked at: unknown. Sample projection refreshed at: ", remembered.checkedAt || "not requested", "."));
+    const feedback = h("p", { role: "status", "aria-live": "polite", class: remembered.stale ? "problem" : "help" },
+      remembered.stale ? "Refresh failed. The recorded projection below is stale; current environment readiness remains unknown." : "");
+    const refresh = h("button", { id: "readiness-refresh", type: "button", class: "control", "data-requires-server": "" }, "Refresh recorded run");
+    refresh.addEventListener("click", async () => {
+      const revision = state.navigationRevision;
+      const hash = location.hash;
+      const selected = state.sample?.id12;
+      const controller = new AbortController();
+      const deadline = setTimeout(() => controller.abort(), 10000);
+      refresh.disabled = true;
+      feedback.className = "help";
+      feedback.textContent = "Refreshing recorded run…";
+      try {
+        const response = await fetch(`/api/samples/${encodeURIComponent(sample.id12)}`, {
+          credentials: "same-origin", signal: controller.signal,
+        });
+        if (!response.ok) throw new Error("sample refresh unavailable");
+        const current = await response.json();
+        if (current.found !== true || current.id12 !== sample.id12 ||
+            !Array.isArray(current.catalog) || !Array.isArray(current.algorithms)) {
+          throw new Error("sample refresh unavailable");
+        }
+        if (revision !== state.navigationRevision || hash !== location.hash || selected !== state.sample?.id12) return;
+        state.readinessRefresh = { ...state.readinessRefresh,
+          [`${current.id12}:${current.full_input_id || "unknown"}`]: { checkedAt: new Date().toISOString(), stale: false } };
+        state.sample = current;
+        L.render();
+        document.getElementById("readiness-refresh")?.focus();
+      } catch (_error) {
+        if (revision !== state.navigationRevision || hash !== location.hash || selected !== state.sample?.id12) return;
+        state.readinessRefresh = { ...state.readinessRefresh, [key]: { ...remembered, stale: true } };
+        feedback.className = "problem";
+        feedback.textContent = "Refresh failed. The recorded projection below is stale; current environment readiness remains unknown.";
+      } finally {
+        clearTimeout(deadline);
+        if (refresh.isConnected) refresh.disabled = false;
+      }
+    });
+    panel.append(refresh, feedback);
+    const byId = new Map((sample.algorithms || []).map((row) => [row.algorithm_id, row]));
+    const catalog = Array.isArray(sample.catalog) ? sample.catalog : [];
+    const groups = new Map();
+    let available = 0;
+    for (const row of catalog) {
+      if (row.status === "ok") { available += 1; continue; }
+      const reason = row.status === "skipped" ? READINESS_REASONS[row.skip_reason] : null;
+      const issue = reason || (row.status === "failed"
+        ? ["Recorded step failed", "Inspect the run log and documented failure before retrying.", "tbx-lab-016"]
+        : row.status === "unreadable" || row.status === "ambiguous"
+          ? ["Selected result unavailable", "Inspect the selected result and restore its local files if needed.", "tbx-lab-020"]
+          : row.status === "not run"
+            ? ["Method not run", "No recorded result is available; prerequisite status is unknown.", "running-on-a-kit"]
+            : ["Other recorded skip or unknown state", "Review the method's recorded result and local run log.", "running-on-a-kit"]);
+      const [label, action, anchor] = issue;
+      if (!groups.has(label)) groups.set(label, { action, anchor, rows: [] });
+      groups.get(label).rows.push({ row, algorithm: byId.get(row.algorithm_id) });
+    }
+    panel.append(h("p", {}, catalog.length
+      ? `${available} recorded results available; ${[...groups.values()].reduce((n, group) => n + group.rows.length, 0)} methods need review or have no recorded result.`
+      : "Recorded method availability is unknown because this sample projection has no catalog."));
+    if (groups.size) panel.append(h("ul", { class: "readiness-issues" }, ...[...groups].map(([label, group]) =>
+      h("li", {}, h("strong", {}, `${label} (${group.rows.length}): `),
+        group.rows.map(({ row }) => `${row.label || row.algorithm_id} (${row.algorithm_id})`).join(", "), ". ", group.action, " ",
+        h("a", { href: READINESS_GUIDE + group.anchor, target: "_blank", rel: "noopener noreferrer" }, "Read guide"),
+        ...group.rows.flatMap(({ row, algorithm }) =>
+          row.skip_reason === "depth" && algorithm?.input_gate
+            ? [h("p", { class: "help" }, `${row.label || row.algorithm_id} recorded gate: ${algorithm.input_gate}`)]
+            : row.skip_reason === "platform"
+              ? [h("p", { class: "help" }, `${row.label || row.algorithm_id}: recorded input ${sample.platform || "unknown"}; declared platforms ${(row.platforms || []).join(", ") || "unknown"}.`)]
+              : [])))));
+    else if (catalog.length) panel.append(h("p", { class: "help" }, "Every visible method has a recorded result. This does not establish current environment readiness or clinical validity."));
+    const cohort = sample.cohort_state;
+    if ((cohort && cohort !== "ready") || sample.cohort_problem) {
+      const code = sample.cohort_problem?.code;
+      const anchor = typeof code === "string" && /^TBX-LAB-0(?:0[1-9]|1[0-9]|2[0-5])$/.test(code)
+        ? code.toLowerCase() : "building-a-lab-cohort";
+      panel.append(h("p", { class: "help" },
+        cohort === "example" ? "Cohort reference: synthetic example; real-cohort comparison is unavailable." :
+          `Cohort reference: ${({ ready: "ready with a recorded panel issue", not_built: "not built", cohort_unavailable: "unavailable", target_unavailable: "target unavailable", stale_target: "selected target stale" })[cohort] || "unknown"}.`,
+        " ", h("a", { href: READINESS_GUIDE + anchor, target: "_blank", rel: "noopener noreferrer" }, "Cohort guide")));
+    }
+    const copyStatus = h("p", { role: "status", "aria-live": "polite" });
+    const command = (value, label) => {
+      const button = h("button", { type: "button", class: "control", "aria-label": `Copy ${label} command` }, "Copy");
+      button.addEventListener("click", async () => {
+        try { await navigator.clipboard.writeText(value); copyStatus.textContent = "Copied command"; }
+        catch (_error) { copyStatus.textContent = "Copy failed. Select the command text to copy it manually."; }
+      });
+      return h("div", { class: "readiness-command" }, h("code", {}, value), button);
+    };
+    panel.append(h("h3", {}, "Safe local next actions"),
+      h("p", { class: "help" }, "Replace placeholders on your own machine. Doctor checks current setup; a rerun uses the intended input only after its recorded issue is resolved."),
+      command("traceback lab doctor --root <ROOT>", "doctor"),
+      command("traceback lab run <FILE> --root <ROOT>", "run"), copyStatus);
+    return panel;
   }
 
   // -- shared helpers for L1.7 ------------------------------------------------------------------

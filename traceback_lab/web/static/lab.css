@@ -20,6 +20,10 @@ body.lab { background: #f3f1ec; }
 .lenses { width: min(76rem, calc(100% - 2rem)); margin: .25rem auto 0; display: flex; flex-wrap: wrap; gap: .25rem 1rem; border-bottom: 1px solid var(--rule); }
 .lenses a { display: inline-flex; align-items: center; min-height: 2.75rem; padding: 0 .25rem; color: var(--ink); text-decoration: none; font-weight: 650; border-bottom: 3px solid transparent; }
 .lenses a[aria-current="page"] { border-bottom-color: var(--ink); }
+.readiness-issues { padding-left: 1.5rem; }
+.readiness-issues li { margin-block: .4rem; }
+.readiness-command { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-block: .35rem; }
+.readiness-command code { overflow-wrap: anywhere; user-select: text; }
 .breadcrumb { margin: 0; color: var(--muted); }
 .tier { display: inline-block; padding: .15rem .45rem; border-radius: 4px; font-size: .875rem; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; }
 .tier-PROVEN { background: var(--ink); color: #ffffff; border: 2px solid var(--ink); }

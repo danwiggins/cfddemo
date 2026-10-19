@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import copy
 import json
+import time
 
 import pytest
 
 from tests.lab.test_acceptance_synthetic_routes import ID12, LICENSE_IDS, _license_nodes, _sample, _server
+from tests.lab.test_acceptance_accessibility import _key
+from tests.lab.test_lab_server import _chrome, _dom_cdp
 from tests.lab.test_landing import _dom, _id12, needs_chrome, page_root as _landing_page_root
 from traceback_lab.interpretation.engine import Entry, Library, load_library
 from traceback_lab.registry import load_registry
@@ -43,6 +47,200 @@ def test_every_registered_algorithm_has_catalog_disclosures(algorithm_id: str) -
     }
     assert set(row["license_ids"]) == expected
     assert expected <= LIBRARY.licenses.keys()
+    assert row["description"] and row["question"] and row["limitations"]
+    assert row["family"] and row["platforms"]
+    assert row["environment_readiness"] == "unknown" and row["readiness_checked_at"] is None
+
+
+def test_method_explanations_cover_exactly_the_visible_registry() -> None:
+    assert set(LIBRARY.method_catalog) == set(REGISTRY)
+    assert LIBRARY.hidden_algorithms == {"read-summary", "meth-calls"}
+
+
+@needs_chrome
+def test_methods_search_and_filters_keep_provenance_available(tmp_path) -> None:
+    sample = _sample()
+    sample["catalog"][0]["status"] = "skipped"
+    sample["catalog"][0]["skip_reason"] = "missing_asset"
+    with _server(tmp_path, sample) as server:
+        profile = tmp_path / "browser-profile"
+
+        def interact(_command, evaluate) -> None:
+            assert evaluate("document.querySelectorAll('#method-catalog-results article').length") == len(REGISTRY)
+            assert evaluate("document.getElementById('method-provenance') !== null")
+            assert evaluate("document.querySelector('#main').textContent.includes('Current environment readiness is unknown')")
+            assert evaluate("""(() => { const input = document.getElementById('method-search');
+              input.value = 'Weidner'; input.dispatchEvent(new Event('input', {bubbles: true}));
+              return [...document.querySelectorAll('#method-catalog-results article')]
+                .map((row) => row.id); })()""") == ["method-epi-clock"]
+            assert evaluate("""(() => { const input = document.getElementById('method-search');
+              input.value = ''; input.dispatchEvent(new Event('input', {bubbles: true}));
+              const select = document.getElementById('method-status'); select.value = 'skipped';
+              select.dispatchEvent(new Event('change', {bubbles: true}));
+              return [...document.querySelectorAll('#method-catalog-results article')]
+                .map((row) => row.id); })()""") == ["method-bam-qc"]
+            assert evaluate("""(() => { const select = document.getElementById('method-family');
+              select.value = 'methylation'; select.dispatchEvent(new Event('change', {bubbles: true}));
+              return document.querySelector('#method-catalog-results').textContent.includes('No methods match'); })()""")
+            assert evaluate("document.getElementById('method-provenance').textContent.includes('Every number with its provenance')")
+
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", "--window-size=1280,800",
+             server.issue_link() + f"&route=/sample/{ID12}/methods"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'id="method-catalog-results"' in dom,
+            interact=interact,
+        )
+
+
+@needs_chrome
+def test_recorded_readiness_distinguishes_reasons_without_leaking_messages(tmp_path) -> None:
+    sample = _sample()
+    cases = {
+        "copy-number": ("skipped", "missing_asset", "Registered asset missing"),
+        "meth-tf": ("skipped", "invalid_asset", "Registered asset malformed"),
+        "short-read-fragment-size": ("skipped", "platform", "Input platform mismatch"),
+        "griffin": ("skipped", "depth", "Insufficient recorded depth"),
+        "global-5hmc": ("skipped", "missing_channel", "Modification channel unavailable"),
+        "instability": ("skipped", "upstream", "Upstream result unavailable"),
+        "viral-reads": ("failed", None, "Recorded step failed"),
+        "identity": ("not run", None, "Method not run"),
+    }
+    for row in sample["catalog"]:
+        if row["algorithm_id"] in cases:
+            row["status"], row["skip_reason"], _ = cases[row["algorithm_id"]]
+    for row in sample["algorithms"]:
+        if row["algorithm_id"] in cases:
+            row["status"], row["skip_reason"], _ = cases[row["algorithm_id"]]
+            row["skip_message"] = "PRIVATE_PATH_SENTINEL must never reach the view"
+            if row["algorithm_id"] == "griffin":
+                row["input_gate"] = "at least 5,000,000 eligible autosomal pairs"
+    sample["cohort_state"] = "cohort_unavailable"
+    sample["cohort_problem"] = {"code": "TBX-LAB-022", "cause": "PRIVATE_PATH_SENTINEL"}
+    with _server(tmp_path, sample) as server:
+        profile = tmp_path / "browser-profile"
+
+        def inspect(_command, evaluate) -> None:
+            labels = evaluate("[...document.querySelectorAll('#recorded-readiness .readiness-issues strong')].map(node => node.textContent)")
+            for _, _, expected in cases.values():
+                assert any(expected in label for label in labels), (expected, labels)
+            text = evaluate("document.getElementById('recorded-readiness').textContent")
+            assert "Current environment checked at: unknown" in text
+            assert "5,000,000 eligible autosomal pairs" in text
+            assert "Cohort reference: unavailable" in text
+            assert "PRIVATE_PATH_SENTINEL" not in text and "negative biological finding" in text
+            assert evaluate("[...document.querySelectorAll('#recorded-readiness a')].every(a => a.href.includes('/docs/LAB-GUIDE.md#'))")
+            assert evaluate("[...document.querySelectorAll('.readiness-command code')].map(node => node.textContent)") == [
+                "traceback lab doctor --root <ROOT>", "traceback lab run <FILE> --root <ROOT>",
+            ]
+
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", "--window-size=1280,800",
+             server.issue_link() + f"&route=/sample/{ID12}/methods"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'id="recorded-readiness"' in dom,
+            interact=inspect,
+        )
+
+
+@needs_chrome
+def test_readiness_refresh_failure_retains_projection_and_navigation_discards_late_response(tmp_path) -> None:
+    sample = _sample()
+    late = copy.deepcopy(sample)
+    late["full_input_id"] = "changed"
+    with _server(tmp_path, sample) as server:
+        profile = tmp_path / "browser-profile"
+
+        def inspect(_command, evaluate) -> None:
+            evaluate("window.fetch = () => Promise.reject(new Error('offline')); document.getElementById('readiness-refresh').click()")
+            assert evaluate("document.querySelector('#recorded-readiness [role=status]').textContent.includes('projection below is stale')")
+            assert evaluate("window.TracebackLab.state.sample.catalog[0].status === 'ok'")
+            assert evaluate("document.getElementById('recorded-readiness').textContent.includes('Current environment checked at: unknown')")
+            evaluate("""window.fetch = () => new Promise(resolve => { window.finishReadinessFetch = resolve; });
+              document.getElementById('readiness-refresh').click();""")
+            evaluate(f"location.hash = '#/sample/{ID12}/findings'")
+            evaluate("window.finishReadinessFetch(new Response(JSON.stringify(__PAYLOAD__), {status:200}))".replace(
+                "__PAYLOAD__", json.dumps(late)))
+            for _ in range(40):
+                if evaluate("document.querySelector('#main h1')?.textContent === 'Findings'"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("navigation did not reach Findings")
+            time.sleep(0.1)
+            assert evaluate("location.hash.endsWith('/findings')")
+            assert evaluate("window.TracebackLab.state.sample.full_input_id !== 'changed'")
+
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", "--window-size=1280,800",
+             server.issue_link() + f"&route=/sample/{ID12}/methods"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'id="recorded-readiness"' in dom,
+            interact=inspect,
+        )
+
+
+@needs_chrome
+def test_readiness_refresh_success_and_copy_feedback(tmp_path) -> None:
+    sample = _sample()
+    refreshed = copy.deepcopy(sample)
+    refreshed["catalog"][0]["status"] = "skipped"
+    refreshed["catalog"][0]["skip_reason"] = "missing_asset"
+    refreshed["algorithms"][0]["status"] = "skipped"
+    refreshed["algorithms"][0]["skip_reason"] = "missing_asset"
+    with _server(tmp_path, sample) as server:
+        profile = tmp_path / "browser-profile"
+
+        def inspect(command, evaluate) -> None:
+            payload = json.dumps(refreshed)
+            evaluate("""window.refreshPaths = [];
+              window.fetch = async (path, options) => {
+                window.refreshPaths.push({path, credentials: options?.credentials, hasSignal: !!options?.signal});
+                return new Response(JSON.stringify(__PAYLOAD__), {status: 200,
+                  headers: {'Content-Type': 'application/json'}});
+              };""".replace("__PAYLOAD__", payload))
+            command("Page.bringToFront")
+            evaluate("document.getElementById('readiness-refresh').focus()")
+            _key(command, "Enter", "Enter", 13)
+            for _ in range(40):
+                if evaluate("window.TracebackLab.state.sample.catalog[0].status === 'skipped'"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("sample refresh did not replace the recorded projection")
+            assert evaluate("window.refreshPaths.filter(row => row.path.startsWith('/api/samples/'))") == [{
+                "path": f"/api/samples/{ID12}", "credentials": "same-origin", "hasSignal": True,
+            }]
+            assert evaluate("document.getElementById('recorded-readiness').textContent.includes('Registered asset missing')")
+            assert evaluate("document.getElementById('recorded-readiness').textContent.includes('Current environment checked at: unknown')")
+            assert evaluate("document.activeElement?.id === 'readiness-refresh'")
+            assert evaluate("document.activeElement?.matches(':focus-visible')")
+            evaluate("""Object.defineProperty(navigator, 'clipboard', {configurable:true,
+              value:{writeText: async (text) => { window.copiedCommand = text; }}});
+              document.querySelector('.readiness-command button').click();""")
+            for _ in range(20):
+                if evaluate("document.querySelector('#recorded-readiness [role=status]:last-child')?.textContent === 'Copied command'"):
+                    break
+                time.sleep(0.05)
+            assert evaluate("window.copiedCommand") == "traceback lab doctor --root <ROOT>"
+            evaluate("""Object.defineProperty(navigator, 'clipboard', {configurable:true,
+              value:{writeText: async () => { throw new Error('denied'); }}});
+              document.querySelector('.readiness-command button').click();""")
+            for _ in range(20):
+                if evaluate("document.getElementById('recorded-readiness').textContent.includes('Copy failed.')"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("clipboard rejection did not produce an error announcement")
+            assert evaluate("document.querySelector('.readiness-command code').textContent") == "traceback lab doctor --root <ROOT>"
+
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", "--window-size=1280,800",
+             server.issue_link() + f"&route=/sample/{ID12}/methods"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'id="recorded-readiness"' in dom,
+            interact=inspect,
+        )
 
 
 def test_stored_modkit_result_keeps_its_license_without_labeling_new_decoder() -> None:
