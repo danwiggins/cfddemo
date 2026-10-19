@@ -191,7 +191,7 @@
       h("h1", {}, "Traceback Lab research report"),
       field("Captured UTC", report.generated_at), field("Sample", report.sample_id),
       field("Input", report.full_input_id), field("Source", report.source_id),
-      field("Run UTC", report.run_utc), field("Interpretation version", report.interpretation_version),
+      field("Recorded date (UTC)", report.recorded_utc), field("Interpretation version", report.interpretation_version),
       field("Cohort version", report.cohort_version),
       h("p", {}, "Freshly captured report; values may differ from the earlier page."),
       h("h2", {}, "Limitations"), h("ul", {}, ...report.limitations.map((item) => h("li", {}, item))));
