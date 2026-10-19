@@ -44,6 +44,7 @@ def test_report_capture_download_print_and_selection_invalidation(tmp_path) -> N
               window.reportBlobs = [];
               window.reportFiles = [];
               window.reportPrint = null;
+              window.reportPrintCalls = 0;
               const create = URL.createObjectURL.bind(URL);
               URL.createObjectURL = (blob) => {
                 blob.text().then((value) => window.reportBlobs.push(value));
@@ -55,6 +56,7 @@ def test_report_capture_download_print_and_selection_invalidation(tmp_path) -> N
                 return click.call(this);
               };
               window.print = () => {
+                window.reportPrintCalls += 1;
                 const root = document.querySelector('#lab-report-print');
                 window.reportPrint = {
                   marks: root.querySelector('.report-print-marks').textContent,
@@ -86,6 +88,13 @@ def test_report_capture_download_print_and_selection_invalidation(tmp_path) -> N
             observed["files"] = evaluate("window.reportFiles")
             observed["print"] = evaluate("window.reportPrint")
             observed["calls_after_actions"] = len(calls) - before
+            evaluate("""(() => {
+              window.TracebackLab.state.sessionExpired = true;
+              const buttons = [...document.querySelectorAll('.report-actions button')];
+              buttons[0].click(); buttons[2].click();
+            })()""")
+            observed["after_session"] = evaluate("""({blobs: window.reportBlobs.length,
+              printCalls: window.reportPrintCalls})""")
             evaluate("location.hash = '#/sample/ffffffffffff/findings'")
             for _ in range(100):
                 if evaluate("!document.querySelector('.report-preview')"):
@@ -112,6 +121,7 @@ def test_report_capture_download_print_and_selection_invalidation(tmp_path) -> N
     assert observed["print"]["count"] > 0
     assert not observed["print"]["privateData"]
     assert "RESEARCH USE ONLY" in observed["print"]["marks"]
+    assert observed["after_session"] == {"blobs": 2, "printCalls": 1}
     assert observed["cleared"]
 
 

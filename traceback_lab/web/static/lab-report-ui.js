@@ -34,7 +34,7 @@
       state.navigationRevision === revision &&
       !state.completedInputUnavailable && !state.completionHistoryUnavailable &&
       !["completed_input_unavailable", "completion_history_unavailable"].includes(state.sample.state) &&
-      document.body.dataset.disconnected !== "1" && document.body.dataset.sessionExpired !== "1";
+      document.body.dataset.disconnected !== "1" && state.sessionExpired !== true;
   }
 
   function safeMetadata(value) {
@@ -91,6 +91,13 @@
   }
 
   function currentCapture() {
+    if (state.sessionExpired === true) {
+      const hadCapture = !!captured;
+      captured = null;
+      releaseUrl();
+      if (hadCapture && panel?.isConnected) queueMicrotask(renderPanel);
+      return null;
+    }
     return captured && state.sample?.id12 === captured.report.sample_id ? captured : null;
   }
 
