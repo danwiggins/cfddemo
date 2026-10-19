@@ -62,9 +62,13 @@ def test_latest_completed_primary_survives_newer_active_and_blocked_runs(tmp_pat
     assert listing["samples"][0]["id12"] == source_b[:12]
     assert listing["default_sample_id12"] == source_a[:12]
     assert next(row for row in listing["samples"] if row["id12"] == source_a[:12])["run_utc"] == "2026-10-17T10:00:00Z"
+    assert next(row for row in listing["samples"] if row["id12"] == source_a[:12])["completed_utc"] == "2026-10-17T10:00:00Z"
+    assert next(row for row in listing["samples"] if row["id12"] == source_b[:12])["completed_utc"] is None
     assert api.sample(source_a[:12])["full_input_id"] == old_a
     assert api.sample(source_a[:12])["run_utc"] == "2026-10-17T10:00:00Z"
+    assert api.sample(source_a[:12])["completed_utc"] == "2026-10-17T10:00:00Z"
     assert api.sample(source_b[:12])["full_input_id"] == input_b  # explicit active fallback
+    assert api.sample(source_b[:12])["completed_utc"] is None
 
     second = "r-20261018-1300-abcd"
     _run(store, second, source_a, new_a, "2026-10-18T13:00:00Z")
@@ -498,7 +502,7 @@ def test_recovery_home_keeps_clia_disclosures_with_sample_overview(tmp_path, sta
         assert content.index('<section class="clia-panel"') == content.index("<section")
     assert content.count('<section class="clia-panel"') == 1
     if route_kind == "explicit" and state == "no_completed":
-        assert f"Sample {source[:12]}" in dom and "No completed run in this ROOT yet" in dom
+        assert f"Sample {source[:12]}" in dom and "no completion recorded for this sample" in dom
     assert "What CLIA means for this demo" in content
     assert 'aria-expanded="false"' in content
     assert 'aria-controls="clia-full"' in content

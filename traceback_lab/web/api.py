@@ -597,6 +597,7 @@ class LabApi:
                         "id12": id12,
                         "state": "completion_history_unavailable" if uncertain else "completed_input_unavailable",
                         "run_utc": "" if uncertain else unavailable["completed_utc"], "depth_x": None,
+                        "completed_utc": None if uncertain else unavailable["completed_utc"],
                         "example": bool(record.get("example")),
                         "counts": {"ok": 0, "skipped": 0, "failed": 0},
                         "outside_reference": 0, "controls": {"spike": None, "split": False},
@@ -627,6 +628,7 @@ class LabApi:
                 {
                     "id12": id12,
                     "run_utc": used,
+                    "completed_utc": sample.completed_utc,
                     "depth_x": sample.full.depth_x(),
                     "example": sample.example,
                     "cohort_version": generation.version_id if generation else None,
@@ -685,11 +687,13 @@ class LabApi:
             completed = completed_for_source(self.store, source_id, record)
             if completion_history_unavailable(self.store, source_id, record, completed):
                 return {"found": True, "state": "completion_history_unavailable",
-                        "id12": self._id12s()[source_id], "source_id": source_id}
+                        "id12": self._id12s()[source_id], "source_id": source_id,
+                        "completed_utc": None}
             if completed is not None:
                 return {"found": True, "state": "completed_input_unavailable",
                         "id12": self._id12s()[source_id], "source_id": source_id,
-                        "run_utc": completed["completed_utc"]}
+                        "run_utc": completed["completed_utc"],
+                        "completed_utc": completed["completed_utc"]}
             return {"found": False, "candidates": []}
         library = self.libraries.get()
         record = source_record(self.store, source_id) or {}
@@ -798,6 +802,7 @@ class LabApi:
             "full_input_id": sample.full.input_id,
             "platform": sample.platform,
             "example": sample.example,
+            "completed_utc": sample.completed_utc,
             "run_utc": sample.completed_utc or max(
                 (entry.get("used_utc", "") for entry in record.get("inputs", [])), default="",
             ),

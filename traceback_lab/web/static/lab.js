@@ -194,7 +194,7 @@
     const context = document.getElementById("sample-context");
     const sample = state.sample && state.sample.found && state.route.name !== "unknown" ? state.sample : null;
     if (!sample) {
-      context.replaceChildren("No sample selected");
+      context.replaceChildren(state.loading ? "Loading sample…" : "No sample selected");
       return;
     }
     const listed = state.samples.find((row) => row.id12 === sample.id12);
@@ -203,8 +203,9 @@
       : example ? "EXAMPLE (synthetic)" : "Not marked as the built-in synthetic example";
     const availability = sample.state === "completed_input_unavailable" ? "completed input unavailable"
       : sample.state === "completion_history_unavailable" ? "completion history unavailable"
-        : !state.defaultSampleId12 && !state.completedInputUnavailable && !state.completionHistoryUnavailable
-          ? "No completed run in this ROOT yet" : "selected sample";
+        : sample.completed_utc ? `completion recorded ${sample.completed_utc.slice(0, 10)}`
+          : sample.completed_utc === null ? "no completion recorded for this sample"
+            : "selected sample";
     context.replaceChildren(`Sample ${sample.id12} · `,
       h("span", { class: "sample-context-kind" }, kind), ` · ${availability}`);
   }
