@@ -252,7 +252,8 @@ def test_stability_names_both_halves_without_a_numeric_verdict(
     altered = [figure for figure in re.findall(r'<figure class="multiple">(.*?)</figure>', dom, re.S)
                if "an unrecognized split label is present" in figure]
     assert len(altered) == 1
-    assert "100 / 105" in altered[0] and "|A−B| = 5" in altered[0]
+    assert "split A ok (100 bp); split B ok (105 bp)" in altered[0]
+    assert "|A−B| = 5 bp" in altered[0]
     assert f"relative difference {shown}" in altered[0]
     if relative is None:
         assert "relative difference 0%" not in altered[0]
