@@ -202,7 +202,7 @@
     const availability = sample.state === "completed_input_unavailable" ? "completed input unavailable"
       : sample.state === "completion_history_unavailable" ? "completion history unavailable"
         : !state.defaultSampleId12 && !state.completedInputUnavailable && !state.completionHistoryUnavailable
-          ? "No completed Lab run yet" : "selected sample view";
+          ? "No completed run in this ROOT yet" : "selected sample view";
     context.replaceChildren(`Sample ${sample.id12} · `,
       h("span", { class: "sample-context-kind" }, kind), ` · ${availability}`);
   }
