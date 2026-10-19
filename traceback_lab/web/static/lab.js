@@ -220,7 +220,9 @@
   }
 
   function api(path, signal, options = {}) {
-    return requestJson(path, { signal, allow404: /^\/api\/samples\/[0-9a-f]{12,64}$/.test(path), ...options });
+    const sample404 = /^\/api\/samples\/[0-9a-f]{12,64}$/.test(path);
+    const runLog404 = /^\/api\/samples\/[0-9a-f]{12,64}\/run-log\/[a-z0-9-]{1,40}(?:\/[0-9a-f]{64}\/[0-9a-f]{64}\/a-\d{8}T\d{12}-[0-9a-f]{8})?$/.test(path);
+    return requestJson(path, { signal, allow404: sample404 || runLog404, ...options });
   }
 
   function expireSession() {
@@ -520,6 +522,19 @@
         href: "https://github.com/danwiggins/cfddemo/blob/main/docs/LAB-GUIDE.md#troubleshooting",
         target: "_blank", rel: "noopener noreferrer", referrerpolicy: "no-referrer",
       }, "Open recovery guide (external)"));
+    } else if (state.connectionLost || (state.resultStale && !state.loadFailure && !state.initialLoadFailure)) {
+      // A fresh connection check takes priority; keep an unresolved selection
+      // failure available for retry after the connection returns.
+      problem = state.connectionLost ? `Lab server not responding since ${state.disconnectedSince || "page load"}; ${sample?.found
+        ? "showing last confirmed result." : "no selected result is loaded."}` :
+        `Selected result could not be refreshed. ${recoveryCause(state.refreshFailureKind)} Showing last confirmed result.`;
+      const retry = h("button", { type: "button", class: "control", onclick: () => {
+        if (state.connectionLost) poll(); else if (generationChanged) location.reload(); else refreshSelectedSample();
+      } }, state.connectionLost ? "Retry connection" : generationChanged ? "Reload Lab" : "Retry selected refresh");
+      retry.disabled = !!state.selectedRefresh;
+      action.append("Next action: ", retry);
+      if (!generationChanged) action.append(" ", h("button", { type: "button", class: "control",
+        onclick: () => location.reload() }, "Reload Lab"));
     } else if (state.loadFailure) {
       problem = `Could not open selected sample. ${recoveryCause(state.loadFailure.kind)} ${state.renderedHash
         ? "The last rendered view is retained." : "No selected result was loaded."}`;
@@ -533,17 +548,6 @@
       problem = "Lab results could not be loaded. The sample list and current result are unknown.";
       action.append("Next action: ", h("button", { type: "button", class: "control",
         onclick: () => location.reload() }, "Retry loading Lab"));
-    } else if (state.resultStale || state.connectionLost) {
-      problem = state.connectionLost ? `Lab server not responding since ${state.disconnectedSince || "page load"}; ${sample?.found
-        ? "showing last confirmed result." : "no selected result is loaded."}` :
-        `Selected result could not be refreshed. ${recoveryCause(state.refreshFailureKind)} Showing last confirmed result.`;
-      const retry = h("button", { type: "button", class: "control", onclick: () => {
-        if (state.connectionLost) poll(); else if (generationChanged) location.reload(); else refreshSelectedSample();
-      } }, state.connectionLost ? "Retry connection" : generationChanged ? "Reload Lab" : "Retry selected refresh");
-      retry.disabled = !!state.selectedRefresh;
-      action.append("Next action: ", retry);
-      if (!generationChanged) action.append(" ", h("button", { type: "button", class: "control",
-        onclick: () => location.reload() }, "Reload Lab"));
     } else if (!state.loading && !state.samples.length) {
       action.append("Next action: ", h("a", {
         href: "https://github.com/danwiggins/cfddemo/blob/main/docs/LAB-GUIDE.md#first-five-minutes",
@@ -1010,12 +1014,20 @@
           return;
         }
         showLogLine("Loading run log line…");
+        const revision = state.navigationRevision;
+        const hash = location.hash;
+        const isCurrent = () => revision === state.navigationRevision && hash === location.hash &&
+          sample.source_id === state.sample?.source_id && sample.full_input_id === state.sample?.full_input_id;
         try {
-          const line = await api(`/api/samples/${sample.id12}/run-log/${a.algorithm_id}/${pin.input_id}/${pin.parameters_sha256}/${pin.attempt_id}`);
-          showLogLine(line.found
-            ? `${line.run_id} · line ${line.line} · ${line.utc || "time unavailable"} · step_end ${line.step} status=${line.status}${line.skip_reason ? ` (${line.skip_reason})` : ""}${line.duration_s !== null ? ` · ${line.duration_s} s` : ""}`
-            : "Run log line unavailable. Results may have changed; reload this sample. Only 64 recent, bounded logs are searched.");
+          const line = await api(`/api/samples/${sample.id12}/run-log/${a.algorithm_id}/${pin.input_id}/${pin.parameters_sha256}/${pin.attempt_id}`,
+            null, { isCurrent });
+          if (line.found === false) {
+            showLogLine("Run log line unavailable. Results may have changed; reload this sample. Only 64 recent, bounded logs are searched.");
+          } else if (line.found === true) {
+            showLogLine(`${line.run_id} · line ${line.line} · ${line.utc || "time unavailable"} · step_end ${line.step} status=${line.status}${line.skip_reason ? ` (${line.skip_reason})` : ""}${line.duration_s !== null ? ` · ${line.duration_s} s` : ""}`);
+          } else showLogLine("Run log line unavailable.");
         } catch (error) {
+          if (error.kind === "obsolete") return;
           showLogLine(error.session ? "Session expired; reopen Lab." : "Run log line unavailable.");
         }
       } }, "Run log line →") : h("span", { class: "help" }, "Run log line unavailable for this result");
