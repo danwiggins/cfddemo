@@ -959,9 +959,11 @@ class LabApi:
             problem = LabProblem(
                 "TBX-LAB-017", cause=f"sample {id12} has no readable current full input",
                 fix=("Inspect `traceback lab runs` and restore the source record, completed-run log, "
-                     "or pinned input manifest from a known-good backup as needed. If the pinned input "
-                     "cannot be restored, re-ingest the original input under a fresh ROOT, rebuild "
-                     "the cohort there, then serve that ROOT and open Compare"),
+                     "or pinned input manifest from a known-good backup as needed. If the pinned "
+                     "manifest is intact, rerun the sample from its original input under this ROOT "
+                     "and reload Compare. If the manifest cannot be restored, re-ingest the original "
+                     "input under a fresh ROOT, rebuild the cohort there, then serve that ROOT "
+                     "and open Compare"),
             )
             return {"found": True, "id12": id12, "cohort_id": cohort_id,
                     "state": "target_unavailable", "metrics": [], "unscored": [],
@@ -1016,6 +1018,7 @@ class LabApi:
                            "and open Compare. The existing input directory cannot be replaced in place")
                 problem = LabProblem(
                     "TBX-LAB-020", cause=problem.cause, fix=fix, data=problem.data,
+                    summary="Pinned input unavailable",
                 )
             return {**base, "state": "target_unavailable", "metrics": [], "unscored": [],
                     "problem": _recovery_problem(problem)}

@@ -275,6 +275,7 @@ def test_compare_target_unavailable_has_no_metrics(tmp_path, monkeypatch) -> Non
     assert payload["cohort_version"] == "healthy:7"
     assert payload["metrics"] == [] and payload["unscored"] == []
     assert payload["problem"]["code"] == "TBX-LAB-020"
+    assert payload["problem"]["summary"] == problem.summary
     assert payload["problem"]["fix"] == problem.fix
 
 
@@ -324,8 +325,10 @@ def test_compare_missing_completed_manifest_before_view_has_workable_recovery(tm
     fix = payload["problem"]["fix"]
     assert "source record" in fix and "input manifest" in fix
     assert "known-good backup" in fix
+    assert "If the pinned manifest is intact, rerun the sample" in fix
+    assert "under this ROOT" in fix
     assert "fresh ROOT" in fix and "rebuild the cohort" in fix and "serve that ROOT" in fix
-    assert "rerun the sample" not in fix
+    assert "If the manifest cannot be restored" in fix
 
 
 @pytest.mark.parametrize("disappearance", ("source_membership", "manifest"))
@@ -360,6 +363,7 @@ def test_compare_pinned_input_disappearing_after_view_has_specific_recovery(
     assert payload["cohort_version"] == "healthy:7"
     assert payload["metrics"] == [] and payload["unscored"] == []
     assert payload["problem"]["code"] == "TBX-LAB-020"
+    assert payload["problem"]["summary"] == "Pinned input unavailable"
     assert input_id[:12] in payload["problem"]["cause"]
     assert "Compare" in payload["problem"]["fix"]
     if disappearance == "source_membership":
