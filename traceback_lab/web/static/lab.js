@@ -323,7 +323,6 @@
     } catch (error) {
       if (!isCurrent() || state.sessionExpired) return;
       state.loadFailure = { requestedHash, id12: target, kind: error.kind || "unavailable" };
-      state.resultStale = !!state.sample;
       if (state.renderedHash) {
         history.replaceState(null, "", location.pathname + location.search + state.renderedHash);
         renderSwitcher();
@@ -452,7 +451,9 @@
     const last = state.resultConfirmedAt ? state.resultConfirmedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "unknown";
     freshness.dataset.stale = state.resultStale || state.sessionExpired ? "true" : "false";
     freshness.textContent = state.sessionExpired ? `Freshness/session: session expired; last confirmed ${last}.` :
-      state.connectionLost ? `Freshness/session: connection lost; showing last confirmed result (${last}).` :
+      state.connectionLost ? state.sample?.found
+        ? `Freshness/session: connection lost; showing last confirmed result (${last}).`
+        : "Freshness/session: connection lost; no selected result loaded." :
       state.resultStale ? `Freshness/session: ${state.selectedRefresh ? "verifying selected result" : "selected result unconfirmed"}; last confirmed ${last}.` :
       state.sample?.found ? `Freshness/session: recorded projection confirmed at ${last}.` :
       "Freshness/session: no selected result loaded.";
@@ -500,7 +501,8 @@
         target: "_blank", rel: "noopener noreferrer", referrerpolicy: "no-referrer",
       }, "Open recovery guide (external)"));
     } else if (state.loadFailure) {
-      problem = `Could not open selected sample. ${recoveryCause(state.loadFailure.kind)} The last rendered view is retained and marked stale.`;
+      problem = `Could not open selected sample. ${recoveryCause(state.loadFailure.kind)} ${state.renderedHash
+        ? "The last rendered view is retained." : "No selected result was loaded."}`;
       const requested = state.loadFailure.requestedHash;
       action.append("Next action: ", h("button", { type: "button", class: "control",
         onclick: () => {
@@ -512,7 +514,8 @@
       action.append("Next action: ", h("button", { type: "button", class: "control",
         onclick: () => location.reload() }, "Retry loading Lab"));
     } else if (state.resultStale || state.connectionLost) {
-      problem = state.connectionLost ? `Lab server not responding since ${state.disconnectedSince || "page load"}; showing last confirmed result.` :
+      problem = state.connectionLost ? `Lab server not responding since ${state.disconnectedSince || "page load"}; ${sample?.found
+        ? "showing last confirmed result." : "no selected result is loaded."}` :
         `Selected result could not be refreshed. ${recoveryCause(state.refreshFailureKind)} Showing last confirmed result.`;
       const retry = h("button", { type: "button", class: "control", onclick: () => {
         if (state.connectionLost) poll(); else if (generationChanged) location.reload(); else refreshSelectedSample();
@@ -1242,7 +1245,7 @@
         const since = state.lastOk ? state.lastOk.toTimeString().slice(0, 5) : "page load";
         state.connectionLost = true;
         state.disconnectedSince = since;
-        state.resultStale = !!state.sample;
+        state.resultStale = !!state.sample?.found;
         document.body.classList.add("dimmed");
         restoreRenderedRoute();
         setControlsEnabled(false);
