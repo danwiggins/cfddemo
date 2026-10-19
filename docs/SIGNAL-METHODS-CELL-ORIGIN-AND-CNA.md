@@ -152,7 +152,7 @@ content_sha256)`, `method_registry.py:165-168`), and both enter the hash.
 | Piece | Location | Notes |
 |---|---|---|
 | Pipeline and CLI | `evidence_inspector/cell_origin_pipeline.py` (1,935 lines); entry `scripts/regenerate_cell_origin.py` | Inputs: an aligned modBAM or a normalized extract TSV (`cell_origin_pipeline.py:1803-1860`). Output: a private operator-local result file |
-| modkit call | `cell_origin_pipeline.py:1710-1740` | `modkit extract calls --reference <selected-reference> --cpg --include-bed <regions> --mapped-only --filter-threshold <value>`. At the review's pinned `149799e` snapshot, `--reference` was fixed to a path under the gitignored local-data directory. Current code accepts a CLI `--reference` override and passes the selected path to modkit with an explicit filter threshold. |
+| modkit call | `cell_origin_pipeline.py:1462-1506` | At the pinned `149799e` snapshot, `modkit extract calls --reference <fixed path under gitignored local-data directory> --cpg --include-bed <regions> --mapped-only`. **The reference path was hard-coded (`:1477`).** The version was probed but not pinned (`:1527-1535`). No explicit `--filter-threshold`. |
 | Pinned modkit 0.6.4 adapter (`extract full`, digest-bound) | `evidence_inspector/modkit_adapter.py:39`, `:164`; `scripts/adapt_modkit_064.py` | Separate research path; not used by `run_pipeline` |
 | UXM classification | `cell_origin_models.py:67-69`, `:224-236` | Fragment-level: ≥4 CpGs; U if methylation < 0.251, M if ≥ 0.75, otherwise X |
 | NNLS | `deconvolution.py:117` (active-set, `traceback.active-set-nnls.v1`, `:45`), `deconvolve_uxm_v2` `:340` | **The pipeline uses `NnlsRowScale.SQRT_COUNT` (`cell_origin_pipeline.py:1565`).** The enum's own docstring says `REFERENCE_COUNT` is the one that reproduces the reference implementation (`cell_origin_models.py:124-135`) |
@@ -786,7 +786,7 @@ only that item's own behaviour.
     - the lower-limit sentence is always present next to the tumour-fraction
       value;
     - no `<pre>`.
-  - Screenshots at 1280 and 390 px are attached to each PR.
+  - Screenshots from generated fixtures at 1280 and 390 px are attached to each PR; real-input screenshots remain private.
 
 **Dependency graph:**
 

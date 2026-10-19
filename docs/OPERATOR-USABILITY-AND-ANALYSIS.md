@@ -2,6 +2,9 @@
 # Operator usability, changeable analysis and an interpretable site
 
 Status: draft spec, 2026-10-03. Verified against `main` at `e76e9d0`.
+Public copy note: historical review summaries and pending-gate wording below
+are redacted or paraphrased where input-specific details appeared; they are
+not verbatim transcripts.
 Scope: one epic, four tracks. Track A makes more BAMs runnable without help.
 Track B lets a scientist change the fragment analysis without an engineer and
 without breaking existing records. Track C makes the local site show the
@@ -313,7 +316,7 @@ Change:
 - Word `PARTIAL` instead of "PASS ... partial".
 - `run` reuse: when `submit` returns an existing COMPLETE job, print "Reused existing record <id> from job <job_id>; nothing was re-measured" and skip the "STAGE seal: copying" line. A new record whose measurement equals an earlier record's prints "same measurement as <id>" (B1).
 - `NEXT_COMMANDS` use the guide's `verify` spelling.
-- Guide: reference registration reads the full FASTA and can take minutes for a human reference; `RECORD_ID=$(ls R/records)` replaced by `run --json`'s `data.record_id`; the guide opens with a chooser ("I have a MinKNOW zip" / "I have an aligned BAM" / "I want the demo") and the real-BAM path moves to the top; an "Upgrading" section covers B1's second record and D15's code aliases; a "disk: each run adds about 1x the input under ROOT" note; lock message and its code in troubleshooting.
+- Guide: later correction to the original plan's "seconds, not minutes" claim—reference registration reads the full FASTA and can take minutes for a human reference; `RECORD_ID=$(ls R/records)` replaced by `run --json`'s `data.record_id`; the guide opens with a chooser ("I have a MinKNOW zip" / "I have an aligned BAM" / "I want the demo") and the real-BAM path moves to the top; an "Upgrading" section covers B1's second record and D15's code aliases; a "disk: each run adds about 1x the input under ROOT" note; lock message and its code in troubleshooting.
 - Web jobs list: a finished, verified job no longer says "Runner status is stale" (state word from C3).
 
 Acceptance: a golden-file test per command for human output (`doctor`, `logs`, `run` reuse), with paths and times normalised; no `{` at the start of any human-output line in those tests. +5 tests. Rollback: revert.
@@ -426,7 +429,7 @@ Acceptance:
 1. API: the view's histogram counts equal the signed measurement's and sum to `eligible_alignments`.
 2. A tampered bundle (one count edited) and a stale authority each make the route return HTTP 503 with TBX-WEB-503 and no counts; the page shows C0's 503 copy.
 3. DOM harness (`tests/web/app_dom_harness.js`): one `<svg>` with N `<rect>` for an N-bin built-in policy, the hatched final bar, the footnote, and a table with N rows; for a 1,001-bin policy one `<path>`, a 101-row grouped table, and no per-bar labels.
-4. No horizontal page scroll at 390 px; 200% zoom reflows; screenshots at 1280 and 390 px attached to the PR.
+4. No horizontal page scroll at 390 px; 200% zoom reflows; screenshots from generated fixtures at 1280 and 390 px attached to the PR. Real-input screenshots remain private.
 
 Tests: +7 Python, +4 DOM. Rollback: revert; nothing stored.
 
@@ -446,7 +449,7 @@ Acceptance: a test enumerates every member of the enums used in `LocalRecordView
 
 Change (cut from four tiles to two values by the design review): the strip's header carries "Eligible of scanned" (`<eligible_count> of <records_scanned> (<eligible_share>%)`, filled from the signed record) and "Share over 1 kb"; "Share 150-200 bp" only when the policy has edges at 150 and 200; "most common bin" lives on the chart only. No colour encodes good or bad. Strip: scanned → each exclusion reason with count and % of scanned → eligible, as one horizontal bar plus a list. Numbers use thousands separators and one-decimal percentages.
 
-Acceptance: the strip values and the strip reconcile (exclusions + eligible = scanned) in a DOM test; the real-input 150-200 share is compared privately with the share calculated from the DoD's independent span counts, with only pass/fail reported in the PR. +2 tests. Rollback: revert.
+Acceptance: the strip values and the strip reconcile (exclusions + eligible = scanned) in a DOM test; the real-input [150,200) bin count and eligible total exactly equal the DoD's independent counts under the same locked contigs, flags, MAPQ and CIGAR rules, with span from reference-consuming CIGAR operations (M, D, N, =, X). The share calculated from those integers must also agree before display rounding; only pass/fail is reported in the PR. +2 tests. Rollback: revert.
 
 #### C5. Catalog record table, labels, checkbox compare; jobs disclosure
 
@@ -561,7 +564,7 @@ Sequencing: B1 first because it silently returns wrong records. A0 before A1/A5/
 Manual evidence (kept in private operator receipts; PRs report only pass/fail):
 - The operator processes the real zip unaided from the guide and logs every intervention (where they had to read code, ask, or guess). Target for DoD-1: zero code reading.
 - Alignment wall time per GB, `run` times, eligible counts, screenshots at 1280 and 390 px.
-- The histogram of one real BAM cross-checked against an independent count (for example `samtools view -F 0xF04 -q 20` piped to an awk span count over the same contigs): bin counts equal.
+- The histogram of one real BAM cross-checked against an independent count (for example `samtools view -F 0xF04 -q 20`, restricted to policy contigs and records with a CIGAR, piped to an awk reference-span count): eligible and bin counts equal.
 
 ## Out of scope (follow-ups with triggers)
 
@@ -627,7 +630,7 @@ No item changes a signed byte of a built-in record.
 | Integration | CLI on generated BAMs (unaligned, empty, renamed contigs, Dorado header), research run/import/serve, record and compare routes, lease loss | about +45 |
 | DOM | histogram SVG, renderers, catalog table, compare states | about +15 |
 | E2E | `usability_acceptance.sh` in CI on macOS and ubuntu | +1 |
-| Manual | real-data DoD table and screenshots | 1 |
+| Manual | private real-data DoD table and screenshots | 1 |
 
 ## Effort
 
@@ -1284,7 +1287,7 @@ I unzip the run and find multiple BAM chunks per barcode. The guide's first sect
 | `samtools stats` + plot script | 2-5 min | No provenance, no labels, plots by hand |
 | EPI2ME (ONT) workflows | 10-30 min first time (install), then one command | Hosted/managed; fragmentomics coverage varies |
 | Notebook with pysam | 10-20 min | Flexible; nothing signed or comparable |
-| traceback today | not reachable unaided from an unaligned zip; aligned-input timing stays private | Signed, honest labels; no histogram on the site |
+| traceback today | not reachable unaided from an unaligned zip; aligned-input timing omitted here | Signed, honest labels; no histogram on the site |
 | traceback after wave 1 | target under 5 min from an aligned BAM (register, run --label --import, serve) | Signed record + histogram + catalog |
 
 Target tier: Competitive (2-5 min) from an aligned BAM, measured excluding alignment compute. Alignment itself is outside the tool (premise P5).
@@ -1359,7 +1362,7 @@ DX DUAL VOICES — CONSENSUS TABLE:
 | 7 Community | n/a 3 | 3 | Private prototype; no change; not in scope |
 | 8 Measurement | 1 | 5 | DoD-1 logs every intervention on the real zip; repeat at DoD-2 |
 
-TTHW: today, unreachable unaided from an unaligned zip; measured aligned-input timing stays private. After the plan: first diagnosis under 1 min; target first viewable record from an aligned BAM under 5 min; from the zip, alignment compute plus the same record-view target.
+TTHW: today, unreachable unaided from an unaligned zip; aligned-input timing omitted here. After the plan: first diagnosis under 1 min; target first viewable record from an aligned BAM under 5 min; from the zip, alignment compute plus the same record-view target.
 
 ### DX scorecard
 
@@ -1378,7 +1381,7 @@ TTHW: today, unreachable unaided from an unaligned zip; measured aligned-input t
 | Community            |  3/10  |  3/10  |   0    |
 | DX Measurement       |  5/10  |  1/10  |  +4 ↑  |
 +--------------------------------------------------------------------+
-| TTHW                 | private aligned-input measurement | unreachable (zip) | ↑ |
+| TTHW                 | aligned-input timing omitted | unreachable (zip) | ↑ |
 | Competitive Rank     | Competitive (aligned BAM); Needs Work (zip) |
 | Magical Moment       | designed via run --label --import + C1      |
 | Product Type         | CLI tool + local web viewer                 |

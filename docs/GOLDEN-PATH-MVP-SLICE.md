@@ -2,6 +2,9 @@
 # Golden-path MVP slice and engineering hygiene
 
 Status: draft spec, 2026-10-02. Verified against `main` at `d3739ca`.
+Public copy note: historical review summaries and pending-gate wording below
+are redacted or paraphrased where input-specific details appeared; they are
+not verbatim transcripts.
 Update 2026-10-03: the Context and the item tables describe `main` at
 `d3739ca`. Since then CI (#91), `traceback run` on a real BAM (Milestone 1,
 #92) and the E12 browser routes, view, Save and Reopen (#93, `bc237e0`) have
@@ -300,7 +303,7 @@ Behaviour:
 - `verify` gains `--root ROOT RECORD_ID` as an alternative to a bundle path plus `--trust-store` (resolves both under ROOT).
 
 Acceptance:
-1. Real BAM: exit 0, `eligible_alignments` matches an independently calculated expected count, recorded privately for that input before acceptance, under 120 s end to end on the operator workstation. Record input size and observed stage timings privately too.
+1. Real BAM: exit 0, `eligible_alignments` exactly equals an independently counted primary, mapped, nonduplicate, QC-passing alignment total under the same locked contigs and MAPQ 20 policy, excluding records without a CIGAR (for example, start with `samtools view -F 0xF04 -q 20`, then restrict to policy contigs and require a CIGAR). Record that expected count privately before acceptance; finish under 120 s end to end on the operator workstation. Record input size and observed stage timings privately too.
 2. `traceback verify` on the record passes; `traceback status JOB` reports complete and verified.
 3. BLOCKED preflight: failed job with TBX-BAM-002, no record.
 4. A BAM with zero eligible alignments: TBX-RUN-005, no record.
