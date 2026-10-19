@@ -1002,14 +1002,17 @@ class LabApi:
             if (problem.code == "TBX-LAB-020"
                     and problem.data.get("input_id") == sample.full.input_id
                     and problem.data.get("field") in ("source input identity", "manifest")):
-                repair = ("source record entry" if problem.data["field"] == "source input identity"
-                          else "input manifest")
+                if problem.data["field"] == "source input identity":
+                    fix = (f"Restore the pinned source record entry for input {sample.full.input_id[:12]} "
+                           "from a known-good backup, or rerun the sample from its original input, "
+                           "then reload Compare")
+                else:
+                    fix = (f"Restore the pinned input manifest for input {sample.full.input_id[:12]} "
+                           "from a known-good backup. If it cannot be restored, re-ingest the original "
+                           "input under a fresh ROOT, rebuild the cohort there, then serve that ROOT "
+                           "and open Compare. The existing input directory cannot be replaced in place")
                 problem = LabProblem(
-                    "TBX-LAB-020", cause=problem.cause,
-                    fix=(f"Restore the pinned {repair} for input {sample.full.input_id[:12]} "
-                         "from a known-good backup, or rerun the sample from its original input, "
-                         "then reload Compare"),
-                    data=problem.data,
+                    "TBX-LAB-020", cause=problem.cause, fix=fix, data=problem.data,
                 )
             return {**base, "state": "target_unavailable", "metrics": [], "unscored": [],
                     "problem": _recovery_problem(problem)}
