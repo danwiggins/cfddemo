@@ -164,6 +164,7 @@ def test_readiness_refresh_failure_retains_projection_and_navigation_discards_la
             assert evaluate("document.querySelector('#recorded-readiness [role=status]').textContent.includes('projection below is stale')")
             assert evaluate("window.TracebackLab.state.sample.catalog[0].status === 'ok'")
             assert evaluate("document.getElementById('recorded-readiness').textContent.includes('Current environment checked at: unknown')")
+            assert evaluate("document.querySelector('#lenses a[href$=\"/findings\"]').getAttribute('aria-disabled') === null")
             evaluate("""window.fetch = () => new Promise(resolve => { window.finishReadinessFetch = resolve; });
               document.getElementById('readiness-refresh').click();""")
             evaluate(f"location.hash = '#/sample/{ID12}/findings'")

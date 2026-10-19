@@ -644,7 +644,7 @@ STATE_CASES = [
     ("pre-cohort", "findings", "eligible cohort n = 0 of 10 needed"),
     ("invalid-library", "trust-qc", "Interpretation library on disk is invalid"),
     ("unknown-sample", "findings", "No Lab sample matches aaaaaaaaaaaa."),
-    ("chart-failed", "signals", "Chart could not be drawn (synthetic renderer failure)"),
+    ("chart-failed", "signals", "Chart could not be drawn. The data table below has the same numbers."),
 ]
 
 
@@ -689,6 +689,7 @@ def test_synthetic_state_copy_on_surface(state, route, copy_text, tmp_path) -> N
     assert copy_text in dom, (state, route)
     if state == "chart-failed":
         assert "Data table" in dom and "167" in dom
+        assert "synthetic renderer failure" not in dom
     if state == "partial-exit-8" and route == "findings":
         assert "Details in Trust/QC" in dom
 
