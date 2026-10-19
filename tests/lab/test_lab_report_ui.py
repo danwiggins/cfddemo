@@ -34,7 +34,8 @@ def test_report_capture_download_print_and_selection_invalidation(tmp_path) -> N
 
         def counted(id12):
             calls.append(id12)
-            return original(id12)
+            # The real API resolves the full source digest to its canonical ID.
+            return original(ID12 if id12 == sample["source_id"] else id12)
 
         server.app.api.sample = counted
         profile = Path(tmp_path / "browser-profile")
