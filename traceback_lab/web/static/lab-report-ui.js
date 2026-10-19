@@ -41,7 +41,8 @@
     if (typeof value !== "string" || value.length > 1200 ||
         /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\\]/.test(value) ||
         /(?:password|secret|token|api[_ -]?key|bearer|AKIA|sk-[A-Za-z0-9]{8}|[ACGTN]{30})/i.test(value) ||
-        /(?:^|\s)\/(?:Users|home|tmp|etc|var)\//.test(value)) return null;
+        /(?:^|[\s(:])\/[A-Za-z][\w.-]*(?:\/[\w.-]+)+/.test(value) ||
+        /\b[0-9a-f]{32,}\b/i.test(value)) return null;
     return value;
   }
 
