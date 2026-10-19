@@ -168,9 +168,11 @@
       link.click();
       message("Download started. Check your browser for the saved file.");
       releaseTimer = setTimeout(releaseUrl, 60000);
-    } catch (_) {
+    } catch (error) {
       releaseUrl();
-      message("The download could not be started. Try again.", true);
+      message(error?.code === "report_too_large"
+        ? `The ${extension.toUpperCase()} report exceeds the 5 MiB download limit. Select a smaller sample and prepare a new report. No file was saved.`
+        : "The download could not be started. Try again.", true);
     } finally {
       link?.remove();
     }
