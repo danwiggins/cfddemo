@@ -775,8 +775,9 @@
       grid.append(h("figure", { class: "multiple" }, h("figcaption", {}, h("strong", {}, panel.label), ` — ${panel.verdict}`),
         svg("svg", { viewBox: `0 0 ${w} ${hgt}`, role: "img", "aria-label": label, class: "multiple-svg" }, svg("title", {}, label), ...marks),
         dataTable(`${panel.label}: plotted stability points`, ["Mark", "Input fraction (%)", "Value",
-          unit === "percent" ? "Deviation (%)" : "Deviation", unit === "percent" ? "Band low (%)" : "Band low",
-          unit === "percent" ? "Band high (%)" : "Band high", "State"], pointRows),
+          unit === "percent" ? "Relative deviation (%)" : "Deviation",
+          unit === "percent" ? "Relative band low (%)" : "Band low",
+          unit === "percent" ? "Relative band high (%)" : "Band high", "State"], pointRows),
         h("p", { class: "help" }, unit === "none" ? "No validated stability deviation scale; measured values remain in the table." : unit === "unit" ? "y: difference from full depth (metric's unit)" : "y: relative deviation from full depth, % (clipped ±50%)"),
         hasSplitHalf ? h("p", { class: "help" }, `Split halves: ${splitSummary}. `,
           splitDiffText ? `${splitDiffText}. ` : "",
@@ -1183,8 +1184,8 @@
     },
     {
       algorithm: "global-5mc", metric: "cpg_5mc_fraction", title: "Genome-wide 5mC fraction",
-      definition: "CpG C+m site calls assigned to 5mC by the largest of the 5mC, 5hmC, and canonical probabilities, divided by all eligible CpG C+m site calls, both strands.",
-      denominator: "CpG C+m site calls on primary mapped canonical-contig reads, MAPQ ≥20, excluding duplicates and QC failures",
+      definition: "The fraction of eligible CpG C+m site calls assigned to 5mC by the largest of the 5mC, 5hmC, and canonical probabilities, both strands. CpG context comes from the read sequence; both bases must align to adjacent reference positions.",
+      denominator: "Aligned read-sequence CpG C+m site calls on primary mapped canonical-contig reads, MAPQ ≥20, excluding duplicates and QC failures",
       limitation: "This is exploratory and depends on the basecaller modification model, call quality, and cell mixture. No validated reference is supplied for this run; this value alone supports no biological conclusion.",
     },
     {

@@ -64,7 +64,8 @@ unavailable instead of becoming a made-up value.
 - **Genome-wide 5mC fraction** (`global-5mc/cpg_5mc_fraction`) counts CpG C+m
   calls assigned to 5mC among eligible CpG C+m calls on primary mapped
   canonical-contig reads at MAPQ ≥ 20, excluding duplicate and QC-failed
-  reads.
+  reads. CpG context comes from the read sequence; both bases must align to
+  adjacent reference positions, so unaligned calls are excluded.
   Its interpretation depends on the basecaller modification model, call
   quality, and cell mixture; the card supplies no validated reference.
 - **Mapped-read share** (`bam-qc/mapped_fraction`) is mapped primary read rows
