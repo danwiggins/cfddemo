@@ -201,6 +201,8 @@ def test_guided_signals_use_recorded_values_and_show_unavailable_reasons(tmp_pat
         assert f"{count}</p>" in card, key
         assert "Method and source" in card and "Result provenance" in card
         assert "Interpretation limit:" in card and "Stability" in card and "Trust/QC" in card
+    assert "CpG context comes from the read sequence" in cards[1][1]
+    assert "both bases must align to adjacent reference positions" in cards[1][1]
     assert "seeded synthetic example" in dom and "no biological finding" in dom
     assert "Stability: usable to 0.5" in cards[0][1]
     assert "Unavailable guided signals" not in dom

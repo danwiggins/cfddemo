@@ -64,7 +64,8 @@ unavailable instead of becoming a made-up value.
 - **Genome-wide 5mC fraction** (`global-5mc/cpg_5mc_fraction`) counts CpG C+m
   calls assigned to 5mC among eligible CpG C+m calls on primary mapped
   canonical-contig reads at MAPQ ≥ 20, excluding duplicate and QC-failed
-  reads.
+  reads. CpG context comes from the read sequence; both bases must align to
+  adjacent reference positions, so unaligned calls are excluded.
   Its interpretation depends on the basecaller modification model, call
   quality, and cell mixture; the card supplies no validated reference.
 - **Mapped-read share** (`bam-qc/mapped_fraction`) is mapped primary read rows
@@ -978,12 +979,24 @@ Per-metric `computed_at` retains that result's own timestamp. The nullable
 disclosed in limitations. It describes interpretation, not measurement absence.
 The 30-column CSV places the support field immediately after `raw_unit`, the
 date kind after `recorded_utc`, and the reason after `interpretation_state`. CSV
-repeats report identity and limitations for each row and quotes textual cells
+repeats report identity and general limitations for each row, adds that row's
+audited flags and license terms, and quotes textual cells
 with spreadsheet-formula protection. Spreadsheet software may still interpret
 types on import; use JSON for authoritative scalar types. Filenames begin
 `traceback-research-` and include the sample ID and UTC capture time. A
 "Download started" message confirms only that the browser action was
 dispatched; check the browser for the saved file.
+
+For each included metric, JSON and CSV limitations retain its audited CLIA,
+FDA, privacy, legal and PII flags and applicable curated license restrictions.
+Unknown, missing or inconsistent restriction metadata is disclosed as
+incomplete without copying untrusted API text or paths. Print places fixed
+license callouts beside the method and flags beside the displayed value.
+Analytical and clinical-setting next steps are separate, each accompanied by
+the clinical-advice warning.
+Successful stored cell-origin results with algorithm version `1` or an empty
+version also retain the modkit research-only license disclosure; version 2 and
+later results use the Lab decoder and do not carry that legacy callout.
 
 Only visible registered scalar metrics enter these downloads. Hidden
 processing steps, vector values, unsupplied artifacts and taxon detail are
@@ -993,9 +1006,13 @@ provisional-input warning when truncated chunks were excluded, and disclose
 malformed or unavailable selection details without copying private filenames
 or error diagnostics. A report with no eligible scalar rows is refused.
 Exports are limited to 5,000 rows and 5 MiB per file; an over-limit report is
-refused without a partial download. The print view adds recorded method
-questions, requirements, support counts, references and signal definitions
-where available; an absent denominator or source context remains unavailable.
+refused without a partial download. The print view shows the schema version
+once, then adds recorded method questions, requirements, support counts,
+literature references and signal definitions where available. Each metric also
+prints its validated tool, tool version, full parameters SHA-256, attempt ID,
+reference asset ID and computed UTC from the captured report. The reference
+asset ID is provenance, distinct from the literature reference; an absent
+attempt ID, denominator or source context is shown as unavailable.
 Research-use and synthetic-example markings stay with the printed report.
 No export or printout establishes scientific or clinical qualification.
 

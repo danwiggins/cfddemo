@@ -193,7 +193,7 @@ def test_report_date_kind_and_interpretation_reason_roundtrip() -> None:
       const sample = {found: true, id12: source.slice(0, 12), source_id: source,
         full_input_id: input, example: false, run_utc: '2026-10-19T11:00:00Z',
         completed_utc: '2026-10-19T11:00:00Z', interpretation_version: 'v1',
-        cohort_version: null, catalog: [{algorithm_id: 'copy-number'}],
+        cohort_version: 'cohort-v7', catalog: [{algorithm_id: 'copy-number'}],
         algorithms: [{algorithm_id: 'copy-number', status: 'ok', metrics,
           provenance: {tool: 'lab', tool_version: '1', parameters_sha256: 'c'.repeat(64),
             input_id: input, source_id: source, reference_id: 'ref',
@@ -219,6 +219,7 @@ def test_report_date_kind_and_interpretation_reason_roundtrip() -> None:
     model = data["model"]
     assert model["recorded_utc"] == "2026-10-19T11:00:00Z"
     assert model["recorded_utc_kind"] == "completion"
+    assert model["cohort_version"] == "cohort-v7"
     assert data["inputUse"]["recorded_utc_kind"] == "input_use"
     assert data["unknownMissing"]["recorded_utc_kind"] == "unknown"
     assert "Completion metadata was absent" in " ".join(data["unknownMissing"]["limitations"])
@@ -235,6 +236,18 @@ def test_report_date_kind_and_interpretation_reason_roundtrip() -> None:
     csv_rows = list(csv.DictReader(io.StringIO(data["csv"])))
     assert len(csv_rows[0]) == 30
     assert all(row["recorded_utc_kind"] == "completion" for row in csv_rows)
+    for row in csv_rows:
+        for key, value in model.items():
+            if key == "metrics":
+                continue
+            if key == "limitations":
+                for limitation in value:
+                    assert limitation in row[key]
+                continue
+            expected = " | ".join(value) if key == "limitations" else (
+                "" if value is None else str(value).lower() if isinstance(value, bool) else str(value)
+            )
+            assert row[key] == expected, key
     assert [row["interpretation_reason"] for row in csv_rows] == [
         "no_pon", "cohort_too_small", "", "", "",
     ]
@@ -298,7 +311,7 @@ def test_audited_metric_metadata_matches_library_and_static_producers() -> None:
     from traceback_lab.registry import load_registry
 
     source = REPORT.read_text()
-    audited = json.loads(source.split("  const audited = ", 1)[1].split(";\n  const sha =", 1)[0])
+    audited = json.loads(source.split("  const audited = ", 1)[1].split(";\n  // Fixed, audited restrictions", 1)[0])
     library = load_library()
     visible = {row.id for row in load_registry() if row.id not in library.hidden_algorithms}
     expected = {(algorithm, metric): entry for (algorithm, metric), entry in library.entries.items()
@@ -325,6 +338,140 @@ def test_audited_metric_metadata_matches_library_and_static_producers() -> None:
             unit = next((kw.value for kw in node.keywords if kw.arg == "unit"), None)
             if unit is None or isinstance(unit, ast.Constant):
                 assert actual[key][1] == (unit.value if unit is not None else None), key
+
+
+def test_fixed_report_restrictions_match_library() -> None:
+    from traceback_lab.interpretation.engine import load_library
+
+    source = REPORT.read_text()
+    restrictions = json.loads(source.split("  const auditedRestrictions = ", 1)[1].split(";\n  // Curated license copy", 1)[0].replace(",\n  }", "\n  }"))
+    licenses = json.loads(source.split("  const licenseRestrictions = ", 1)[1].split(";\n  const restrictionFlagText", 1)[0].replace(",\n  }", "\n  }"))
+    library = load_library()
+    expected = {f"{algorithm}/{metric}": [entry.get("flags") or [], entry.get("license_ids") or []]
+                for (algorithm, metric), entry in library.entries.items()
+                if entry.get("flags") or entry.get("license_ids")}
+    assert restrictions == expected
+    assert licenses == {license_id: [entry["headline"], entry["body"], entry.get("url")]
+                        for license_id, entry in library.licenses.items()}
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js unavailable")
+def test_report_restriction_warning_copy_matches_finding_cards() -> None:
+    views = (REPORT.parent / "lab-views.js").read_text()
+    source = REPORT.read_text()
+    for flag in ("CLIA", "FDA", "PRIVACY", "LEGAL", "PII"):
+        expected = re.search(rf"^    {flag}: (\"[^\n]+\"),$", views, re.MULTILINE)
+        assert expected
+        assert f"    {flag}: {expected.group(1)}," in source
+    for key, metric in (("copy-number", "tumor_fraction"), ("viral-reads", "ebv_rpm")):
+        data = _node(f"require(process.argv[1]); process.stdout.write(JSON.stringify("
+                     f"globalThis.TracebackLabReport.restrictionsForMetric({json.dumps(key)}, {json.dumps(metric)})))")
+        if key == "viral-reads":
+            assert "FLAG: PRIVACY — viral-read signals can reveal sensitive infection-related information." in data["flags"]
+            assert data["flags"][1] in views
+    assert "FLAG: CLIA — reads as clinical advice if a donor or clinician sees it." in source
+    assert "FLAG: CLIA — reads as clinical advice if a donor or clinician sees it." in views
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js unavailable")
+def test_restrictions_omit_untrusted_metadata_and_roundtrip_fixed_warnings() -> None:
+    data = _node(r"""
+      require(process.argv[1]);
+      const report = globalThis.TracebackLabReport;
+      const source = 'a'.repeat(64), input = 'b'.repeat(64);
+      const sample = {
+        found: true, id12: source.slice(0, 12), source_id: source, full_input_id: input,
+        example: false, run_utc: '2026-10-19T11:00:00Z', completed_utc: null,
+        interpretation_version: 'v1', cohort_version: null,
+        catalog: [{algorithm_id: 'copy-number'}],
+        licenses: [{license_id: 'gpl-copyleft', headline: '/private/license', body: 'secret-token', url: '/private/url'},
+          {license_id: 'unknown-private-license', headline: 'private'}],
+        algorithms: [{algorithm_id: 'copy-number', status: 'ok', provenance: {
+          tool: 'lab', tool_version: '1', parameters_sha256: 'c'.repeat(64),
+          input_id: input, source_id: source, reference_id: 'ref',
+          timestamp_utc: '2026-10-19T12:00:00Z'},
+          metrics: [{metric_id: 'tumor_fraction', value: 0.1, unit: 'fraction',
+            entry: {flags: ['SECRET_UNKNOWN'], license_ids: ['unknown-private-license']}}]}],
+      };
+      const format = (metric) => ({displayValue: String(metric.value), displayUnit: metric.unit});
+      const model = report.project(sample, '2026-10-19T16:00:00Z', format);
+      process.stdout.write(JSON.stringify({model, json: report.json(model), csv: report.csv(model),
+        fixed: report.restrictionsForMetric('copy-number', 'tumor_fraction')}));
+    """)
+    assert len(data["model"]["metrics"]) == 1
+    limitations = " | ".join(data["model"]["limitations"])
+    assert "Some restriction metadata was absent, unknown, or inconsistent" in limitations
+    for flag in data["fixed"]["flags"]:
+        assert flag in limitations
+    for license in data["fixed"]["licenses"]:
+        assert license["headline"] in limitations and license["body"] in limitations
+    assert "Some restriction metadata" in data["csv"]
+    for output in (data["json"], data["csv"]):
+        for secret in ("/private", "secret-token", "SECRET_UNKNOWN", "unknown-private-license"):
+            assert secret not in output
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js unavailable")
+def test_stored_cell_origin_v1_adds_modkit_restriction_but_v2_does_not() -> None:
+    from traceback_lab.interpretation.engine import load_library
+
+    library = load_library()
+    liver = library.entry("cell-origin", "fraction_liver_hep")
+    sex = library.entry("sex-check", "chry_chrx_ratio")
+    fixture = {
+        "licenses": {key: {"license_id": key, **library.licenses[key]}
+                     for key in [*liver["license_ids"], "modkit-ont-public"]},
+        "liver": {"flags": liver["flags"], "license_ids": liver["license_ids"]},
+        "sex": {"flags": sex["flags"], "license_ids": sex.get("license_ids") or []},
+    }
+    script = r"""
+      require(process.argv[1]);
+      const report = globalThis.TracebackLabReport;
+      const fixture = __FIXTURE__;
+      const source = 'a'.repeat(64), input = 'b'.repeat(64);
+      const provenance = {tool: 'lab', tool_version: '1', parameters_sha256: 'c'.repeat(64),
+        input_id: input, source_id: source, reference_id: 'ref',
+        timestamp_utc: '2026-10-19T12:00:00Z'};
+      const output = {};
+      for (const [name, version] of [['empty', ''], ['1', '1'], ['2', '2'], ['3', '3'], ['missing', '1']]) {
+        const legacy = version === '' || version === '1';
+        const sample = {found: true, id12: source.slice(0, 12), source_id: source,
+          full_input_id: input, example: false, run_utc: '2026-10-19T11:00:00Z',
+          completed_utc: null, interpretation_version: 'v1', cohort_version: null,
+          catalog: [{algorithm_id: 'cell-origin'}, {algorithm_id: 'sex-check'}],
+          licenses: [fixture.licenses['yissum-uxm'], fixture.licenses['loyfer-atlas-terms-unknown'],
+            ...(legacy && name !== 'missing' ? [fixture.licenses['modkit-ont-public']] : [])],
+          algorithms: [
+            {algorithm_id: 'cell-origin', algorithm_version: version, status: 'ok', provenance,
+              metrics: [{metric_id: 'fraction_liver_hep', value: 0.2, unit: 'fraction',
+                entry: {...fixture.liver, license_ids: [...fixture.liver.license_ids,
+                  ...(legacy ? ['modkit-ont-public'] : [])]}}]},
+            {algorithm_id: 'sex-check', algorithm_version: '2', status: 'ok', provenance,
+              metrics: [{metric_id: 'chry_chrx_ratio', value: 0.5, unit: 'ratio', entry: fixture.sex}]},
+          ]};
+        const model = report.project(sample, '2026-10-19T16:00:00Z',
+          (metric) => ({displayValue: String(metric.value), displayUnit: metric.unit}));
+        output[name] = {limitations: model.limitations,
+          csv: report.csv(model), licenseIds: report.restrictionsForMetric('cell-origin',
+            'fraction_liver_hep', version).licenseIds};
+      }
+      process.stdout.write(JSON.stringify(output));
+    """.replace("__FIXTURE__", json.dumps(fixture))
+    result = _node(script)
+    for version in ("empty", "1", "2", "3"):
+        data = result[version]
+        has_modkit = version in {"empty", "1"}
+        assert ("modkit-ont-public" in data["licenseIds"]) is has_modkit
+        assert (any("License modkit-ont-public:" in item for item in data["limitations"])) is has_modkit
+        assert not any("Some restriction metadata was absent" in item for item in data["limitations"])
+        rows = list(csv.DictReader(io.StringIO(data["csv"])))
+        cell = next(row for row in rows if row["algorithm_id"] == "cell-origin")
+        sex_row = next(row for row in rows if row["algorithm_id"] == "sex-check")
+        assert ("License modkit-ont-public:" in cell["limitations"]) is has_modkit
+        assert "License modkit-ont-public:" not in sex_row["limitations"]
+    missing = result["missing"]
+    assert any("License modkit-ont-public:" in item for item in missing["limitations"])
+    assert any("Some restriction metadata was absent" in item for item in missing["limitations"])
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js unavailable")
