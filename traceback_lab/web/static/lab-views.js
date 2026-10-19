@@ -154,6 +154,7 @@
       failed: rows.filter((algorithm) => algorithm.status === "failed").length,
       other: rows.filter((algorithm) => !["ok", "skipped", "failed"].includes(algorithm.status)).length,
     };
+    const intermediateFailures = (sample.algorithms || []).filter((algorithm) => algorithm.hidden && algorithm.status === "failed").length;
     const selectionProblems = [
       (sample.unreadable_results || []).length ? `${sample.unreadable_results.length} unreadable` : null,
       (sample.ambiguous_results || []).length ? `${sample.ambiguous_results.length} ambiguous` : null,
@@ -164,16 +165,19 @@
       h("p", { class: "landing-identity" }, `Sample ${sample.id12} · `,
         h("span", { class: "sample-context-kind" }, sample.example ? "EXAMPLE (synthetic)" : "Not marked as the built-in synthetic example")),
       h("dl", { class: "landing-summary" },
-        h("div", {}, h("dt", {}, "Latest recorded activity"), h("dd", {}, sample.run_utc ? sample.run_utc.slice(0, 10) : "Unavailable")),
-        h("div", {}, h("dt", {}, "Approximate depth"), h("dd", {}, sample.depth?.approx_depth_x == null ? "Unavailable" : `${sample.depth.approx_depth_x.toPrecision(3)}x`)),
+        h("div", {}, h("dt", {}, "Recorded date (UTC)"), h("dd", {}, sample.run_utc ? sample.run_utc.slice(0, 10) : "Unavailable",
+          h("p", { class: "help" }, "Completion date when recorded; otherwise latest input-use date. Active and interrupted work is reported in the header."))),
+        h("div", {}, h("dt", {}, "Approximate depth"), h("dd", {}, sample.depth?.approx_depth_x == null ? "Unavailable" : `${sample.depth.approx_depth_x.toPrecision(3)}x`,
+          h("span", { class: "help" }, "Aligned-base depth; eligible reads."))),
         h("div", {}, h("dt", {}, "Recorded method states"), h("dd", {}, rows.length
           ? `${rows.length} visible entries: ${counts.ok} OK · ${counts.skipped} skipped · ${counts.failed} failed${counts.other ? ` · ${counts.other} other` : ""}`
           : "No recorded visible method results")),
+        intermediateFailures ? h("div", {}, h("dt", {}, "Intermediate failures"), h("dd", { class: "problem" }, `${intermediateFailures} hidden intermediate${intermediateFailures === 1 ? "" : "s"} failed; see Trust/QC`)) : "",
         selectionProblems ? h("div", {}, h("dt", {}, "Result selection problems"), h("dd", { class: "problem" }, selectionProblems)) : ""),
       h("nav", { class: "landing-actions", "aria-label": "Explore this sample" },
         h("a", { href: `#/sample/${sample.id12}/signals` }, "Explore signals"),
         h("a", { href: `#/sample/${sample.id12}/trust-qc` }, "Check reliability"),
-        h("a", { href: `#/sample/${sample.id12}/methods` }, "Method readiness")));
+        h("a", { href: `#/sample/${sample.id12}/methods` }, "Explore methods")));
     const out = [h("h1", { class: "visually-hidden" }, `Traceback Lab — ${sample.id12}`), overview];
     const sentence = h("p", { class: "headline", id: "headline" }, sample.headline.sentence);
     if (sample.headline.unlock) sentence.append(" ", h("span", { title: "literature, not measured" }, sample.headline.unlock.text), h("span", { class: "visually-hidden" }, " (literature, not measured)"));

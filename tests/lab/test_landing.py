@@ -117,7 +117,7 @@ def page_root(tmp_path_factory, synthetic_world) -> Path:
     return root
 
 
-def _dom(server, tmp_path, *, size="1280,800", route=None, want=None) -> str:
+def _dom(server, tmp_path, *, size="1280,800", route=None, want=None, interact=None) -> str:
     """Inspect one page with a fresh link and bounded readiness wait."""
 
     from tests.lab.test_lab_server import _dom_cdp
@@ -134,6 +134,7 @@ def _dom(server, tmp_path, *, size="1280,800", route=None, want=None) -> str:
          f"--user-data-dir={profile}", f"--window-size={size}", link],
         profile, ok=good, timeout=90,
         viewport=tuple(map(int, size.split(","))),
+        interact=interact,
     )
 
 
@@ -148,8 +149,15 @@ needs_chrome = pytest.mark.skipif(_chrome() is None, reason="no Chrome/Chromium 
 
 @needs_chrome
 def test_landing_pixel_budget_at_1280x800(page_root, tmp_path) -> None:
+    def inspect_visibility(_command, evaluate) -> None:
+        assert evaluate("(() => { const r = document.getElementById('banner').getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight && r.left >= 0 && r.right <= innerWidth; })()")
+        assert evaluate("(() => { const p = document.querySelector('.clia-panel'); return p.scrollHeight <= p.clientHeight + 1; })()")
+        evaluate("document.querySelector('.clia-panel').scrollIntoView({block: 'start'})")
+        panel = evaluate("(() => { const r = document.querySelector('.clia-panel').getBoundingClientRect(); return {top: r.top, bottom: r.bottom, viewport: innerHeight}; })()")
+        assert panel["top"] >= -1 and panel["bottom"] <= panel["viewport"] + 1, panel
+
     with RunningLabServer(LabStore(page_root)) as server:
-        dom = _dom(server, tmp_path)
+        dom = _dom(server, tmp_path, interact=inspect_visibility)
     body = _body(dom)
     assert body["csp-violations"] == "0"
     assert int(body["banner-height"]) <= 40

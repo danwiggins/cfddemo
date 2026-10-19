@@ -790,8 +790,11 @@ the scroll controls are hidden.
 ## What the page shows
 
 - **Landing (`#/`)**: a selected-sample overview names the ID, built-in
-  synthetic-example status, latest recorded activity, approximate depth,
-  recorded method states and result-selection problems. One-link actions open
+  synthetic-example status, recorded UTC date, approximate depth,
+  visible method states, hidden intermediate failures and result-selection
+  problems. The date is the completed run's terminal date when recorded, or
+  the latest input-use date otherwise; live work is reported in the header.
+  One-link actions open
   Signals, Trust/QC, and Methods. The selected-sample status stays outside the
   switcher across lenses; the header separately reports live run status. The
   overview is followed by one computed headline sentence and the **defended
@@ -804,7 +807,7 @@ the scroll controls are hidden.
   KNOWN-STATUS). The CLIA explainer remains on the landing after those result
   panels (short version, "Read the full explainer" expands in place, full text
   at `#/about/clia`), followed by the samples table and license callouts. The
-  research-use notice remains visible in the header on every route.
+  research-use notice is shown in the page header on every route.
 - **Findings**: only above/below-reference results are cards (sorted by tier,
   then severity); not-interpretable, no-reference and in-range metrics are
   counted, collapsible rows. Before the kit cohort exists (n < 10) most
