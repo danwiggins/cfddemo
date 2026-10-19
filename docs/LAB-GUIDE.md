@@ -941,6 +941,12 @@ A failed refresh keeps the previous projection visibly stale and keeps current
 environment readiness unknown. If you navigate to another sample or view while
 the request is in flight, that response is discarded.
 
+Ordinary browser reads have a 10-second deadline, including the initial sample
+list, sample navigation, selected refresh, report preparation, Compare and
+cohort requests, artifact reads, and run-log lines. A timed-out read shows a
+visible failure or retry path; retrying starts a new request. Response time on
+a large ROOT has not been qualified by this deadline.
+
 ### Prepare, download, or print a research report
 
 On an available selected sample, use **Prepare Export / Print** in the sample
@@ -961,10 +967,17 @@ values, method status, interpretation state and validated provenance. Each
 metric also includes `recorded_support_n`, the recorded nonnegative support
 count or `null` when unavailable. This count is not necessarily a denominator;
 read the method's measurement and filter definition before interpreting it.
-The report's `recorded_utc` is the recorded completion time when present,
-otherwise the latest input-use time; a date alone is not proof of a completed
-run. Per-metric `computed_at` retains that result's own timestamp.
-The 28-column CSV places the support field immediately after `raw_unit`. CSV
+The report pairs `recorded_utc` with `recorded_utc_kind`: `completion` means a
+matching recorded completion, `input_use` means latest input use without a
+recorded completion, and `unknown` means its kind could not be established.
+Missing completion metadata is disclosed; conflicting or malformed completion
+metadata prevents export. A date alone is not proof of a completed run.
+Per-metric `computed_at` retains that result's own timestamp. The nullable
+`interpretation_reason` preserves fixed, state-matched reasons such as
+`no_pon` or `cohort_too_small`; unknown or mismatched reasons are omitted and
+disclosed in limitations. It describes interpretation, not measurement absence.
+The 30-column CSV places the support field immediately after `raw_unit`, the
+date kind after `recorded_utc`, and the reason after `interpretation_state`. CSV
 repeats report identity and limitations for each row and quotes textual cells
 with spreadsheet-formula protection. Spreadsheet software may still interpret
 types on import; use JSON for authoritative scalar types. Filenames begin

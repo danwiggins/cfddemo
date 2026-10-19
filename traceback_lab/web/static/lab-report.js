@@ -290,6 +290,12 @@
     "not_interpretable", "no_reference", "in_range", "above_typical", "markedly_above",
     "below_typical", "markedly_below",
   ]);
+  // Keep these in parity with interpretation/engine.py's two fixed reason sets.
+  const notInterpretableReasons = new Set([
+    "depth", "qc", "no_pon", "below_lod", "missing_channel",
+    "no_stability_verdict", "comparison_unavailable",
+  ]);
+  const noReferenceReasons = new Set(["none_published", "cohort_too_small", "no_library_entry"]);
   const reasons = new Set([
     "depth", "derived_input", "disk", "missing_toolchain", "missing_asset", "no_pon",
     "protocol_mismatch", "invalid_asset", "asset_unavailable", "missing_channel",
@@ -300,9 +306,9 @@
   ]);
   const columns = [
     "schema_version", "generated_at", "research_use_only", "example", "sample_id", "source_id",
-    "full_input_id", "recorded_utc", "interpretation_version", "cohort_version", "limitations",
+    "full_input_id", "recorded_utc", "recorded_utc_kind", "interpretation_version", "cohort_version", "limitations",
     "algorithm_id", "metric_id", "label", "raw_value", "raw_unit", "recorded_support_n", "display_value",
-    "display_unit", "status", "skip_reason", "interpretation_state", "tool", "tool_version",
+    "display_unit", "status", "skip_reason", "interpretation_state", "interpretation_reason", "tool", "tool_version",
     "parameters_sha256", "attempt_id", "reference_id", "computed_at",
   ];
 
@@ -371,13 +377,24 @@
         !Array.isArray(sample.algorithms) || typeof formatResultMetric !== "function") {
       fail("invalid_report_identity", "The selected sample cannot be prepared as a report.");
     }
+    let recordedUtcKind = "unknown";
+    if (Object.hasOwn(sample, "completed_utc")) {
+      if (sample.completed_utc === null) recordedUtcKind = sample.run_utc ? "input_use" : "unknown";
+      else if (validInstant(sample.completed_utc) && sample.completed_utc === sample.run_utc)
+        recordedUtcKind = "completion";
+      else fail("invalid_report_identity", "The selected sample has inconsistent completion metadata.");
+    }
     const limitations = [
       "Research use only; not for diagnosis or clinical decisions.",
       "Only visible registered scalar metrics are included; hidden processing steps, arrays, artifacts, and taxon detail are excluded.",
       "Stable input and provenance identifiers may be linkable to other local records.",
-      "Recorded date UTC is the recorded completion time when present, otherwise the latest input-use time; a date alone is not proof of a completed run.",
+      "Recorded date kind distinguishes a recorded completion from latest input use; unknown means completion status could not be established. A date alone is not proof of a completed run.",
     ];
     const note = (message) => { if (!limitations.includes(message)) limitations.push(message); };
+    if (!Object.hasOwn(sample, "completed_utc"))
+      note("Completion metadata was absent; the recorded date kind is unknown.");
+    else if (recordedUtcKind === "unknown")
+      note("No recorded completion or input-use timestamp was available.");
     if (Array.isArray(sample.excluded_chunks)) {
       // Ingest records -1 when an excluded BAM has no parsed chunk index.
       const knownExcluded = sample.excluded_chunks.filter((chunk) => Number.isSafeInteger(chunk) && chunk >= -1);
@@ -467,6 +484,12 @@
           note("Some recorded support counts were invalid and are shown as unavailable.");
         const interpretationState = metric.state == null || states.has(metric.state) ? metric.state ?? null : null;
         if (metric.state != null && interpretationState == null) note("Some interpretation states were unavailable.");
+        const allowedReasons = interpretationState === "not_interpretable" ? notInterpretableReasons
+          : interpretationState === "no_reference" ? noReferenceReasons : null;
+        const interpretationReason = typeof metric.reason === "string" && allowedReasons?.has(metric.reason)
+          ? metric.reason : null;
+        if (metric.reason != null && interpretationReason == null)
+          note("Some interpretation reasons were omitted because their state or reason was invalid.");
         // Pass only vetted scalar fields; free-form reason, entry, and API diagnostics never reach the formatter.
         let formatted;
         try {
@@ -488,6 +511,7 @@
           raw_value: raw.value, raw_unit: metric.unit ?? null, recorded_support_n: recordedSupportN,
           display_value: formatted.displayValue, display_unit: formatted.displayUnit ?? null,
           status, skip_reason: reason, interpretation_state: interpretationState,
+          interpretation_reason: interpretationReason,
           tool: algorithm.provenance.tool, tool_version: algorithm.provenance.tool_version,
           parameters_sha256: algorithm.provenance.parameters_sha256,
           attempt_id: algorithm.provenance.attempt_id ?? null,
@@ -508,6 +532,7 @@
       schema_version: "2", generated_at: generatedAt, research_use_only: true,
       example: sample.example, sample_id: sample.id12, source_id: sample.source_id,
       full_input_id: sample.full_input_id, recorded_utc: sample.run_utc || null,
+      recorded_utc_kind: recordedUtcKind,
       interpretation_version: sample.interpretation_version,
       cohort_version: sample.cohort_version ?? null,
       limitations: Object.freeze(limitations), metrics: Object.freeze(metrics.map((row) => Object.freeze(row))),

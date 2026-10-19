@@ -29,6 +29,11 @@ def _reportable_sample() -> dict:
 def test_report_capture_download_print_and_selection_invalidation(tmp_path) -> None:
     sample = _reportable_sample()
     sample["example"] = True
+    sample["completed_utc"] = sample["run_utc"]
+    copy_number = next(row for row in sample["algorithms"] if row["algorithm_id"] == "copy-number")
+    next(row for row in copy_number["metrics"] if row["metric_id"] == "tumor_fraction").update(
+        state="not_interpretable", reason="no_pon",
+    )
     observed = {}
     with _server(tmp_path, sample) as server:
         original = server.app.api.sample
@@ -74,6 +79,8 @@ def test_report_capture_download_print_and_selection_invalidation(tmp_path) -> N
                   marksVisible: visible(marks),
                   limitsVisible: visible(limits),
                   input: root.textContent.includes(window.TracebackLab.state.sample.full_input_id),
+                  dateKind: root.textContent.includes('Recorded date kind: completion'),
+                  reason: root.textContent.includes('Interpretation reason: no_pon'),
                   definition: root.textContent.includes('most frequent aligned reference span'),
                   count: root.querySelectorAll('.report-print-metric').length,
                   privateData: root.textContent.includes('/private/read-identifiers'),
@@ -142,7 +149,13 @@ def test_report_capture_download_print_and_selection_invalidation(tmp_path) -> N
     assert observed["files"][0].endswith(".json") and observed["files"][1].endswith(".csv")
     assert '"schema_version": "2"' in observed["blobs"][0]
     assert observed["blobs"][1].startswith("schema_version,generated_at,")
+    model = json.loads(observed["blobs"][0])
+    assert model["recorded_utc_kind"] == "completion"
+    assert any(row["interpretation_reason"] == "no_pon" for row in model["metrics"])
+    assert b"recorded_utc_kind" in observed["blobs"][1].encode()
+    assert b"interpretation_reason" in observed["blobs"][1].encode()
     assert observed["print"]["input"] and observed["print"]["definition"]
+    assert observed["print"]["dateKind"] and observed["print"]["reason"]
     assert observed["print"]["count"] > 0
     assert not observed["print"]["privateData"]
     assert "RESEARCH USE ONLY" in observed["print"]["marks"]
@@ -217,6 +230,11 @@ def test_report_uses_healthy_selection_despite_listing_flags_and_keeps_error_sta
 @needs_chrome
 def test_report_download_writes_json_and_csv_from_one_capture(tmp_path) -> None:
     sample = _reportable_sample()
+    sample["completed_utc"] = sample["run_utc"]
+    copy_number = next(row for row in sample["algorithms"] if row["algorithm_id"] == "copy-number")
+    next(row for row in copy_number["metrics"] if row["metric_id"] == "tumor_fraction").update(
+        state="not_interpretable", reason="no_pon",
+    )
     downloads = tmp_path / "downloads"
     downloads.mkdir()
     with _server(tmp_path, sample) as server:
@@ -278,9 +296,14 @@ def test_report_download_writes_json_and_csv_from_one_capture(tmp_path) -> None:
     model = json.loads(json_files[0].read_text(encoding="utf-8"))
     csv = csv_files[0].read_bytes()
     assert model["schema_version"] == "2"
+    assert model["recorded_utc_kind"] == "completion"
+    assert any(row["interpretation_reason"] == "no_pon" for row in model["metrics"])
     assert all("recorded_support_n" in row for row in model["metrics"])
     columns = csv.split(b"\r\n", 1)[0].split(b",")
-    assert len(columns) == 28 and columns[columns.index(b"raw_unit") + 1] == b"recorded_support_n"
+    assert len(columns) == 30 and columns[columns.index(b"raw_unit") + 1] == b"recorded_support_n"
+    assert columns[columns.index(b"recorded_utc") + 1] == b"recorded_utc_kind"
+    assert columns[columns.index(b"interpretation_state") + 1] == b"interpretation_reason"
+    assert b"completion" in csv and b"no_pon" in csv
     assert model["sample_id"] == ID12 and model["metrics"]
     assert b"\r\n" in csv and csv.startswith(b"schema_version,generated_at,")
     assert model["generated_at"].split(".", 1)[0].replace("-", "").replace(":", "") in json_files[0].name
