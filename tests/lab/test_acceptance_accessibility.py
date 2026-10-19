@@ -1249,6 +1249,15 @@ def test_failed_sample_navigation_restores_rendered_identity(tmp_path, failure) 
                 time.sleep(0.05)
             else:
                 pytest.fail("requested sample fetch did not start")
+            if failure == "session":
+                evaluate("""(() => {
+                  const ui = window.TracebackLabReportUI;
+                  window.reportInvalidations = 0;
+                  window.TracebackLabReportUI = { ...ui, invalidate() {
+                    window.reportInvalidations += 1;
+                    ui?.invalidate?.();
+                  } };
+                })()""")
             if failure == "network":
                 evaluate("window.releaseRequested.reject(new TypeError('private /Users/example/input.bam'))")
             else:
@@ -1284,9 +1293,67 @@ def test_failed_sample_navigation_restores_rendered_identity(tmp_path, failure) 
             if failure == "session":
                 assert state["expired"] and "Session expired" in state["status"], state
                 assert "fresh one-use link" in state["action"], state
+                assert evaluate("window.reportInvalidations === 1")
             else:
                 assert "Could not open selected sample" in state["status"], state
                 assert "Retry loading this selection" in state["action"], state
+
+        profile = tmp_path / "browser-profile"
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/findings"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'aria-current="page">Findings' in dom,
+            interact=inspect,
+        )
+
+
+@needs_chrome
+def test_navigation_retry_works_after_stale_poll_blocks_hash_changes(tmp_path) -> None:
+    """The recovery action can retry while stale-result controls stay blocked."""
+
+    requested = "aaaaaaaaaaaa"
+    with _server(tmp_path, _sample()) as server:
+        kind, source = server.app.assets["/assets/lab.js"]
+        server.app.assets["/assets/lab.js"] = (
+            kind, source.replace(b"const POLL_MS = 15000;", b"const POLL_MS = 500;"),
+        )
+        listing = server.app.api.samples()
+        server.app.api.samples = lambda: {**listing, "samples": [
+            listing["samples"][0], {**listing["samples"][0], "id12": requested},
+        ]}
+        original_sample = server.app.api.sample
+        valid = original_sample(ID12)
+        server.app.api.sample = lambda id12: {**valid, "id12": requested} if id12 == requested else original_sample(id12)
+
+        def inspect(_command, evaluate) -> None:
+            evaluate("""(() => {
+              const original = window.fetch;
+              window.failRequestedOnce = true;
+              window.fetch = (...args) => {
+                if (String(args[0]) === '/api/samples/aaaaaaaaaaaa' && window.failRequestedOnce) {
+                  window.failRequestedOnce = false;
+                  return Promise.resolve(new Response('{}', {status:503}));
+                }
+                return original.apply(window, args);
+              };
+              location.hash = '#/sample/aaaaaaaaaaaa/findings';
+            })()""")
+            for _ in range(40):
+                if evaluate("!!window.TracebackLab.state.loadFailure && document.body.dataset.disconnected === '1'"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("failed navigation did not reach blocked stale state")
+            assert evaluate(f"location.hash === '#/sample/{ID12}/findings'")
+            evaluate("document.querySelector('#recovery-action button').click()")
+            for _ in range(40):
+                if evaluate(f"window.TracebackLab.state.sample?.id12 === '{requested}' && document.body.dataset.disconnected === '0'"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("retry did not load and reenable the requested sample")
+            assert evaluate(f"location.hash === '#/sample/{requested}/findings'")
+            assert evaluate("document.getElementById('freshness-state').dataset.stale === 'false'")
 
         profile = tmp_path / "browser-profile"
         _dom_cdp(

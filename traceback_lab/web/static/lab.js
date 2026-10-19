@@ -197,6 +197,7 @@
     state.sessionExpired = true;
     state.resultStale = !!state.sample;
     state.navigationRevision += 1;
+    window.TracebackLabReportUI?.invalidate?.();
     restoreRenderedRoute();
     document.body.classList.add("dimmed");
     setControlsEnabled(false);
@@ -276,6 +277,10 @@
       state.loadFailure = null;
       render();
       state.renderedHash = requestedHash;
+      if (!state.resultStale && !state.connectionLost) {
+        setControlsEnabled(true);
+        document.body.classList.remove("dimmed");
+      }
       const title = document.querySelector("main h1");
       if (title) { title.setAttribute("tabindex", "-1"); title.focus({ preventScroll: false }); }
       revealCurrentNav();
@@ -446,7 +451,10 @@
       problem = `Could not open selected sample. ${recoveryCause(state.loadFailure.kind)} The last rendered view is retained and marked stale.`;
       const requested = state.loadFailure.requestedHash;
       action.append("Next action: ", h("button", { type: "button", class: "control",
-        onclick: () => { if (location.hash === requested) navigate(); else location.hash = requested; } }, "Retry loading this selection"));
+        onclick: () => {
+          history.replaceState(null, "", location.pathname + location.search + requested);
+          navigate();
+        } }, "Retry loading this selection"));
     } else if (state.initialLoadFailure) {
       problem = "Lab results could not be loaded. The sample list and current result are unknown.";
       action.append("Next action: ", h("button", { type: "button", class: "control",
