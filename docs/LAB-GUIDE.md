@@ -844,6 +844,31 @@ serve as a history of every interrupted run.
   algorithm without inventing a metric-level panel from damaged data.
   When a metric lacks a stability rule or numeric values, the downsample cell
   says no stability verdict instead of calling it unstable.
+- **Methods**: search or filter the 35 currently visible methods by recorded
+  result and family, review research questions and limits, and open the
+  provenance table. The visible count is generated from the registry; the two
+  shared processing steps are described separately. The readiness summary
+  explains recorded skips, failures and absent results without interpreting
+  any of them as a negative biological finding.
+
+### Readiness for a recorded run
+
+The Methods summary describes the selected input and the results published for
+that run. It groups recorded skip reasons such as missing or malformed assets,
+platform mismatch, insufficient support, missing modification channels and
+upstream failures. The labels do not certify that the toolchain or assets are
+ready now. Current environment readiness and its checked-at time stay unknown
+on the page; run `traceback lab doctor --root <ROOT>` locally for a current
+setup check. Replace `<ROOT>` with your local root. After correcting a recorded
+issue, `traceback lab run <FILE> --root <ROOT>` is a template for rerunning the
+intended input; a stored sample can instead be rerun by its id12 as described
+above. The page never runs these commands or downloads assets.
+
+**Refresh recorded run** requests one current authenticated sample projection
+with a 10-second deadline. It does not run doctor or scientific preflight.
+A failed refresh keeps the previous projection visibly stale and keeps current
+environment readiness unknown. If you navigate to another sample or view while
+the request is in flight, that response is discarded.
 
 ## Building a Lab cohort
 
