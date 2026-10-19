@@ -211,10 +211,10 @@
     const wrapper = h("div", { class: "lens-navigation" });
     const previous = h("button", { type: "button", class: "lens-scroll-control lens-scroll-prev",
       "aria-label": "Previous views", "aria-controls": "lenses",
-      onclick: () => { nav.scrollLeft -= Math.max(140, Math.round(nav.clientWidth * 0.75)); updateNavFade(); } }, "‹");
+      onclick: () => { nav.scrollLeft -= nav.clientWidth; updateNavFade(); } }, "‹");
     const next = h("button", { type: "button", class: "lens-scroll-control lens-scroll-next",
       "aria-label": "More views", "aria-controls": "lenses",
-      onclick: () => { nav.scrollLeft += Math.max(140, Math.round(nav.clientWidth * 0.75)); updateNavFade(); } }, "›");
+      onclick: () => { nav.scrollLeft += nav.clientWidth; updateNavFade(); } }, "›");
     nav.before(wrapper);
     wrapper.append(previous, nav, next);
     nav.addEventListener("focusin", (event) => {

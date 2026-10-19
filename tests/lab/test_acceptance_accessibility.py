@@ -286,6 +286,8 @@ def test_lens_navigation_labels_controls_and_history(width, tmp_path) -> None:
                 evaluate("document.querySelector('.lens-scroll-prev').click()")
                 evaluate("document.querySelector('#lenses [aria-current=page]').focus()")
                 assert snapshot(evaluate)["activeVisible"]
+                assert evaluate(f"location.hash === '#/sample/{ID12}/methods'")
+                assert evaluate("document.querySelector('#main h1')?.textContent === 'Methods'")
             else:
                 assert all(not row["visible"] for row in initial["controls"]), initial
 
