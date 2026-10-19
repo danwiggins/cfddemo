@@ -394,7 +394,9 @@ def test_compare_pinned_input_disappearing_after_view_has_specific_recovery(
 def test_example_is_explicitly_unscorable(tmp_path, monkeypatch) -> None:
     generation = CohortGeneration(cohort_id="healthy", version=1, members=())
     monkeypatch.setattr(web_api, "read_current", lambda store, cohort_id: generation)
-    monkeypatch.setattr(web_api.views, "load_sample", lambda store, source_id: SimpleNamespace(example=True))
+    monkeypatch.setattr(web_api.views, "load_sample", lambda store, source_id: SimpleNamespace(
+        example=True, full=SimpleNamespace(input_id="b" * 64),
+    ))
     api = web_api.LabApi(LabStore(tmp_path))
     monkeypatch.setattr(api, "_resolve", lambda id12: (_TARGET, []))
     monkeypatch.setattr(api, "_id12s", lambda: {_TARGET: _TARGET[:12]})

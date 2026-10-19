@@ -1896,6 +1896,20 @@
       detail.docs ? h("p", { class: "help" }, `Guide: ${detail.docs}`) : "");
   }
 
+  function compareRequestNotice(subject, kind, retry) {
+    const cause = {
+      timeout: "The Lab server did not answer within 10 seconds.",
+      invalid: "The server returned an incomplete comparison response.",
+      unavailable: "The selected comparison or Lab server is unavailable.",
+    }[kind] || "The selected comparison could not be loaded.";
+    return h("div", { class: "problem" },
+      h("p", { class: "problem-title" }, `${subject} unavailable`),
+      h("p", {}, `Cause: ${cause}`),
+      h("p", {}, "Next action: Check the Lab server and selected inputs, then ",
+        h("button", { type: "button", class: "control", "data-requires-server": "", onclick: retry },
+          "retry this selection"), "."));
+  }
+
   function compare(sample) {
     const out = [h("p", { class: "breadcrumb" }, `Lab › ${sample.id12} › Compare`),
       h("div", { class: "findings-head" }, h("h1", { class: "view-title" }, "Compare"), flagPill("CLIA")),
@@ -1930,15 +1944,23 @@
             results.replaceChildren(recoveryNotice(data.state === "target_unavailable" ? "This sample" : `Cohort ${cohort.cohort_id}`, data.problem));
             return;
           }
-          if (data.found !== true || typeof data.id12 !== "string" || typeof data.cohort_id !== "string"
+          if (data.found !== true || data.id12 !== sample.id12 || data.cohort_id !== cohort.cohort_id
               || typeof data.cohort_version !== "string" || !Array.isArray(data.metrics)) {
-            results.replaceChildren(h("p", { class: "problem" }, "Comparison response is incomplete. Reload Compare."));
+            results.replaceChildren(compareRequestNotice("Cohort comparison", "invalid", () => show(cohort)));
+            return;
+          }
+          if (sample.full_input_id && data.input_id !== sample.full_input_id) {
+            results.replaceChildren(h("p", { class: "problem" },
+              "The selected sample now uses a different full input. Reload the sample before comparing."));
             return;
           }
           const nodes = [
             h("p", {}, `Sample ${data.id12} · input ID (abbrev.) ${compareInputId(data.input_id)} · cohort ${data.cohort_id} generation ${data.cohort_version} · ${data.member_n} distinct members · PoN n = ${data.pon_n} (separate denominator).`),
           ];
-          if (data.cohort_version !== cohort.cohort_version) nodes.push(h("p", { class: "status-line" }, "A newer cohort generation was published after the list loaded. This comparison uses the generation named above; reload to refresh the list."));
+          if (data.cohort_version !== cohort.cohort_version) nodes.push(h("p", { class: "status-line" },
+            "A newer cohort generation was published after the list loaded. This comparison uses the generation named above. ",
+            h("button", { type: "button", class: "control", "data-requires-server": "", onclick: () => location.reload() },
+              "Reload cohort list")));
           if (data.kind === "provisional_external") nodes.push(h("p", { class: "status-line" }, "Provisional external reference: protocol mismatch. Interpret ranges cautiously."));
           if (data.state === "example_unscorable") {
             nodes.push(h("p", { class: "empty" }, "EXAMPLE (synthetic) cannot be scored against a real kit cohort."));
@@ -1950,8 +1972,8 @@
             results.replaceChildren(...nodes);
             return;
           }
-          if (data.state !== "ready") {
-            results.replaceChildren(h("p", { class: "problem" }, "Comparison state is unavailable. Reload Compare and choose the current sample."));
+          if (data.state !== "ready" || typeof data.target_aligner !== "string") {
+            results.replaceChildren(compareRequestNotice("Cohort comparison", "invalid", () => show(cohort)));
             return;
           }
           if (data.pon_problem) nodes.push(h("p", { class: "problem" }, `Panel of normals unavailable: copy-number and dependent comparisons are withheld; independent metrics remain comparable. ${data.pon_problem.fix}`));
@@ -2015,13 +2037,17 @@
         })
         .catch((error) => {
           if (error.kind !== "obsolete" && viewCurrent() && results.isConnected && current === request) {
-            results.replaceChildren(h("p", { class: "problem" }, "Comparison could not be loaded. Retry this selected cohort."));
+            results.replaceChildren(compareRequestNotice("Cohort comparison", error.kind, () => show(cohort)));
           }
         });
     };
     L.requestJson("/api/cohorts", { isCurrent: viewCurrent })
       .then((data) => {
         if (!slot.isConnected) return;
+        if (!Array.isArray(data.cohorts) || (data.unavailable && !Array.isArray(data.unavailable))) {
+          slot.replaceChildren(compareRequestNotice("Cohort list", "invalid", () => location.reload()));
+          return;
+        }
         const unavailable = data.unavailable || [];
         const rootProblem = data.problem ? recoveryNotice("Cohort storage", data.problem) : "";
         const unavailablePanel = unavailable.length ? h("section", { class: "panel", "aria-labelledby": "compare-unavailable-title" },
@@ -2044,7 +2070,7 @@
       })
       .catch((error) => {
         if (error.kind !== "obsolete" && viewCurrent() && slot.isConnected) {
-          slot.replaceChildren(h("p", { class: "problem" }, "Cohorts could not be loaded. Retry this selected view."));
+          slot.replaceChildren(compareRequestNotice("Cohort list", error.kind, () => location.reload()));
         }
       });
     out.push(sampleCompare(sample));
@@ -2114,6 +2140,10 @@
               "A selected sample could not be resolved. Reload the sample list and choose both samples again."));
             return;
           }
+          if (data.found !== true || typeof data.state !== "string") {
+            result.replaceChildren(compareRequestNotice("Sample comparison", "invalid", show));
+            return;
+          }
           if (data.state !== "ready") {
             const messages = {
               same_sample: "Choose a different sample.",
@@ -2124,9 +2154,14 @@
             result.replaceChildren(h("p", { class: "problem" }, messages[data.state] || "The selected comparison is unavailable."));
             return;
           }
-          if (data.found !== true || typeof data.id12_a !== "string" || typeof data.id12_b !== "string"
-              || !Array.isArray(data.metrics) || !Array.isArray(data.unscored)) {
-            result.replaceChildren(h("p", { class: "problem" }, "Sample comparison response is incomplete. Reload Compare."));
+          if (data.id12_a !== sample.id12 || data.id12_b !== other ||
+              !Array.isArray(data.metrics) || !Array.isArray(data.unscored)) {
+            result.replaceChildren(compareRequestNotice("Sample comparison", "invalid", show));
+            return;
+          }
+          if (sample.full_input_id && data.input_id_a !== sample.full_input_id) {
+            result.replaceChildren(h("p", { class: "problem" },
+              "Sample A now uses a different full input. Reload the sample before comparing."));
             return;
           }
           const nodes = [h("p", {}, `Sample A ${data.id12_a} · input ID (abbrev.) ${compareInputId(data.input_id_a)}; sample B ${data.id12_b} · input ID (abbrev.) ${compareInputId(data.input_id_b)}. A: ${data.aligner_a}; B: ${data.aligner_b}. Only equal compatibility keys and exact selected results appear below.`)];
@@ -2142,7 +2177,8 @@
                 h("caption", {}, `Sample A ${data.id12_a} versus B ${data.id12_b}; displayed values and B−A`),
                 h("thead", {}, h("tr", {}, ...["Metric", "Overlay", "Sample A", "Sample B", "B−A"].map((name) => h("th", { scope: "col" }, name)))),
                 h("tbody", {}, ...rows))));
-          } else nodes.push(h("p", { class: "empty" }, "No compatible scalar metric is available for this pair. Missing values are not zero."));
+          } else nodes.push(h("p", { class: "empty" },
+            "No compatible scalar metric is available for this pair. Missing values are not zero. Inspect both samples’ Methods results or choose another sample B."));
           if (data.unscored.some((row) => row.reason === "not_current_result")) nodes.push(h("p", { class: "help" },
             "A stored result is no longer current for its registered method. Recompute with the current method, or restore its registration before comparing."));
           if (data.unscored.length) nodes.push(h("details", {}, h("summary", {}, `Not paired (${data.unscored.length})`),
@@ -2153,7 +2189,7 @@
         })
         .catch((error) => {
           if (error.kind !== "obsolete" && isCurrent() && result.isConnected) {
-            result.replaceChildren(h("p", { class: "problem" }, "Sample comparison could not be loaded. Retry this selected pair."));
+            result.replaceChildren(compareRequestNotice("Sample comparison", error.kind, show));
           }
         });
     };
