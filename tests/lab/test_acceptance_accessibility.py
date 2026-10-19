@@ -669,9 +669,16 @@ def _walk_live_tab_order(command, evaluate, selector: str, label: str) -> list[i
     expression = f"""(() => {{
       const all = [...document.querySelectorAll({json.dumps(selector)})];
       const current = all.indexOf(document.activeElement);
+      const hiddenByClosedDetails = (el) => {{
+        for (let ancestor = el.parentElement; ancestor; ancestor = ancestor.parentElement) {{
+          if (ancestor.matches('details:not([open])') &&
+              !ancestor.querySelector(':scope > summary')?.contains(el)) return true;
+        }}
+        return false;
+      }};
       const eligible = (el) =>
         (el.tabIndex >= 0 || (el.matches('.table-wrap') && el.scrollWidth > el.clientWidth + 1))
-        && !el.disabled && el.getClientRects().length
+        && !el.disabled && !hiddenByClosedDetails(el) && el.getClientRects().length
         && getComputedStyle(el).visibility !== 'hidden';
       const next = all.findIndex((el, index) => index > current && eligible(el));
       const active = document.activeElement;

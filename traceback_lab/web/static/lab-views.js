@@ -842,12 +842,16 @@
       h("p", {}, `Interpretation library v${sample.interpretation_version} · cohort ${sample.cohort_version || "none yet"} · provenance stamp only (no signing). `, flagPill("PII", "FLAG: PII — file paths often embed donor names. Hashes only, never paths."))];
     const catalog = sample.catalog || [];
     const counts = sample.method_counts || {};
+    const provenanceAlgorithms = new Set((sample.algorithms || [])
+      .filter((algorithm) => !algorithm.hidden && (algorithm.metrics || []).some((metric) =>
+        metric.value === null || typeof metric.value !== "object"))
+      .map((algorithm) => algorithm.algorithm_id));
     const search = h("input", { id: "method-search", type: "search", autocomplete: "off",
       "aria-label": "Search methods" });
     const statuses = [...new Set(catalog.map((row) => row.status))].sort();
     const status = h("select", { id: "method-status", "aria-label": "Filter methods by recorded result" },
       h("option", { value: "" }, "All recorded results"),
-      ...statuses.map((value) => h("option", { value }, value)));
+      ...statuses.map((value) => h("option", { value }, value === "ok" ? "ran" : value)));
     const families = [...new Set(catalog.map((row) => row.family).filter(Boolean))].sort();
     const family = h("select", { id: "method-family", "aria-label": "Filter methods by family" },
       h("option", { value: "" }, "All families"),
@@ -878,8 +882,13 @@
         const platforms = (row.platforms || []).map((value) => value === "ont" ? "ONT" : value === "illumina" ? "Illumina" : value).join(", ");
         const requirements = row.requirements || [];
         const recorded = row.status === "ok" ? "ran" : row.status;
-        const provenance = h("button", { type: "button", class: "control" }, "Go to recorded provenance");
-        provenance.addEventListener("click", () => document.getElementById("method-provenance")?.scrollIntoView());
+        const provenance = provenanceAlgorithms.has(row.algorithm_id)
+          ? h("button", { type: "button", class: "control" }, "Go to recorded provenance") : null;
+        if (provenance) provenance.addEventListener("click", () => {
+          const target = document.getElementById("method-provenance");
+          target?.scrollIntoView();
+          target?.focus({ preventScroll: true });
+        });
         return h("article", { class: "panel", id: `method-${row.algorithm_id}` },
           h("h3", {}, row.label, " ", h("span", { class: "help" }, `(${row.algorithm_id})`)),
           h("p", {}, row.description || "Method explanation unavailable."),
@@ -892,12 +901,12 @@
               row.requires_mm_tags ? " MM tags required." : ""),
             requirements.length ? h("ul", {}, ...requirements.map((item) => h("li", {}, item)))
               : h("p", {}, "No additional registered asset is listed in the method explanation; a run can still have input-specific gates."),
-            row.min_depth_x ? h("p", {}, `Literature depth minimum: ${fmt(row.min_depth_x)}x; this is not a readiness verdict.`) : "",
+            row.min_depth_x ? h("p", {}, `Literature depth minimum: ${row.min_depth_x}x; this is not a readiness verdict.`) : "",
             h("p", {}, `Evidence note: ${row.footnote || "none published"}`,
               row.footnote_source ? ` (${row.footnote_source})` : "",
-              row.citation_checked ? "" : " · UNVERIFIED citation"),
+              row.has_library_entry && !row.citation_checked ? " · UNVERIFIED citation" : ""),
             h("p", {}, h("a", { href: `#/sample/${sample.id12}/evidence` }, "Evidence, citations and licenses"),
-              " · ", provenance)));
+              provenance ? [" · ", provenance] : "")));
       }));
     };
     const userFilter = (event) => {
