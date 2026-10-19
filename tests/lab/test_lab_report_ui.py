@@ -11,6 +11,7 @@ from pathlib import Path
 from tests.lab.test_acceptance_synthetic_routes import ID12, _sample, _server
 from tests.lab.test_lab_server import _chrome, _dom_cdp
 from tests.lab.test_landing import needs_chrome
+from traceback_lab.interpretation.engine import load_library
 
 
 def _reportable_sample() -> dict:
@@ -31,6 +32,11 @@ def test_report_capture_download_print_and_selection_invalidation(tmp_path) -> N
     sample["example"] = True
     sample["completed_utc"] = sample["run_utc"]
     sample["cohort_version"] = "cohort-v7"
+    cell_origin = next(row for row in sample["algorithms"] if row["algorithm_id"] == "cell-origin")
+    cell_origin["algorithm_version"] = "1"
+    for metric in cell_origin["metrics"]:
+        metric["entry"]["license_ids"].append("modkit-ont-public")
+    sample["licenses"].append({"license_id": "modkit-ont-public", **load_library().licenses["modkit-ont-public"]})
     copy_number = next(row for row in sample["algorithms"] if row["algorithm_id"] == "copy-number")
     copy_number["provenance"]["attempt_id"] = None
     next(row for row in copy_number["metrics"] if row["metric_id"] == "tumor_fraction").update(
@@ -74,6 +80,8 @@ def test_report_capture_download_print_and_selection_invalidation(tmp_path) -> N
                 const tumorRow = [...root.querySelectorAll('.report-print-metric')]
                   .find((row) => row.textContent.includes('Metric ID: tumor_fraction'));
                 const tumorMethod = tumorRow?.closest('.report-print-method');
+                const cellMethod = [...root.querySelectorAll('.report-print-method')]
+                  .find((section) => section.querySelector('h2')?.textContent === 'cell-origin');
                 const visible = (node) => {
                   const bounds = node.getBoundingClientRect();
                   return bounds.width > 0 && bounds.height > 0;
@@ -95,6 +103,7 @@ def test_report_capture_download_print_and_selection_invalidation(tmp_path) -> N
                   tumorFlag: tumorRow?.querySelector('.report-print-flag')?.textContent || '',
                   tumorLicense: tumorMethod?.querySelector('.report-print-license')?.textContent || '',
                   licenseCount: tumorMethod?.querySelectorAll('.report-print-license').length,
+                  legacyLicense: cellMethod?.textContent.includes('License restriction (modkit-ont-public): RESEARCH-ONLY: modkit'),
                   analyticalSteps: tumorRow?.textContent.includes('Next steps (analytical): Build the kit panel of normals'),
                   clinicalSteps: tumorRow?.textContent.includes('Clinical setting: In a validated clinical setting'),
                   adviceFlags: tumorRow?.querySelectorAll('.report-print-advice-flag').length,
@@ -189,10 +198,12 @@ def test_report_capture_download_print_and_selection_invalidation(tmp_path) -> N
     assert observed["print"]["tumorFlag"] == "FLAG: FDA — cancer-detection claim if marketed."
     assert "GPL/AGPL COPYLEFT" in observed["print"]["tumorLicense"]
     assert observed["print"]["licenseCount"] == 1
+    assert observed["print"]["legacyLicense"]
     assert observed["print"]["analyticalSteps"] and observed["print"]["clinicalSteps"]
     assert observed["print"]["adviceFlags"] == 2
     assert any("Metric copy-number/tumor_fraction: FLAG: FDA" in item for item in model["limitations"])
     assert any("License gpl-copyleft: GPL/AGPL COPYLEFT" in item for item in model["limitations"])
+    assert any("License modkit-ont-public: RESEARCH-ONLY: modkit" in item for item in model["limitations"])
     assert "Tool: synthetic-fixture" in provenance and "Tool version: 1" in provenance
     assert f"Parameters SHA-256: {tumor['parameters_sha256']}" in provenance
     assert tumor["attempt_id"] is None and "Attempt ID: unavailable" in provenance

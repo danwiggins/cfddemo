@@ -77,7 +77,8 @@
         referenceText = [kind, sourceName].filter(Boolean).join(": ") || null;
       }
       const guide = globalThis.TracebackLabViews?.signalDefinition?.(row.algorithm_id, row.metric_id) || null;
-      const restrictions = core.restrictionsForMetric(row.algorithm_id, row.metric_id);
+      const restrictions = core.restrictionsForMetric(row.algorithm_id, row.metric_id,
+        algorithms.get(row.algorithm_id)?.algorithm_version);
       for (const license of restrictions?.licenses || []) {
         if (!method[row.algorithm_id].licenses.some((item) => item.id === license.id))
           method[row.algorithm_id].licenses.push(license);

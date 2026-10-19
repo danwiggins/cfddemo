@@ -6,6 +6,7 @@
   const MAX_BYTES = 5 * 1024 * 1024;
   const encoder = new TextEncoder();
   const built = new WeakSet();
+  const capturedRestrictionIds = new WeakMap();
   // Audited from the registered interpretation library and algorithm metric producers.
   // Each entry is [curated label, producer unit, library value kind].
   const audited = {
@@ -449,9 +450,13 @@
   const clinicalAdviceWarning = "FLAG: CLIA — reads as clinical advice if a donor or clinician sees it.";
   const incompleteRestrictions = "Some restriction metadata was absent, unknown, or inconsistent; only audited flags and license terms are shown.";
 
-  function restrictionsForMetric(algorithmId, metricIdValue) {
+  function restrictionsForMetric(algorithmId, metricIdValue, algorithmVersion = null) {
     if (!Object.hasOwn(audited, algorithmId) || !Object.hasOwn(audited[algorithmId], metricIdValue)) return null;
-    const [flagIds, licenseIds] = auditedRestrictions[`${algorithmId}/${metricIdValue}`] || [[], []];
+    const [baseFlagIds, baseLicenseIds] = auditedRestrictions[`${algorithmId}/${metricIdValue}`] || [[], []];
+    const flagIds = baseFlagIds.slice();
+    // Stored cell-origin v1 used modkit. The current library describes the v2 decoder.
+    const licenseIds = algorithmId === "cell-origin" && (algorithmVersion === "" || algorithmVersion === "1")
+      ? [...baseLicenseIds, "modkit-ont-public"] : baseLicenseIds.slice();
     return {
       flagIds, licenseIds,
       flags: flagIds.map((flag) => flag === "PRIVACY" && algorithmId === "viral-reads"
@@ -647,6 +652,7 @@
       note(`Method ${algorithmId}: ${status === "not run" ? "not run" : `selected result ${status}`}; no scalar rows.`);
     }
     const metrics = [];
+    const rowRestrictionIds = [];
     let scanned = 0;
     const recorded = new Set();
     const restrictionsNoted = new Set();
@@ -721,18 +727,20 @@
           continue;
         }
         const restrictionKey = `${algorithmId}/${metric.metric_id}`;
-        if (!restrictionsNoted.has(restrictionKey)) {
-          restrictionsNoted.add(restrictionKey);
-          const restriction = restrictionsForMetric(algorithmId, metric.metric_id);
-          if (!sameIds(metric.entry?.flags, restriction.flagIds) ||
-              !sameIds(metric.entry?.license_ids, restriction.licenseIds) ||
-              restriction.licenseIds.some((licenseId) => !suppliedLicenses.has(licenseId)))
-            note(incompleteRestrictions);
+        const restriction = restrictionsForMetric(algorithmId, metric.metric_id, algorithm.algorithm_version);
+        if (!sameIds(metric.entry?.flags, restriction.flagIds) ||
+            !sameIds(metric.entry?.license_ids, restriction.licenseIds) ||
+            restriction.licenseIds.some((licenseId) => !suppliedLicenses.has(licenseId)))
+          note(incompleteRestrictions);
+        const restrictionVariant = `${restrictionKey}:${restriction.licenseIds.join(",")}`;
+        if (!restrictionsNoted.has(restrictionVariant)) {
+          restrictionsNoted.add(restrictionVariant);
           for (const flagText of restriction.flags) note(`Metric ${restrictionKey}: ${flagText}`);
           for (const license of restriction.licenses)
             note(`License ${license.id}: ${license.headline} — ${license.body}`);
         }
         if (metrics.length >= MAX_ROWS) fail("report_too_many_rows", "The report exceeds the 5,000 row export limit.");
+        rowRestrictionIds.push(restriction.licenseIds);
         metrics.push({
           algorithm_id: algorithmId, metric_id: metric.metric_id, label,
           raw_value: raw.value, raw_unit: metric.unit ?? null, recorded_support_n: recordedSupportN,
@@ -767,6 +775,7 @@
     sizeCheck(JSON.stringify(report));
     Object.freeze(report);
     built.add(report);
+    capturedRestrictionIds.set(report, rowRestrictionIds);
     return report;
   }
 
@@ -789,10 +798,9 @@
     const sharedLimitations = report.limitations.filter((item) =>
       !item.startsWith("Metric ") && !item.startsWith("License "));
     const lines = [columns.join(",")];
-    for (const row of report.metrics) {
-      const restriction = restrictionsForMetric(row.algorithm_id, row.metric_id);
+    for (const [index, row] of report.metrics.entries()) {
       const metricPrefix = `Metric ${row.algorithm_id}/${row.metric_id}: `;
-      const licensePrefixes = (restriction?.licenseIds || []).map((licenseId) => `License ${licenseId}: `);
+      const licensePrefixes = capturedRestrictionIds.get(report)[index].map((licenseId) => `License ${licenseId}: `);
       const rowLimitations = report.limitations.filter((item) =>
         item.startsWith(metricPrefix) || licensePrefixes.some((prefix) => item.startsWith(prefix)));
       const values = { ...identity, ...row, limitations: [...sharedLimitations, ...rowLimitations].join(" | ") };
