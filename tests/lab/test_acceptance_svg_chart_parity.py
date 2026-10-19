@@ -176,6 +176,8 @@ def test_sample_comparison_overlay_has_formatted_adjacent_values(tmp_path) -> No
                                           "root_has_runs": True}
         server.app.api.compare_samples = lambda a, b: {
             "found": True, "state": "ready", "id12_a": ID12, "id12_b": other,
+            "source_id_a": sample["source_id"], "source_id_b": other + "d" * 52,
+            "input_id_a": sample["full_input_id"], "input_id_b": "c" * 64,
             "aligner_a": "bwa", "aligner_b": "bwa", "unscored": [],
             "metrics": [{"algorithm_id": "copy-number", "metric_id": "tumor_fraction",
                          "label": "Tumour fraction", "unit": "fraction",

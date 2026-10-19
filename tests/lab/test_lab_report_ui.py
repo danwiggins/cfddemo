@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 import time
@@ -283,3 +284,77 @@ def test_report_download_writes_json_and_csv_from_one_capture(tmp_path) -> None:
     assert model["sample_id"] == ID12 and model["metrics"]
     assert b"\r\n" in csv and csv.startswith(b"schema_version,generated_at,")
     assert model["generated_at"].split(".", 1)[0].replace("-", "").replace(":", "") in json_files[0].name
+
+
+@needs_chrome
+def test_oversized_report_download_refuses_both_formats_without_a_file(tmp_path) -> None:
+    sample = _reportable_sample()
+    large = copy.deepcopy(sample)
+    algorithm = copy.deepcopy(large["algorithms"][0])
+    metric = copy.deepcopy(algorithm["metrics"][0])
+    metric.update(value=123456789012345, n=123456789012345)
+    algorithm["metrics"] = [metric for _ in range(5000)]
+    algorithm["provenance"].update(tool="t" * 120, tool_version="v" * 40,
+                                   reference_id="r" * 128)
+    large["algorithms"] = [algorithm]
+    large["catalog"] = [row for row in large["catalog"]
+                        if row["algorithm_id"] == algorithm["algorithm_id"]]
+    with _server(tmp_path, sample) as server:
+        profile = Path(tmp_path / "browser-profile")
+
+        def inspect(_command, evaluate) -> None:
+            server.app.api.sample = lambda id12: copy.deepcopy(large)
+            evaluate("""(() => {
+              window.reportBlobCount = 0;
+              window.reportFileCount = 0;
+              const create = URL.createObjectURL.bind(URL);
+              URL.createObjectURL = (blob) => {
+                window.reportBlobCount += 1;
+                return create(blob);
+              };
+              const click = HTMLAnchorElement.prototype.click;
+              HTMLAnchorElement.prototype.click = function () {
+                if (this.download) window.reportFileCount += 1;
+                return click.call(this);
+              };
+              const core = window.TracebackLabReport;
+              const project = core.project;
+              core.project = (...args) => {
+                const report = project(...args);
+                window.oversizedReport = report;
+                return report;
+              };
+              window.TracebackLab.formatResultMetric = () => ({
+                displayValue: 'x'.repeat(120), displayUnit: 'estimated reads/million'
+              });
+            })()""")
+            evaluate("document.querySelector('.report-export-panel button').click()")
+            for _ in range(100):
+                if evaluate("!!document.querySelector('.report-preview')"):
+                    break
+                time.sleep(0.05)
+            assert evaluate("!!document.querySelector('.report-preview')")
+            assert evaluate("window.oversizedReport.metrics.length") == 5000
+            assert evaluate("new TextEncoder().encode(JSON.stringify(window.oversizedReport)).length < 5 * 1024 * 1024")
+            for index, format_name in ((0, "JSON"), (1, "CSV")):
+                serializer = format_name.lower()
+                assert evaluate(f"""(() => {{
+                  try {{ window.TracebackLabReport.{serializer}(window.oversizedReport); return null; }}
+                  catch (error) {{ return error.code; }}
+                }})()""") == "report_too_large"
+                evaluate(f"[...document.querySelectorAll('.report-actions button')][{index}].click()")
+                status = evaluate("document.querySelector('[data-report-status]').textContent")
+                assert f"{format_name} report exceeds the 5 MiB download limit" in status
+                assert "Select a smaller sample and prepare a new report" in status
+                assert "No file was saved" in status
+                assert evaluate("document.querySelector('[data-report-status]').classList.contains('problem')")
+                assert evaluate("window.reportBlobCount === 0 && window.reportFileCount === 0")
+                assert evaluate("!!document.querySelector('.report-preview')")
+
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/methods"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and
+            re.search(r'<section[^>]*class="[^"]*\breport-export-panel\b', dom) is not None,
+            interact=inspect, timeout=120,
+        )
