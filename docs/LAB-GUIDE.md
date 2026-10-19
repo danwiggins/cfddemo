@@ -978,12 +978,21 @@ Per-metric `computed_at` retains that result's own timestamp. The nullable
 disclosed in limitations. It describes interpretation, not measurement absence.
 The 30-column CSV places the support field immediately after `raw_unit`, the
 date kind after `recorded_utc`, and the reason after `interpretation_state`. CSV
-repeats report identity and limitations for each row and quotes textual cells
+repeats report identity and general limitations for each row, adds that row's
+audited flags and license terms, and quotes textual cells
 with spreadsheet-formula protection. Spreadsheet software may still interpret
 types on import; use JSON for authoritative scalar types. Filenames begin
 `traceback-research-` and include the sample ID and UTC capture time. A
 "Download started" message confirms only that the browser action was
 dispatched; check the browser for the saved file.
+
+For each included metric, JSON and CSV limitations retain its audited CLIA,
+FDA, privacy, legal and PII flags and applicable curated license restrictions.
+Unknown, missing or inconsistent restriction metadata is disclosed as
+incomplete without copying untrusted API text or paths. Print places fixed
+license callouts beside the method and flags beside the displayed value.
+Analytical and clinical-setting next steps are separate, each accompanied by
+the clinical-advice warning.
 
 Only visible registered scalar metrics enter these downloads. Hidden
 processing steps, vector values, unsupplied artifacts and taxon detail are

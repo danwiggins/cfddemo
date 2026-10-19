@@ -64,6 +64,7 @@
         method[row.algorithm_id] = {
           question: safeMetadata(source.question), description: safeMetadata(source.description),
           limitations: metadataList(source.limitations), requirements: metadataList(source.requirements),
+          licenses: [],
         };
       }
       const source = algorithms.get(row.algorithm_id)?.metrics?.find((item) => item.metric_id === row.metric_id) || {};
@@ -76,13 +77,19 @@
         referenceText = [kind, sourceName].filter(Boolean).join(": ") || null;
       }
       const guide = globalThis.TracebackLabViews?.signalDefinition?.(row.algorithm_id, row.metric_id) || null;
-      const nextSteps = entry.next_steps && typeof entry.next_steps === "object"
-        ? [metadataList(entry.next_steps.analytical), metadataList(entry.next_steps.clinical_setting)]
-          .filter(Boolean).join("; ") || null : null;
+      const restrictions = core.restrictionsForMetric(row.algorithm_id, row.metric_id);
+      for (const license of restrictions?.licenses || []) {
+        if (!method[row.algorithm_id].licenses.some((item) => item.id === license.id))
+          method[row.algorithm_id].licenses.push(license);
+      }
+      const nextSteps = entry.next_steps && typeof entry.next_steps === "object" ? entry.next_steps : {};
       metric[`${row.algorithm_id}/${row.metric_id}`] = {
         support: row.recorded_support_n,
         reference: referenceText,
-        confounders: metadataList(entry.confounders), nextSteps,
+        confounders: metadataList(entry.confounders),
+        analyticalNextSteps: metadataList(nextSteps.analytical),
+        clinicalNextSteps: metadataList(nextSteps.clinical_setting),
+        flags: restrictions?.flags || [],
         guide: guide ? {
           definition: safeMetadata(guide.definition), denominator: safeMetadata(guide.denominator),
           limitation: safeMetadata(guide.limitation),
@@ -212,17 +219,25 @@
       const meta = context.method[algorithmId] || {};
       const section = h("section", { class: "report-print-method" }, h("h2", {}, algorithmId),
         field("Question", meta.question), field("Method", meta.description),
-        field("Requirements", meta.requirements), field("Limitations", meta.limitations));
+        field("Requirements", meta.requirements), field("Limitations", meta.limitations),
+        ...(meta.licenses || []).map((license) => h("div", { class: "report-print-license" },
+          h("p", {}, h("strong", {}, `License restriction (${license.id}): ${license.headline}`)),
+          h("p", {}, license.body))));
       for (const row of rows) {
         const detail = context.metric[`${algorithmId}/${row.metric_id}`] || {};
         section.append(h("article", { class: "report-print-metric" }, h("h3", {}, row.label),
           field("Metric ID", row.metric_id),
           field("Displayed value", `${row.display_value}${row.display_unit === "%" ? "%" : row.display_unit ? ` ${row.display_unit}` : ""}`),
+          ...((detail.flags || []).map((flag) => h("p", { class: "report-print-flag" }, flag))),
           field("Exact API value", row.raw_value == null ? "unavailable" : `${row.raw_value}${row.raw_unit ? ` ${row.raw_unit}` : " (unit not declared)"}`),
           field("Interpretation", row.interpretation_state),
           field("Interpretation reason", row.interpretation_reason),
           field("Recorded support count", detail.support), field("Reference", detail.reference),
-          field("Confounders", detail.confounders), field("Next steps", detail.nextSteps),
+          field("Confounders", detail.confounders),
+          field("Next steps (analytical)", detail.analyticalNextSteps),
+          h("p", { class: "report-print-advice-flag" }, core.clinicalAdviceWarning),
+          detail.clinicalNextSteps ? [field("Clinical setting", detail.clinicalNextSteps),
+            h("p", { class: "report-print-advice-flag" }, core.clinicalAdviceWarning)] : [],
           field("Measurement", detail.guide?.definition),
           field("Denominator / filter", detail.guide?.denominator),
           field("Measurement limitation", detail.guide?.limitation),

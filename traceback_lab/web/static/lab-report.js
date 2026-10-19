@@ -268,6 +268,206 @@
       "qualifying_fragment_depth_x": ["WPS-eligible 120–180 bp aligned-fragment depth", "x", "positive"]
     }
   };
+  // Fixed, audited restrictions keyed by registered algorithm/metric identity.
+  const auditedRestrictions = {
+    "aligned-end-structure/ocf_like_end_asymmetry": [["LEGAL"], ["method-patents"]],
+    "aligned-end-structure/preferred_end_support_fraction": [["LEGAL"], ["method-patents"]],
+    "arm-summary/arms_with_value": [[], ["gpl-copyleft"]],
+    "arm-summary/chr10p_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr10q_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr11p_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr11q_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr12p_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr12q_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr13p_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr13q_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr14p_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr14q_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr15p_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr15q_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr16p_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr16q_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr17p_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr17q_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr18p_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr18q_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr19p_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr19q_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr1p_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr1q_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr20p_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr20q_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr21p_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr21q_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr22p_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr22q_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr2p_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr2q_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr3p_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr3q_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr4p_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr4q_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr5p_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr5q_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr6p_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr6q_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr7p_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr7q_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr8p_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr8q_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr9p_log2": [[], ["gpl-copyleft"]],
+    "arm-summary/chr9q_log2": [[], ["gpl-copyleft"]],
+    "breakpoint-motifs/cpg_near_end_fraction": [["LEGAL"], []],
+    "cell-origin/fraction_adipocytes": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_bladder_ep": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_blood_b": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_blood_granul": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_blood_mono_macro": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_blood_nk": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_blood_t": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_bone_osteob": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_breast_basal_ep": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_breast_luminal_ep": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_colon_ep": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_colon_fibro": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_dermal_fibro": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_endothel": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_epid_kerat": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_eryth_prog": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_fallopian_ep": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_gallbladder": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_gastric_ep": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_head_neck_ep": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_heart_cardio": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_heart_fibro": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_kidney_ep": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_liver_hep": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_lung_ep_alveo": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_lung_ep_bron": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_megakaryocytes": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_neuron": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_oligodend": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_ovary_ep": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_pancreas_acinar": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_pancreas_alpha": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_pancreas_beta": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_pancreas_delta": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_pancreas_duct": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_prostate_ep": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_skeletal_musc": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_small_int_ep": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_smooth_musc": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "cell-origin/fraction_thyroid_ep": [["LEGAL"], ["yissum-uxm", "loyfer-atlas-terms-unknown"]],
+    "copy-number/counted_reads": [[], ["gpl-copyleft"]],
+    "copy-number/identifiable": [[], ["gpl-copyleft"]],
+    "copy-number/ploidy": [[], ["gpl-copyleft"]],
+    "copy-number/pon_policy": [[], ["gpl-copyleft"]],
+    "copy-number/segments_altered": [["FDA"], ["gpl-copyleft"]],
+    "copy-number/tumor_fraction": [["FDA"], ["gpl-copyleft"]],
+    "dd-cfdna-chry/chry_nonpar_reads": [["FDA", "PRIVACY"], []],
+    "dd-cfdna-chry/chry_reads_per_million": [["FDA", "PRIVACY"], []],
+    "dd-cfdna-chry/dd_cfdna_fraction": [["FDA", "PRIVACY"], []],
+    "delfi-ratio/ratio_sd": [["LEGAL"], ["method-patents", "no-license-not-adopted"]],
+    "end-motifs/ccca_fraction": [["LEGAL"], ["method-patents"]],
+    "end-motifs/mds": [["LEGAL"], ["method-patents"]],
+    "fetal-fraction/fetal_fraction": [["FDA", "PRIVACY", "LEGAL"], ["nipter-lgpl"]],
+    "fetal-fraction/trisomy_13_z": [["FDA", "PRIVACY", "LEGAL"], ["nipter-lgpl"]],
+    "fetal-fraction/trisomy_18_z": [["FDA", "PRIVACY", "LEGAL"], ["nipter-lgpl"]],
+    "fetal-fraction/trisomy_21_z": [["FDA", "PRIVACY", "LEGAL"], ["nipter-lgpl"]],
+    "fetal-fraction-chry/fetal_chry_nonpar_reads": [["FDA", "PRIVACY", "LEGAL"], []],
+    "fetal-fraction-chry/fetal_chry_reads_per_million": [["FDA", "PRIVACY", "LEGAL"], []],
+    "fetal-fraction-chry/fetal_fraction": [["FDA", "PRIVACY", "LEGAL"], []],
+    "finaletoolkit-xcheck/delfi_ratio_pearson_r": [["LEGAL"], ["method-patents", "no-license-not-adopted"]],
+    "finaletoolkit-xcheck/motif_pearson_r": [["LEGAL"], ["method-patents"]],
+    "griffin/central_coverage": [["LEGAL"], ["method-patents"]],
+    "griffin/site_count": [["LEGAL"], ["method-patents"]],
+    "identity/fingerprint_bytes": [["PRIVACY"], ["somalier-mit"]],
+    "instability/bins_missing_estimate": [[], ["gpl-copyleft"]],
+    "instability/segments_missing_estimate": [[], ["gpl-copyleft"]],
+    "instability/segments_used": [[], ["gpl-copyleft"]],
+    "instability/tmad": [[], ["gpl-copyleft"]],
+    "lionheart/cell_types_scored": [["LEGAL"], ["lionheart-resources-research"]],
+    "long-tail/gt300_fraction": [["CLIA"], []],
+    "long-tail/gt7500_fraction": [["CLIA"], []],
+    "long-tail/kb1_4_fraction": [["CLIA"], []],
+    "meth-tf/cpg_calls_used": [["CLIA"], ["meth-tf-reference-operator"]],
+    "meth-tf/fit_rms": [["CLIA"], ["meth-tf-reference-operator"]],
+    "meth-tf/identifiable": [["CLIA"], ["meth-tf-reference-operator"]],
+    "meth-tf/markers_covered": [["CLIA"], ["meth-tf-reference-operator"]],
+    "meth-tf/reference_condition_number": [["CLIA"], ["meth-tf-reference-operator"]],
+    "meth-tf/tumor_fraction": [["CLIA"], ["meth-tf-reference-operator"]],
+    "methylbert/classified_reads": [[], ["methylbert-mit"]],
+    "methylbert/normal_fraction": [[], ["methylbert-mit"]],
+    "methylbert/tumour_fraction": [[], ["methylbert-mit"]],
+    "microbial/candidate_unmapped_reads": [["PRIVACY"], ["kraken2-mit", "bracken-gpl3"]],
+    "microbial/classified_candidate_reads": [["PRIVACY"], ["kraken2-mit", "bracken-gpl3"]],
+    "microbial/microbial_estimated_reads": [["PRIVACY"], ["kraken2-mit", "bracken-gpl3"]],
+    "microbial/microbial_rpm_primary": [["PRIVACY"], ["kraken2-mit", "bracken-gpl3"]],
+    "microbial/missing_sequence_unmapped_reads": [["PRIVACY"], ["kraken2-mit", "bracken-gpl3"]],
+    "microbial/omitted_taxa": [["PRIVACY"], ["kraken2-mit", "bracken-gpl3"]],
+    "microbial/primary_reads": [["PRIVACY"], ["kraken2-mit", "bracken-gpl3"]],
+    "microbial/too_short_unmapped_reads": [["PRIVACY"], ["kraken2-mit", "bracken-gpl3"]],
+    "microbial/unclassified_candidate_reads": [["PRIVACY"], ["kraken2-mit", "bracken-gpl3"]],
+    "pmd-score/non_pmd_meth": [[], ["zhou-pmd-terms-unknown"]],
+    "pmd-score/pmd_delta": [[], ["zhou-pmd-terms-unknown"]],
+    "pmd-score/pmd_meth": [[], ["zhou-pmd-terms-unknown"]],
+    "sex-check/call": [["PRIVACY"], []],
+    "sex-check/chry_chrx_ratio": [["PRIVACY"], []],
+    "tss-profile/central_flank_ratio": [["LEGAL"], ["non-commercial-not-adopted"]],
+    "viral-reads/ebv_rpm": [["LEGAL", "PRIVACY"], ["viral-reference-terms-vary"]],
+    "viral-reads/hbv_rpm": [["LEGAL", "PRIVACY"], ["viral-reference-terms-vary"]],
+    "viral-reads/hpv_rpm": [["LEGAL", "PRIVACY"], ["viral-reference-terms-vary"]],
+    "wps/qualifying_fragment_depth_x": [["LEGAL"], ["method-patents"]],
+  };
+  // Curated license copy; never copied from the sample API response.
+  const licenseRestrictions = {
+    "bracken-gpl3": ["GPL-3: Bracken abundance estimator", "Bracken runs as a separate process; its GPL-3 terms and database data terms require independent review.", "https://github.com/jenniferlu717/Bracken"],
+    "gpl-copyleft": ["GPL/AGPL COPYLEFT: ichorCNA, Bracken, NIPTeR (LGPL), CelFiE/cfNOMe (AGPL; not adopted)", "GPL tools are acceptable as separate processes, which is how ichorCNA runs. Do not link or embed them. AGPL also triggers on network use, so it matters if the front end is ever hosted.", "https://github.com/broadinstitute/ichorCNA"],
+    "kraken2-mit": ["MIT: Kraken2 classifier", "Kraken2 runs as an external process; the operator provides and licenses the database separately.", "https://github.com/DerrickWood/kraken2/blob/master/LICENSE"],
+    "lionheart-resources-research": ["RESEARCH-ONLY RESOURCES: LIONHEART cell-type scores", "LIONHEART code is MIT, but Zenodo record 15747531 says its shared scores and models derive from data restricted to non-commercial research use. The resource pack is operator-supplied and is never bundled here. ONT single-end extraction is experimental and is not a validated cancer test.", "https://zenodo.org/records/15747531"],
+    "loyfer-atlas-terms-unknown": ["ATLAS DATA-USE TERMS UNKNOWN: Loyfer atlas / nanomix", "No explicit data license was found for the processed atlas. Raw data is controlled-access at EGA. nanomix's MIT license covers its code, not the Loyfer-derived atlas file it ships.", "https://doi.org/10.1038/s41586-022-05580-6"],
+    "meth-tf-reference-operator": ["OPERATOR-SUPPLIED METHYLATION REFERENCE: check data terms", "The tumour/healthy CpG marker fractions are not bundled. The operator registers exact local bytes and records their source and terms. Registration does not establish redistribution rights or clinical validity.", null],
+    "method-patents": ["METHOD PATENTS: DELFI, Lo-lab end motifs/MDS, Griffin", "Code licenses do not grant patent rights, and Griffin's BSD-3-Clear license says so expressly. DELFI is a commercial test. No freedom-to-operate review has been done.", "https://github.com/adoebley/Griffin"],
+    "methylbert-mit": ["MIT: MethylBERT code; model terms are operator supplied", "The MethylBERT source is MIT-licensed. A fine-tuned tumour/normal checkpoint is not distributed with the Lab; its data and model terms must be checked separately by the operator before registration.", "https://github.com/CompEpigen/methylbert/blob/main/LICENSE"],
+    "modkit-ont-public": ["RESEARCH-ONLY: modkit", "ONT Public License v1.0 grants use \"solely for Research Purposes\", defined as not directed toward commercial advantage. Commercial use needs an ONT agreement or an in-house MM/ML parser.", "https://github.com/nanoporetech/modkit/blob/master/LICENSE.md"],
+    "nipter-lgpl": ["LGPL: NIPTeR prenatal analysis", "The installed NIPTeR 1.0.2 DESCRIPTION says GNU Lesser General Public License without a version. NIPTeR runs as a separate R process; its license terms and the control cohort's data rights require independent review.", "https://github.com/molgenis/NIPTeR"],
+    "no-license-not-adopted": ["NO LICENSE FILE: delfi_scripts, pughlab (none adopted)", "No license means all rights reserved. The Lab uses its own implementation (or the MIT FinaleToolkit reimplementation) instead.", "https://github.com/cancer-genomics/delfi_scripts"],
+    "non-commercial-not-adopted": ["NON-COMMERCIAL: WisecondorX, Triton, Zhao-lab code (none adopted)", "WisecondorX is CC BY-NC-SA; Triton needs a Fred Hutch license for any commercial entity; Zhao-lab code is under an academic EULA plus WARF patents. None of them is used.", "https://github.com/CenterForMedicalGeneticsGhent/WisecondorX/blob/master/LICENSE.md"],
+    "somalier-mit": ["MIT: Somalier", "Somalier is MIT-licensed. Its fingerprint and relatedness output can reveal family relationships; use it only for explicitly selected pairs.", "https://github.com/brentp/somalier/blob/master/LICENSE"],
+    "viral-reference-terms-vary": ["VIRAL REFERENCE TERMS: operator-supplied FASTA", "The Lab does not ship viral sequence data. Each local viral FASTA records its exact bytes, target accessions and declared terms. NCBI places no restrictions of its own on molecular data, but submitters may assert intellectual-property rights; the operator must review the chosen source.", "https://www.ncbi.nlm.nih.gov/home/about/policies/"],
+    "yissum-uxm": ["RESEARCH-ONLY: Loyfer UXM / wgbs_tools / meth_atlas (Yissum)", "The Yissum Software Research License excludes \"direct or indirect commercial ... gain\". The existing cell-origin method is built on this.", "https://github.com/nloyfer/UXM_deconv"],
+    "zhou-pmd-terms-unknown": ["DATA TERMS UNKNOWN: Zhou 2018 PMD annotation", "The hg38 common-PMD file (PMD_coordinates_hg38.bed.gz) is distributed by the Zhou lab with a citation request and no stated license. It is not in the repo: the operator places it under ROOT/lab/assets/pmd/, and the Lab pins its sha256.", "https://zwdzwd.github.io/pmd"],
+  };
+  const restrictionFlagText = {
+    CLIA: "FLAG: CLIA — health-assessment labels on an individual sample",
+    FDA: "FLAG: FDA — cancer-detection claim if marketed.",
+    PRIVACY: "FLAG: PRIVACY — can reveal pregnancy or transplant status.",
+    LEGAL: "FLAG: LEGAL — possible method patents; no FTO review.",
+    PII: "FLAG: PII — file paths often embed donor names.",
+  };
+  const viralPrivacyText = "FLAG: PRIVACY — viral-read signals can reveal sensitive infection-related information.";
+  const clinicalAdviceWarning = "FLAG: CLIA — reads as clinical advice if a donor or clinician sees it.";
+  const incompleteRestrictions = "Some restriction metadata was absent, unknown, or inconsistent; only audited flags and license terms are shown.";
+
+  function restrictionsForMetric(algorithmId, metricIdValue) {
+    if (!Object.hasOwn(audited, algorithmId) || !Object.hasOwn(audited[algorithmId], metricIdValue)) return null;
+    const [flagIds, licenseIds] = auditedRestrictions[`${algorithmId}/${metricIdValue}`] || [[], []];
+    return {
+      flagIds, licenseIds,
+      flags: flagIds.map((flag) => flag === "PRIVACY" && algorithmId === "viral-reads"
+        ? viralPrivacyText : restrictionFlagText[flag]).filter(Boolean),
+      licenses: licenseIds.map((licenseId) => {
+        const fixed = licenseRestrictions[licenseId];
+        return fixed && { id: licenseId, headline: fixed[0], body: fixed[1] };
+      }).filter(Boolean),
+    };
+  }
+
+  function sameIds(actual, expected) {
+    return Array.isArray(actual) && actual.length === expected.length &&
+      new Set(actual).size === expected.length && expected.every((id) => actual.includes(id));
+  }
+
   const sha = /^[0-9a-f]{64}$/;
   const id = /^[a-z0-9-]{1,40}$/;
   const metricId = /^[a-z0-9_]{1,64}$/;
@@ -394,6 +594,17 @@
       "Recorded date kind distinguishes a recorded completion from latest input use; unknown means completion status could not be established. A date alone is not proof of a completed run.",
     ];
     const note = (message) => { if (!limitations.includes(message)) limitations.push(message); };
+    const suppliedLicenses = new Map();
+    if (!Array.isArray(sample.licenses)) note(incompleteRestrictions);
+    else for (const license of sample.licenses) {
+      const licenseId = license?.license_id;
+      if (typeof licenseId !== "string" || !Object.hasOwn(licenseRestrictions, licenseId) ||
+          suppliedLicenses.has(licenseId)) { note(incompleteRestrictions); continue; }
+      const fixed = licenseRestrictions[licenseId];
+      if (license.headline !== fixed[0] || license.body !== fixed[1] || (license.url ?? null) !== fixed[2])
+        note(incompleteRestrictions);
+      suppliedLicenses.set(licenseId, license);
+    }
     if (!Object.hasOwn(sample, "completed_utc"))
       note("Completion metadata was absent; the recorded date kind is unknown.");
     else if (recordedUtcKind === "unknown")
@@ -438,6 +649,7 @@
     const metrics = [];
     let scanned = 0;
     const recorded = new Set();
+    const restrictionsNoted = new Set();
     for (const algorithm of sample.algorithms) {
       if (!algorithm || !visible.has(algorithm.algorithm_id) ||
           !Object.hasOwn(audited, algorithm.algorithm_id) || algorithm.hidden === true) continue;
@@ -508,6 +720,18 @@
           note("Some metrics were omitted because their display values were unavailable.");
           continue;
         }
+        const restrictionKey = `${algorithmId}/${metric.metric_id}`;
+        if (!restrictionsNoted.has(restrictionKey)) {
+          restrictionsNoted.add(restrictionKey);
+          const restriction = restrictionsForMetric(algorithmId, metric.metric_id);
+          if (!sameIds(metric.entry?.flags, restriction.flagIds) ||
+              !sameIds(metric.entry?.license_ids, restriction.licenseIds) ||
+              restriction.licenseIds.some((licenseId) => !suppliedLicenses.has(licenseId)))
+            note(incompleteRestrictions);
+          for (const flagText of restriction.flags) note(`Metric ${restrictionKey}: ${flagText}`);
+          for (const license of restriction.licenses)
+            note(`License ${license.id}: ${license.headline} — ${license.body}`);
+        }
         if (metrics.length >= MAX_ROWS) fail("report_too_many_rows", "The report exceeds the 5,000 row export limit.");
         metrics.push({
           algorithm_id: algorithmId, metric_id: metric.metric_id, label,
@@ -560,12 +784,18 @@
       if (/^[\t\r\n]/.test(result) || /^[\s]*[=+\-@]/.test(result)) result = `'${result}`;
       return `"${result.replace(/"/g, '""')}"`;
     };
-    const identity = Object.fromEntries(reportIdentityFields.map((key) => [
-      key, key === "limitations" ? report.limitations.join(" | ") : report[key],
-    ]));
+    const identity = Object.fromEntries(reportIdentityFields.filter((key) => key !== "limitations")
+      .map((key) => [key, report[key]]));
+    const sharedLimitations = report.limitations.filter((item) =>
+      !item.startsWith("Metric ") && !item.startsWith("License "));
     const lines = [columns.join(",")];
     for (const row of report.metrics) {
-      const values = { ...identity, ...row };
+      const restriction = restrictionsForMetric(row.algorithm_id, row.metric_id);
+      const metricPrefix = `Metric ${row.algorithm_id}/${row.metric_id}: `;
+      const licensePrefixes = (restriction?.licenseIds || []).map((licenseId) => `License ${licenseId}: `);
+      const rowLimitations = report.limitations.filter((item) =>
+        item.startsWith(metricPrefix) || licensePrefixes.some((prefix) => item.startsWith(prefix)));
+      const values = { ...identity, ...row, limitations: [...sharedLimitations, ...rowLimitations].join(" | ") };
       lines.push(columns.map((key) => text(values[key])).join(","));
     }
     return sizeCheck(`${lines.join("\r\n")}\r\n`);
@@ -578,5 +808,5 @@
     return `traceback-research-${report.sample_id}-${stamp}Z.${extension}`;
   }
 
-  globalThis.TracebackLabReport = { project, json, csv, filename };
+  globalThis.TracebackLabReport = { project, json, csv, filename, restrictionsForMetric, clinicalAdviceWarning };
 })();
