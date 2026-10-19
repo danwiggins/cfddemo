@@ -182,7 +182,7 @@ Change:
 - `doctor` reports a missing `minimap2` as WARN with `brew install minimap2`; the guide's prerequisites list it.
 - `docs/OPERATOR-GUIDE.md`: new section "Aligning MinKNOW output" with the
   command, how to merge one sample's `bam_pass` chunks (`samtools cat -o SAMPLE.bam bam_pass/barcodeNN/*.bam`; never merge across barcode directories, which mixes samples),
-  expected time per GB measured once on the operator's workstation and stored in the private performance receipt (the PR records pass/fail only), and a serial batch
+  instructions to measure alignment time per GB once on the operator's workstation and record the result privately, and a serial batch
   block: per barcode directory, merge, align, index, then `traceback run "$f" --reference ID --label "$(basename "$f" .sorted.bam)" --import --root R || echo "FAILED $f"`, ending with `traceback jobs --root R`. `tests/test_operator_guide.py` executes this block on generated fixtures (with `minimap2` stubbed when absent). `doctor`
   reports `minimap2` presence as WARN when absent (never blocks).
 
@@ -313,7 +313,7 @@ Change:
 - Word `PARTIAL` instead of "PASS ... partial".
 - `run` reuse: when `submit` returns an existing COMPLETE job, print "Reused existing record <id> from job <job_id>; nothing was re-measured" and skip the "STAGE seal: copying" line. A new record whose measurement equals an earlier record's prints "same measurement as <id>" (B1).
 - `NEXT_COMMANDS` use the guide's `verify` spelling.
-- Guide: reference register takes seconds, not minutes; `RECORD_ID=$(ls R/records)` replaced by `run --json`'s `data.record_id`; the guide opens with a chooser ("I have a MinKNOW zip" / "I have an aligned BAM" / "I want the demo") and the real-BAM path moves to the top; an "Upgrading" section covers B1's second record and D15's code aliases; a "disk: each run adds about 1x the input under ROOT" note; lock message and its code in troubleshooting.
+- Guide: reference registration reads the full FASTA and can take minutes for a human reference; `RECORD_ID=$(ls R/records)` replaced by `run --json`'s `data.record_id`; the guide opens with a chooser ("I have a MinKNOW zip" / "I have an aligned BAM" / "I want the demo") and the real-BAM path moves to the top; an "Upgrading" section covers B1's second record and D15's code aliases; a "disk: each run adds about 1x the input under ROOT" note; lock message and its code in troubleshooting.
 - Web jobs list: a finished, verified job no longer says "Runner status is stale" (state word from C3).
 
 Acceptance: a golden-file test per command for human output (`doctor`, `logs`, `run` reuse), with paths and times normalised; no `{` at the start of any human-output line in those tests. +5 tests. Rollback: revert.
@@ -446,7 +446,7 @@ Acceptance: a test enumerates every member of the enums used in `LocalRecordView
 
 Change (cut from four tiles to two values by the design review): the strip's header carries "Eligible of scanned" (`<eligible_count> of <records_scanned> (<eligible_share>%)`, filled from the signed record) and "Share over 1 kb"; "Share 150-200 bp" only when the policy has edges at 150 and 200; "most common bin" lives on the chart only. No colour encodes good or bad. Strip: scanned → each exclusion reason with count and % of scanned → eligible, as one horizontal bar plus a list. Numbers use thousands separators and one-decimal percentages.
 
-Acceptance: the strip values and the strip reconcile (exclusions + eligible = scanned) in a DOM test; the real-input 150-200 share is checked against a private operator receipt, with only pass/fail reported in the PR. +2 tests. Rollback: revert.
+Acceptance: the strip values and the strip reconcile (exclusions + eligible = scanned) in a DOM test; the real-input 150-200 share is compared privately with the share calculated from the DoD's independent span counts, with only pass/fail reported in the PR. +2 tests. Rollback: revert.
 
 #### C5. Catalog record table, labels, checkbox compare; jobs disclosure
 
@@ -1462,7 +1462,7 @@ Nothing below is decided. The spec body reflects your stated direction plus mech
 | P4 | The site's audience is you now and outside readers in demand interviews later | Accept; C7 and outside-reader polish wait until P7 is settled | UNDECIDED |
 | P5 | Printing an alignment command (alignment outside the tool) is acceptable for this slice | Accept for this slice, labelled "assisted prerequisite"; PRODUCT-SPEC's no-shell-commands goal stays open; `traceback align` is a triggered follow-up | UNDECIDED |
 | P6 | About 3 calendar weeks | Plan for 5-6 weeks for both waves; about 2 for wave 1 | UNDECIDED |
-| P7 | The new BAMs' provenance and consent are known before any record from them is shown outside the team | Write one line on provenance and rights in the A0 PR; no external showing until then; no donor identifiers in labels | UNDECIDED |
+| P7 | The new BAMs' provenance and consent are known before any record from them is shown outside the team | Review provenance and rights privately before external showing; the A0 PR records the decision without input-specific details; no donor identifiers in labels | UNDECIDED |
 | P8 | Team Macs run traceback from a repo checkout with `uv run` | Accept for now; multi-Mac install is a triggered follow-up | UNDECIDED |
 
 ### User Challenges (both models recommend changing your stated direction)

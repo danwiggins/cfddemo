@@ -51,8 +51,8 @@ is the first step of that order. Track B is the third.
 
 The manual glue run exercised preflight and measurement on a local input;
 missing optional reference and modification declarations exposed preflight
-and TBX-MOD-001 limitations. Its input-specific counts, timings and header
-observations are omitted here.
+and TBX-MOD-001 limitations. Its input-specific counts and timings are omitted
+here; the qualitative header limitations above remain part of the plan.
 
 Honesty defect found in the glue run: the catalog row reported
 `qualification_state: "qualified"` for an unqualified local record, because the
@@ -234,7 +234,7 @@ Matching (D1), replacing `_reference_matches`:
 
 Acceptance:
 1. `reference register` on the operator's local hg38 primary FASTA produces 195 reference contigs and finishes in under 5 min on the operator workstation (recorded privately, not a CI test).
-2. `preflight <local-aligned-bam> --reference hg38-local --root R` reports TBX-BAM-002 WARN, overall outcome PARTIAL when TBX-MOD-001 applies, `fragment_measurement_eligible: true`, exit 0. Keep the actual input path and header observations private.
+2. `preflight <local-aligned-bam> --reference hg38-local --root R` on a designated real acceptance input with no `M5`/`AS` declarations or sampled modification tags reports TBX-BAM-002 WARN and TBX-MOD-001 PARTIAL, overall outcome PARTIAL, `fragment_measurement_eligible: true`, exit 0. Keep its path and detailed header observations private.
 3. A BAM whose `M5` differs from the registration is BLOCKED.
 4. Synthetic preflight without `--reference` is byte-identical to today's output.
 
@@ -410,7 +410,7 @@ The script reads the record ID from `traceback run --json` (`data.record_id`, th
 6. `traceback serve --root R` started in the background
 7. an operator-session HTTP GET of `/api/v1/explorer/catalog?limit=10` lists the record with `qualification_state="development_unqualified"`
 
-In CI the script uses a generated BAM (2 contigs, about 1,000 reads, no `M5`/`AS`, so the WARN path is exercised) and a matching tiny FASTA, both generated at test time by an extension of `traceback_runner/fixtures.py`. A pytest wrapper `tests/test_golden_path_acceptance.py` runs the script. The real BAM run is executed once manually; record its input-specific counts, preflight outcome and wall times privately. The PR reports only whether the manual acceptance checks passed, without raw CLI JSON or real-input values.
+In CI the script uses a generated BAM (2 contigs, about 1,000 reads, no `M5`/`AS`, so the WARN path is exercised) and a matching tiny FASTA, both generated at test time by an extension of `traceback_runner/fixtures.py`. A pytest wrapper `tests/test_golden_path_acceptance.py` runs the script. The real BAM run is executed once manually; record its input-specific counts, preflight outcome and wall times privately. The PR reports the manual pass/fail result, exit codes and observed catalog `qualification_state` (required to equal `development_unqualified`), without raw CLI JSON or real-input values.
 
 ## Dependency graph
 
@@ -705,7 +705,7 @@ BAM ──▶ preflight ──▶ seal copy ──▶ measure ──▶ sign ─
 
 ### What already exists
 
-See 0B. Short form: every stage has a library API; `glue.py` proved the chain at library level in about 30 s of compute; the missing parts are composition (authority, trust registry, explorer factory), honest labels (v2 approval state, report template) and CLI entry points.
+See 0B. Short form: every stage has a library API; `glue.py` proved the chain at library level in a bounded manual run; the missing parts are composition (authority, trust registry, explorer factory), honest labels (v2 approval state, report template) and CLI entry points.
 
 ### Dream state delta
 
