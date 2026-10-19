@@ -78,10 +78,18 @@ jobs:
       - name: Lint
         run: uvx ruff@0.7.4 check .
 
+      # The guide module shares one generated example across its tests. Keep
+      # its 180-second first-run budget free of concurrent xdist workers and
+      # avoid generating the same example in multiple workers.
+      - name: Test Lab guide journey
+        run: >-
+          uv run pytest -p no:cacheprovider -n 0 --timeout 600 -m "not slow"
+          tests/lab/test_lab_guide.py --durations=10
+
       # The local web service's single-instance lock is per state directory
-      # (golden-path A3), so web tests run under xdist with everything else.
+      # (golden-path A3), so the remaining web tests run under xdist.
       - name: Test
         timeout-minutes: 40
         run: >-
           uv run pytest -p no:cacheprovider -n auto --timeout 600 -m "not slow"
-          --durations=10
+          --ignore=tests/lab/test_lab_guide.py --durations=10
