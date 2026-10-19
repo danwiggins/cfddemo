@@ -263,7 +263,7 @@ def test_stability_dom_names_unvalidated_wps_without_false_verdict(server, tmp_p
     assert ("<strong>WPS-eligible 120–180 bp aligned-fragment depth</strong>"
             " — stability not validated") in dom
     assert "no split-half stability verdict" in dom
-    assert "No validated stability deviation scale; numeric values are in the table." in dom
+    assert "No validated stability deviation scale; measured values remain in the table." in dom
     assert "0.4" in dom
 
 

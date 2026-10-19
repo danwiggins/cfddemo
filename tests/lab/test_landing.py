@@ -236,7 +236,7 @@ def test_stability_names_both_halves_without_a_numeric_verdict(page_root, tmp_pa
     assert "split A unavailable (selected result unavailable); split B not interpretable (metric value unavailable)" in dom
     assert "No split-half stability verdict." in dom
     assert "100 / 105" in dom and "|A−B| = 5" in dom
-    assert "relative difference 4.9%" in dom
+    assert "relative difference 4.88%" in dom
     assert "no split-half stability verdict; an unrecognized split label is present" in dom
     assert "No validated stability deviation scale" in dom
 
@@ -264,7 +264,7 @@ def test_home_names_unavailable_split_comparisons(page_root, tmp_path, comparabl
         dom = _dom(server, tmp_path, want=lambda page: expected in page)
     assert expected in dom
     if comparable:
-        assert "Median split-half |A−B|: 5.0%" in dom
+        assert "Median split-half |A−B|: 5%" in dom
     else:
         assert "no comparable pair is available" in dom
         assert "See Stability" in dom
