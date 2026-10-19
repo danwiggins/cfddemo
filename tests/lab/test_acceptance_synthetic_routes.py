@@ -191,7 +191,7 @@ def test_guided_signals_use_recorded_values_and_show_unavailable_reasons(tmp_pat
         dom = _dom(server, tmp_path / "available-dom", route=f"/sample/{ID12}/signals",
                    want=lambda page: 'data-guide-signal="bam-qc/mapped_fraction"' in page)
     cards = re.findall(r'<article class="signal-guide-card" data-guide-signal="([^"]+)">(.*?)</article>', dom, re.S)
-    assert [key for key, _ in cards] == list(guide)
+    assert [key for key, _ in cards] == [f"{algorithm}/{metric}" for algorithm, metric in guide]
     for (key, value), (_, card) in zip(guide.items(), cards, strict=True):
         observed, unit, count = value
         expected = f"{observed} bp" if unit == "bp" else f"{observed * 100:g}%"
