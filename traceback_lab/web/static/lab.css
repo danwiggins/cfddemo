@@ -156,11 +156,28 @@ pre.stderr { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; 
 .report-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
 #lab-report-print { display: none; }
 @media print {
-  @page { margin: 25mm 15mm 20mm; }
+  @page labReport, labReportSynthetic {
+    margin: 25mm 15mm 20mm;
+    @top-center {
+      content: "RESEARCH USE ONLY · NOT CLIA VALIDATED · NOT A DIAGNOSIS";
+      font: bold 8pt sans-serif;
+      color: #111;
+    }
+    @bottom-center {
+      content: "Visible registered scalar metrics only; hidden steps, arrays, artifacts and taxon detail omitted. Values may differ from the earlier page.";
+      font: 7pt/1.3 sans-serif;
+      color: #111;
+    }
+  }
+  @page labReportSynthetic {
+    @top-center {
+      content: "RESEARCH USE ONLY · NOT CLIA VALIDATED · NOT A DIAGNOSIS · SYNTHETIC EXAMPLE";
+    }
+  }
   body.lab > :not(#lab-report-print) { display: none !important; }
-  #lab-report-print { display: block !important; color: #111; font: 10pt/1.4 sans-serif; }
-  #lab-report-print .report-print-marks { position: fixed; top: -16mm; left: 0; right: 0; text-align: center; font-weight: 700; font-size: 8pt; }
-  #lab-report-print .report-print-limits { position: fixed; bottom: -13mm; left: 0; right: 0; text-align: center; font-size: 7pt; }
+  #lab-report-print { display: block !important; page: labReport; color: #111; font: 10pt/1.4 sans-serif; }
+  #lab-report-print[data-example="true"] { page: labReportSynthetic; }
+  #lab-report-print .report-print-marks, #lab-report-print .report-print-limits { display: none; }
   #lab-report-print .report-print-method { break-before: page; }
   #lab-report-print .report-print-metric { break-inside: avoid; border-top: 1px solid #999; padding: .3rem 0; }
   #lab-report-print h1, #lab-report-print h2, #lab-report-print h3 { break-after: avoid; }

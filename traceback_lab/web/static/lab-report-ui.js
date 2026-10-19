@@ -183,7 +183,8 @@
 
   function printTree(capture) {
     const { report, context } = capture;
-    const root = h("section", { id: "lab-report-print", "aria-label": "Captured research report" },
+    const root = h("section", { id: "lab-report-print", "aria-label": "Captured research report",
+      "data-example": String(report.example) },
       h("div", { class: "report-print-marks" }, "RESEARCH USE ONLY · NOT CLIA VALIDATED · NOT A DIAGNOSIS",
         report.example ? " · SYNTHETIC EXAMPLE" : ""),
       h("div", { class: "report-print-limits" },
