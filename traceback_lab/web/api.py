@@ -92,8 +92,15 @@ def _safe_result_selections(sample: Any, order: list[str]) -> dict[str, Any]:
 def _recovery_problem(problem: LabProblem) -> dict[str, str]:
     """Only operator-safe fields cross the local Compare API boundary."""
 
+    unsafe_path = re.compile(r"(?<![A-Za-z0-9])/[^\s`'\"<>]+|[A-Za-z]:[\\/]|file://|--root\s+(?!['\"]?<ROOT>)")
+    cause = problem.cause if not unsafe_path.search(problem.cause) else (
+        "The selected Lab record could not be read or verified."
+    )
+    fix = problem.fix if not unsafe_path.search(problem.fix) else (
+        "Check the Lab guide, restore the affected record from a known-good backup if needed, then retry Compare."
+    )
     return {"code": problem.code, "summary": problem.summary,
-            "cause": problem.cause, "fix": problem.fix, "docs": problem.docs}
+            "cause": cause, "fix": fix, "docs": problem.docs}
 
 
 _AGREEMENT_AXES = (
@@ -597,6 +604,7 @@ class LabApi:
                         "id12": id12,
                         "state": "completion_history_unavailable" if uncertain else "completed_input_unavailable",
                         "run_utc": "" if uncertain else unavailable["completed_utc"], "depth_x": None,
+                        "completed_utc": None if uncertain else unavailable["completed_utc"],
                         "example": bool(record.get("example")),
                         "counts": {"ok": 0, "skipped": 0, "failed": 0},
                         "outside_reference": 0, "controls": {"spike": None, "split": False},
@@ -627,6 +635,7 @@ class LabApi:
                 {
                     "id12": id12,
                     "run_utc": used,
+                    "completed_utc": sample.completed_utc,
                     "depth_x": sample.full.depth_x(),
                     "example": sample.example,
                     "cohort_version": generation.version_id if generation else None,
@@ -685,11 +694,13 @@ class LabApi:
             completed = completed_for_source(self.store, source_id, record)
             if completion_history_unavailable(self.store, source_id, record, completed):
                 return {"found": True, "state": "completion_history_unavailable",
-                        "id12": self._id12s()[source_id], "source_id": source_id}
+                        "id12": self._id12s()[source_id], "source_id": source_id,
+                        "completed_utc": None}
             if completed is not None:
                 return {"found": True, "state": "completed_input_unavailable",
                         "id12": self._id12s()[source_id], "source_id": source_id,
-                        "run_utc": completed["completed_utc"]}
+                        "run_utc": completed["completed_utc"],
+                        "completed_utc": completed["completed_utc"]}
             return {"found": False, "candidates": []}
         library = self.libraries.get()
         record = source_record(self.store, source_id) or {}
@@ -798,6 +809,7 @@ class LabApi:
             "full_input_id": sample.full.input_id,
             "platform": sample.platform,
             "example": sample.example,
+            "completed_utc": sample.completed_utc,
             "run_utc": sample.completed_utc or max(
                 (entry.get("used_utc", "") for entry in record.get("inputs", [])), default="",
             ),
@@ -984,7 +996,7 @@ class LabApi:
             problem = LabProblem(
                 "TBX-LAB-017", cause=f"cohort {cohort_id} has no published generation",
                 fix="Run `" + shlex.join(["traceback", "lab", "cohort", "build", "--cohort", cohort_id,
-                                          "--root", str(self.store.root)]) + "`, then reload Compare",
+                                          "--root", "<ROOT>"]) + "`, then reload Compare",
             )
             return {"found": True, "id12": id12, "cohort_id": cohort_id,
                     "state": "cohort_unavailable", "metrics": [], "unscored": [],
@@ -1252,6 +1264,7 @@ class LabApi:
                 rows.append({
                     "algorithm_id": algorithm_id, "metric_id": metric_id,
                     "label": entry["label"] if entry is not None else metric_id,
+                    "value_kind": entry.get("value_kind") if entry is not None else None,
                     "unit": metric_a.unit, "value_a": metric_a.value, "value_b": metric_b.value,
                     "delta_b_minus_a": metric_b.value - metric_a.value,
                     "parameters_sha256_a": result_a.parameters_sha256,
@@ -1487,6 +1500,7 @@ def _metric_payload(row: Any, entry: Any, band: str | None) -> dict[str, Any]:
         payload["entry"] = {
             key: entry.get(key)
             for key in (
+                "value_kind",
                 "origin_tier",
                 "origin_platform",
                 "min_depth_x",

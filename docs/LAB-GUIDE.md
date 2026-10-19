@@ -781,17 +781,33 @@ The run-status banner follows the latest Lab writer; a later cohort update or
 other writer can supersede an earlier interrupted-run banner. It does not
 serve as a history of every interrupted run.
 
+On a narrow screen, **Previous views** and **More views** move the lens list by
+one visible navigation width without changing the selected view. The active
+view is brought into sight after a link or browser Back/Forward navigation;
+the lens links remain keyboard reachable. On wider screens the links wrap and
+the scroll controls are hidden.
+
 ## What the page shows
 
-- **Landing (`#/`)**: the CLIA explainer (short version, "Read the full
-  explainer" expands in place, full text at `#/about/clia`), one computed
-  headline sentence, the **defended results** (headline metrics that are
+- **Landing (`#/`)**: a selected-sample overview names the ID, built-in
+  synthetic-example status, recorded UTC date, approximate depth,
+  visible method states, hidden intermediate failures and result-selection
+  problems. The date is the completed run's terminal date when recorded, or
+  the latest input-use date otherwise; live work is reported in the header.
+  One-link actions open
+  Signals, Trust/QC, and Methods. The selected-sample status stays outside the
+  switcher across lenses; the header separately reports live run status. The
+  overview is followed by one computed headline sentence and the **defended
+  results** (headline metrics that are
   usable at half depth, stable across split halves, PROVEN or NEWER,
   citation-checked and, for copy-number, whose synthetic spike at TF 0.10 was
   recovered), the **depth → utility curve** (one row per algorithm; cells at
   10/25/50/100% of the reads; literature minimums drawn as "literature, not
-  measured"), the **positive controls** (SYNTHETIC, REPEATABILITY,
-  KNOWN-STATUS), the samples table and the license callouts.
+  measured"), and the **positive controls** (SYNTHETIC, REPEATABILITY,
+  KNOWN-STATUS). The CLIA explainer remains on the landing after those result
+  panels (short version, "Read the full explainer" expands in place, full text
+  at `#/about/clia`), followed by the samples table and license callouts. The
+  research-use notice is shown in the page header on every route.
 - **Findings**: only above/below-reference results are cards (sorted by tier,
   then severity); not-interpretable, no-reference and in-range metrics are
   counted, collapsible rows. Before the kit cohort exists (n < 10) most

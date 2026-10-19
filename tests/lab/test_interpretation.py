@@ -214,7 +214,10 @@ def test_direct_entry_with_incomplete_check_serializes_as_unverified() -> None:
         metric_id=entry.metric_id, label=entry["label"], value=0.95, unit="fraction", n=100,
         tier=entry.tier, interpretation=classify(0.95, entry),
     )
-    assert _metric_payload(row, entry, None)["entry"]["citation_checked"] is None
+    metric_payload = _metric_payload(row, entry, None)
+    assert metric_payload["entry"]["citation_checked"] is None
+    assert metric_payload["entry"]["value_kind"] == "proportion"
+    assert metric_payload["value"] == 0.95 and metric_payload["unit"] == "fraction"
     library = Library(LIB.version, {(entry.algorithm_id, entry.metric_id): entry}, LIB.licenses)
     assert _catalog(library, [entry.algorithm_id], [])[0]["citation_checked"] is False
 

@@ -35,8 +35,22 @@
     loading: true,
     runLogLines: new Map(),
     staleRunLogCleared: false,
+    sessionExpired: false,
+    connectionLost: false,
+    disconnectedSince: null,
+    resultStale: false,
+    resultConfirmedAt: null,
+    selectedRefresh: null,
+    loadFailure: null,
+    initialLoadFailure: false,
+    refreshFailureKind: null,
+    pollMessage: "",
+    pollAction: null,
   };
-  window.TracebackLab = { state, LENSES, h, render, chart, dataTable, fmt };
+  window.TracebackLab = { state, LENSES, h, render, chart, dataTable, rawCell, fmt, fmtMetric, fmtMetricValue, fmtCount,
+    requestJson, refreshSelectedSample,
+    formatMetric: window.TracebackLabFormat.formatMetric,
+    formatResultMetric: window.TracebackLabFormat.formatResultMetric };
 
   // -- tiny DOM helper -----------------------------------------------------------
   function h(tag, attrs, ...children) {
@@ -54,7 +68,10 @@
     }
     // Async route content may arrive after the disconnected state was set.
     if ((tag === "button" || tag === "select") && "data-requires-server" in (attrs || {})) {
-      if (document.body.dataset.disconnected === "1") setFetchControlEnabled(el, false);
+      if (document.body.dataset.disconnected === "1" &&
+          !(attrs.id === "readiness-refresh" && !state.connectionLost && !state.sessionExpired)) {
+        setFetchControlEnabled(el, false);
+      }
     }
     if (tag === "a" && typeof attrs?.href === "string" && attrs.href.startsWith("#/") &&
         document.body.dataset.disconnected === "1") setLinkEnabled(el, false);
@@ -83,14 +100,21 @@
     }
   }
 
-  function fmt(value, unit) {
-    if (value === null || value === undefined) return "—";
-    if (typeof value === "number") {
-      const text = Number.isInteger(value) ? value.toLocaleString("en-US") : (Math.abs(value) < 0.01 && value !== 0 ? value.toExponential(2) : value.toFixed(Math.abs(value) < 1 ? 3 : 1));
-      return unit && unit !== "fraction" ? `${text} ${unit}` : text;
-    }
-    if (typeof value === "boolean") return value ? "yes" : "no";
-    return String(value);
+  function fmt(value, unit, options = {}) {
+    return window.TracebackLabFormat.formatMetric(value, unit, {
+      missingUnit: unit !== undefined, ...options,
+    }).text;
+  }
+  function fmtMetric(metric, options = {}) {
+    return window.TracebackLabFormat.formatResultMetric(metric, options).text;
+  }
+  function fmtMetricValue(metric, value, options = {}) {
+    return fmtMetric({ ...metric, value }, { reason: null, ...options });
+  }
+  function fmtCount(value) {
+    return window.TracebackLabFormat.formatMetric(value, null, {
+      valueKind: "count", missingUnit: false,
+    }).text;
   }
 
   // -- session ------------------------------------------------------------------------
@@ -100,7 +124,7 @@
     if (!code) return;
     // An optional start route travels with the one-use link (e.g. for a deep link).
     const route = params.get("route");
-    const safe = route && /^\/[A-Za-z0-9/?=._-]{0,120}$/.test(route) ? route : "/";
+    const safe = route && /^\/[A-Za-z0-9/?=&._-]{0,383}$/.test(route) ? route : "/";
     history.replaceState(null, "", location.pathname + "#" + safe);
     const response = await fetch("/api/v1/session/bootstrap", {
       method: "POST",
@@ -111,21 +135,104 @@
     if (!response.ok) throw new Error("bootstrap");
   }
 
-  async function api(path, signal) {
-    const response = await fetch(path, { credentials: "same-origin", ...(signal ? { signal } : {}) });
-    if (response.status === 401) throw Object.assign(new Error("session"), { session: true });
-    const payload = await response.json();
-    if (!response.ok && !(path.startsWith("/api/samples/") && response.status === 404)) throw new Error(`http ${response.status}`);
-    return payload;
+  function requestIssue(kind) {
+    return Object.assign(new Error(kind), { kind, session: kind === "session" });
+  }
+
+  async function requestJson(path, { signal, timeoutMs = 10000, isCurrent = () => true,
+    allow404 = false } = {}) {
+    const controller = new AbortController();
+    let timeoutId;
+    let timedOut = false;
+    let settled = false;
+    const abort = () => controller.abort();
+    if (signal) {
+      if (signal.aborted) abort();
+      else signal.addEventListener("abort", abort, { once: true });
+    }
+    const deadline = timeoutMs === null ? null : new Promise((_, reject) => {
+      timeoutId = setTimeout(() => {
+        timedOut = true;
+        settled = true;
+        controller.abort();
+        reject(requestIssue("timeout"));
+      }, timeoutMs);
+    });
+    try {
+      const read = (async () => {
+        const response = await fetch(path, {
+          credentials: "same-origin", cache: "no-store", signal: controller.signal,
+        });
+        if (settled || !isCurrent()) throw requestIssue("obsolete");
+        if (response.status === 401) {
+          expireSession();
+          throw requestIssue("session");
+        }
+        if (!response.ok && !(allow404 && response.status === 404)) throw requestIssue("unavailable");
+        let payload;
+        try { payload = await response.json(); }
+        catch (_error) { throw requestIssue("invalid"); }
+        if (settled || !isCurrent()) throw requestIssue("obsolete");
+        if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw requestIssue("invalid");
+        return payload;
+      })();
+      return await (deadline ? Promise.race([read, deadline]) : read);
+    } catch (error) {
+      if (!isCurrent()) throw requestIssue("obsolete");
+      if (error.kind) throw error;
+      throw requestIssue(timedOut ? "timeout" : "unavailable");
+    } finally {
+      settled = true;
+      clearTimeout(timeoutId);
+      signal?.removeEventListener("abort", abort);
+    }
+  }
+
+  function api(path, signal, options = {}) {
+    return requestJson(path, { signal, allow404: /^\/api\/samples\/[0-9a-f]{12,64}$/.test(path), ...options });
+  }
+
+  function expireSession() {
+    if (state.sessionExpired) return;
+    state.sessionExpired = true;
+    state.resultStale = !!state.sample;
+    state.navigationRevision += 1;
+    restoreRenderedRoute();
+    document.body.classList.add("dimmed");
+    setControlsEnabled(false);
+    setStatus("Session expired. A new local session is needed to load or export results. Restart `traceback lab serve --open` for a fresh one-use link.");
+    renderRecoveryState();
   }
 
   // -- routes -------------------------------------------------------------------------
+  function parseContext(params, query, routeLength) {
+    const keys = ["algorithm", "metric", "family"];
+    const context = { algorithm: null, metric: null, family: null };
+    const known = new URLSearchParams();
+    let invalid = false;
+    for (const key of keys) {
+      const values = params.getAll(key);
+      if (values.length > 1) invalid = true;
+      for (const value of values) known.append(key, value);
+      if (values.length === 1) {
+        if (/^[A-Za-z0-9_-]{1,64}$/.test(values[0])) context[key] = values[0];
+        else invalid = true;
+      }
+    }
+    if (query.length > 256 || routeLength > 384 || known.toString().length > 256 ||
+        (context.metric && !context.algorithm)) invalid = true;
+    return invalid
+      ? { context: { algorithm: null, metric: null, family: null }, contextInvalid: true,
+        contextError: "Context link is invalid; showing the selected sample." }
+      : { context, contextInvalid: false, contextError: null };
+  }
+
   function parseRoute() {
     const hash = location.hash.replace(/^#/, "") || "/";
     const [pathPart, query = ""] = hash.split("?");
     const params = new URLSearchParams(query);
     let match = pathPart.match(/^\/sample\/([0-9a-f]{12,64})\/([a-z-]+)$/);
-    if (match) return { name: "lens", id12: match[1], lens: match[2] };
+    if (match) return { name: "lens", id12: match[1], lens: match[2], ...parseContext(params, query, hash.length) };
     if (pathPart === "/" || pathPart === "") {
       const sample = params.get("sample");
       if (sample && !/^[0-9a-f]{12,64}$/.test(sample)) return { name: "unknown", id12: sample };
@@ -135,28 +242,117 @@
     return { name: "unknown", id12: null };
   }
 
-  async function loadSample(id12) {
+  async function loadSample(id12, isCurrent = () => true) {
     if (!id12) return null;
     if (state.sample && state.sample.id12 === id12) return state.sample;
-    const payload = await api(`/api/samples/${id12}`);
+    const payload = await api(`/api/samples/${id12}`, null, { isCurrent });
+    if (typeof payload.found !== "boolean") throw requestIssue("invalid");
+    if (payload.found && (typeof payload.id12 !== "string" ||
+        !/^[0-9a-f]{12,64}$/.test(payload.id12) ||
+        !(id12.startsWith(payload.id12) || payload.id12.startsWith(id12)))) throw requestIssue("invalid");
+    if (payload.found && !["completed_input_unavailable", "completion_history_unavailable"].includes(payload.state) &&
+        (!Array.isArray(payload.algorithms) || !Array.isArray(payload.catalog))) throw requestIssue("invalid");
     return payload.found ? payload : { found: false, id12, candidates: payload.candidates || [] };
   }
 
   async function navigate() {
+    if (state.sessionExpired) { restoreRenderedRoute(); return; }
     const revision = ++state.navigationRevision;
     const requestedHash = location.hash || "#/";
     const route = parseRoute();
     const target = route.id12 || (route.name === "home" ? state.defaultSampleId12 : null);
-    const sample = route.name === "home" || route.name === "lens" ? await loadSample(target) : state.sample;
-    if (revision !== state.navigationRevision || (location.hash || "#/") !== requestedHash) return;
-    if (sample !== state.sample) state.runLogLines.clear();
-    state.sample = sample;
-    state.route = route;
-    render();
-    state.renderedHash = requestedHash;
-    const title = document.querySelector("main h1");
-    if (title) { title.setAttribute("tabindex", "-1"); title.focus({ preventScroll: false }); }
-    revealCurrentNav();
+    const isCurrent = () => revision === state.navigationRevision && (location.hash || "#/") === requestedHash;
+    try {
+      const sample = route.name === "home" || route.name === "lens" ? await loadSample(target, isCurrent) : state.sample;
+      if (!isCurrent()) return;
+      const freshSample = sample && sample !== state.sample;
+      if (freshSample) state.runLogLines.clear();
+      if (freshSample) {
+        state.resultConfirmedAt = new Date();
+        state.resultStale = false;
+      }
+      state.sample = sample;
+      state.route = route;
+      state.loadFailure = null;
+      render();
+      state.renderedHash = requestedHash;
+      const title = document.querySelector("main h1");
+      if (title) { title.setAttribute("tabindex", "-1"); title.focus({ preventScroll: false }); }
+      revealCurrentNav();
+    } catch (error) {
+      if (!isCurrent() || state.sessionExpired) return;
+      state.loadFailure = { requestedHash, id12: target, kind: error.kind || "unavailable" };
+      state.resultStale = !!state.sample;
+      if (state.renderedHash) {
+        history.replaceState(null, "", location.pathname + location.search + state.renderedHash);
+        renderSwitcher();
+      } else {
+        state.route = { name: "load-error" };
+        state.sample = null;
+        state.loading = false;
+        render();
+      }
+      renderRecoveryState();
+    }
+  }
+
+  function refreshSelectedSample() {
+    const previous = state.sample;
+    if (state.sessionExpired) return Promise.resolve({ kind: "session" });
+    if (!previous?.found) return Promise.resolve({ kind: "unavailable" });
+    const hash = location.hash || "#/";
+    const key = `${previous.id12}:${previous.full_input_id || "unknown"}:${hash}`;
+    if (state.selectedRefresh?.key === key &&
+        state.selectedRefresh.revision === state.navigationRevision) return state.selectedRefresh.promise;
+    const revision = ++state.navigationRevision;
+    const isCurrent = () => revision === state.navigationRevision && hash === (location.hash || "#/") &&
+      previous.id12 === state.sample?.id12 && previous.full_input_id === state.sample?.full_input_id;
+    const promise = (async () => {
+      try {
+        const current = await requestJson(`/api/samples/${encodeURIComponent(previous.id12)}`, { isCurrent });
+        if (!isCurrent()) return { kind: "obsolete" };
+        if (current.found !== true || current.id12 !== previous.id12 ||
+            (!["completed_input_unavailable", "completion_history_unavailable"].includes(current.state) &&
+              (!Array.isArray(current.catalog) || !Array.isArray(current.algorithms)))) {
+          throw requestIssue("invalid");
+        }
+        const checkedAt = new Date();
+        state.sample = current;
+        state.resultConfirmedAt = checkedAt;
+        state.resultStale = false;
+        state.connectionLost = false;
+        state.refreshFailureKind = null;
+        state.readinessRefresh = { ...state.readinessRefresh,
+          [`${current.id12}:${current.full_input_id || "unknown"}`]: { checkedAt: checkedAt.toISOString(), stale: false } };
+        render();
+        setControlsEnabled(true);
+        renderRecoveryState();
+        return { kind: "ok", sample: current };
+      } catch (error) {
+        if (state.sessionExpired) return { kind: "session" };
+        if (!isCurrent()) return { kind: "obsolete" };
+        state.resultStale = true;
+        state.refreshFailureKind = error.kind || "unavailable";
+        setControlsEnabled(false);
+        state.readinessRefresh = { ...state.readinessRefresh,
+          [`${previous.id12}:${previous.full_input_id || "unknown"}`]: {
+            ...state.readinessRefresh?.[`${previous.id12}:${previous.full_input_id || "unknown"}`], stale: true } };
+        renderRecoveryState();
+        return { kind: error.kind || "unavailable" };
+      } finally {
+        if (state.selectedRefresh?.key === key && state.selectedRefresh.revision === revision) {
+          state.selectedRefresh = null;
+          const refreshButton = document.getElementById("readiness-refresh");
+          if (refreshButton && !state.sessionExpired && !state.connectionLost) {
+            refreshButton.disabled = false;
+          }
+          renderRecoveryState();
+        }
+      }
+    })();
+    state.selectedRefresh = { key, revision, promise };
+    renderRecoveryState();
+    return promise;
   }
 
   // -- render -------------------------------------------------------------------------
@@ -167,7 +363,7 @@
       message = h("span", { "data-status-message": "" });
       status.prepend(message);
     }
-    message.textContent = text || "";
+    if (message.textContent !== (text || "")) message.textContent = text || "";
     status.querySelector("[data-library-error]")?.remove();
     let reload = status.querySelector("button.reload");
     if (action) {
@@ -178,26 +374,191 @@
     } else if (reload) reload.closest("[data-reload-action]").remove();
   }
 
+  function setPollStatus(text, action = null) {
+    state.pollMessage = text;
+    state.pollAction = action;
+    setStatus(text, action);
+  }
+
+  function recoveryCause(kind) {
+    return kind === "timeout" ? "The request timed out." :
+      kind === "invalid" ? "The response could not be read." :
+      "The Lab server could not provide this result.";
+  }
+
+  function renderRecoveryState() {
+    const freshness = document.getElementById("freshness-state");
+    if (!freshness) return;
+    const run = document.getElementById("run-state");
+    const result = document.getElementById("result-state");
+    const action = document.getElementById("recovery-action");
+    const last = state.resultConfirmedAt ? state.resultConfirmedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "unknown";
+    freshness.dataset.stale = state.resultStale || state.sessionExpired ? "true" : "false";
+    freshness.textContent = state.sessionExpired ? `Freshness/session: session expired; last confirmed ${last}.` :
+      state.connectionLost ? `Freshness/session: connection lost; showing last confirmed result (${last}).` :
+      state.resultStale ? `Freshness/session: ${state.selectedRefresh ? "verifying selected result" : "selected result unconfirmed"}; last confirmed ${last}.` :
+      state.sample?.found ? `Freshness/session: recorded projection confirmed at ${last}.` :
+      "Freshness/session: no selected result loaded.";
+    const status = state.lastStatus;
+    run.textContent = status?.active ? (state.connectionLost || state.sessionExpired
+      ? "Run state: a run was in progress at last check; current status is unknown."
+      : "Run state: a run is in progress; results below are from completed steps.") :
+      status?.interrupted ? "Run state: the last run was interrupted; published results may still be available." :
+      status?.run_log_unavailable ? "Run state: the last run log is unavailable." :
+      state.connectionLost || state.sessionExpired ? "Run state: current status is unknown." :
+      "Run state: no active run was reported at last check.";
+    const generationChanged = Number.isFinite(status?.generation) &&
+      Number.isFinite(state.generationAtLoad) && status.generation > state.generationAtLoad;
+    if (generationChanged) run.append(" Results changed on disk; full Reload is still needed for the sample listing.");
+    const sample = state.sample;
+    const algorithms = Array.isArray(sample?.algorithms) ? sample.algorithms : [];
+    const failed = algorithms.filter((row) => row.status === "failed").length;
+    const skipped = algorithms.filter((row) => row.status === "skipped").length;
+    const missing = sample?.state === "completed_input_unavailable" ||
+      (!sample && state.completedInputUnavailable);
+    const historyMissing = sample?.state === "completion_history_unavailable" ||
+      (!sample && state.completionHistoryUnavailable);
+    if (missing) result.textContent = "Recorded result: selected input unavailable; no result is asserted for it.";
+    else if (historyMissing) result.textContent = "Recorded result: completion history unavailable; the latest completion cannot be verified.";
+    else if (sample?.found) {
+      result.textContent = !algorithms.length ? "Recorded result: no completed method result for this selected input." : failed || skipped
+        ? `Recorded result: partially available (${failed} failed, ${skipped} skipped methods); reasons appear beside affected methods.`
+        : "Recorded result: available for the selected input; inspect each method's reliability before interpretation.";
+    } else result.textContent = "Recorded result: no selected result available.";
+    action.replaceChildren();
+    let problem = null;
+    if (state.sessionExpired) {
+      problem = "Session expired. A new local session is needed to load or export results.";
+      action.append("Next action: restart `traceback lab serve --open` for a fresh one-use link.");
+    } else if (missing || historyMissing) {
+      problem = missing ? "Selected input unavailable. Restore the input or choose another recorded sample." :
+        "Completion history unavailable. The latest completion cannot be verified.";
+      if (missing) {
+        const other = state.samples.find((row) => row.id12 !== sample?.id12 &&
+          row.state !== "completed_input_unavailable" && row.state !== "completion_history_unavailable");
+        if (other) action.append("Next action: ", h("a", { href: `#/?sample=${other.id12}` }, "Choose an available sample"));
+      }
+      if (!action.hasChildNodes()) action.append("Next action: ", h("a", {
+        href: "https://github.com/danwiggins/cfddemo/blob/main/docs/LAB-GUIDE.md#troubleshooting",
+        target: "_blank", rel: "noopener noreferrer", referrerpolicy: "no-referrer",
+      }, "Open recovery guide (external)"));
+    } else if (state.loadFailure) {
+      problem = `Could not open selected sample. ${recoveryCause(state.loadFailure.kind)} The last rendered view is retained and marked stale.`;
+      const requested = state.loadFailure.requestedHash;
+      action.append("Next action: ", h("button", { type: "button", class: "control",
+        onclick: () => { if (location.hash === requested) navigate(); else location.hash = requested; } }, "Retry loading this selection"));
+    } else if (state.initialLoadFailure) {
+      problem = "Lab results could not be loaded. The sample list and current result are unknown.";
+      action.append("Next action: ", h("button", { type: "button", class: "control",
+        onclick: () => location.reload() }, "Retry loading Lab"));
+    } else if (state.resultStale || state.connectionLost) {
+      problem = state.connectionLost ? `Lab server not responding since ${state.disconnectedSince || "page load"}; showing last confirmed result.` :
+        `Selected result could not be refreshed. ${recoveryCause(state.refreshFailureKind)} Showing last confirmed result.`;
+      const retry = h("button", { type: "button", class: "control", onclick: () => {
+        if (state.connectionLost) poll(); else if (generationChanged) location.reload(); else refreshSelectedSample();
+      } }, state.connectionLost ? "Retry connection" : generationChanged ? "Reload Lab" : "Retry selected refresh");
+      retry.disabled = !!state.selectedRefresh;
+      action.append("Next action: ", retry);
+    } else if (!state.loading && !state.samples.length) {
+      action.append("Next action: ", h("a", {
+        href: "https://github.com/danwiggins/cfddemo/blob/main/docs/LAB-GUIDE.md#first-five-minutes",
+        target: "_blank", rel: "noopener noreferrer", referrerpolicy: "no-referrer",
+      }, "Open example setup guide (external)"));
+    } else if (sample?.found && (failed || skipped) && !state.pollAction) {
+      action.append("Next action: ", h("a", { href: `#/sample/${sample.id12}/methods` }, "Method readiness"));
+    } else if (status?.active && !state.pollAction) {
+      action.append("Next action: ", h("a", { href: sample?.id12 ? `#/sample/${sample.id12}/trust-qc` : "#/" }, "View run status"));
+    }
+    if (problem) setStatus(problem);
+    else if (!state.loading) setStatus(state.pollMessage, state.pollAction);
+  }
+
   function renderSwitcher() {
     const select = document.getElementById("sample-switcher");
     select.replaceChildren(
       ...(state.sample && state.sample.found ? [] : [h("option", { value: "", selected: true, disabled: true }, "Select a sample")]),
       ...state.samples.map((row) =>
         h("option", { value: row.id12, selected: state.sample && state.sample.id12 === row.id12 },
-          `${row.id12} · ${row.run_utc ? row.run_utc.slice(0, 10) : "—"} · ${row.depth_x !== null ? row.depth_x.toFixed(2) + "x" : "—"}${row.example ? " · EXAMPLE (synthetic)" : ""}${row.state === "completed_input_unavailable" ? " · completed input unavailable" : row.state === "completion_history_unavailable" ? " · completion history unavailable" : ""}`)
+          `${row.id12} · ${row.run_utc ? row.run_utc.slice(0, 10) : "—"} · ${fmt(row.depth_x, "x")}${row.example ? " · EXAMPLE (synthetic)" : ""}${row.state === "completed_input_unavailable" ? " · completed input unavailable" : row.state === "completion_history_unavailable" ? " · completion history unavailable" : ""}`)
       )
     );
   }
 
+  function renderSampleContext() {
+    const context = document.getElementById("sample-context");
+    const sample = state.sample && state.sample.found && state.route.name !== "unknown" ? state.sample : null;
+    if (!sample) {
+      const requested = state.route.id12 || state.sample?.id12;
+      const safeId = typeof requested === "string" && /^[0-9a-f]{12,64}$/.test(requested) ? requested : null;
+      context.replaceChildren(state.loading ? "Loading sample…" :
+        state.initialLoadFailure ? "Sample list could not be loaded" :
+          state.route.name === "load-error" ? `Requested sample ${safeId || "identity"} could not be loaded` :
+            state.route.name === "unknown" || state.sample?.found === false ?
+              `Unknown requested sample${safeId ? ` ${safeId}` : ""}` : "No sample selected");
+      return;
+    }
+    const listed = state.samples.find((row) => row.id12 === sample.id12);
+    const example = sample.example ?? listed?.example;
+    const kind = example === undefined ? "Synthetic status unavailable"
+      : example ? "EXAMPLE (synthetic)" : "Not marked as the built-in synthetic example";
+    const availability = sample.state === "completed_input_unavailable" ? "completed input unavailable"
+      : sample.state === "completion_history_unavailable" ? "completion history unavailable"
+        : sample.completed_utc ? `completion recorded ${sample.completed_utc.slice(0, 10)}`
+          : sample.completed_utc === null ? "no completion recorded for this sample"
+            : "selected sample";
+    context.replaceChildren(`Sample ${sample.id12} · `,
+      h("span", { class: "sample-context-kind" }, kind), ` · ${availability}`);
+  }
+
   function updateNavFade() {
     const nav = document.getElementById("lenses");
-    const overflow = !nav.hidden && nav.scrollWidth > nav.clientWidth + 1;
+    const wrapper = nav.closest(".lens-navigation");
+    if (wrapper) wrapper.hidden = nav.hidden;
+    // Measure against the full slot so a resize can remove controls once all
+    // labels fit without them; measuring the narrowed scroller would keep them.
+    const overflow = !nav.hidden && nav.scrollWidth > (wrapper?.clientWidth ?? nav.clientWidth) + 1;
     nav.classList.toggle("more-left", overflow && nav.scrollLeft > 1);
     nav.classList.toggle("more-right", overflow && nav.scrollLeft + nav.clientWidth < nav.scrollWidth - 1);
+    if (wrapper) {
+      wrapper.classList.toggle("has-overflow", overflow);
+      wrapper.querySelector(".lens-scroll-prev").disabled = !overflow || nav.scrollLeft <= 1;
+      wrapper.querySelector(".lens-scroll-next").disabled = !overflow ||
+        nav.scrollLeft + nav.clientWidth >= nav.scrollWidth - 1;
+    }
+  }
+
+  function setupLensNavigation() {
+    const nav = document.getElementById("lenses");
+    const wrapper = h("div", { class: "lens-navigation" });
+    const previous = h("button", { type: "button", class: "lens-scroll-control lens-scroll-prev",
+      "aria-label": "Previous views", "aria-controls": "lenses",
+      onclick: () => { nav.scrollLeft -= nav.clientWidth; updateNavFade(); } }, "‹");
+    const next = h("button", { type: "button", class: "lens-scroll-control lens-scroll-next",
+      "aria-label": "More views", "aria-controls": "lenses",
+      onclick: () => { nav.scrollLeft += nav.clientWidth; updateNavFade(); } }, "›");
+    nav.before(wrapper);
+    wrapper.append(previous, nav, next);
+    nav.addEventListener("focusin", (event) => {
+      // Pointer focus can happen between mouse down and up. Moving the link
+      // then sends the click to the nav instead of activating its route.
+      if (!(event.target instanceof HTMLAnchorElement) || !event.target.matches(":focus-visible") ||
+          getComputedStyle(nav).flexWrap !== "nowrap") return;
+      const frame = nav.getBoundingClientRect();
+      const link = event.target.getBoundingClientRect();
+      // Keep focus clear of the 1.25rem edge fade as keyboard travel scrolls.
+      const fadeWidth = parseFloat(getComputedStyle(document.documentElement).fontSize) * 1.25;
+      if (link.left < frame.left + fadeWidth || link.right > frame.right - fadeWidth) {
+        nav.scrollLeft += link.left - frame.left - (nav.clientWidth - link.width) / 2;
+      }
+      updateNavFade();
+    });
   }
 
   function revealCurrentNav() {
     const nav = document.getElementById("lenses");
+    // The previous loading/home render hid the wrapper. Give it its final
+    // visible width and control slots before measuring the active link.
+    updateNavFade();
     const active = nav.querySelector('[aria-current="page"]');
     if (active && getComputedStyle(nav).flexWrap === "nowrap") {
       const navRect = nav.getBoundingClientRect();
@@ -227,28 +588,38 @@
       if (lens.count) label += lens.count(sample);
       nav.append(h("a", { href: `#/sample/${sample.id12}/${lens.id}`, "aria-current": lens.id === current ? "page" : null }, label));
     }
+    updateNavFade();
   }
 
   function render() {
     renderSwitcher();
+    renderSampleContext();
     renderNav();
     const main = document.getElementById("main");
     main.replaceChildren();
+    renderRecoveryState();
     const route = state.route;
     if (state.loading) {
       setStatus("Loading Lab results…");
       main.append(h("h1", { class: route.name === "home" ? "visually-hidden" : "view-title" }, "Loading…"));
       if (route.name === "home") {
         main.append(
-          h("section", { class: "clia-panel loading-clia" },
-            h("h2", { class: "clia-title" }, "What CLIA means for this demo"), h("p", {}, "Loading…")),
+          h("section", { class: "panel landing-intro loading-intro" },
+            h("h2", {}, "Sample overview"), h("p", {}, "Loading…")),
           h("p", { class: "headline loading-headline" }, "Loading…"),
           h("div", { class: "landing-band" },
             h("section", { class: "panel defended loading-defended" }, h("h2", {}, "Defended results"), h("p", {}, "Loading…")),
             h("section", { class: "panel curve loading-curve" }, h("h2", {}, "Depth → utility"), h("p", {}, "Loading…")),
             h("section", { class: "panel controls loading-controls" }, h("h2", {}, "Positive controls"), h("p", {}, "Loading…"))),
+          h("section", { class: "clia-panel loading-clia" },
+            h("h2", { class: "clia-title" }, "What CLIA means for this demo"), h("p", {}, "Loading…")),
         );
       } else main.append(h("section", { class: "panel loading-lens" }, h("p", {}, "Loading…")));
+      return;
+    }
+    if (route.name === "load-error") {
+      main.append(h("h1", { class: "view-title" }, "Could not open selected sample"),
+        h("p", { class: "problem" }, "The Lab result could not be read. Retry loading this selection when the server is available."));
       return;
     }
     if (route.name === "home" && !route.id12 && state.completionHistoryUnavailable) {
@@ -312,7 +683,7 @@
           h("p", {}, `Provisional: this input excludes ${sample.excluded_chunks.length} truncated chunks; depth reflects the reads present.`),
           h("details", {}, h("summary", {}, `Excluded chunk indexes (${sample.excluded_chunks.length})`),
             h("p", {}, `Excluded chunk indexes: ${sample.excluded_chunks.join(", ")}.`)));
-        const anchor = route.name === "home" ? main.querySelector(".clia-panel") : main.querySelector("h1");
+        const anchor = route.name === "home" ? main.querySelector(".landing-intro") : main.querySelector("h1");
         if (anchor) anchor.after(notice); else main.prepend(notice);
       }
     };
@@ -336,7 +707,15 @@
   }
 
   // -- charts ---------------------------------------------------------------------------
-  const chartCell = (value) => typeof value === "number" && Number.isFinite(value) ? String(value) : fmt(value);
+  function rawCell(display, raw, unit) {
+    const exact = raw === null || raw === undefined ? "null" : String(raw);
+    return h("div", { class: "value-with-raw" }, h("span", { class: "display-value" }, display), " ",
+      h("details", { class: "raw-value" }, h("summary", {}, "Raw value"), h("code", {}, `${exact} ${unit || "unit not declared"}`)));
+  }
+  function chartCell(value) {
+    if (value instanceof Node) return value;
+    return typeof value === "number" && Number.isFinite(value) ? String(value) : fmt(value);
+  }
   function dataTable(caption, headers, rows) {
     const table = h("table", { class: "data-table" },
       h("caption", {}, caption),
@@ -355,8 +734,8 @@
         const instance = window.echarts.init(box, null, { renderer: "canvas" });
         instance.setOption(Object.assign({ animation: false }, option));
         box.dataset.rendered = "1";
-      } catch (error) {
-        box.replaceWith(h("div", { class: "problem" }, `Chart could not be drawn (${error.message}). The data table below has the same numbers.`));
+      } catch (_error) {
+        box.replaceWith(h("div", { class: "problem" }, "Chart could not be drawn. The data table below has the same numbers."));
         const details = wrap.querySelector("details");
         if (details) details.open = true;
       }
@@ -365,9 +744,12 @@
   }
 
   async function fetchArtifact(sample, label, algorithmId, panelId) {
-    const response = await fetch(`/api/samples/${sample.id12}/artifact/${label}/${algorithmId}/${panelId}`, { credentials: "same-origin" });
-    if (!response.ok) throw new Error("data reference invalid");
-    return response.json();
+    const revision = state.navigationRevision;
+    const hash = location.hash;
+    return requestJson(`/api/samples/${sample.id12}/artifact/${label}/${algorithmId}/${panelId}`, {
+      isCurrent: () => revision === state.navigationRevision && hash === location.hash &&
+        state.sample?.id12 === sample.id12,
+    });
   }
 
   function sizeDensity(sample) {
@@ -400,13 +782,14 @@
         table,
       ));
     }).catch((error) => {
+      if (error.kind === "obsolete" || !slot.isConnected) return;
       // No panel data reached the page, so there is no data table to open;
       // the summary metrics stay in the table below.
-      const rows = algorithm.metrics.map((m) => [m.label, m.value]);
+      const rows = algorithm.metrics.map((m) => [m.label, fmtMetric(m, { algorithmId: algorithm.algorithm_id })]);
       slot.replaceWith(h("div", {},
-        h("div", { class: "problem" }, `Chart could not be drawn (${error.message}). The summary numbers are in the table below.`),
+        h("div", { class: "problem" }, "Chart could not be drawn. Retry loading this selected result; summary numbers are below."),
         h("div", { class: "table-wrap" }, h("table", { class: "data-table" }, h("caption", {}, "fragment-size summary"),
-          h("tbody", {}, ...rows.map(([label, value]) => h("tr", {}, h("th", { scope: "row" }, label), h("td", {}, fmt(value)))))))));
+          h("tbody", {}, ...rows.map(([label, value]) => h("tr", {}, h("th", { scope: "row" }, label), h("td", {}, value))))))));
     });
     return section;
   }
@@ -433,7 +816,7 @@
       const text = a.input_gate
         ? `${a.input_gate} → ${a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status === "failed" ? "failed" : "ran"}`
         : a.min_depth_x
-        ? `needs ${a.min_depth_x}x; this run ${depth !== null ? depth.toFixed(3) : "—"}x → ${a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status === "failed" ? "failed" : "ran"}`
+        ? `needs ${fmt(a.min_depth_x, "x")}; this run ${fmt(depth, "x")} → ${a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status === "failed" ? "failed" : "ran"}`
         : `any depth → ${a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status}`;
       return h("tr", {}, h("th", { scope: "row" }, a.algorithm_id), h("td", {}, bar), h("td", {}, text));
     });
@@ -452,12 +835,14 @@
       const status = a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status;
       const matches = (run) => run && run.step === a.algorithm_id && run.source_id === sample.source_id && run.input_id === a.provenance?.input_id;
       const runNote = matches(active) ? "latest run in progress" : matches(interrupted) ? interruptedLabel : null;
-      const duration = a.duration_s !== null && a.duration_s !== undefined ? `${a.duration_s.toFixed(1)} s` : "—";
+      const duration = fmt(a.duration_s, "s");
       const cells = [h("th", { scope: "row" }, a.algorithm_id + (a.hidden ? " (intermediate)" : "")),
         h("td", { class: a.status === "failed" ? "problem" : null,
           "data-run-algorithm": a.algorithm_id, "data-run-input": a.provenance?.input_id || "" }, status, " ",
           h("span", { class: "state-chip run-note", "data-run-note": "", hidden: !runNote }, runNote || "")),
-        h("td", { class: "num", "data-run-duration": duration }, runNote === "latest run in progress" && duration !== "—"
+        h("td", { class: "num", "data-run-duration": duration,
+          "data-run-duration-available": Number.isFinite(a.duration_s) ? "1" : "0" },
+          runNote === "latest run in progress" && Number.isFinite(a.duration_s)
           ? `${duration} (selected result)` : duration)];
       const pin = a.provenance;
       const canPin = pin && /^[0-9a-f]{64}$/.test(pin.input_id) && /^[0-9a-f]{64}$/.test(pin.parameters_sha256) &&
@@ -517,7 +902,8 @@
       h("div", { class: "table-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, ...["Algorithm", "Status", "Duration", "Run log", "Detail"].map((t) => h("th", { scope: "col" }, t)))), h("tbody", {}, ...runRows)))));
     // QC bands.
     const banded = [];
-    for (const a of sample.algorithms) for (const m of a.metrics) if (m.qc_band) banded.push([m.label, fmt(m.value), m.qc_band]);
+    for (const a of sample.algorithms) for (const m of a.metrics) if (m.qc_band)
+      banded.push([m.label, fmtMetric(m, { algorithmId: a.algorithm_id }), m.qc_band]);
     const glyph = { pass: "✓ pass", warn: "! warn", fail: "✕ fail" };
     out.push(h("section", { class: "panel" }, h("h2", {}, "QC bands"),
       h("p", { class: "help" }, "provisional (not from literature)"),
@@ -553,10 +939,10 @@
         h("p", { class: "help" }, "Viral taxa here are Bracken estimates per million QC-passing, non-duplicate primary reads. The separate viral-reference panel counts side-reference alignments per million human-unmapped primaries, including QC-fail and duplicate-flagged reads; the rates are not directly comparable."),
         microbial.reason ? h("p", { class: "problem" }, microbial.reason) : "",
         microbial.microbial_rpm_primary !== undefined
-          ? h("p", {}, `Candidate microbial estimate: ${fmt(microbial.microbial_rpm_primary)} per million primary QC-passing reads; ${fmt(microbial.candidate_unmapped_reads)} unmapped reads submitted. Cohort 97.5th percentile: ${microbial.cohort_p975 === null ? "unavailable" : fmt(microbial.cohort_p975)}${microbial.cohort_p975 === null ? "" : ` (n=${microbial.cohort_n}, ${microbial.cohort_version})`}.`)
+          ? h("p", {}, `Candidate microbial estimate: ${fmt(microbial.microbial_rpm_primary, "estimated reads/million", { unitDisplay: false })} per million primary QC-passing reads; ${fmtCount(microbial.candidate_unmapped_reads)} unmapped reads submitted. Cohort 97.5th percentile: ${microbial.cohort_p975 === null ? "unavailable" : fmt(microbial.cohort_p975, "estimated reads/million", { unitDisplay: false })}${microbial.cohort_p975 === null ? "" : ` (n=${fmtCount(microbial.cohort_n)}, ${microbial.cohort_version})`}.`)
           : "",
         microbial.microbial_rpm_primary !== undefined
-          ? h("p", { class: "help" }, `${fmt(microbial.too_short_unmapped_reads)} unmapped reads were shorter than the registered Bracken length; ${fmt(microbial.missing_sequence_unmapped_reads)} lacked sequence. Neither group was classified. The per-million rate still divides by all primary QC-passing non-duplicate reads.`)
+          ? h("p", { class: "help" }, `${fmtCount(microbial.too_short_unmapped_reads)} unmapped reads were shorter than the registered Bracken length; ${fmtCount(microbial.missing_sequence_unmapped_reads)} lacked sequence. Neither group was classified. The per-million rate still divides by all primary QC-passing non-duplicate reads.`)
           : "",
         microbial.omitted_taxa ? h("p", { class: "help" }, `${microbial.omitted_taxa} lower-abundance taxa omitted from the bounded display. The headline estimate includes them, so it can exceed the sum of visible rows; absent taxa are not assumed zero in cohort comparisons.`) : "",
         microbial.taxa.length
@@ -564,8 +950,8 @@
             h("thead", {}, h("tr", {}, ...["Candidate taxon", "Group", "Estimate / million", "Cohort 97.5th pct", "Context"].map((label) => h("th", { scope: "col" }, label)))),
             h("tbody", {}, ...microbial.taxa.map((row) => h("tr", {},
               h("th", { scope: "row" }, `${row.name} (taxid ${row.taxid})`),
-              h("td", {}, row.category), h("td", {}, fmt(row.rpm_primary)),
-              h("td", {}, row.cohort_p975 === null ? `unavailable (n=${row.cohort_n})` : `${fmt(row.cohort_p975)} (n=${row.cohort_n})`),
+              h("td", {}, row.category), h("td", {}, fmt(row.rpm_primary, "estimated reads/million", { unitDisplay: false })),
+              h("td", {}, row.cohort_p975 === null ? `unavailable (n=${row.cohort_n})` : `${fmt(row.cohort_p975, "estimated reads/million", { unitDisplay: false })} (n=${row.cohort_n})`),
               h("td", {}, row.above_cohort_p975 === null ? "no cohort reference" : row.above_cohort_p975 ? "above cohort percentile" : "at or below cohort percentile"))))))
           : h("p", {}, microbial.microbial_rpm_primary === 0
             ? "No species-level microbial estimate was returned under this database and read-length policy. Reads classified above species rank do not establish absence."
@@ -583,7 +969,7 @@
             h("th", { scope: "row" }, pair.peer_id12),
             h("td", {}, pair.state === "unavailable" ? pair.reason : fmt(pair.metrics.relatedness)),
             h("td", {}, pair.state === "unavailable" ? "unavailable" : fmt(pair.metrics.concordance)),
-            h("td", {}, pair.state === "unavailable" ? "unavailable" : fmt(pair.metrics.n)))))))
+            h("td", {}, pair.state === "unavailable" ? "unavailable" : fmtCount(pair.metrics.n)))))))
           : h("p", { class: sample.identity_pairs_reason ? "problem" : "" },
             sample.identity_pairs_reason || "No current pair comparison. Prepare fingerprints with lab run --only identity, then use lab identity compare SAMPLE_A SAMPLE_B.")));
     }
@@ -645,7 +1031,7 @@
       chip.hidden = !note;
       const duration = cell.nextElementSibling;
       const base = duration.dataset.runDuration;
-      duration.textContent = note === "latest run in progress" && base !== "—"
+      duration.textContent = note === "latest run in progress" && duration.dataset.runDurationAvailable === "1"
         ? `${base} (selected result)` : base;
     }
     const unavailable = new Set([...(sample.unreadable_results || []), ...(sample.ambiguous_results || [])]);
@@ -662,7 +1048,7 @@
 
   let polling = false;
   async function poll() {
-    if (polling) return;
+    if (polling || state.sessionExpired) return;
     polling = true;
     const controller = new AbortController();
     let timeoutId;
@@ -674,10 +1060,12 @@
       }, Math.max(100, POLL_MS * 0.8));
     });
     try {
-      const status = await Promise.race([api("/api/status", controller.signal), deadline]);
+      const status = await Promise.race([api("/api/status", controller.signal, { timeoutMs: null }), deadline]);
+      const wasDisconnected = state.connectionLost;
       state.missed = 0;
       state.lastOk = new Date();
-      document.body.classList.remove("dimmed");
+      state.connectionLost = false;
+      state.disconnectedSince = null;
       const previous = state.lastStatus;
       state.lastStatus = status;
       const logIssue = status.run_log_unavailable;
@@ -696,42 +1084,50 @@
           ? ` Earlier run (${status.interrupted.run_id}) stopped during ${status.interrupted.step || "a step"}.` : "";
         const logNotice = logIssue ? ` ${logIssue.run_id ? `Run log for ${logIssue.run_id}` : "Run status"} is unavailable (${logReason}).` : "";
         if (["run", "simulate cna", "simulate split"].includes(status.active.command)) {
-          setStatus(`A Lab run is in progress (step: ${status.active.step || "starting"}, ${minutes} min). Results below are from completed steps.${priorInterrupted}${logNotice}`,
+          setPollStatus(`A Lab run is in progress (step: ${status.active.step || "starting"}, ${minutes} min). Results below are from completed steps.${priorInterrupted}${logNotice}`,
             status.generation > state.generationAtLoad ? "Reload" : null);
         } else {
-          setStatus(`Lab ${status.active.command || "work"} is in progress. Results below are from completed steps.${priorInterrupted}${logNotice}`,
+          setPollStatus(`Lab ${status.active.command || "work"} is in progress. Results below are from completed steps.${priorInterrupted}${logNotice}`,
             status.generation > state.generationAtLoad ? "Reload" : null);
         }
       } else if (status.interrupted) {
         // A run that died (stale heartbeat, open log) is "interrupted", even
         // if it published results before it stopped.
-        setStatus(`The last run (${status.interrupted.run_id}) stopped during ${status.interrupted.step || "a step"}. Results shown are from completed steps. Rerun the same command; only missing results recompute.`,
+        setPollStatus(`The last run (${status.interrupted.run_id}) stopped during ${status.interrupted.step || "a step"}. Results shown are from completed steps. Rerun the same command; only missing results recompute.`,
           status.generation > state.generationAtLoad ? "Reload" : null);
       } else if (logIssue) {
-        setStatus(`The last run${logIssue.run_id ? ` (${logIssue.run_id})` : ""} status is unavailable (${logReason}). Results shown are from completed steps. Inspect the run log or rerun the command.`,
+        setPollStatus(`The last run${logIssue.run_id ? ` (${logIssue.run_id})` : ""} status is unavailable (${logReason}). Results shown are from completed steps. Inspect the run log or rerun the command.`,
           status.generation > state.generationAtLoad ? "Reload" : null);
       } else if (status.generation > state.generationAtLoad && previous && previous.active) {
-        setStatus("New results are available.", "Reload");
+        setPollStatus("New results are available.", "Reload");
       } else if (status.generation > state.generationAtLoad) {
-        setStatus("Results changed on disk since this page loaded.", "Reload");
+        setPollStatus("Results changed on disk since this page loaded.", "Reload");
       } else {
-        setStatus("");
+        setPollStatus("");
       }
       if (status.library && status.library.error) {
         document.getElementById("status").append(h("span", { class: "problem", "data-library-error": "" },
           ` Interpretation library on disk is invalid (${status.library.error}). Showing v${status.library.version}, loaded at ${status.library.loaded_at}.`));
       }
-      setControlsEnabled(true);
+      if (wasDisconnected && state.sample?.found) {
+        const refreshed = await refreshSelectedSample();
+        if (refreshed.kind !== "ok") setControlsEnabled(false);
+      } else setControlsEnabled(!state.resultStale);
+      if (!state.resultStale) document.body.classList.remove("dimmed");
+      renderRecoveryState();
       updateTrustQcRunStatus(status);
     } catch (error) {
-      if (error.session) { setStatus("Session expired. Restart `traceback lab serve --open`; it opens a fresh page."); return; }
+      if (error.session || state.sessionExpired) return;
       state.missed += 1;
       if (state.missed >= MISSED_LIMIT) {
         const since = state.lastOk ? state.lastOk.toTimeString().slice(0, 5) : "page load";
-        setStatus(`Lab server not responding since ${since}. What you see may be out of date. Restart \`traceback lab serve --open\`; it opens a fresh page.`);
+        state.connectionLost = true;
+        state.disconnectedSince = since;
+        state.resultStale = !!state.sample;
         document.body.classList.add("dimmed");
         restoreRenderedRoute();
         setControlsEnabled(false);
+        renderRecoveryState();
       }
     } finally {
       clearTimeout(timeoutId);
@@ -743,6 +1139,11 @@
   function setControlsEnabled(enabled) {
     setFetchControlEnabled(document.getElementById("sample-switcher"), enabled);
     for (const control of document.querySelectorAll("button[data-requires-server], select[data-requires-server]")) {
+      if (control.id === "readiness-refresh" && !state.connectionLost && !state.sessionExpired) {
+        setFetchControlEnabled(control, true);
+        if (state.selectedRefresh) control.disabled = true;
+        continue;
+      }
       setFetchControlEnabled(control, enabled);
     }
     for (const link of document.querySelectorAll("a[href^='#/']")) setLinkEnabled(link, enabled);
@@ -758,6 +1159,7 @@
   document.addEventListener("click", (event) => {
     if (document.body.dataset.disconnected !== "1" || !(event.target instanceof Element) ||
         !event.target.closest("a[href^='#/'], [data-requires-server], #sample-switcher")) return;
+    if (event.target.closest("#readiness-refresh") && !state.connectionLost && !state.sessionExpired) return;
     event.preventDefault();
     event.stopImmediatePropagation();
   }, true);
@@ -787,6 +1189,7 @@
   // -- start ----------------------------------------------------------------------------
   async function start() {
     setupKey();
+    setupLensNavigation();
     document.getElementById("lenses").addEventListener("scroll", updateNavFade, { passive: true });
     window.addEventListener("resize", revealCurrentNav);
     render();
@@ -817,12 +1220,15 @@
       await poll();
     } catch (error) {
       state.loading = false;
-      setStatus("");
+      state.initialLoadFailure = true;
+      if (error.session || error.message === "bootstrap") expireSession();
       const main = document.getElementById("main");
       main.replaceChildren(h("h1", { class: "view-title" }, "Traceback Lab"),
         h("p", { class: "problem" }, error.session || error.message === "bootstrap"
           ? "This page needs the one-use link printed by `traceback lab serve`. Press Enter in that terminal for a fresh link."
-          : `The Lab server could not be reached (${error.message}).`));
+          : "The Lab results could not be loaded. Check the server, then retry with the current selection."));
+      renderSampleContext();
+      renderRecoveryState();
     }
     document.getElementById("sample-switcher").addEventListener("change", (event) => {
       location.hash = `#/?sample=${event.target.value}`;

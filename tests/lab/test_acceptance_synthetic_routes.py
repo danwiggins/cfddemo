@@ -8,6 +8,7 @@ import re
 import time
 from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
@@ -133,7 +134,8 @@ def _sample() -> dict:
     return {
         "found": True, "id12": ID12, "source_id": "c" * 64,
         "full_input_id": "b" * 64, "example": False,
-        "run_utc": "2026-10-16T00:00:00Z", "depth": {"approx_depth_x": 1.0},
+        "run_utc": "2026-10-16T00:00:00Z", "completed_utc": "2026-10-16T00:00:00Z",
+        "depth": {"approx_depth_x": 1.0},
         "excluded_chunks": [], "interpretation_version": LIBRARY.version,
         "cohort_version": None, "cohort_n": 0,
         "algorithms": algorithms, "catalog": catalog, "unreadable_results": [],
@@ -162,13 +164,121 @@ def _server(tmp_path, sample):
                                      "library": sample["library_health"]}
     server.app.api.samples = lambda: {"samples": [{
         "id12": ID12, "run_utc": sample["run_utc"], "depth_x": 1.0,
-        "example": False, "counts": {"ok": len(REGISTRY), "skipped": 0, "failed": 0},
+        "example": sample["example"], "counts": {"ok": len(REGISTRY), "skipped": 0, "failed": 0},
         "outside_reference": len(REGISTRY), "controls": {"spike": None, "split": False},
         "unreadable_results": sample["unreadable_results"],
     }], "root_has_runs": True}
     server.app.api.sample = lambda id12: copy.deepcopy(sample) if id12 == ID12 else {"found": False, "candidates": []}
     server.app.api.cohorts = lambda: {"cohorts": [], "unavailable": []}
     return server
+
+
+@needs_chrome
+def test_guided_signals_use_recorded_values_and_show_unavailable_reasons(tmp_path) -> None:
+    sample = _sample()
+    sample["example"] = True
+    guide = {
+        ("fragment-size", "mode_bp"): (167, "bp", 24),
+        ("global-5mc", "cpg_5mc_fraction"): (0.83, "fraction", 120),
+        ("bam-qc", "mapped_fraction"): (0.92, "fraction", 200),
+    }
+    for algorithm in sample["algorithms"]:
+        for metric in algorithm["metrics"]:
+            key = (algorithm["algorithm_id"], metric["metric_id"])
+            if key in guide:
+                metric["value"], metric["unit"], metric["n"] = guide[key]
+    sample["stability"] = [{"algorithm_id": "fragment-size", "metric_id": "mode_bp",
+                            "verdict": "usable to 0.5"}]
+    with _server(tmp_path / "available", sample) as server:
+        dom = _dom(server, tmp_path / "available-dom", route=f"/sample/{ID12}/signals",
+                   want=lambda page: 'data-guide-signal="bam-qc/mapped_fraction"' in page)
+    cards = re.findall(r'<article class="signal-guide-card"[^>]*data-guide-signal="([^"]+)">(.*?)</article>', dom, re.S)
+    assert [key for key, _ in cards] == [f"{algorithm}/{metric}" for algorithm, metric in guide]
+    for (key, value), (_, card) in zip(guide.items(), cards, strict=True):
+        observed, unit, count = value
+        expected = f"{observed} bp" if unit == "bp" else f"{observed * 100:g}%"
+        assert f"Observed: <strong>{expected}</strong>" in card, key
+        assert f"{count}</p>" in card, key
+        assert "Method and source" in card and "Result provenance" in card
+        assert "Interpretation limit:" in card and "Stability" in card and "Trust/QC" in card
+    assert "seeded synthetic example" in dom and "no biological finding" in dom
+    assert "Stability: usable to 0.5" in cards[0][1]
+    assert "Unavailable guided signals" not in dom
+
+    sample["algorithms"] = [algorithm for algorithm in sample["algorithms"]
+                            if algorithm["algorithm_id"] != "global-5mc"]
+    mapped = next(algorithm for algorithm in sample["algorithms"] if algorithm["algorithm_id"] == "bam-qc")
+    next(metric for metric in mapped["metrics"] if metric["metric_id"] == "mapped_fraction").update(
+        value=None, reason="no_primary_reads")
+    sample["unreadable_results"] = ["global-5mc"]
+    with _server(tmp_path / "unavailable", sample) as server:
+        dom = _dom(server, tmp_path / "unavailable-dom", route=f"/sample/{ID12}/signals",
+                   want=lambda page: "Unavailable guided signals (2)" in page)
+    assert dom.index('data-guide-signal="fragment-size/mode_bp"') < dom.index("Unavailable guided signals (2)")
+    assert dom.index("Unavailable guided signals (2)") < dom.index('data-guide-signal="global-5mc/cpg_5mc_fraction"')
+    assert "unavailable (selected result unreadable)" in dom
+    assert "unavailable (no primary reads)" in dom
+
+
+@needs_chrome
+def test_signal_context_hash_validates_and_focuses_without_losing_the_route(tmp_path) -> None:
+    sample = _sample()
+    cases = [
+        ("algorithm=global-5mc&metric=cpg_5mc_fraction&family=methylation",
+         False, "global-5mc/cpg_5mc_fraction", "Methylation"),
+        ("algorithm=fragment-size&other=ignored", False, "fragment-size/mode_bp", "Fragmentomics"),
+        ("algorithm=fragment-size&algorithm=bam-qc", True, None, "Fragmentomics"),
+        ("algorithm=fragment-size&family=methylation", False, None, "Fragmentomics"),
+    ]
+    for index, (query, parser_invalid, focused, selected_family) in enumerate(cases):
+        observed = {}
+        with _server(tmp_path / str(index), sample) as server:
+            profile = tmp_path / f"context-profile-{index}"
+            target = f"#/sample/{ID12}/signals?{query}"
+
+            def inspect(_command, evaluate) -> None:
+                observed["route"] = evaluate("window.TracebackLab.state.route")
+                for _ in range(20):
+                    observed["focused"] = evaluate("document.activeElement?.getAttribute('data-guide-signal')")
+                    if observed["focused"] == focused or focused is None:
+                        break
+                    time.sleep(0.05)
+                observed["selected"] = evaluate("[...document.querySelectorAll('#main .subtab')].find((button) => button.getAttribute('aria-pressed') === 'true')?.textContent")
+                observed["hash"] = evaluate("location.hash")
+
+            dom = _dom_cdp(
+                [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+                 f"--user-data-dir={profile}", server.issue_link()], profile,
+                action=f"(() => {{ location.hash = {json.dumps(target)}; return true; }})()",
+                ok=lambda page: 'data-ready="1"' in page and "Start with three measured signals" in page
+                and (("Context link is invalid" if index == 2 else "does not match this sample") in page
+                     if index >= 2 else 'aria-pressed="true"' in page),
+                interact=inspect,
+            )
+        assert observed["route"]["contextInvalid"] is parser_invalid
+        assert observed["hash"] == target
+        assert observed["selected"] == selected_family
+        if focused:
+            assert observed["focused"] == focused
+        if index == 2:
+            assert "Context link is invalid" in dom
+        if index == 3:
+            assert "does not match this sample" in dom
+
+
+@needs_chrome
+def test_bootstrap_accepts_a_bounded_multi_key_signal_context(tmp_path) -> None:
+    with _server(tmp_path, _sample()) as server:
+        profile = tmp_path / "context-bootstrap-profile"
+        route = f"/sample/{ID12}/signals?algorithm=global-5mc&metric=cpg_5mc_fraction&family=methylation"
+        link = server.issue_link() + "&route=" + quote(route, safe="")
+        dom = _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", link], profile,
+            ok=lambda page: 'data-ready="1"' in page and 'data-guide-signal="global-5mc/cpg_5mc_fraction"' in page,
+        )
+    assert "Start with three measured signals" in dom
+    assert "Context link is invalid" not in dom
 
 
 @needs_chrome
@@ -180,6 +290,7 @@ def test_landing_defaults_to_completed_run_with_newer_active_sample(tmp_path) ->
     active = copy.deepcopy(completed)
     active["id12"] = active_id12
     active["source_id"] = "d" * 64
+    active["completed_utc"] = None
     active["headline"] = {"sentence": "Active fixture has no completed results.", "unlock": None}
     active["algorithms"] = []
     active["catalog"] = []
@@ -221,9 +332,115 @@ def test_landing_defaults_to_completed_run_with_newer_active_sample(tmp_path) ->
                                             else "No completed Lab run yet") in dom
                 assert f'href="#/?sample={active_id12}"' in dom
                 assert "Select a sample" in dom
+                assert "No sample selected" in dom
             else:
                 assert heading is not None and heading.group(1) == expected, label
                 assert f'href="#/sample/{active_id12}/findings"' in dom
+            if label == "explicit-active":
+                assert "no completion recorded for this sample" in dom and "A Lab run is in progress" in dom
+
+
+@needs_chrome
+def test_landing_recorded_date_is_not_labeled_as_latest_activity_during_rerun(tmp_path) -> None:
+    sample = _sample()
+    with _server(tmp_path, sample) as server:
+        server.app.api.status = lambda: {
+            "generation": 2,
+            "active": {"run_id": "r-20261018-0000-abcd", "command": "run", "step": "bam-qc",
+                       "started_utc": "2026-10-18T00:00:00Z", "source_id": sample["source_id"],
+                       "input_id": "e" * 64},
+            "interrupted": None,
+            "library": sample["library_health"],
+        }
+        dom = _dom(server, tmp_path / "browser", route="/",
+                   want=lambda page: "A Lab run is in progress" in page and "Recorded completion (UTC)" in page)
+    assert f'<dt>Recorded completion (UTC)</dt><dd>{sample["run_utc"][:10]}<p class="help">' in dom
+    assert "Completion recorded for this selected sample" in dom
+    assert "Latest recorded activity" not in dom
+
+
+@needs_chrome
+def test_landing_actions_keep_synthetic_status_on_each_destination(tmp_path) -> None:
+    sample = _sample()
+    sample["example"] = True
+    observed = []
+    with _server(tmp_path, sample) as server:
+        profile = tmp_path / "scientist-landing"
+
+        def visit(command, evaluate) -> None:
+            assert evaluate("document.getElementById('sample-context').closest('header') !== null")
+            assert evaluate("document.getElementById('sample-context').textContent").count("EXAMPLE (synthetic)") == 1
+            assert evaluate("document.querySelector('.landing-intro').textContent").count("EXAMPLE (synthetic)") == 1
+            evaluate("document.querySelector('.landing-actions a').classList.add('disabled')")
+            assert evaluate("getComputedStyle(document.querySelector('.landing-actions a')).backgroundColor") == "rgb(255, 255, 255)"
+            evaluate("document.querySelector('.landing-actions a').classList.remove('disabled')")
+            actions = (
+                ("Explore signals", "signals", "Signals"),
+                ("Check reliability", "trust-qc", "Trust / QC"),
+                ("Explore methods", "methods", "Methods"),
+            )
+            for label, lens, heading in actions:
+                href = evaluate(f"[...document.querySelectorAll('.landing-actions a')].find(a => a.textContent === {json.dumps(label)})?.getAttribute('href')")
+                assert href == f"#/sample/{ID12}/{lens}"
+                evaluate(f"[...document.querySelectorAll('.landing-actions a')].find(a => a.textContent === {json.dumps(label)}).click()")
+                for _ in range(100):
+                    if evaluate("location.hash") == href and evaluate("document.querySelector('#main h1')?.textContent.trim()") == heading:
+                        break
+                    time.sleep(0.05)
+                assert evaluate("location.hash") == href
+                assert evaluate("document.querySelector('#main h1')?.textContent.trim()") == heading
+                observed.append((label, evaluate("location.hash"), evaluate("document.getElementById('sample-context').textContent")))
+                evaluate("location.hash = '#/'")
+                for _ in range(100):
+                    if evaluate("document.querySelector('.landing-actions') !== null"):
+                        break
+                    time.sleep(0.05)
+                assert evaluate("document.querySelector('.landing-actions') !== null")
+            for lens in SAMPLE_ROUTES:
+                route = f"#/sample/{ID12}/{lens}"
+                evaluate(f"location.hash = {json.dumps(route)}")
+                for _ in range(100):
+                    if evaluate("window.TracebackLab.state.renderedHash") == route:
+                        break
+                    time.sleep(0.05)
+                assert evaluate("window.TracebackLab.state.renderedHash") == route
+                assert "EXAMPLE (synthetic)" in evaluate("document.getElementById('sample-context').textContent")
+            command("Emulation.setEmulatedMedia", {"media": "print"})
+            assert evaluate("getComputedStyle(document.getElementById('sample-context')).display") != "none"
+            assert "EXAMPLE (synthetic)" in evaluate("document.getElementById('sample-context').textContent")
+            evaluate("location.hash = '#/about/clia'")
+            for _ in range(100):
+                if evaluate("window.TracebackLab.state.renderedHash") == "#/about/clia":
+                    break
+                time.sleep(0.05)
+            assert evaluate("window.TracebackLab.state.renderedHash") == "#/about/clia"
+            assert evaluate("document.getElementById('sample-context').textContent").endswith("completion recorded 2026-10-16")
+
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + "&route=/"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'class="landing-actions"' in dom,
+            interact=visit,
+        )
+    assert [route for _, route, _ in observed] == [f"#/sample/{ID12}/{lens}" for lens in ("signals", "trust-qc", "methods")]
+    assert all("EXAMPLE (synthetic)" in context for _, _, context in observed)
+
+
+@needs_chrome
+def test_landing_names_result_selection_problems_beside_recorded_counts(tmp_path) -> None:
+    sample = _sample()
+    sample["unreadable_results"] = ["bam-qc"]
+    sample["ambiguous_results"] = ["fragment-size"]
+    sample["malformed_result_selections"] = True
+    sample["algorithms"] = [algorithm for algorithm in sample["algorithms"] if algorithm["algorithm_id"] != "bam-qc"]
+    sample["algorithms"].append({"algorithm_id": "read-summary", "status": "failed", "hidden": True})
+    with _server(tmp_path, sample) as server:
+        dom = _dom(server, tmp_path / "browser", route="/",
+                   want=lambda page: "Result selection problems" in page)
+    assert f"{len(sample['algorithms']) - 1} visible entries" in dom
+    assert "1 hidden intermediate failed; see Trust/QC" in dom
+    assert "1 unreadable" in dom and "1 ambiguous" in dom
+    assert "malformed selection present" in dom
 
 
 def test_disclosure_fixture_is_nonvacuous_and_registry_complete() -> None:
@@ -579,10 +796,15 @@ def test_loading_copy_while_synthetic_listing_is_in_flight(tmp_path) -> None:
 
         server.app.api.samples = delayed_listing
         profile = Path(tmp_path / "browser-profile")
+
+        def check_reservation(_command, evaluate) -> None:
+            assert evaluate("parseFloat(getComputedStyle(document.querySelector('.loading-intro')).minHeight)") >= 200
+
         dom = _dom_cdp(
             [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
              f"--user-data-dir={profile}", server.issue_link()],
             profile, ok=lambda d: "Loading Lab results…" in d, timeout=12,
+            interact=check_reservation,
         )
     assert "Loading Lab results…" in dom and "Loading…" in dom
 
@@ -599,6 +821,7 @@ def test_empty_copy_and_complete_example_commands(tmp_path) -> None:
         about = _dom(server, tmp_path / "clia", route="/about/clia",
                      want=lambda page: "What CLIA is." in page)
     assert '<section class="clia-panel"' in dom
+    assert "Unknown requested sample" in unknown
     short = re.search(r'<div class="clia-short">(.*?)</div>', dom, re.DOTALL)
     full = re.search(r'<div class="clia-full"[^>]*>(.*?)</div>', dom, re.DOTALL)
     assert short is not None and full is not None

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import shlex
 from types import SimpleNamespace
 
 import pytest
@@ -251,8 +250,22 @@ def test_compare_cohort_unavailable_has_no_metrics(tmp_path, monkeypatch, cohort
     assert payload["problem"]["code"] == ("TBX-LAB-022" if cohort_failure == "damaged" else "TBX-LAB-017")
     assert "fix" in payload["problem"] and "docs" in payload["problem"]
     if cohort_failure == "unbuilt":
-        assert f"--root {shlex.quote(str(root))}" in payload["problem"]["fix"]
-        assert "--root R" not in payload["problem"]["fix"]
+        assert "--root '<ROOT>'" in payload["problem"]["fix"]
+        assert str(root) not in payload["problem"]["fix"]
+
+
+def test_compare_recovery_problem_scrubs_local_paths() -> None:
+    problem = LabProblem(
+        "TBX-LAB-017", cause="Selected record at /Users/alice/private/cohort.json is unreadable",
+        fix="Retry with --root /tmp/local-root after restoring the file",
+    )
+
+    projected = web_api._recovery_problem(problem)
+
+    assert projected["code"] == "TBX-LAB-017" and projected["docs"].endswith("#tbx-lab-017")
+    assert "selected Lab record" in projected["cause"]
+    assert "known-good backup" in projected["fix"]
+    assert "/Users/" not in str(projected) and "/tmp/" not in str(projected)
 
 
 def test_compare_target_unavailable_has_no_metrics(tmp_path, monkeypatch) -> None:

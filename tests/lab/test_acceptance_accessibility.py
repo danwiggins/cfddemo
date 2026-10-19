@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 import time
@@ -189,6 +190,101 @@ def test_mobile_lens_deep_link_and_route_changes_reveal_current_tab(tmp_path) ->
 
 
 @needs_chrome
+def test_mobile_edge_lens_pointer_click_reaches_route(tmp_path) -> None:
+    """A pointer-focused edge link must stay under the pointer until mouseup."""
+
+    with _server(tmp_path, _sample()) as server:
+        profile = tmp_path / "browser-profile"
+
+        def inspect(command, evaluate) -> None:
+            command("Page.bringToFront")
+            before = evaluate("""(() => {
+              const nav = document.getElementById('lenses');
+              nav.scrollLeft = 0;
+              const link = nav.querySelector('a[href$="/stability"]');
+              const frame = nav.getBoundingClientRect();
+              const rect = link.getBoundingClientRect();
+              const x = frame.right - 4;
+              const y = (rect.top + rect.bottom) / 2;
+              window.edgePointerPoint = {x, y};
+              window.edgePointerEvents = [];
+              for (const name of ['pointerdown', 'mousedown', 'focusin', 'pointerup', 'mouseup', 'click']) {
+                document.addEventListener(name, (event) => window.edgePointerEvents.push({
+                  name, target: event.target.closest?.('a')?.getAttribute('href') || event.target.tagName,
+                  scrollLeft: nav.scrollLeft
+                }), true);
+              }
+              return { x, y, href: link.getAttribute('href'),
+                partlyVisible: rect.left < frame.right && rect.right > frame.right,
+                hit: document.elementFromPoint(x, y)?.closest('a')?.getAttribute('href'),
+                scrollLeft: nav.scrollLeft };
+            })()""")
+            assert before["partlyVisible"] and before["hit"] == before["href"], before
+            click = {"x": before["x"], "y": before["y"], "button": "left", "clickCount": 1}
+            command("Input.dispatchMouseEvent", {"type": "mousePressed", **click})
+            down = evaluate("""(() => ({
+              focused: document.activeElement?.getAttribute('href'),
+              hit: document.elementFromPoint(window.edgePointerPoint.x, window.edgePointerPoint.y)
+                ?.closest('a')?.getAttribute('href'),
+              scrollLeft: document.getElementById('lenses').scrollLeft
+            }))()""")
+            assert down["focused"] == before["href"], (before, down)
+            assert down["hit"] == before["href"], (before, down)
+            command("Input.dispatchMouseEvent", {"type": "mouseReleased", **click})
+            for _ in range(40):
+                if evaluate(f"location.hash === '#/sample/{ID12}/stability' && document.querySelector('#main h1')?.textContent === 'Stability'"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail(f"Edge lens click did not navigate: {before}, {down}, {evaluate('window.edgePointerEvents')}")
+            events = evaluate("window.edgePointerEvents")
+            assert any(row["name"] == "click" and row["target"] == before["href"] for row in events), events
+
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", "--window-size=375,800",
+             server.issue_link() + f"&route=/sample/{ID12}/findings"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'aria-current="page">Findings' in dom,
+            interact=inspect, viewport=(375, 800),
+        )
+
+
+@needs_chrome
+def test_mobile_lens_keyboard_focus_is_visible(tmp_path) -> None:
+    """Tabbing to an edge lens keeps its label and focus outline in view."""
+
+    with _server(tmp_path, _sample()) as server:
+        profile = tmp_path / "browser-profile"
+
+        def inspect(command, evaluate) -> None:
+            command("Page.bringToFront")
+            evaluate("document.getElementById('lenses').scrollLeft = 0")
+            evaluate("document.querySelector('#lenses a[href$=\"/findings\"]').focus()")
+            _key(command, "Tab", "Tab", 9)
+            _key(command, "Tab", "Tab", 9)
+            focused = evaluate("""(() => {
+              const nav = document.getElementById('lenses');
+              const link = document.activeElement;
+              const frame = nav.getBoundingClientRect();
+              const rect = link.getBoundingClientRect();
+              return { href: link.getAttribute('href'), visible: link.matches(':focus-visible'),
+                outline: getComputedStyle(link).outlineWidth,
+                inView: rect.left >= frame.left + 19 && rect.right <= frame.right - 19 };
+            })()""")
+            assert focused["href"] == f"#/sample/{ID12}/stability", focused
+            assert focused["visible"] and float(focused["outline"].removesuffix("px")) >= 3, focused
+            assert focused["inView"], focused
+
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", "--window-size=375,800",
+             server.issue_link() + f"&route=/sample/{ID12}/findings"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'aria-current="page">Findings' in dom,
+            interact=inspect, viewport=(375, 800),
+        )
+
+
+@needs_chrome
 def test_mobile_nav_uses_final_width_after_lens_content_renders(tmp_path) -> None:
     """A classic page scrollbar may narrow the nav after its links are added."""
 
@@ -198,9 +294,9 @@ def test_mobile_nav_uses_final_width_after_lens_content_renders(tmp_path) -> Non
         server.app.assets["/assets/lab-views.js"] = (kind, source + b"""
           const originalMethods = window.TracebackLabViews.methods;
           window.TracebackLabViews.methods = (sample) => {
-            const nav = document.getElementById('lenses');
-            nav.style.width = 'calc(100% - 47px)';
-            nav.dispatchEvent(new Event('scroll'));
+            const wrapper = document.querySelector('.lens-navigation');
+            wrapper.style.width = 'calc(100% - 47px)';
+            document.getElementById('lenses').dispatchEvent(new Event('scroll'));
             return originalMethods(sample);
           };
         """)
@@ -209,10 +305,11 @@ def test_mobile_nav_uses_final_width_after_lens_content_renders(tmp_path) -> Non
         def inspect(_command, evaluate) -> None:
             observed.update(evaluate("""(() => {
               const nav = document.querySelector('#lenses');
+              const wrapper = nav.closest('.lens-navigation');
               const tab = nav.querySelector('[aria-current="page"]').getBoundingClientRect();
               const box = nav.getBoundingClientRect();
               return {
-                width: innerWidth, navWidth: nav.clientWidth,
+                width: innerWidth, wrapperWidth: wrapper.clientWidth, navWidth: nav.clientWidth,
                 scroll: nav.scrollLeft, maxScroll: nav.scrollWidth - nav.clientWidth,
                 visible: tab.left >= box.left && tab.right <= box.right,
                 leftFade: nav.classList.contains('more-left'),
@@ -228,9 +325,126 @@ def test_mobile_nav_uses_final_width_after_lens_content_renders(tmp_path) -> Non
             interact=inspect, viewport=(360, 740),
         )
 
-    assert observed["width"] == 360 and observed["navWidth"] < 328, observed
+    assert observed["width"] == 360 and observed["wrapperWidth"] < 328, observed
+    assert observed["navWidth"] < observed["wrapperWidth"], observed
     assert observed["visible"] and observed["leftFade"] and not observed["rightFade"], observed
     assert observed["scroll"] >= observed["maxScroll"] - 1, observed
+
+
+@needs_chrome
+@pytest.mark.parametrize("width", [375, 768, 1440])
+def test_lens_navigation_labels_controls_and_history(width, tmp_path) -> None:
+    """P03: full labels, discoverable mobile scrolling and retained route focus."""
+
+    with _server(tmp_path, _sample()) as server:
+        profile = tmp_path / "browser-profile"
+
+        def snapshot(evaluate) -> dict:
+            return evaluate("""(() => {
+              const nav = document.getElementById('lenses');
+              const controls = [...document.querySelectorAll('.lens-scroll-control')];
+              const links = [...nav.querySelectorAll('a')];
+              const active = nav.querySelector('[aria-current="page"]');
+              const frame = nav.getBoundingClientRect();
+              const tab = active.getBoundingClientRect();
+              return {
+                pageOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
+                navOverflow: nav.scrollWidth > nav.clientWidth + 1,
+                scrollLeft: nav.scrollLeft,
+                activeVisible: tab.left >= frame.left - 1 && tab.right <= frame.right + 1,
+                labels: links.map((link) => ({nowrap: getComputedStyle(link).whiteSpace === 'nowrap',
+                  shrink: getComputedStyle(link).flexShrink, height: link.getBoundingClientRect().height})),
+                controls: controls.map((control) => ({name: control.getAttribute('aria-label'),
+                  target: control.getAttribute('aria-controls'), disabled: control.disabled,
+                  visible: getComputedStyle(control).display !== 'none',
+                  width: control.getBoundingClientRect().width,
+                  height: control.getBoundingClientRect().height}))
+              };
+            })()""")
+
+        def inspect(command, evaluate) -> None:
+            command("Page.bringToFront")
+            initial = snapshot(evaluate)
+            assert not initial["pageOverflow"] and initial["activeVisible"], initial
+            assert len(initial["labels"]) == 9, initial
+            assert all(row["nowrap"] and row["shrink"] == "0" for row in initial["labels"]), initial
+            assert [row["name"] for row in initial["controls"]] == ["Previous views", "More views"]
+            assert all(row["target"] == "lenses" for row in initial["controls"]), initial
+            if width == 375:
+                assert initial["navOverflow"] and initial["controls"][0]["visible"], initial
+                assert all(row["width"] >= 43.5 and row["height"] >= 43.5 for row in initial["controls"]), initial
+                assert not initial["controls"][0]["disabled"] and initial["controls"][1]["disabled"], initial
+                evaluate("document.querySelector('.lens-scroll-prev').focus()")
+                _key(command, "Enter", "Enter", 13)
+                moved = snapshot(evaluate)
+                assert moved["scrollLeft"] < initial["scrollLeft"] and not moved["controls"][1]["disabled"], moved
+                evaluate("document.querySelector('.lens-scroll-next').focus()")
+                _key(command, "Enter", "Enter", 13)
+                at_end = snapshot(evaluate)
+                assert at_end["scrollLeft"] > moved["scrollLeft"] and at_end["controls"][1]["disabled"], at_end
+                assert evaluate("document.activeElement === document.querySelector('.lens-scroll-next')")
+                _key(command, "Enter", "Enter", 13)
+                assert snapshot(evaluate)["scrollLeft"] == at_end["scrollLeft"]
+                evaluate("document.querySelector('.lens-scroll-prev').click()")
+                evaluate("document.querySelector('#lenses [aria-current=page]').focus()")
+                assert snapshot(evaluate)["activeVisible"]
+                evaluate("document.querySelector('.lens-scroll-prev').focus()")
+                for _ in range(10):
+                    if snapshot(evaluate)["controls"][0]["disabled"]:
+                        break
+                    _key(command, "Enter", "Enter", 13)
+                else:
+                    pytest.fail("Previous views did not reach the first edge")
+                at_start = snapshot(evaluate)
+                assert evaluate("document.activeElement === document.querySelector('.lens-scroll-prev')")
+                _key(command, "Enter", "Enter", 13)
+                assert snapshot(evaluate)["scrollLeft"] == at_start["scrollLeft"]
+                assert evaluate(f"location.hash === '#/sample/{ID12}/methods'")
+                assert evaluate("document.querySelector('#main h1')?.textContent === 'Methods'")
+            else:
+                assert all(not row["visible"] for row in initial["controls"]), initial
+
+            evaluate(f"location.hash = '#/sample/{ID12}/findings'")
+            for _ in range(40):
+                if evaluate("document.querySelector('#main h1')?.textContent === 'Findings'"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("Findings route did not render")
+            evaluate("history.back()")
+            for _ in range(40):
+                if evaluate("document.querySelector('#main h1')?.textContent === 'Methods'"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("browser Back did not restore Methods")
+            assert evaluate("document.activeElement === document.querySelector('#main h1')")
+            assert snapshot(evaluate)["activeVisible"]
+            if width == 375:
+                evaluate("location.hash = '#/'")
+                for _ in range(40):
+                    if evaluate("document.querySelector('#main h1')?.textContent.startsWith('Traceback Lab')"):
+                        break
+                    time.sleep(0.05)
+                else:
+                    pytest.fail("landing route did not render")
+                assert evaluate("document.querySelector('.lens-navigation').hidden")
+                evaluate(f"location.hash = '#/sample/{ID12}/methods'")
+                for _ in range(40):
+                    if evaluate("document.querySelector('#main h1')?.textContent === 'Methods'"):
+                        break
+                    time.sleep(0.05)
+                else:
+                    pytest.fail("landing-to-lens route did not render")
+                assert snapshot(evaluate)["activeVisible"]
+
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", f"--window-size={width},800",
+             server.issue_link() + f"&route=/sample/{ID12}/methods"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'aria-current="page">Methods' in dom,
+            interact=inspect, viewport=(width, 800),
+        )
 
 
 @needs_chrome
@@ -449,6 +663,37 @@ def _key(command, key: str, code: str, virtual: int) -> None:
     command("Input.dispatchKeyEvent", {"type": "keyUp", **args})
 
 
+def _walk_live_tab_order(command, evaluate, selector: str, label: str) -> list[int]:
+    """Prove each Tab reaches the next control enabled at that keypress."""
+
+    expression = f"""(() => {{
+      const all = [...document.querySelectorAll({json.dumps(selector)})];
+      const current = all.indexOf(document.activeElement);
+      const eligible = (el) =>
+        (el.tabIndex >= 0 || (el.matches('.table-wrap') && el.scrollWidth > el.clientWidth + 1))
+        && !el.disabled && el.getClientRects().length
+        && getComputedStyle(el).visibility !== 'hidden';
+      const next = all.findIndex((el, index) => index > current && eligible(el));
+      const active = document.activeElement;
+      return {{current, next, count: all.length,
+        html: active?.outerHTML.slice(0, 180),
+        visible: active?.matches(':focus-visible'),
+        outline: active ? getComputedStyle(active).outlineWidth : '0px'}};
+    }})()"""
+    visited = []
+    maximum = evaluate(expression)["count"] + 10
+    for _ in range(maximum):
+        before = evaluate(expression)
+        if before["next"] < 0:
+            return visited
+        _key(command, "Tab", "Tab", 9)
+        after = evaluate(expression)
+        assert after["current"] == before["next"] and after["visible"], (label, before, after)
+        assert float(after["outline"].removesuffix("px")) >= 3, (label, after)
+        visited.append(after["current"])
+    pytest.fail(f"{label}: Tab order did not reach its final control")
+
+
 @needs_chrome
 def test_keyboard_focus_order_disclosures_dialog_and_route_focus(tmp_path) -> None:
     sample = _sample()
@@ -461,23 +706,9 @@ def test_keyboard_focus_order_disclosures_dialog_and_route_focus(tmp_path) -> No
             command("Page.bringToFront")
             assert evaluate("document.activeElement?.tagName") == "H1"
             evaluate("document.querySelector('.skip-link').focus()")
-            expected = evaluate("""(() => [...document.querySelectorAll('a[href], button, select, summary, input')]
-              .flatMap((el, index) => el.tabIndex >= 0 && !el.disabled && el.getClientRects().length
-                && getComputedStyle(el).visibility !== 'hidden' ? [index] : []))()""")
-            assert len(expected) >= 8
-            indices = []
-            for next_index in expected[1:]:
-                _key(command, "Tab", "Tab", 9)
-                state = evaluate("""(() => {
-                  const active = document.activeElement;
-                  const order = [...document.querySelectorAll('a[href], button, select, summary, input')];
-                  return {index: order.indexOf(active), tag: active.tagName, id: active.id,
-                    focusVisible: active.matches(':focus-visible'), outline: getComputedStyle(active).outlineWidth};
-                })()""")
-                assert state["index"] == next_index and state["focusVisible"], f"focus={state['tag']}#{state['id']} {state}"
-                assert float(state["outline"].removesuffix("px")) >= 3
-                indices.append(state["index"])
-            assert indices == expected[1:]
+            visited = _walk_live_tab_order(command, evaluate,
+                "a[href], button, select, summary, input", "findings")
+            assert len(visited) >= 7
 
             evaluate("document.querySelector('.finding-group summary').focus()")
             assert evaluate("document.activeElement?.tagName") == "SUMMARY"
@@ -992,6 +1223,242 @@ def test_pending_navigation_is_cancelled_when_status_disconnects(tmp_path) -> No
 
 
 @needs_chrome
+@pytest.mark.parametrize("failure", ["unavailable", "invalid", "mismatch", "network", "session"])
+def test_failed_sample_navigation_restores_rendered_identity(tmp_path, failure) -> None:
+    """A failed requested hash never remains above another sample's result."""
+
+    requested = "aaaaaaaaaaaa"
+    with _server(tmp_path, _sample()) as server:
+        listing = server.app.api.samples()
+        server.app.api.samples = lambda: {**listing, "samples": [
+            listing["samples"][0], {**listing["samples"][0], "id12": requested},
+        ]}
+
+        def inspect(_command, evaluate) -> None:
+            evaluate("""(() => {
+              const original = window.fetch;
+              window.releaseRequested = null;
+              window.fetch = (...args) => String(args[0]) === '/api/samples/aaaaaaaaaaaa'
+                ? new Promise((resolve, reject) => { window.releaseRequested = {resolve, reject}; })
+                : original.apply(window, args);
+              location.hash = '#/sample/aaaaaaaaaaaa/findings';
+            })()""")
+            for _ in range(40):
+                if evaluate("!!window.releaseRequested"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("requested sample fetch did not start")
+            if failure == "network":
+                evaluate("window.releaseRequested.reject(new TypeError('private /Users/example/input.bam'))")
+            else:
+                response = {
+                    "unavailable": "new Response('{}', {status: 503})",
+                    "invalid": "new Response('{', {status: 200})",
+                    "mismatch": "new Response(JSON.stringify({found:true, id12:'bbbbbbbbbbbb', catalog:[], algorithms:[]}), {status:200})",
+                    "session": "new Response('{}', {status: 401})",
+                }[failure]
+                evaluate(f"window.releaseRequested.resolve({response})")
+            for _ in range(40):
+                ready = evaluate("window.TracebackLab.state.sessionExpired" if failure == "session"
+                                 else "!!window.TracebackLab.state.loadFailure")
+                if ready:
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail(f"{failure} did not resolve to visible recovery")
+            state = evaluate("""(() => ({ hash: location.hash,
+              rendered: window.TracebackLab.state.renderedHash,
+              sample: window.TracebackLab.state.sample?.id12,
+              selected: document.getElementById('sample-switcher').value,
+              title: document.querySelector('#main h1')?.textContent,
+              stale: document.getElementById('freshness-state').dataset.stale,
+              status: document.getElementById('status').textContent,
+              action: document.getElementById('recovery-action').textContent,
+              expired: window.TracebackLab.state.sessionExpired
+            }))()""")
+            assert state["hash"] == state["rendered"] == f"#/sample/{ID12}/findings", state
+            assert state["sample"] == state["selected"] == ID12 and state["title"].startswith("Findings"), state
+            assert state["stale"] == "true", state
+            assert "/Users/" not in str(state), state
+            if failure == "session":
+                assert state["expired"] and "Session expired" in state["status"], state
+                assert "fresh one-use link" in state["action"], state
+            else:
+                assert "Could not open selected sample" in state["status"], state
+                assert "Retry loading this selection" in state["action"], state
+
+        profile = tmp_path / "browser-profile"
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/findings"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'aria-current="page">Findings' in dom,
+            interact=inspect,
+        )
+
+
+@needs_chrome
+def test_timed_out_json_request_discards_late_401(tmp_path) -> None:
+    """A response arriving after the explicit deadline cannot expire the page."""
+
+    with _server(tmp_path, _sample()) as server:
+        profile = tmp_path / "browser-profile"
+
+        def inspect(_command, evaluate) -> None:
+            evaluate("""(() => {
+              const original = window.fetch;
+              window.fetch = (...args) => {
+                if (String(args[0]) !== '/api/late-401') return original.apply(window, args);
+                window.lateRequestCache = args[1]?.cache;
+                return new Promise((resolve) => { window.releaseLate401 = resolve; });
+              };
+              window.lateOutcome = 'pending';
+              window.TracebackLab.requestJson('/api/late-401', {timeoutMs: 20})
+                .then(() => { window.lateOutcome = 'unexpected success'; })
+                .catch((error) => { window.lateOutcome = error.kind; });
+            })()""")
+            for _ in range(40):
+                if evaluate("window.lateOutcome === 'timeout'"):
+                    break
+                time.sleep(0.01)
+            else:
+                pytest.fail("request did not reach its explicit deadline")
+            assert evaluate("window.lateRequestCache === 'no-store'")
+            evaluate("window.releaseLate401(new Response('{}', {status:401}))")
+            time.sleep(0.05)
+            assert evaluate("window.lateOutcome === 'timeout'")
+            assert evaluate("window.TracebackLab.state.sessionExpired === false")
+            assert evaluate("document.body.dataset.disconnected !== '1'")
+
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/findings"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'aria-current="page">Findings' in dom,
+            interact=inspect,
+        )
+
+
+@needs_chrome
+def test_first_sample_load_failure_has_no_old_result(tmp_path) -> None:
+    """A first-load API failure has its own recovery view and no invented sample."""
+
+    requested = "aaaaaaaaaaaa"
+    with _server(tmp_path, _sample()) as server:
+        def unavailable(_id12):
+            raise OSError("private /Users/example/input.bam")
+        server.app.api.sample = unavailable
+        profile = tmp_path / "browser-profile"
+
+        def inspect(_command, evaluate) -> None:
+            shown = evaluate("""(() => ({
+              hash: location.hash, title: document.querySelector('#main h1')?.textContent,
+              sample: window.TracebackLab.state.sample,
+              retry: document.getElementById('recovery-action').textContent,
+              body: document.getElementById('main').textContent
+            }))()""")
+            assert shown["hash"] == f"#/sample/{requested}/findings", shown
+            assert shown["title"] == "Could not open selected sample" and shown["sample"] is None, shown
+            assert "Retry loading this selection" in shown["retry"] and "/Users/" not in str(shown), shown
+            assert evaluate("document.getElementById('sample-context').textContent.includes('could not be loaded')")
+
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{requested}/findings"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'Could not open selected sample' in dom,
+            interact=inspect,
+        )
+
+
+@needs_chrome
+def test_bootstrap_listing_failure_clears_loading_identity(tmp_path) -> None:
+    """The header never claims the sample is still loading after startup fails."""
+
+    with _server(tmp_path, _sample()) as server:
+        def unavailable():
+            raise OSError("private /Users/example/root")
+        server.app.api.samples = unavailable
+        profile = tmp_path / "browser-profile"
+
+        def inspect(_command, evaluate) -> None:
+            context = evaluate("document.getElementById('sample-context').textContent")
+            assert context == "Sample list could not be loaded", context
+            assert evaluate("document.getElementById('status').textContent.includes('Lab results could not be loaded')")
+            assert evaluate("document.getElementById('recovery-action').textContent.includes('Retry loading Lab')")
+
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + "&route=/"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'Sample list could not be loaded' in dom,
+            interact=inspect,
+        )
+
+
+@needs_chrome
+@pytest.mark.parametrize("older_first", [True, False])
+def test_older_sample_error_cannot_replace_newer_selection(tmp_path, older_first) -> None:
+    """An obsolete 401 is discarded in either response completion order."""
+
+    older, newer = "aaaaaaaaaaaa", "bbbbbbbbbbbb"
+    selected = copy.deepcopy(_sample())
+    selected["id12"] = newer
+    with _server(tmp_path, _sample()) as server:
+        listing = server.app.api.samples()
+        server.app.api.samples = lambda: {**listing, "samples": [
+            listing["samples"][0], {**listing["samples"][0], "id12": older},
+            {**listing["samples"][0], "id12": newer},
+        ]}
+
+        def inspect(_command, evaluate) -> None:
+            evaluate("""(() => {
+              const original = window.fetch;
+              window.pendingSelections = {};
+              window.fetch = (...args) => ['/api/samples/aaaaaaaaaaaa', '/api/samples/bbbbbbbbbbbb'].includes(String(args[0]))
+                ? new Promise((resolve) => { window.pendingSelections[String(args[0])] = resolve; })
+                : original.apply(window, args);
+              location.hash = '#/sample/aaaaaaaaaaaa/findings';
+            })()""")
+            for _ in range(40):
+                if evaluate("!!window.pendingSelections['/api/samples/aaaaaaaaaaaa']"):
+                    break
+                time.sleep(0.05)
+            evaluate("location.hash = '#/sample/bbbbbbbbbbbb/findings'")
+            for _ in range(40):
+                if evaluate("!!window.pendingSelections['/api/samples/bbbbbbbbbbbb']"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("newer selected sample fetch did not start")
+            release_old = "window.pendingSelections['/api/samples/aaaaaaaaaaaa'](new Response('{}', {status:401}))"
+            release_new = "window.pendingSelections['/api/samples/bbbbbbbbbbbb'](new Response(__PAYLOAD__, {status:200}))".replace(
+                "__PAYLOAD__", json.dumps(json.dumps(selected)))
+            if older_first:
+                evaluate(release_old)
+                evaluate(release_new)
+            else:
+                evaluate(release_new)
+                evaluate(release_old)
+            for _ in range(40):
+                if evaluate(f"window.TracebackLab.state.sample?.id12 === '{newer}'"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("newer selected sample did not render")
+            time.sleep(0.05)
+            assert evaluate(f"location.hash === '#/sample/{newer}/findings'")
+            assert evaluate("document.querySelector('#main h1')?.textContent.startsWith('Findings')")
+            assert evaluate("window.TracebackLab.state.sessionExpired === false")
+            assert evaluate("document.getElementById('sample-switcher').value") == newer
+
+        profile = tmp_path / "browser-profile"
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/findings"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'aria-current="page">Findings' in dom,
+            interact=inspect,
+        )
+
+
+@needs_chrome
 def test_hung_status_observations_count_as_missed_polls(tmp_path) -> None:
     """Three unanswered polls disconnect the page within the polling budget."""
 
@@ -1028,6 +1495,69 @@ def test_hung_status_observations_count_as_missed_polls(tmp_path) -> None:
             [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
              f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/trust-qc"],
             profile, ok=lambda d: 'data-ready="1"' in d and "Run log line for bam-qc" in d,
+            interact=inspect, timeout=90,
+        )
+
+
+@needs_chrome
+def test_reconnected_status_does_not_confirm_stale_selected_result(tmp_path) -> None:
+    """Status reachability needs a separate same-selection sample refresh."""
+
+    phase = {"down": False}
+    with _server(tmp_path, _sample()) as server:
+        kind, source = server.app.assets["/assets/lab.js"]
+        server.app.assets["/assets/lab.js"] = (kind, source.replace(b"const POLL_MS = 15000;", b"const POLL_MS = 500;"))
+        original_status = server.app.api.status
+
+        def status():
+            if phase["down"]:
+                raise OSError("synthetic disconnect")
+            return original_status()
+
+        server.app.api.status = status
+
+        def inspect(_command, evaluate) -> None:
+            evaluate("""(() => {
+              const original = window.fetch;
+              window.failSelectedRefresh = true;
+              window.fetch = (...args) => String(args[0]) === '/api/samples/3f9a1c2b7e04' && window.failSelectedRefresh
+                ? Promise.resolve(new Response('{}', {status:503})) : original.apply(window, args);
+            })()""")
+            phase["down"] = True
+            for _ in range(40):
+                if evaluate("window.TracebackLab.state.connectionLost"):
+                    break
+                time.sleep(0.2)
+            else:
+                pytest.fail("page did not reach its three-miss disconnected state")
+            assert evaluate("document.getElementById('freshness-state').dataset.stale === 'true'")
+            phase["down"] = False
+            for _ in range(40):
+                if evaluate("!window.TracebackLab.state.connectionLost && window.TracebackLab.state.refreshFailureKind === 'unavailable'"):
+                    break
+                time.sleep(0.2)
+            else:
+                pytest.fail("status recovery did not attempt the selected refresh")
+            assert evaluate("document.getElementById('freshness-state').dataset.stale === 'true'")
+            assert evaluate(f"window.TracebackLab.state.sample.id12 === '{ID12}'")
+            assert evaluate(f"location.hash === '#/sample/{ID12}/findings'")
+            time.sleep(0.7)
+            assert evaluate("document.body.dataset.disconnected === '1'")
+            assert evaluate("document.getElementById('sample-switcher').disabled")
+            evaluate("window.failSelectedRefresh = false; document.querySelector('#recovery-action button').click()")
+            for _ in range(40):
+                if evaluate("document.getElementById('freshness-state').dataset.stale === 'false'"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("successful selected refresh did not clear stale status")
+            assert evaluate(f"window.TracebackLab.state.sample.id12 === '{ID12}'")
+
+        profile = tmp_path / "browser-profile"
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/findings"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'aria-current="page">Findings' in dom,
             interact=inspect, timeout=90,
         )
 
@@ -1126,17 +1656,9 @@ def test_keyboard_traversal_and_revealed_controls_on_every_sample_route(tmp_path
                 assert evaluate("document.activeElement === document.querySelector('#main h1')"), route
                 time.sleep(0.1)
                 evaluate("document.querySelector('.skip-link').focus()")
-                expected = evaluate("""(() => [...document.querySelectorAll('a[href], button, select, summary, input, [tabindex]')]
-                  .flatMap((el, index) => el.tabIndex >= 0 && !el.disabled && el.getClientRects().length
-                    && getComputedStyle(el).visibility !== 'hidden' ? [index] : []))()""")
-                assert len(expected) >= 2, route
-                for next_index in expected[1:]:
-                    _key(command, "Tab", "Tab", 9)
-                    state = evaluate("""(() => { const active = document.activeElement;
-                      return {index: [...document.querySelectorAll('a[href], button, select, summary, input, [tabindex]')].indexOf(active),
-                        visible: active.matches(':focus-visible'), outline: getComputedStyle(active).outlineWidth}; })()""")
-                    assert state["index"] == next_index and state["visible"], (route, state)
-                    assert float(state["outline"].removesuffix("px")) >= 3, (route, state)
+                visited = _walk_live_tab_order(command, evaluate,
+                    "a[href], button, select, summary, input, [tabindex]", route)
+                assert visited, route
                 disclosure = evaluate("""(() => {
                   const details = [...document.querySelectorAll('#main details')]
                     .find((item) => item.querySelector('summary') && !item.open);
@@ -1201,22 +1723,10 @@ def test_keyboard_walk_reaches_every_revealed_control_and_signals_subtab(tmp_pat
 
             def walk(label: str) -> None:
                 evaluate("document.querySelector('.skip-link').focus()")
-                expected = evaluate("""(() => [...document.querySelectorAll('a[href], button, select, summary, input, [tabindex], .table-wrap')]
-                  .flatMap((el, index) => (el.tabIndex >= 0 || (el.matches('.table-wrap') && el.scrollWidth > el.clientWidth + 1))
-                    && !el.disabled && el.getClientRects().length
-                    && getComputedStyle(el).visibility !== 'hidden' ? [index] : []))()""")
-                assert len(expected) >= 2, label
-                for next_index in expected[1:]:
-                    _key(command, "Tab", "Tab", 9)
-                    state = evaluate("""(() => { const active = document.activeElement;
-                      return {index: [...document.querySelectorAll('a[href], button, select, summary, input, [tabindex], .table-wrap')].indexOf(active),
-                        tag: active.tagName, id: active.id, html: active.outerHTML.slice(0, 180),
-                        visible: active.matches(':focus-visible'), outline: getComputedStyle(active).outlineWidth}; })()""")
-                    if state["index"] != next_index or not state["visible"]:
-                        skipped = evaluate(f"""document.querySelectorAll('a[href], button, select, summary, input, [tabindex], .table-wrap')[{next_index}].outerHTML.slice(0, 180)""")
-                        pytest.fail(f"{label}: expected {next_index} {skipped}; got {state}")
-                    assert float(state["outline"].removesuffix("px")) >= 3, (label, state)
-                walked.append((label, len(expected)))
+                visited = _walk_live_tab_order(command, evaluate,
+                    "a[href], button, select, summary, input, [tabindex], .table-wrap", label)
+                assert visited, label
+                walked.append((label, len(visited) + 1))
 
             for route, heading in routes.items():
                 path = "/" if route == "home" else f"/sample/{ID12}/{route}"
