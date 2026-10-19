@@ -9,6 +9,11 @@ signature. The signed `traceback run` path has its own methods and records.
 
 **Research use only. Not CLIA-validated. Not a diagnosis.**
 
+From a repository checkout, run `uv sync` once, then run the `traceback`
+commands below with `uv run` as shown in the first-run steps. If the CLI is
+already installed, the bare `traceback` commands used elsewhere in this guide
+are equivalent.
+
 ## First five minutes
 
 On a Mac with only `uv`, samtools and minimap2 (`brew install samtools
@@ -45,10 +50,10 @@ Measured time to the page on a clean Mac by a teammate: not yet measured
 ## One-time setup for real kits
 
 1. `brew install samtools minimap2` (samtools ≥ 1.20, minimap2 ≥ 2.28).
-2. Register hg38: `traceback reference register --fasta hg38.fa --id hg38 --root R`.
-3. For copy-number: `traceback toolchain install ichor`, then
-   `traceback method-asset register --from-toolchain copy-number --root R`.
-4. `traceback lab doctor --root R` shows setup checks and recovery commands;
+2. Register hg38: `uv run traceback reference register --fasta hg38.fa --id hg38 --root R`.
+3. For copy-number: `uv run traceback toolchain install ichor`, then
+   `uv run traceback method-asset register --from-toolchain copy-number --root R`.
+4. `uv run traceback lab doctor --root R` shows setup checks and recovery commands;
    inspect readiness for the methods you intend to run. Other methods have
    additional optional tools, assets, or input-scoped calibrations below.
 
