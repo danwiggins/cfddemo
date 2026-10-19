@@ -234,6 +234,88 @@ def test_mobile_nav_uses_final_width_after_lens_content_renders(tmp_path) -> Non
 
 
 @needs_chrome
+@pytest.mark.parametrize("width", [375, 768, 1440])
+def test_lens_navigation_labels_controls_and_history(width, tmp_path) -> None:
+    """P03: full labels, discoverable mobile scrolling and retained route focus."""
+
+    with _server(tmp_path, _sample()) as server:
+        profile = tmp_path / "browser-profile"
+
+        def snapshot(evaluate) -> dict:
+            return evaluate("""(() => {
+              const nav = document.getElementById('lenses');
+              const controls = [...document.querySelectorAll('.lens-scroll-control')];
+              const links = [...nav.querySelectorAll('a')];
+              const active = nav.querySelector('[aria-current="page"]');
+              const frame = nav.getBoundingClientRect();
+              const tab = active.getBoundingClientRect();
+              return {
+                pageOverflow: document.documentElement.scrollWidth > document.documentElement.clientWidth + 1,
+                navOverflow: nav.scrollWidth > nav.clientWidth + 1,
+                scrollLeft: nav.scrollLeft,
+                activeVisible: tab.left >= frame.left - 1 && tab.right <= frame.right + 1,
+                labels: links.map((link) => ({nowrap: getComputedStyle(link).whiteSpace === 'nowrap',
+                  shrink: getComputedStyle(link).flexShrink, height: link.getBoundingClientRect().height})),
+                controls: controls.map((control) => ({name: control.getAttribute('aria-label'),
+                  target: control.getAttribute('aria-controls'), disabled: control.disabled,
+                  visible: getComputedStyle(control).display !== 'none',
+                  width: control.getBoundingClientRect().width,
+                  height: control.getBoundingClientRect().height}))
+              };
+            })()""")
+
+        def inspect(command, evaluate) -> None:
+            command("Page.bringToFront")
+            initial = snapshot(evaluate)
+            assert not initial["pageOverflow"] and initial["activeVisible"], initial
+            assert len(initial["labels"]) == 9, initial
+            assert all(row["nowrap"] and row["shrink"] == "0" for row in initial["labels"]), initial
+            assert [row["name"] for row in initial["controls"]] == ["Previous views", "More views"]
+            assert all(row["target"] == "lenses" for row in initial["controls"]), initial
+            if width == 375:
+                assert initial["navOverflow"] and initial["controls"][0]["visible"], initial
+                assert all(row["width"] >= 43.5 and row["height"] >= 43.5 for row in initial["controls"]), initial
+                assert not initial["controls"][0]["disabled"] and initial["controls"][1]["disabled"], initial
+                evaluate("document.querySelector('.lens-scroll-prev').focus()")
+                _key(command, "Enter", "Enter", 13)
+                moved = snapshot(evaluate)
+                assert moved["scrollLeft"] < initial["scrollLeft"] and not moved["controls"][1]["disabled"], moved
+                evaluate("document.querySelector('.lens-scroll-next').focus()")
+                _key(command, "Enter", "Enter", 13)
+                assert snapshot(evaluate)["scrollLeft"] > moved["scrollLeft"]
+                evaluate("document.querySelector('.lens-scroll-prev').click()")
+                evaluate("document.querySelector('#lenses [aria-current=page]').focus()")
+                assert snapshot(evaluate)["activeVisible"]
+            else:
+                assert all(not row["visible"] for row in initial["controls"]), initial
+
+            evaluate(f"location.hash = '#/sample/{ID12}/findings'")
+            for _ in range(40):
+                if evaluate("document.querySelector('#main h1')?.textContent === 'Findings'"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("Findings route did not render")
+            evaluate("history.back()")
+            for _ in range(40):
+                if evaluate("document.querySelector('#main h1')?.textContent === 'Methods'"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("browser Back did not restore Methods")
+            assert evaluate("document.activeElement === document.querySelector('#main h1')")
+            assert snapshot(evaluate)["activeVisible"]
+
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", f"--window-size={width},800",
+             server.issue_link() + f"&route=/sample/{ID12}/methods"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'aria-current="page">Methods' in dom,
+            interact=inspect, viewport=(width, 800),
+        )
+
+
+@needs_chrome
 @pytest.mark.parametrize("size", ["1280,800", "1024,768", "768,1024", "360,740"])
 def test_all_routes_have_no_page_overflow_and_44px_targets(size, tmp_path) -> None:
     routes = [

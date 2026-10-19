@@ -17,9 +17,13 @@ body.lab { background: #f3f1ec; }
 .lab-status { flex-basis: 100%; margin: 0; min-height: 1.4rem; color: var(--ink); font-weight: 600; }
 .lab-status:empty { min-height: 0; }
 .flag-pill { display: inline-block; padding: .25rem .5rem; border-radius: 1rem; background: var(--flag-bg); color: var(--ink); font-size: 1rem; font-weight: 700; }
-.lenses { width: min(76rem, calc(100% - 2rem)); margin: .25rem auto 0; display: flex; flex-wrap: wrap; gap: .25rem 1rem; border-bottom: 1px solid var(--rule); }
-.lenses a { display: inline-flex; align-items: center; min-height: 2.75rem; padding: 0 .25rem; color: var(--ink); text-decoration: none; font-weight: 650; border-bottom: 3px solid transparent; }
+.lens-navigation { width: min(76rem, calc(100% - 2rem)); margin: .25rem auto 0; }
+.lens-navigation[hidden] { display: none; }
+.lenses { width: 100%; margin: 0; display: flex; flex-wrap: wrap; gap: .25rem 1rem; border-bottom: 1px solid var(--rule); }
+.lenses a { display: inline-flex; flex: 0 0 auto; align-items: center; min-height: 2.75rem; padding: 0 .25rem; white-space: nowrap; color: var(--ink); text-decoration: none; font-weight: 650; border-bottom: 3px solid transparent; }
 .lenses a[aria-current="page"] { border-bottom-color: var(--ink); }
+.lens-scroll-control { display: none; min-width: 2.75rem; min-height: 2.75rem; padding: 0; border: 1px solid var(--rule); background: #fff; color: var(--ink); font-size: 1.5rem; line-height: 1; cursor: pointer; }
+.lens-scroll-control:disabled { opacity: .45; cursor: default; }
 .breadcrumb { margin: 0; color: var(--muted); }
 .tier { display: inline-block; padding: .15rem .45rem; border-radius: 4px; font-size: .875rem; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; }
 .tier-PROVEN { background: var(--ink); color: #ffffff; border: 2px solid var(--ink); }
@@ -51,6 +55,8 @@ body.lab { background: #f3f1ec; }
 pre.stderr { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; background: #f6f6f4; padding: .5rem; }
 #key-dialog { max-width: min(48rem, calc(100% - 2rem)); }
 @media (max-width: 47.99rem) {
+  .lens-navigation.has-overflow { display: grid; grid-template-columns: 2.75rem minmax(0, 1fr) 2.75rem; gap: .25rem; }
+  .lens-navigation.has-overflow .lens-scroll-control { display: inline-flex; align-items: center; justify-content: center; }
   .lenses { flex-wrap: nowrap; overflow-x: auto; }
   .lenses.more-left { mask-image: linear-gradient(to right, transparent, #000 1.25rem); }
   .lenses.more-right { mask-image: linear-gradient(to right, #000 calc(100% - 1.25rem), transparent); }

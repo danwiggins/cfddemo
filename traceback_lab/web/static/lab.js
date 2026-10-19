@@ -191,9 +191,40 @@
 
   function updateNavFade() {
     const nav = document.getElementById("lenses");
-    const overflow = !nav.hidden && nav.scrollWidth > nav.clientWidth + 1;
+    const wrapper = nav.closest(".lens-navigation");
+    if (wrapper) wrapper.hidden = nav.hidden;
+    // Measure against the full slot so a resize can remove controls once all
+    // labels fit without them; measuring the narrowed scroller would keep them.
+    const overflow = !nav.hidden && nav.scrollWidth > (wrapper?.clientWidth ?? nav.clientWidth) + 1;
     nav.classList.toggle("more-left", overflow && nav.scrollLeft > 1);
     nav.classList.toggle("more-right", overflow && nav.scrollLeft + nav.clientWidth < nav.scrollWidth - 1);
+    if (wrapper) {
+      wrapper.classList.toggle("has-overflow", overflow);
+      wrapper.querySelector(".lens-scroll-prev").disabled = !overflow || nav.scrollLeft <= 1;
+      wrapper.querySelector(".lens-scroll-next").disabled = !overflow ||
+        nav.scrollLeft + nav.clientWidth >= nav.scrollWidth - 1;
+    }
+  }
+
+  function setupLensNavigation() {
+    const nav = document.getElementById("lenses");
+    const wrapper = h("div", { class: "lens-navigation" });
+    const previous = h("button", { type: "button", class: "lens-scroll-control lens-scroll-prev",
+      "aria-label": "Previous views", "aria-controls": "lenses",
+      onclick: () => { nav.scrollLeft -= Math.max(140, Math.round(nav.clientWidth * 0.75)); updateNavFade(); } }, "‹");
+    const next = h("button", { type: "button", class: "lens-scroll-control lens-scroll-next",
+      "aria-label": "More views", "aria-controls": "lenses",
+      onclick: () => { nav.scrollLeft += Math.max(140, Math.round(nav.clientWidth * 0.75)); updateNavFade(); } }, "›");
+    nav.before(wrapper);
+    wrapper.append(previous, nav, next);
+    nav.addEventListener("focusin", (event) => {
+      if (!(event.target instanceof HTMLAnchorElement) || getComputedStyle(nav).flexWrap !== "nowrap") return;
+      const frame = nav.getBoundingClientRect();
+      const link = event.target.getBoundingClientRect();
+      if (link.left < frame.left) nav.scrollLeft += link.left - frame.left;
+      else if (link.right > frame.right) nav.scrollLeft += link.right - frame.right;
+      updateNavFade();
+    });
   }
 
   function revealCurrentNav() {
@@ -787,6 +818,7 @@
   // -- start ----------------------------------------------------------------------------
   async function start() {
     setupKey();
+    setupLensNavigation();
     document.getElementById("lenses").addEventListener("scroll", updateNavFade, { passive: true });
     window.addEventListener("resize", revealCurrentNav);
     render();
