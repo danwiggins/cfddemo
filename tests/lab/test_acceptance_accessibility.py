@@ -396,13 +396,14 @@ def test_lens_navigation_labels_controls_and_history(width, tmp_path) -> None:
                 assert snapshot(evaluate)["activeVisible"]
                 evaluate("document.querySelector('.lens-scroll-prev').focus()")
                 for _ in range(10):
-                    if snapshot(evaluate)["controls"][0]["disabled"]:
+                    if snapshot(evaluate)["controls"][0]["ariaDisabled"] == "true":
                         break
                     _key(command, "Enter", "Enter", 13)
                 else:
                     pytest.fail("Previous views did not reach the first edge")
                 at_start = snapshot(evaluate)
                 assert at_start["controls"][0]["ariaDisabled"] == "true", at_start
+                assert at_start["scrollLeft"] <= 1, at_start
                 assert evaluate("document.activeElement === document.querySelector('.lens-scroll-prev')")
                 _key(command, "Enter", "Enter", 13)
                 assert snapshot(evaluate)["scrollLeft"] == at_start["scrollLeft"]
