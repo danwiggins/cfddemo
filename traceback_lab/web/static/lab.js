@@ -12,6 +12,15 @@
     document.body.dataset.cspViolations = String(violations.length);
     document.body.dataset.cspLast = violations[violations.length - 1];
   });
+  if (!window.TracebackLabFormat?.formatMetric || !window.TracebackLabFormat?.formatResultMetric) {
+    const message = "Lab display unavailable: metric formatter did not load. Reload this page.";
+    const main = document.getElementById("main");
+    if (main) main.textContent = message;
+    const status = document.getElementById("status");
+    if (status) status.textContent = message;
+    document.body.dataset.ready = "0";
+    return;
+  }
 
   const POLL_MS = 15000;
   const MISSED_LIMIT = 3;
@@ -36,7 +45,9 @@
     runLogLines: new Map(),
     staleRunLogCleared: false,
   };
-  window.TracebackLab = { state, LENSES, h, render, chart, dataTable, fmt };
+  window.TracebackLab = { state, LENSES, h, render, chart, dataTable, rawCell, fmt, fmtMetric, fmtMetricValue, fmtCount,
+    formatMetric: window.TracebackLabFormat.formatMetric,
+    formatResultMetric: window.TracebackLabFormat.formatResultMetric };
 
   // -- tiny DOM helper -----------------------------------------------------------
   function h(tag, attrs, ...children) {
@@ -51,6 +62,27 @@
     for (const child of children.flat()) {
       if (child === null || child === undefined || child === false) continue;
       el.append(child instanceof Node ? child : document.createTextNode(String(child)));
+    }
+    if (tag === "div" && el.classList.contains("table-wrap")) {
+      if (!el.hasAttribute("tabindex")) el.setAttribute("tabindex", "0");
+      if (!el.hasAttribute("role")) el.setAttribute("role", "region");
+      if (!el.hasAttribute("aria-label")) {
+        const caption = el.querySelector("table caption")?.textContent?.trim();
+        el.setAttribute("aria-label", caption || "Scrollable data table");
+      }
+    }
+    if (tag === "table") {
+      const caption = el.querySelector(":scope > caption")?.textContent?.trim() || "Table";
+      const headers = [...el.querySelectorAll(":scope > thead > tr > th")].map((th) => th.textContent.trim());
+      [...el.querySelectorAll(":scope > tbody > tr")].forEach((row, rowIndex) => {
+        const subject = row.querySelector(":scope > th[scope='row']")?.textContent?.trim() || `row ${rowIndex + 1}`;
+        [...row.children].forEach((cell, columnIndex) => {
+          cell.querySelectorAll("details.raw-value > summary").forEach((summary) => {
+            if (!summary.hasAttribute("aria-label")) summary.setAttribute("aria-label",
+              `Raw value: ${caption}, ${subject}, ${headers[columnIndex] || "value"}`);
+          });
+        });
+      });
     }
     // Async route content may arrive after the disconnected state was set.
     if ((tag === "button" || tag === "select") && "data-requires-server" in (attrs || {})) {
@@ -83,14 +115,21 @@
     }
   }
 
-  function fmt(value, unit) {
-    if (value === null || value === undefined) return "—";
-    if (typeof value === "number") {
-      const text = Number.isInteger(value) ? value.toLocaleString("en-US") : (Math.abs(value) < 0.01 && value !== 0 ? value.toExponential(2) : value.toFixed(Math.abs(value) < 1 ? 3 : 1));
-      return unit && unit !== "fraction" ? `${text} ${unit}` : text;
-    }
-    if (typeof value === "boolean") return value ? "yes" : "no";
-    return String(value);
+  function fmt(value, unit, options = {}) {
+    return window.TracebackLabFormat.formatMetric(value, unit, {
+      missingUnit: unit !== undefined, ...options,
+    }).text;
+  }
+  function fmtMetric(metric, options = {}) {
+    return window.TracebackLabFormat.formatResultMetric(metric, options).text;
+  }
+  function fmtMetricValue(metric, value, options = {}) {
+    return fmtMetric({ ...metric, value }, { reason: null, ...options });
+  }
+  function fmtCount(value) {
+    return window.TracebackLabFormat.formatMetric(value, null, {
+      valueKind: "count", missingUnit: false,
+    }).text;
   }
 
   // -- session ------------------------------------------------------------------------
@@ -184,7 +223,7 @@
       ...(state.sample && state.sample.found ? [] : [h("option", { value: "", selected: true, disabled: true }, "Select a sample")]),
       ...state.samples.map((row) =>
         h("option", { value: row.id12, selected: state.sample && state.sample.id12 === row.id12 },
-          `${row.id12} · ${row.run_utc ? row.run_utc.slice(0, 10) : "—"} · ${row.depth_x !== null ? row.depth_x.toFixed(2) + "x" : "—"}${row.example ? " · EXAMPLE (synthetic)" : ""}${row.state === "completed_input_unavailable" ? " · completed input unavailable" : row.state === "completion_history_unavailable" ? " · completion history unavailable" : ""}`)
+          `${row.id12} · ${row.run_utc ? row.run_utc.slice(0, 10) : "—"} · ${fmt(row.depth_x, "x")}${row.example ? " · EXAMPLE (synthetic)" : ""}${row.state === "completed_input_unavailable" ? " · completed input unavailable" : row.state === "completion_history_unavailable" ? " · completion history unavailable" : ""}`)
       )
     );
   }
@@ -336,12 +375,28 @@
   }
 
   // -- charts ---------------------------------------------------------------------------
-  const chartCell = (value) => typeof value === "number" && Number.isFinite(value) ? String(value) : fmt(value);
+  function rawCell(display, raw, unit, context = null) {
+    const exact = raw === null || raw === undefined ? "null" : String(raw);
+    return h("div", { class: "value-with-raw" }, h("span", { class: "display-value" }, display), " ",
+      h("details", { class: "raw-value" }, h("summary", { "aria-label": context ? `Raw value: ${context}` : null }, "Raw value"),
+        h("code", {}, `${exact} ${unit || "unit not declared"}`)));
+  }
+  function chartCell(value) {
+    if (value instanceof Node) return value;
+    return typeof value === "number" && Number.isFinite(value) ? String(value) : fmt(value);
+  }
   function dataTable(caption, headers, rows) {
     const table = h("table", { class: "data-table" },
       h("caption", {}, caption),
       h("thead", {}, h("tr", {}, ...headers.map((name) => h("th", { scope: "col" }, name)))),
-      h("tbody", {}, ...rows.map((row) => h("tr", {}, ...row.map((cell) => h("td", {}, chartCell(cell)))))));
+      h("tbody", {}, ...rows.map((row) => h("tr", {}, ...row.map((cell, index) => {
+        if (cell instanceof Node && cell.classList?.contains("value-with-raw")) {
+          const subject = row[0] instanceof Node ? row[0].textContent : String(row[0]);
+          cell.querySelector("details.raw-value summary")?.setAttribute("aria-label",
+            `Raw value: ${caption}, ${subject}, ${headers[index]}`);
+        }
+        return h("td", {}, chartCell(cell));
+      })))));
     return h("details", { class: "chart-table" }, h("summary", {}, "Data table"), h("div", { class: "table-wrap" }, table));
   }
 
@@ -402,11 +457,11 @@
     }).catch((error) => {
       // No panel data reached the page, so there is no data table to open;
       // the summary metrics stay in the table below.
-      const rows = algorithm.metrics.map((m) => [m.label, m.value]);
+      const rows = algorithm.metrics.map((m) => [m.label, fmtMetric(m, { algorithmId: algorithm.algorithm_id })]);
       slot.replaceWith(h("div", {},
         h("div", { class: "problem" }, `Chart could not be drawn (${error.message}). The summary numbers are in the table below.`),
         h("div", { class: "table-wrap" }, h("table", { class: "data-table" }, h("caption", {}, "fragment-size summary"),
-          h("tbody", {}, ...rows.map(([label, value]) => h("tr", {}, h("th", { scope: "row" }, label), h("td", {}, fmt(value)))))))));
+          h("tbody", {}, ...rows.map(([label, value]) => h("tr", {}, h("th", { scope: "row" }, label), h("td", {}, value))))))));
     });
     return section;
   }
@@ -433,7 +488,7 @@
       const text = a.input_gate
         ? `${a.input_gate} → ${a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status === "failed" ? "failed" : "ran"}`
         : a.min_depth_x
-        ? `needs ${a.min_depth_x}x; this run ${depth !== null ? depth.toFixed(3) : "—"}x → ${a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status === "failed" ? "failed" : "ran"}`
+        ? `needs ${fmt(a.min_depth_x, "x")}; this run ${fmt(depth, "x")} → ${a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status === "failed" ? "failed" : "ran"}`
         : `any depth → ${a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status}`;
       return h("tr", {}, h("th", { scope: "row" }, a.algorithm_id), h("td", {}, bar), h("td", {}, text));
     });
@@ -452,12 +507,14 @@
       const status = a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status;
       const matches = (run) => run && run.step === a.algorithm_id && run.source_id === sample.source_id && run.input_id === a.provenance?.input_id;
       const runNote = matches(active) ? "latest run in progress" : matches(interrupted) ? interruptedLabel : null;
-      const duration = a.duration_s !== null && a.duration_s !== undefined ? `${a.duration_s.toFixed(1)} s` : "—";
+      const duration = fmt(a.duration_s, "s");
       const cells = [h("th", { scope: "row" }, a.algorithm_id + (a.hidden ? " (intermediate)" : "")),
         h("td", { class: a.status === "failed" ? "problem" : null,
           "data-run-algorithm": a.algorithm_id, "data-run-input": a.provenance?.input_id || "" }, status, " ",
           h("span", { class: "state-chip run-note", "data-run-note": "", hidden: !runNote }, runNote || "")),
-        h("td", { class: "num", "data-run-duration": duration }, runNote === "latest run in progress" && duration !== "—"
+        h("td", { class: "num", "data-run-duration": duration,
+          "data-run-duration-available": Number.isFinite(a.duration_s) ? "1" : "0" },
+          runNote === "latest run in progress" && Number.isFinite(a.duration_s)
           ? `${duration} (selected result)` : duration)];
       const pin = a.provenance;
       const canPin = pin && /^[0-9a-f]{64}$/.test(pin.input_id) && /^[0-9a-f]{64}$/.test(pin.parameters_sha256) &&
@@ -517,7 +574,9 @@
       h("div", { class: "table-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, ...["Algorithm", "Status", "Duration", "Run log", "Detail"].map((t) => h("th", { scope: "col" }, t)))), h("tbody", {}, ...runRows)))));
     // QC bands.
     const banded = [];
-    for (const a of sample.algorithms) for (const m of a.metrics) if (m.qc_band) banded.push([m.label, fmt(m.value), m.qc_band]);
+    for (const a of sample.algorithms) for (const m of a.metrics) if (m.qc_band)
+      banded.push([m.label, rawCell(fmtMetric(m, { algorithmId: a.algorithm_id }), m.value, m.unit,
+        `${a.algorithm_id}/${m.metric_id}, QC band`), m.qc_band]);
     const glyph = { pass: "✓ pass", warn: "! warn", fail: "✕ fail" };
     out.push(h("section", { class: "panel" }, h("h2", {}, "QC bands"),
       h("p", { class: "help" }, "provisional (not from literature)"),
@@ -553,10 +612,10 @@
         h("p", { class: "help" }, "Viral taxa here are Bracken estimates per million QC-passing, non-duplicate primary reads. The separate viral-reference panel counts side-reference alignments per million human-unmapped primaries, including QC-fail and duplicate-flagged reads; the rates are not directly comparable."),
         microbial.reason ? h("p", { class: "problem" }, microbial.reason) : "",
         microbial.microbial_rpm_primary !== undefined
-          ? h("p", {}, `Candidate microbial estimate: ${fmt(microbial.microbial_rpm_primary)} per million primary QC-passing reads; ${fmt(microbial.candidate_unmapped_reads)} unmapped reads submitted. Cohort 97.5th percentile: ${microbial.cohort_p975 === null ? "unavailable" : fmt(microbial.cohort_p975)}${microbial.cohort_p975 === null ? "" : ` (n=${microbial.cohort_n}, ${microbial.cohort_version})`}.`)
+          ? h("p", {}, `Candidate microbial estimate: ${fmt(microbial.microbial_rpm_primary, "estimated reads/million", { unitDisplay: false })} per million primary QC-passing reads; ${fmtCount(microbial.candidate_unmapped_reads)} unmapped reads submitted. Cohort 97.5th percentile: ${microbial.cohort_p975 === null ? "unavailable" : fmt(microbial.cohort_p975, "estimated reads/million", { unitDisplay: false })}${microbial.cohort_p975 === null ? "" : ` (n=${fmtCount(microbial.cohort_n)}, ${microbial.cohort_version})`}.`)
           : "",
         microbial.microbial_rpm_primary !== undefined
-          ? h("p", { class: "help" }, `${fmt(microbial.too_short_unmapped_reads)} unmapped reads were shorter than the registered Bracken length; ${fmt(microbial.missing_sequence_unmapped_reads)} lacked sequence. Neither group was classified. The per-million rate still divides by all primary QC-passing non-duplicate reads.`)
+          ? h("p", { class: "help" }, `${fmtCount(microbial.too_short_unmapped_reads)} unmapped reads were shorter than the registered Bracken length; ${fmtCount(microbial.missing_sequence_unmapped_reads)} lacked sequence. Neither group was classified. The per-million rate still divides by all primary QC-passing non-duplicate reads.`)
           : "",
         microbial.omitted_taxa ? h("p", { class: "help" }, `${microbial.omitted_taxa} lower-abundance taxa omitted from the bounded display. The headline estimate includes them, so it can exceed the sum of visible rows; absent taxa are not assumed zero in cohort comparisons.`) : "",
         microbial.taxa.length
@@ -564,8 +623,8 @@
             h("thead", {}, h("tr", {}, ...["Candidate taxon", "Group", "Estimate / million", "Cohort 97.5th pct", "Context"].map((label) => h("th", { scope: "col" }, label)))),
             h("tbody", {}, ...microbial.taxa.map((row) => h("tr", {},
               h("th", { scope: "row" }, `${row.name} (taxid ${row.taxid})`),
-              h("td", {}, row.category), h("td", {}, fmt(row.rpm_primary)),
-              h("td", {}, row.cohort_p975 === null ? `unavailable (n=${row.cohort_n})` : `${fmt(row.cohort_p975)} (n=${row.cohort_n})`),
+              h("td", {}, row.category), h("td", {}, fmt(row.rpm_primary, "estimated reads/million", { unitDisplay: false })),
+              h("td", {}, row.cohort_p975 === null ? `unavailable (n=${row.cohort_n})` : `${fmt(row.cohort_p975, "estimated reads/million", { unitDisplay: false })} (n=${row.cohort_n})`),
               h("td", {}, row.above_cohort_p975 === null ? "no cohort reference" : row.above_cohort_p975 ? "above cohort percentile" : "at or below cohort percentile"))))))
           : h("p", {}, microbial.microbial_rpm_primary === 0
             ? "No species-level microbial estimate was returned under this database and read-length policy. Reads classified above species rank do not establish absence."
@@ -583,7 +642,7 @@
             h("th", { scope: "row" }, pair.peer_id12),
             h("td", {}, pair.state === "unavailable" ? pair.reason : fmt(pair.metrics.relatedness)),
             h("td", {}, pair.state === "unavailable" ? "unavailable" : fmt(pair.metrics.concordance)),
-            h("td", {}, pair.state === "unavailable" ? "unavailable" : fmt(pair.metrics.n)))))))
+            h("td", {}, pair.state === "unavailable" ? "unavailable" : fmtCount(pair.metrics.n)))))))
           : h("p", { class: sample.identity_pairs_reason ? "problem" : "" },
             sample.identity_pairs_reason || "No current pair comparison. Prepare fingerprints with lab run --only identity, then use lab identity compare SAMPLE_A SAMPLE_B.")));
     }
@@ -645,7 +704,7 @@
       chip.hidden = !note;
       const duration = cell.nextElementSibling;
       const base = duration.dataset.runDuration;
-      duration.textContent = note === "latest run in progress" && base !== "—"
+      duration.textContent = note === "latest run in progress" && duration.dataset.runDurationAvailable === "1"
         ? `${base} (selected result)` : base;
     }
     const unavailable = new Set([...(sample.unreadable_results || []), ...(sample.ambiguous_results || [])]);

@@ -552,7 +552,7 @@ def test_compare_and_joint_panel_render_in_native_tables(tmp_path, monkeypatch) 
     assert 'aria-label="Cohort generation"' not in root_unavailable
     assert 'data-csp-violations="0"' in root_unavailable
     assert "1001+ bp" in signals and "75–100% (inclusive)" in signals
-    assert "Short group n = 0, mean = —" in signals
+    assert "Short group n = 0, mean = unavailable" in signals
     assert "A missing mean is not zero" in signals
     assert 'data-csp-violations="0"' in signals
     assert "physical cleavage sites are not established" in motif_dom

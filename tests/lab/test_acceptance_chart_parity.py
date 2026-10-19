@@ -55,7 +55,10 @@ def test_echarts_scatter_values_match_adjacent_table_without_animation(route, ex
                 animation: option?.animation,
                 points: option?.series.filter((series) => series.type === 'scatter').flatMap((series) => series.data),
                 rows: [...table.querySelectorAll('tbody tr')].map((row) =>
-                  [...row.querySelectorAll('td')].map((cell) => cell.textContent.trim())),
+                  [...row.querySelectorAll('td')].map((cell) =>
+                    cell.querySelector('details.raw-value code')?.textContent.trim().split(' ')[0]
+                      || cell.querySelector('.display-value')?.textContent.trim()
+                      || cell.textContent.trim())),
               };
             }))()"""))
 
@@ -107,7 +110,10 @@ def test_fragment_density_line_values_match_adjacent_table_without_animation(rou
                 points: option?.series.filter((series) => series.type === 'line').flatMap((series) => series.data),
                 labels: option?.xAxis[0].data,
                 rows: [...table.querySelectorAll('tbody tr')].map((row) =>
-                  [...row.querySelectorAll('td')].map((cell) => cell.textContent.trim())),
+                  [...row.querySelectorAll('td')].map((cell) =>
+                    cell.querySelector('details.raw-value code')?.textContent.trim().split(' ')[0]
+                      || cell.querySelector('.display-value')?.textContent.trim()
+                      || cell.textContent.trim())),
               };
             }))()"""))
 
@@ -165,7 +171,10 @@ def test_genome_copy_number_points_match_unmasked_table_bins_in_genome_order(tmp
                 animation: option.animation,
                 points: option.series.filter((series) => series.type === 'scatter').flatMap((series) => series.data),
                 rows: [...table.querySelectorAll('tbody tr')].map((row) =>
-                  [...row.querySelectorAll('td')].map((cell) => cell.textContent.trim())),
+                  [...row.querySelectorAll('td')].map((cell) =>
+                    cell.querySelector('details.raw-value code')?.textContent.trim().split(' ')[0]
+                      || cell.querySelector('.display-value')?.textContent.trim()
+                      || cell.textContent.trim())),
               };
             })()"""))
 
@@ -195,7 +204,7 @@ def test_genome_copy_number_points_match_unmasked_table_bins_in_genome_order(tmp
         if chromosome not in offsets:
             offsets[chromosome] = cursor
         cursor = max(cursor, offsets[chromosome] + ending)
-        if log2 != "—":
+        if log2 not in ("—", "unavailable"):
             expected.append([(offsets[chromosome] + beginning) / 1_000_000, float(log2)])
             assert float(log2) == source["log2"]
     assert observed["points"] == [
