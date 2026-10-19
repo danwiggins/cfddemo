@@ -821,6 +821,7 @@ def test_empty_copy_and_complete_example_commands(tmp_path) -> None:
         about = _dom(server, tmp_path / "clia", route="/about/clia",
                      want=lambda page: "What CLIA is." in page)
     assert '<section class="clia-panel"' in dom
+    assert "Unknown requested sample" in unknown
     short = re.search(r'<div class="clia-short">(.*?)</div>', dom, re.DOTALL)
     full = re.search(r'<div class="clia-full"[^>]*>(.*?)</div>', dom, re.DOTALL)
     assert short is not None and full is not None

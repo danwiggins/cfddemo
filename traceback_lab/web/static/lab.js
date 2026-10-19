@@ -42,6 +42,7 @@
     resultConfirmedAt: null,
     selectedRefresh: null,
     loadFailure: null,
+    initialLoadFailure: false,
     refreshFailureKind: null,
     pollMessage: "",
     pollAction: null,
@@ -67,7 +68,10 @@
     }
     // Async route content may arrive after the disconnected state was set.
     if ((tag === "button" || tag === "select") && "data-requires-server" in (attrs || {})) {
-      if (document.body.dataset.disconnected === "1") setFetchControlEnabled(el, false);
+      if (document.body.dataset.disconnected === "1" &&
+          !(attrs.id === "readiness-refresh" && !state.connectionLost && !state.sessionExpired)) {
+        setFetchControlEnabled(el, false);
+      }
     }
     if (tag === "a" && typeof attrs?.href === "string" && attrs.href.startsWith("#/") &&
         document.body.dataset.disconnected === "1") setLinkEnabled(el, false);
@@ -140,6 +144,7 @@
     const controller = new AbortController();
     let timeoutId;
     let timedOut = false;
+    let settled = false;
     const abort = () => controller.abort();
     if (signal) {
       if (signal.aborted) abort();
@@ -148,6 +153,7 @@
     const deadline = timeoutMs === null ? null : new Promise((_, reject) => {
       timeoutId = setTimeout(() => {
         timedOut = true;
+        settled = true;
         controller.abort();
         reject(requestIssue("timeout"));
       }, timeoutMs);
@@ -155,7 +161,7 @@
     try {
       const read = (async () => {
         const response = await fetch(path, { credentials: "same-origin", signal: controller.signal });
-        if (!isCurrent()) throw requestIssue("obsolete");
+        if (settled || !isCurrent()) throw requestIssue("obsolete");
         if (response.status === 401) {
           expireSession();
           throw requestIssue("session");
@@ -164,7 +170,7 @@
         let payload;
         try { payload = await response.json(); }
         catch (_error) { throw requestIssue("invalid"); }
-        if (!isCurrent()) throw requestIssue("obsolete");
+        if (settled || !isCurrent()) throw requestIssue("obsolete");
         if (!payload || typeof payload !== "object" || Array.isArray(payload)) throw requestIssue("invalid");
         return payload;
       })();
@@ -174,6 +180,7 @@
       if (error.kind) throw error;
       throw requestIssue(timedOut ? "timeout" : "unavailable");
     } finally {
+      settled = true;
       clearTimeout(timeoutId);
       signal?.removeEventListener("abort", abort);
     }
@@ -238,6 +245,9 @@
     if (state.sample && state.sample.id12 === id12) return state.sample;
     const payload = await api(`/api/samples/${id12}`, null, { isCurrent });
     if (typeof payload.found !== "boolean") throw requestIssue("invalid");
+    if (payload.found && (typeof payload.id12 !== "string" ||
+        !/^[0-9a-f]{12,64}$/.test(payload.id12) ||
+        !(id12.startsWith(payload.id12) || payload.id12.startsWith(id12)))) throw requestIssue("invalid");
     if (payload.found && !["completed_input_unavailable", "completion_history_unavailable"].includes(payload.state) &&
         (!Array.isArray(payload.algorithms) || !Array.isArray(payload.catalog))) throw requestIssue("invalid");
     return payload.found ? payload : { found: false, id12, candidates: payload.candidates || [] };
@@ -321,6 +331,7 @@
         if (!isCurrent()) return { kind: "obsolete" };
         state.resultStale = true;
         state.refreshFailureKind = error.kind || "unavailable";
+        setControlsEnabled(false);
         state.readinessRefresh = { ...state.readinessRefresh,
           [`${previous.id12}:${previous.full_input_id || "unknown"}`]: {
             ...state.readinessRefresh?.[`${previous.id12}:${previous.full_input_id || "unknown"}`], stale: true } };
@@ -330,7 +341,7 @@
         if (state.selectedRefresh?.key === key && state.selectedRefresh.revision === revision) {
           state.selectedRefresh = null;
           const refreshButton = document.getElementById("readiness-refresh");
-          if (refreshButton && !state.sessionExpired && document.body.dataset.disconnected !== "1") {
+          if (refreshButton && !state.sessionExpired && !state.connectionLost) {
             refreshButton.disabled = false;
           }
           renderRecoveryState();
@@ -434,6 +445,10 @@
       const requested = state.loadFailure.requestedHash;
       action.append("Next action: ", h("button", { type: "button", class: "control",
         onclick: () => { if (location.hash === requested) navigate(); else location.hash = requested; } }, "Retry loading this selection"));
+    } else if (state.initialLoadFailure) {
+      problem = "Lab results could not be loaded. The sample list and current result are unknown.";
+      action.append("Next action: ", h("button", { type: "button", class: "control",
+        onclick: () => location.reload() }, "Retry loading Lab"));
     } else if (state.resultStale || state.connectionLost) {
       problem = state.connectionLost ? `Lab server not responding since ${state.disconnectedSince || "page load"}; showing last confirmed result.` :
         `Selected result could not be refreshed. ${recoveryCause(state.refreshFailureKind)} Showing last confirmed result.`;
@@ -471,7 +486,13 @@
     const context = document.getElementById("sample-context");
     const sample = state.sample && state.sample.found && state.route.name !== "unknown" ? state.sample : null;
     if (!sample) {
-      context.replaceChildren(state.loading ? "Loading sample…" : "No sample selected");
+      const requested = state.route.id12 || state.sample?.id12;
+      const safeId = typeof requested === "string" && /^[0-9a-f]{12,64}$/.test(requested) ? requested : null;
+      context.replaceChildren(state.loading ? "Loading sample…" :
+        state.initialLoadFailure ? "Sample list could not be loaded" :
+          state.route.name === "load-error" ? `Requested sample ${safeId || "identity"} could not be loaded` :
+            state.route.name === "unknown" || state.sample?.found === false ?
+              `Unknown requested sample${safeId ? ` ${safeId}` : ""}` : "No sample selected");
       return;
     }
     const listed = state.samples.find((row) => row.id12 === sample.id12);
@@ -1089,7 +1110,7 @@
       if (wasDisconnected && state.sample?.found) {
         const refreshed = await refreshSelectedSample();
         if (refreshed.kind !== "ok") setControlsEnabled(false);
-      } else setControlsEnabled(true);
+      } else setControlsEnabled(!state.resultStale);
       if (!state.resultStale) document.body.classList.remove("dimmed");
       renderRecoveryState();
       updateTrustQcRunStatus(status);
@@ -1116,6 +1137,11 @@
   function setControlsEnabled(enabled) {
     setFetchControlEnabled(document.getElementById("sample-switcher"), enabled);
     for (const control of document.querySelectorAll("button[data-requires-server], select[data-requires-server]")) {
+      if (control.id === "readiness-refresh" && !state.connectionLost && !state.sessionExpired) {
+        setFetchControlEnabled(control, true);
+        if (state.selectedRefresh) control.disabled = true;
+        continue;
+      }
       setFetchControlEnabled(control, enabled);
     }
     for (const link of document.querySelectorAll("a[href^='#/']")) setLinkEnabled(link, enabled);
@@ -1131,6 +1157,7 @@
   document.addEventListener("click", (event) => {
     if (document.body.dataset.disconnected !== "1" || !(event.target instanceof Element) ||
         !event.target.closest("a[href^='#/'], [data-requires-server], #sample-switcher")) return;
+    if (event.target.closest("#readiness-refresh") && !state.connectionLost && !state.sessionExpired) return;
     event.preventDefault();
     event.stopImmediatePropagation();
   }, true);
@@ -1191,12 +1218,14 @@
       await poll();
     } catch (error) {
       state.loading = false;
-      setStatus("");
+      state.initialLoadFailure = true;
+      if (error.session || error.message === "bootstrap") expireSession();
       const main = document.getElementById("main");
       main.replaceChildren(h("h1", { class: "view-title" }, "Traceback Lab"),
         h("p", { class: "problem" }, error.session || error.message === "bootstrap"
           ? "This page needs the one-use link printed by `traceback lab serve`. Press Enter in that terminal for a fresh link."
           : "The Lab results could not be loaded. Check the server, then retry with the current selection."));
+      renderSampleContext();
       renderRecoveryState();
     }
     document.getElementById("sample-switcher").addEventListener("change", (event) => {

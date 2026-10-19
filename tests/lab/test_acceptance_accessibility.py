@@ -1223,7 +1223,7 @@ def test_pending_navigation_is_cancelled_when_status_disconnects(tmp_path) -> No
 
 
 @needs_chrome
-@pytest.mark.parametrize("failure", ["unavailable", "invalid", "network", "session"])
+@pytest.mark.parametrize("failure", ["unavailable", "invalid", "mismatch", "network", "session"])
 def test_failed_sample_navigation_restores_rendered_identity(tmp_path, failure) -> None:
     """A failed requested hash never remains above another sample's result."""
 
@@ -1255,6 +1255,7 @@ def test_failed_sample_navigation_restores_rendered_identity(tmp_path, failure) 
                 response = {
                     "unavailable": "new Response('{}', {status: 503})",
                     "invalid": "new Response('{', {status: 200})",
+                    "mismatch": "new Response(JSON.stringify({found:true, id12:'bbbbbbbbbbbb', catalog:[], algorithms:[]}), {status:200})",
                     "session": "new Response('{}', {status: 401})",
                 }[failure]
                 evaluate(f"window.releaseRequested.resolve({response})")
@@ -1297,6 +1298,44 @@ def test_failed_sample_navigation_restores_rendered_identity(tmp_path, failure) 
 
 
 @needs_chrome
+def test_timed_out_json_request_discards_late_401(tmp_path) -> None:
+    """A response arriving after the explicit deadline cannot expire the page."""
+
+    with _server(tmp_path, _sample()) as server:
+        profile = tmp_path / "browser-profile"
+
+        def inspect(_command, evaluate) -> None:
+            evaluate("""(() => {
+              const original = window.fetch;
+              window.fetch = (...args) => String(args[0]) === '/api/late-401'
+                ? new Promise((resolve) => { window.releaseLate401 = resolve; })
+                : original.apply(window, args);
+              window.lateOutcome = 'pending';
+              window.TracebackLab.requestJson('/api/late-401', {timeoutMs: 20})
+                .then(() => { window.lateOutcome = 'unexpected success'; })
+                .catch((error) => { window.lateOutcome = error.kind; });
+            })()""")
+            for _ in range(40):
+                if evaluate("window.lateOutcome === 'timeout'"):
+                    break
+                time.sleep(0.01)
+            else:
+                pytest.fail("request did not reach its explicit deadline")
+            evaluate("window.releaseLate401(new Response('{}', {status:401}))")
+            time.sleep(0.05)
+            assert evaluate("window.lateOutcome === 'timeout'")
+            assert evaluate("window.TracebackLab.state.sessionExpired === false")
+            assert evaluate("document.body.dataset.disconnected !== '1'")
+
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/findings"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'aria-current="page">Findings' in dom,
+            interact=inspect,
+        )
+
+
+@needs_chrome
 def test_first_sample_load_failure_has_no_old_result(tmp_path) -> None:
     """A first-load API failure has its own recovery view and no invented sample."""
 
@@ -1317,11 +1356,36 @@ def test_first_sample_load_failure_has_no_old_result(tmp_path) -> None:
             assert shown["hash"] == f"#/sample/{requested}/findings", shown
             assert shown["title"] == "Could not open selected sample" and shown["sample"] is None, shown
             assert "Retry loading this selection" in shown["retry"] and "/Users/" not in str(shown), shown
+            assert evaluate("document.getElementById('sample-context').textContent.includes('could not be loaded')")
 
         _dom_cdp(
             [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
              f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{requested}/findings"],
             profile, ok=lambda dom: 'data-ready="1"' in dom and 'Could not open selected sample' in dom,
+            interact=inspect,
+        )
+
+
+@needs_chrome
+def test_bootstrap_listing_failure_clears_loading_identity(tmp_path) -> None:
+    """The header never claims the sample is still loading after startup fails."""
+
+    with _server(tmp_path, _sample()) as server:
+        def unavailable():
+            raise OSError("private /Users/example/root")
+        server.app.api.samples = unavailable
+        profile = tmp_path / "browser-profile"
+
+        def inspect(_command, evaluate) -> None:
+            context = evaluate("document.getElementById('sample-context').textContent")
+            assert context == "Sample list could not be loaded", context
+            assert evaluate("document.getElementById('status').textContent.includes('Lab results could not be loaded')")
+            assert evaluate("document.getElementById('recovery-action').textContent.includes('Retry loading Lab')")
+
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + "&route=/"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'Sample list could not be loaded' in dom,
             interact=inspect,
         )
 
@@ -1474,6 +1538,9 @@ def test_reconnected_status_does_not_confirm_stale_selected_result(tmp_path) -> 
             assert evaluate("document.getElementById('freshness-state').dataset.stale === 'true'")
             assert evaluate(f"window.TracebackLab.state.sample.id12 === '{ID12}'")
             assert evaluate(f"location.hash === '#/sample/{ID12}/findings'")
+            time.sleep(0.7)
+            assert evaluate("document.body.dataset.disconnected === '1'")
+            assert evaluate("document.getElementById('sample-switcher').disabled")
             evaluate("window.failSelectedRefresh = false; document.querySelector('#recovery-action button').click()")
             for _ in range(40):
                 if evaluate("document.getElementById('freshness-state').dataset.stale === 'false'"):
