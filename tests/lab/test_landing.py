@@ -249,10 +249,13 @@ def test_stability_names_both_halves_without_a_numeric_verdict(
     assert "split A skipped (depth); split B failed (algorithm failed)" in dom
     assert "split A unavailable (selected result unavailable); split B not interpretable (metric value unavailable)" in dom
     assert "No split-half stability verdict." in dom
-    assert "100 / 105" in dom and "|A−B| = 5" in dom
-    assert f"relative difference {shown}" in dom
+    altered = [figure for figure in re.findall(r'<figure class="multiple">(.*?)</figure>', dom, re.S)
+               if "an unrecognized split label is present" in figure]
+    assert len(altered) == 1
+    assert "100 / 105" in altered[0] and "|A−B| = 5" in altered[0]
+    assert f"relative difference {shown}" in altered[0]
     if relative is None:
-        assert "relative difference 0%" not in dom
+        assert "relative difference 0%" not in altered[0]
     assert "no split-half stability verdict; an unrecognized split label is present" in dom
     assert "No validated stability deviation scale" in dom
 
