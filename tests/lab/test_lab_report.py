@@ -68,7 +68,7 @@ def test_report_shape_csv_protection_and_private_diagnostics() -> None:
     assert model["schema_version"] == "2"
     assert list(model) == [
         "schema_version", "generated_at", "research_use_only", "example", "sample_id",
-        "source_id", "full_input_id", "run_utc", "interpretation_version", "cohort_version",
+        "source_id", "full_input_id", "recorded_utc", "interpretation_version", "cohort_version",
         "limitations", "metrics",
     ]
     assert len(model["metrics"]) == 3
@@ -76,13 +76,15 @@ def test_report_shape_csv_protection_and_private_diagnostics() -> None:
     assert model["metrics"][1]["raw_value"] is None
     assert model["metrics"][2]["raw_value"] == -0.2
     assert model["metrics"][0]["computed_at"] == "2026-10-19T12:00:00Z"
-    assert model["run_utc"] is None and model["metrics"][0]["raw_value"] == "female"
+    assert model["recorded_utc"] is None and model["metrics"][0]["raw_value"] == "female"
+    assert "otherwise the latest input-use time" in " ".join(model["limitations"])
     assert "nonfinite" in " ".join(model["limitations"])
     assert "Method copy-number: skipped (depth)" in " ".join(model["limitations"])
     assert data["csv"].startswith("schema_version,generated_at,")
     csv_rows = list(csv.DictReader(io.StringIO(data["csv"])))
     assert len(csv_rows) == 3
     assert len(csv_rows[0]) == 28
+    assert "recorded_utc" in csv_rows[0] and "run_utc" not in csv_rows[0]
     assert list(csv_rows[0]).index("recorded_support_n") == list(csv_rows[0]).index("raw_unit") + 1
     assert all(row["schema_version"] == "2" for row in csv_rows)
     assert "\r\n" in data["csv"] and "'\"-0.2\"" not in data["csv"]
@@ -108,7 +110,7 @@ def test_report_discloses_partial_input_selection_omissions_and_recorded_support
       });
       const sample = {
         found: true, id12: source.slice(0, 12), source_id: source, full_input_id: input,
-        example: false, run_utc: '', interpretation_version: 'v1', cohort_version: null,
+        example: false, run_utc: '2026-10-19T11:00:00Z', interpretation_version: 'v1', cohort_version: null,
         excluded_chunks: [-1, 9], unreadable_results: ['bam-qc', '/private/unreadable'],
         ambiguous_results: ['sex-check'], malformed_result_selections: true,
         catalog: [
@@ -138,6 +140,8 @@ def test_report_discloses_partial_input_selection_omissions_and_recorded_support
     """)
     model = data["model"]
     assert model["schema_version"] == "2"
+    assert model["recorded_utc"] == "2026-10-19T11:00:00Z"
+    assert "run_utc" not in model
     assert [row["algorithm_id"] for row in model["metrics"]] == ["depth"] * 4
     assert [row["recorded_support_n"] for row in model["metrics"]] == [0, 29, None, None]
     limitations = " | ".join(model["limitations"])
@@ -153,6 +157,7 @@ def test_report_discloses_partial_input_selection_omissions_and_recorded_support
     csv_rows = list(csv.DictReader(io.StringIO(data["csv"])))
     assert len(csv_rows) == 4
     assert len(csv_rows[0]) == 28
+    assert all(row["recorded_utc"] == "2026-10-19T11:00:00Z" for row in csv_rows)
     assert [row["recorded_support_n"] for row in csv_rows] == ["0", "29", "", ""]
     for private in ("/private/unreadable", "/private/catalog", "/private/failure",
                     "/private/support"):

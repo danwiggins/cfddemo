@@ -300,7 +300,7 @@
   ]);
   const columns = [
     "schema_version", "generated_at", "research_use_only", "example", "sample_id", "source_id",
-    "full_input_id", "run_utc", "interpretation_version", "cohort_version", "limitations",
+    "full_input_id", "recorded_utc", "interpretation_version", "cohort_version", "limitations",
     "algorithm_id", "metric_id", "label", "raw_value", "raw_unit", "recorded_support_n", "display_value",
     "display_unit", "status", "skip_reason", "interpretation_state", "tool", "tool_version",
     "parameters_sha256", "attempt_id", "reference_id", "computed_at",
@@ -375,6 +375,7 @@
       "Research use only; not for diagnosis or clinical decisions.",
       "Only visible registered scalar metrics are included; hidden processing steps, arrays, artifacts, and taxon detail are excluded.",
       "Stable input and provenance identifiers may be linkable to other local records.",
+      "Recorded date UTC is the recorded completion time when present, otherwise the latest input-use time; a date alone is not proof of a completed run.",
     ];
     const note = (message) => { if (!limitations.includes(message)) limitations.push(message); };
     if (Array.isArray(sample.excluded_chunks)) {
@@ -506,7 +507,7 @@
     const report = {
       schema_version: "2", generated_at: generatedAt, research_use_only: true,
       example: sample.example, sample_id: sample.id12, source_id: sample.source_id,
-      full_input_id: sample.full_input_id, run_utc: sample.run_utc || null,
+      full_input_id: sample.full_input_id, recorded_utc: sample.run_utc || null,
       interpretation_version: sample.interpretation_version,
       cohort_version: sample.cohort_version ?? null,
       limitations: Object.freeze(limitations), metrics: Object.freeze(metrics.map((row) => Object.freeze(row))),
