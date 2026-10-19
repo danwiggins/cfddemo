@@ -668,6 +668,9 @@ def test_empty_copy_and_complete_example_commands(tmp_path) -> None:
                        want=lambda page: "Unknown sample" in page)
         about = _dom(server, tmp_path / "clia", route="/about/clia",
                      want=lambda page: "What CLIA is." in page)
+        server.app.api.samples = lambda: {"samples": [], "root_has_runs": True}
+        history = _dom(server, tmp_path / "history", route="/",
+                       want=lambda page: "although run history exists" in page)
     assert '<section class="clia-panel"' in dom
     short = re.search(r'<div class="clia-short">(.*?)</div>', dom, re.DOTALL)
     full = re.search(r'<div class="clia-full"[^>]*>(.*?)</div>', dom, re.DOTALL)
@@ -693,6 +696,9 @@ def test_empty_copy_and_complete_example_commands(tmp_path) -> None:
     assert f"No Lab sample matches {ID12}" in unknown and "No Lab runs under" not in unknown
     assert "What CLIA is." in about and "42 CFR 493.3(b)(2)" in about
     assert "No Lab runs under" not in about
+    assert "No Lab samples are available" in history
+    assert "uv run traceback lab runs --root ROOT_PATH" in history
+    assert "No Lab runs under" not in history
 
 
 @needs_chrome

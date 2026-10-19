@@ -21,6 +21,7 @@
   ];
   const state = {
     samples: [],
+    rootHasRuns: false,
     defaultSampleId12: null,
     completedInputUnavailable: false,
     completionHistoryUnavailable: false,
@@ -350,7 +351,9 @@
         onclick: () => navigator.clipboard && navigator.clipboard.writeText(text) }, "Copy command"));
     return [
       h("h1", { class: "view-title" }, "Traceback Lab"),
-      h("p", { class: "empty" }, "No Lab runs under this server's ROOT. Use the same ROOT shown in the terminal where `lab serve` started. Replace ROOT_PATH in the commands below with that value."),
+      h("p", { class: "empty" }, state.rootHasRuns
+        ? "No Lab samples are available under this server's ROOT, although run history exists. Inspect the run log with `uv run traceback lab runs --root ROOT_PATH`. Replace ROOT_PATH below with the ROOT shown where `lab serve` started."
+        : "No Lab runs under this server's ROOT. Use the same ROOT shown in the terminal where `lab serve` started. Replace ROOT_PATH in the commands below with that value."),
       h("section", { class: "panel onboarding-guide", "aria-labelledby": "onboarding-example-title" },
         h("h2", { id: "onboarding-example-title" }, "Start with a synthetic example"),
         h("p", {}, "From the repository checkout, run these commands in a terminal. The page does not run them for you."),
@@ -852,6 +855,7 @@
       }
       const listing = await api("/api/samples");
       state.samples = listing.samples;
+      state.rootHasRuns = !!listing.root_has_runs;
       state.defaultSampleId12 = listing.default_sample_id12 !== undefined
         ? listing.default_sample_id12 : (listing.samples[0] && listing.samples[0].id12) || null;
       state.completedInputUnavailable = !!listing.completed_input_unavailable;
