@@ -97,6 +97,7 @@ pre.stderr { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; 
 .landing-summary div { min-width: 0; }
 .landing-summary dt { font-size: .875rem; color: var(--muted); }
 .landing-summary dd { margin: 0; font-weight: 700; }
+.landing-summary dd .help { display: block; margin: .15rem 0 0; font-weight: 400; }
 .landing-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .75rem; }
 .landing-actions a { padding: .5rem .75rem; border: 2px solid var(--ink); border-radius: .35rem; background: #ffffff; color: var(--ink); font-weight: 700; text-decoration: none; }
 .landing-actions a:first-child { background: var(--ink); color: #ffffff; }

@@ -543,11 +543,19 @@ def test_unavailable_lens_does_not_gain_landing_panel(tmp_path, state) -> None:
         (store.runs_dir / f"{run_id}.jsonl").unlink()
 
     with RunningLabServer(store) as server:
+        original_listing = server.app.api.samples
+        server.app.api.samples = lambda: {**original_listing(), "samples": []}
         dom = _dom(server, tmp_path / "browser", route=f"/sample/{source[:12]}/findings",
                    want=lambda page: f"Sample {source[:12]} exists" in page)
     main = re.search(r"<main\b[^>]*>(.*?)</main>", dom, re.DOTALL)
     assert main is not None
     assert '<section class="clia-panel"' not in main.group(1)
+    context = re.search(r'<p id="sample-context"[^>]*>(.*?)</p>', dom, re.DOTALL)
+    assert context is not None
+    assert f"Sample {source[:12]}" in context.group(1)
+    assert "Synthetic status unavailable" in context.group(1)
+    assert ("completed input unavailable" if state == "input_unavailable"
+            else "completion history unavailable") in context.group(1)
 
 
 @needs_chrome

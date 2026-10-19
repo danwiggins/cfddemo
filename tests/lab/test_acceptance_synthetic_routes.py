@@ -221,11 +221,12 @@ def test_landing_defaults_to_completed_run_with_newer_active_sample(tmp_path) ->
                                             else "No completed Lab run yet") in dom
                 assert f'href="#/?sample={active_id12}"' in dom
                 assert "Select a sample" in dom
+                assert "No sample selected" in dom
             else:
                 assert heading is not None and heading.group(1) == expected, label
                 assert f'href="#/sample/{active_id12}/findings"' in dom
             if label == "explicit-active":
-                assert "selected sample view" in dom and "A Lab run is in progress" in dom
+                assert "selected sample" in dom and "A Lab run is in progress" in dom
 
 
 @needs_chrome
@@ -242,7 +243,7 @@ def test_landing_recorded_date_is_not_labeled_as_latest_activity_during_rerun(tm
         }
         dom = _dom(server, tmp_path / "browser", route="/",
                    want=lambda page: "A Lab run is in progress" in page and "Recorded date (UTC)" in page)
-    assert f'<dt>Recorded date (UTC)</dt><dd>{sample["run_utc"][:10]}</dd>' in dom
+    assert f'<dt>Recorded date (UTC)</dt><dd>{sample["run_utc"][:10]}<p class="help">' in dom
     assert "Completion date when recorded; otherwise latest input-use date" in dom
     assert "Latest recorded activity" not in dom
 
@@ -265,7 +266,7 @@ def test_landing_actions_keep_synthetic_status_on_each_destination(tmp_path) -> 
             actions = (
                 ("Explore signals", "signals", "Signals"),
                 ("Check reliability", "trust-qc", "Trust / QC"),
-                ("Method readiness", "methods", "Methods"),
+                ("Explore methods", "methods", "Methods"),
             )
             for label, lens, heading in actions:
                 href = evaluate(f"[...document.querySelectorAll('.landing-actions a')].find(a => a.textContent === {json.dumps(label)})?.getAttribute('href')")
@@ -296,6 +297,13 @@ def test_landing_actions_keep_synthetic_status_on_each_destination(tmp_path) -> 
             command("Emulation.setEmulatedMedia", {"media": "print"})
             assert evaluate("getComputedStyle(document.getElementById('sample-context')).display") != "none"
             assert "EXAMPLE (synthetic)" in evaluate("document.getElementById('sample-context').textContent")
+            evaluate("location.hash = '#/about/clia'")
+            for _ in range(100):
+                if evaluate("window.TracebackLab.state.renderedHash") == "#/about/clia":
+                    break
+                time.sleep(0.05)
+            assert evaluate("window.TracebackLab.state.renderedHash") == "#/about/clia"
+            assert evaluate("document.getElementById('sample-context').textContent").endswith("selected sample")
 
         _dom_cdp(
             [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
@@ -313,6 +321,7 @@ def test_landing_names_result_selection_problems_beside_recorded_counts(tmp_path
     sample["unreadable_results"] = ["bam-qc"]
     sample["ambiguous_results"] = ["fragment-size"]
     sample["malformed_result_selections"] = True
+    sample["algorithms"] = [algorithm for algorithm in sample["algorithms"] if algorithm["algorithm_id"] != "bam-qc"]
     sample["algorithms"].append({"algorithm_id": "read-summary", "status": "failed", "hidden": True})
     with _server(tmp_path, sample) as server:
         dom = _dom(server, tmp_path / "browser", route="/",
