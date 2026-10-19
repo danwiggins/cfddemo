@@ -48,7 +48,7 @@ def _observe(server, tmp_path, route, wait_for=""):
 
 
 @needs_chrome
-def test_reference_strip_families_have_exact_adjacent_values(tmp_path) -> None:
+def test_reference_strip_families_have_formatted_adjacent_values(tmp_path) -> None:
     sample = _sample()
     published, exploratory, percentile = [algorithm["metrics"][0] for algorithm in sample["algorithms"][:3]]
     published.update(value=0.123456789, interval=[0.01, 0.2])
@@ -61,19 +61,20 @@ def test_reference_strip_families_have_exact_adjacent_values(tmp_path) -> None:
         charts = _observe(server, tmp_path, f"/sample/{ID12}/findings")
 
     assert charts and all(chart["label"] and chart["adjacent"] for chart in charts)
-    published_chart = next(chart for chart in charts if [row[1] for row in chart["rows"]][-1] == "0.123456789")
+    published_chart = next(chart for chart in charts if [row[1] for row in chart["rows"]][-1] == "0.123 (unit not declared)")
     exploratory_chart = next(chart for chart in charts if chart["members"] == 3)
     percentile_chart = next(chart for chart in charts if chart["headers"][1] == "Percentile (%)")
     cutoff_chart = next(chart for chart in charts if "cutoff-whisker" in chart["chartClass"])
-    assert ["0.01", "0.2", "0.123456789"] == [row[1] for row in published_chart["rows"]]
+    assert ["0.01 (unit not declared)", "0.2 (unit not declared)", "0.123 (unit not declared)"] == [row[1] for row in published_chart["rows"]]
     assert [row[1] for row in exploratory_chart["rows"]] == [
-        "0.1", "0.5", "0.111111111", "0.222222222", "0.444444444", "0.345678901"]
+        "0.1 (unit not declared)", "0.5 (unit not declared)", "0.111 (unit not declared)",
+        "0.222 (unit not declared)", "0.444 (unit not declared)", "0.346 (unit not declared)"]
     assert [row[1] for row in percentile_chart["rows"]] == ["5", "95", "1", "5", "95", "99", "98.7654321"]
     assert cutoff_chart["marks"] == ["▶"]
     assert cutoff_chart["rows"] == [
-        ["Cutoff interval low", "0.5", "On scale"],
-        ["Cutoff interval high", "0.7", "On scale"],
-        ["This sample", "0.789123456", "Off scale right"]]
+        ["Cutoff interval low", "0.5 (unit not declared)", "On scale"],
+        ["Cutoff interval high", "0.7 (unit not declared)", "On scale"],
+        ["This sample", "0.789 (unit not declared)", "Off scale right"]]
 
 
 @needs_chrome
@@ -107,10 +108,10 @@ def test_stability_svg_table_exposes_band_endpoints_and_split_values(tmp_path) -
     assert first["bands"][0]["height"] == pytest.approx(y(-17.1234567) - y(-8.23456789))
     assert first["points"][0] == {"y": pytest.approx(y(-12.3456789) + 4), "glyph": "●"}
     assert [row[:6] for row in first["rows"]] == [
-        ["Measured fraction", "25", "0.123456789", "-12.3456789", "-17.1234567", "-8.23456789"],
-        ["Measured fraction", "100", "0.2", "0", "—", "—"],
-        ["Split A", "50", "0.156789123", "2.3456789", "—", "—"],
-        ["Split B", "50", "0.167891234", "3.4567891", "—", "—"],
+        ["Measured fraction", "25", "0.123 (unit not declared)", "-12.3%", "-17.1%", "-8.23%"],
+        ["Measured fraction", "100", "0.2 (unit not declared)", "0%", "unavailable", "unavailable"],
+        ["Split A", "50", "0.157 (unit not declared)", "2.35%", "unavailable", "unavailable"],
+        ["Split B", "50", "0.168 (unit not declared)", "3.46%", "unavailable", "unavailable"],
     ]
 
 
@@ -130,13 +131,13 @@ def test_composition_plotted_subset_has_adjacent_table_and_full_source_remains_a
 
     composition = next(chart for chart in charts if chart["chartClass"] == "composition-svg")
     assert composition["adjacent"]
-    assert composition["rows"] == [["A", "0.123456789", "0.1", "0.2", "ok"]]
+    assert composition["rows"] == [["A", "12.3%", "10%", "20%", "ok"]]
     assert composition["followingRows"] == [
-        ["A", "0.123456789", "0.1", "0.2", "ok"], ["B", "0", "0", "0", "ok"]]
+        ["A", "12.3%", "10%", "20%", "ok"], ["B", "0%", "0%", "0%", "ok"]]
 
 
 @needs_chrome
-def test_sample_comparison_overlay_has_exact_adjacent_values(tmp_path) -> None:
+def test_sample_comparison_overlay_has_formatted_adjacent_values(tmp_path) -> None:
     sample = _sample()
     other = "a1b2c3d4e5f6"
     with _server(tmp_path, sample) as server:
@@ -154,9 +155,9 @@ def test_sample_comparison_overlay_has_exact_adjacent_values(tmp_path) -> None:
         charts = _observe(server, tmp_path, f"/sample/{ID12}/compare", "sample-overlay")
 
     overlay = next(chart for chart in charts if chart["chartClass"] == "")
-    assert overlay["adjacent"] and "fraction" in overlay["headers"][1]
-    assert overlay["rows"] == [["Sample A", "0.123456789"], ["Sample B", "0.234567891"],
-                                ["B−A", "0.111111102"]]
+    assert overlay["adjacent"] and "Tumour fraction" in overlay["label"]
+    assert overlay["rows"] == [["Sample A", "12.3%"], ["Sample B", "23.5%"],
+                                ["B−A", "11.1 percentage points"]]
 
 
 @needs_chrome
