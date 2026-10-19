@@ -16,9 +16,9 @@ protocol, or makes a record fit for clinical use. Every output keeps its
 
 The golden path works end to end on one real BAM: `reference register`,
 `preflight`, `run`, `verify`, `catalog import` and `serve` (operator review,
-2026-10-04: 47 s `run`, 0.8 s import). Four reviews of `e76e9d0` (evidence:
-`~/scratch/crash-resume-2026-09-30/review2-2026-10-04/`, files `run-files.md`,
-`algo.md`, `ui.md`, `code.md`, `test-quality.md`, `ui-shots/`) found that the
+2026-10-04: 47 s `run`, 0.8 s import). Four reviews of `e76e9d0` (local
+review notes covering run files, algorithms, UI, code and test quality,
+and screenshots, 2026-10-04) found that the
 next three things the operator wants all fail:
 
 1. **More BAMs.** A zip of more BAMs is pending. MinKNOW output is unaligned;

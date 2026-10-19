@@ -167,8 +167,7 @@ content_sha256)`, `method_registry.py:165-168`), and both enter the hash.
 | Explorer view contract | `evidence_inspector/cell_origin_explorer.py`; `docs/CELL-ORIGIN-EXPLORER.md` | Label: "estimated fraction among registered atlas contributors". Carries marker and fragment denominators and solver diagnostics |
 
 **Reproduction.**
-- **2026-10-01 re-creation** (operator-approved; build log
-  `~/scratch/crash-resume-2026-09-30/log-traceback-build.md`, entry 12:16):
+- **2026-10-01 re-creation** (operator-approved; recorded in local build notes):
   - installed modkit 0.6.4 from bioconda through micromamba;
   - re-aligned to hg38 (UCSC analysisSet);
   - confirmed that the Loyfer markers and regions BED match their recorded
