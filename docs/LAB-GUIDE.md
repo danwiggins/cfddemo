@@ -801,7 +801,7 @@ serve as a history of every interrupted run.
   KNOWN-STATUS). The CLIA explainer remains on the landing after those result
   panels (short version, "Read the full explainer" expands in place, full text
   at `#/about/clia`), followed by the samples table and license callouts. The
-  research-use notice remains visible in the header on every route.
+  research-use notice is shown in the page header on every route.
 - **Findings**: only above/below-reference results are cards (sorted by tier,
   then severity); not-interpretable, no-reference and in-range metrics are
   counted, collapsible rows. Before the kit cohort exists (n < 10) most

@@ -198,11 +198,12 @@
     }
     const listed = state.samples.find((row) => row.id12 === sample.id12);
     const example = sample.example ?? listed?.example;
-    const kind = example ? "EXAMPLE (synthetic)" : "Not marked as the built-in synthetic example";
+    const kind = example === undefined ? "Synthetic status unavailable"
+      : example ? "EXAMPLE (synthetic)" : "Not marked as the built-in synthetic example";
     const availability = sample.state === "completed_input_unavailable" ? "completed input unavailable"
       : sample.state === "completion_history_unavailable" ? "completion history unavailable"
         : !state.defaultSampleId12 && !state.completedInputUnavailable && !state.completionHistoryUnavailable
-          ? "No completed run in this ROOT yet" : "selected sample view";
+          ? "No completed run in this ROOT yet" : "selected sample";
     context.replaceChildren(`Sample ${sample.id12} · `,
       h("span", { class: "sample-context-kind" }, kind), ` · ${availability}`);
   }
