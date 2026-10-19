@@ -7,8 +7,11 @@
 <link rel="stylesheet" href="/assets/base.css">
 <link rel="stylesheet" href="/assets/lab.css">
 <script src="/assets/vendor/echarts.min.js" defer></script>
+<script src="/assets/lab-format.js" defer></script>
 <script src="/assets/lab.js" defer></script>
 <script src="/assets/lab-views.js" defer></script>
+<script src="/assets/lab-report.js" defer></script>
+<script src="/assets/lab-report-ui.js" defer></script>
 </head>
 <body class="lab" data-ready="0" data-csp-violations="0">
 <a class="skip-link" href="#main">Skip to results</a>
@@ -22,6 +25,13 @@
     <span class="flag-pill" id="pii-flag">FLAG: PII — donor metadata on screen; de-identified IDs only; never a name or MRN</span>
     <button type="button" id="key-button" class="control">Key</button>
     <p id="status" class="lab-status" role="status" aria-live="polite"></p>
+  </div>
+  <p id="sample-context" class="sample-context"></p>
+  <div id="lab-state-summary" class="lab-state-summary" role="region" aria-label="Lab state">
+    <p id="freshness-state"></p>
+    <p id="run-state"></p>
+    <p id="result-state"></p>
+    <p id="recovery-action"></p>
   </div>
 </header>
 <nav aria-label="Lenses" id="lenses" class="lenses"></nav>

@@ -50,7 +50,7 @@ def test_aligned_end_signals_names_span_and_peak_diagnostics(tmp_path: Path, mon
         "preferred_source": "sites-v1", "terms": "unknown", "observed_depth_x": 10.0,
         "valid_molecules": 10, "eligible_centers": 1, "catalogue_centers": 1,
         "eligible_preferred_sites": 2, "catalogue_preferred_sites": 2,
-        "ocf_like_left": 1, "ocf_like_right": 1, "ocf_like_left_ends": 1,
+        "ocf_like_left": 12345, "ocf_like_right": -12345, "ocf_like_left_ends": 1,
         "ocf_like_right_ends": 1, "preferred_u_hits": 1, "preferred_d_hits": 1,
         "valid_ends": 20, "aligned_span_length_bins_bp": {
             "lt100": 1, "100_200": 7, "201_500": 1, "501_2000": 1, "gt2000": 0,
@@ -73,6 +73,9 @@ def test_aligned_end_signals_names_span_and_peak_diagnostics(tmp_path: Path, mon
     assert "Aligned spans by length (bp)" in html
     assert "100–200" in html and "Left D peak offset: -60 bp" in html
     assert "right U peak offset: 60 bp" in html
+    assert '<code>12345 end-count difference</code>' in html
+    assert '<code>-12345 end-count difference</code>' in html
+    assert 'aria-label="Raw value: OCF left contribution"' in html
     assert "do not measure soft clipping" in html
     assert 'data-csp-violations="0"' in html
 

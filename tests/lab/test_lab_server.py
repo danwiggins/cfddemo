@@ -263,7 +263,7 @@ def test_stability_dom_names_unvalidated_wps_without_false_verdict(server, tmp_p
     assert ("<strong>WPS-eligible 120–180 bp aligned-fragment depth</strong>"
             " — stability not validated") in dom
     assert "no split-half stability verdict" in dom
-    assert "No validated stability deviation scale; numeric values are in the table." in dom
+    assert "No validated stability deviation scale; measured values remain in the table." in dom
     assert "0.4" in dom
 
 
@@ -390,6 +390,23 @@ def test_invalid_library_on_disk_keeps_the_last_good_one(monkeypatch, tmp_path) 
     assert again is good
     assert holder.health()["error"] and "line" in holder.health()["error"]
     del engine
+
+
+def test_invalid_method_catalog_on_disk_keeps_last_good_without_path(monkeypatch, tmp_path) -> None:
+    import yaml
+
+    holder = api_module.LibraryHolder()
+    good = holder.get()
+    edited = yaml.safe_load(api_module.LIBRARY_FILE.read_text())
+    edited["method_catalog"]["bam-qc"]["requirements"] = ["duplicate", "duplicate"]
+    broken = tmp_path / "private" / "library.yaml"
+    broken.parent.mkdir()
+    broken.write_text(yaml.safe_dump(edited))
+    monkeypatch.setattr(api_module, "LIBRARY_FILE", broken)
+    assert holder.get() is good
+    error = holder.health()["error"]
+    assert "method_catalog/bam-qc" in error and "requirements" in error
+    assert str(tmp_path) not in error
 
 
 def _serve_lines_after_ready(root: Path, *, timeout: float = 60) -> list[str]:
@@ -1201,6 +1218,8 @@ def test_trust_qc_run_note_is_scoped_without_replacing_result_status(tmp_path, k
                             "skip_reason": None, "skip_message": None, "failure": None,
                             "duration_s": 1.0, "min_depth_x": None, "metrics": [],
                             "provenance": {"input_id": input_id}}],
+            "catalog": [{"algorithm_id": "bam-qc", "label": "BAM QC", "status": "ok",
+                         "skip_reason": None}],
             "library_health": {"no_library_entry": 0, "unverified_citations": 0,
                                "version": "fixture", "error": None},
         }

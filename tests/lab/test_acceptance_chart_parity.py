@@ -54,8 +54,13 @@ def test_echarts_scatter_values_match_adjacent_table_without_animation(route, ex
                 visible: table.getClientRects().length > 0,
                 animation: option?.animation,
                 points: option?.series.filter((series) => series.type === 'scatter').flatMap((series) => series.data),
+                axes: [option?.xAxis[0].name, option?.yAxis[0].name],
                 rows: [...table.querySelectorAll('tbody tr')].map((row) =>
-                  [...row.querySelectorAll('td')].map((cell) => cell.textContent.trim())),
+                  [...row.querySelectorAll('td')].map((cell) =>
+                    (cell.querySelector('.display-value') || cell).textContent.trim())),
+                rawRows: [...table.querySelectorAll('tbody tr')].map((row) =>
+                  [...row.querySelectorAll('td')].map((cell) =>
+                    cell.querySelector('details.raw-value code')?.textContent.trim() || null)),
               };
             }))()"""))
 
@@ -73,7 +78,11 @@ def test_echarts_scatter_values_match_adjacent_table_without_animation(route, ex
         assert len(chart["points"]) == len(chart["rows"])
         # Home's first two table columns are the pair; Agreement has a sample-ID column.
         table_pairs = [row[:2] if route == "/" else row[1:3] for row in chart["rows"]]
-        assert [[float(value) for value in pair] for pair in table_pairs] == chart["points"]
+        assert [[float(value.removesuffix("%").removesuffix(" bp").strip()) for value in pair]
+                for pair in table_pairs] == chart["points"]
+        assert any("%" in name for name in chart["axes"])
+        if route == "/":
+            assert chart["rawRows"][0][:2] == ["0.1 fraction", "0.123456789 fraction"]
 
 
 @needs_chrome
@@ -106,8 +115,14 @@ def test_fragment_density_line_values_match_adjacent_table_without_animation(rou
                 animation: option?.animation,
                 points: option?.series.filter((series) => series.type === 'line').flatMap((series) => series.data),
                 labels: option?.xAxis[0].data,
+                xUnit: option?.xAxis[0].name,
+                yUnit: option?.yAxis[0].name,
                 rows: [...table.querySelectorAll('tbody tr')].map((row) =>
-                  [...row.querySelectorAll('td')].map((cell) => cell.textContent.trim())),
+                  [...row.querySelectorAll('td')].map((cell) =>
+                    (cell.querySelector('.display-value') || cell).textContent.trim())),
+                rawRows: [...table.querySelectorAll('tbody tr')].map((row) =>
+                  [...row.querySelectorAll('td')].map((cell) =>
+                    cell.querySelector('details.raw-value code')?.textContent.trim() || null)),
               };
             }))()"""))
 
@@ -127,11 +142,15 @@ def test_fragment_density_line_values_match_adjacent_table_without_animation(rou
         assert [[int(value) for value in row] for row in chart["rows"]] == expected_pairs
     else:
         denominator = sum(counts[49:])
-        expected = [counts[bp - 1] / denominator for bp in spans]
+        expected = [float(f"{100 * counts[bp - 1] / denominator:.3g}") for bp in spans]
         assert chart["labels"] == [str(bp) for bp in spans]
+        assert chart["xUnit"] == "span (bp)"
+        assert chart["yUnit"] == "% of 50–1000 bp molecules"
         assert chart["points"] == expected
         assert [int(row[0]) for row in chart["rows"]] == spans
-        assert [float(row[1]) for row in chart["rows"]] == expected
+        assert [float(row[1].removesuffix("%")) for row in chart["rows"]] == expected
+        assert [float(row[1].split()[0]) for row in chart["rawRows"]] == [
+            counts[bp - 1] / denominator for bp in spans]
 
 
 @needs_chrome
@@ -165,7 +184,10 @@ def test_genome_copy_number_points_match_unmasked_table_bins_in_genome_order(tmp
                 animation: option.animation,
                 points: option.series.filter((series) => series.type === 'scatter').flatMap((series) => series.data),
                 rows: [...table.querySelectorAll('tbody tr')].map((row) =>
-                  [...row.querySelectorAll('td')].map((cell) => cell.textContent.trim())),
+                  [...row.querySelectorAll('td')].map((cell) =>
+                    cell.querySelector('details.raw-value code')?.textContent.trim().split(' ')[0]
+                      || cell.querySelector('.display-value')?.textContent.trim()
+                      || cell.textContent.trim())),
               };
             })()"""))
 
@@ -195,7 +217,7 @@ def test_genome_copy_number_points_match_unmasked_table_bins_in_genome_order(tmp
         if chromosome not in offsets:
             offsets[chromosome] = cursor
         cursor = max(cursor, offsets[chromosome] + ending)
-        if log2 != "—":
+        if log2 not in ("—", "unavailable"):
             expected.append([(offsets[chromosome] + beginning) / 1_000_000, float(log2)])
             assert float(log2) == source["log2"]
     assert observed["points"] == [
