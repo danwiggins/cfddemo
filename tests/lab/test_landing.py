@@ -208,7 +208,10 @@ def test_navigation_order_with_compare(page_root, tmp_path) -> None:
 
 
 @needs_chrome
-def test_stability_names_both_halves_without_a_numeric_verdict(page_root, tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("relative,shown", [(5 / 102.5, "4.88%"), (None, "unavailable")])
+def test_stability_names_both_halves_without_a_numeric_verdict(
+    page_root, tmp_path, monkeypatch, relative, shown,
+) -> None:
     from traceback_lab import views
 
     original = views.stability_panels
@@ -228,7 +231,7 @@ def test_stability_names_both_halves_without_a_numeric_verdict(page_root, tmp_pa
         assert len(panels) >= 3
         panels[2]["split"] = {"a": 100, "b": 105, "absolute_diff": 5,
                                "deviation_a": None, "deviation_b": None,
-                               "relative_abs_diff": 5 / 102.5, "stable": None}
+                               "relative_abs_diff": relative, "stable": None}
         panels[2]["split_status"] = {
             half: {"state": "ok", "reason": None, "value": value, "deviation": None}
             for half, value in (("A", 100), ("B", 105))
@@ -246,7 +249,9 @@ def test_stability_names_both_halves_without_a_numeric_verdict(page_root, tmp_pa
     assert "split A unavailable (selected result unavailable); split B not interpretable (metric value unavailable)" in dom
     assert "No split-half stability verdict." in dom
     assert "100 / 105" in dom and "|A−B| = 5" in dom
-    assert "relative difference 4.88%" in dom
+    assert f"relative difference {shown}" in dom
+    if relative is None:
+        assert "relative difference 0%" not in dom
     assert "no split-half stability verdict; an unrecognized split label is present" in dom
     assert "No validated stability deviation scale" in dom
 

@@ -548,6 +548,22 @@ def test_every_registered_metric_flag_is_on_its_finding_card(tmp_path) -> None:
                 assert f"FLAG: {flag}" in card, (marker, flag)
 
 
+@needs_chrome
+def test_findings_separates_missing_measurement_from_interpretation_reason(tmp_path) -> None:
+    sample = _sample()
+    metric = sample["algorithms"][0]["metrics"][0]
+    metric.update({"value": None, "state": "not_interpretable", "reason": "depth"})
+    with _server(tmp_path, sample) as server:
+        dom = _dom(server, tmp_path / "browser", route=f"/sample/{ID12}/findings",
+                   want=lambda page: "Not interpretable (1)" in page)
+    start = dom.find('<details class="finding-group"><summary>Not interpretable')
+    assert start >= 0
+    row = dom[start:].split(f'<td>{metric["label"]}</td>', 1)[1].split("</tr>", 1)[0]
+    assert '<span class="display-value">unavailable</span>' in row
+    assert "<td>depth</td>" in row
+    assert "unavailable (depth)" not in row
+
+
 FLAG_SURFACES = [
     ("home", "PII", None),
     ("findings", "CLIA", None),
@@ -715,6 +731,18 @@ STATUS_CASES = [
 def _run_marker() -> dict:
     return {"run_id": "r-20261015-0101-abcd", "command": "run", "step": "bam-qc",
             "source_id": ID12 + "c" * 52, "input_id": "b" * 64}
+
+
+@needs_chrome
+def test_rounded_run_duration_keeps_exact_selected_result(tmp_path) -> None:
+    sample = _sample()
+    sample["algorithms"][0]["duration_s"] = 12.3456
+    with _server(tmp_path, sample) as server:
+        dom = _dom(server, tmp_path / "browser", route=f"/sample/{ID12}/trust-qc",
+                   want=lambda page: 'data-run-duration="12.3 s"' in page)
+    assert '<span class="display-value" data-run-duration-display="">12.3 s</span>' in dom
+    assert '<code>12.3456 s</code>' in dom
+    assert 'aria-label="Raw value: bam-qc, selected result duration"' in dom
 
 
 @needs_chrome
