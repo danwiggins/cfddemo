@@ -378,7 +378,8 @@
     ];
     const note = (message) => { if (!limitations.includes(message)) limitations.push(message); };
     if (Array.isArray(sample.excluded_chunks)) {
-      const knownExcluded = sample.excluded_chunks.filter((chunk) => Number.isSafeInteger(chunk) && chunk >= 0);
+      // Ingest records -1 when an excluded BAM has no parsed chunk index.
+      const knownExcluded = sample.excluded_chunks.filter((chunk) => Number.isSafeInteger(chunk) && chunk >= -1);
       if (knownExcluded.length) note(
         `Provisional input: ${knownExcluded.length} truncated chunks were excluded; measurements reflect only the reads present.`,
       );

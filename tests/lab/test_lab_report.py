@@ -109,7 +109,7 @@ def test_report_discloses_partial_input_selection_omissions_and_recorded_support
       const sample = {
         found: true, id12: source.slice(0, 12), source_id: source, full_input_id: input,
         example: false, run_utc: '', interpretation_version: 'v1', cohort_version: null,
-        excluded_chunks: [2, 9], unreadable_results: ['bam-qc', '/private/unreadable'],
+        excluded_chunks: [-1, 9], unreadable_results: ['bam-qc', '/private/unreadable'],
         ambiguous_results: ['sex-check'], malformed_result_selections: true,
         catalog: [
           {algorithm_id: 'depth', status: 'ok'},
@@ -142,6 +142,7 @@ def test_report_discloses_partial_input_selection_omissions_and_recorded_support
     assert [row["recorded_support_n"] for row in model["metrics"]] == [0, 29, None, None]
     limitations = " | ".join(model["limitations"])
     assert "Provisional input: 2 truncated chunks were excluded" in limitations
+    assert "Input-exclusion detail was invalid" not in limitations
     assert "Method bam-qc: selected result unreadable; no scalar rows." in limitations
     assert "Method sex-check: selected result ambiguous; no scalar rows." in limitations
     assert "Method fragment-size: not run; no scalar rows." in limitations
