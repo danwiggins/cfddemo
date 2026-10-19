@@ -16,6 +16,10 @@ body.lab { background: #f3f1ec; }
 .switcher select { width: auto; max-width: 22rem; }
 .lab-status { flex-basis: 100%; margin: 0; min-height: 1.4rem; color: var(--ink); font-weight: 600; }
 .lab-status:empty { min-height: 0; }
+.lab-state-summary { display: grid; gap: .1rem; margin: .15rem 0 .35rem; }
+.lab-state-summary p { margin: 0; font-size: 1rem; line-height: 1.4; overflow-wrap: anywhere; }
+.lab-state-summary #recovery-action:empty { display: none; }
+.lab-state-summary #freshness-state[data-stale="true"] { font-weight: 700; }
 .flag-pill { display: inline-block; padding: .25rem .5rem; border-radius: 1rem; background: var(--flag-bg); color: var(--ink); font-size: 1rem; font-weight: 700; }
 .lens-navigation { width: min(76rem, calc(100% - 2rem)); margin: .25rem auto 0; }
 .lens-navigation[hidden] { display: none; }

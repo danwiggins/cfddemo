@@ -244,6 +244,82 @@ def test_readiness_refresh_success_and_copy_feedback(tmp_path) -> None:
 
 
 @needs_chrome
+def test_readiness_refresh_401_expires_session_without_losing_record(tmp_path) -> None:
+    """An explicit refresh 401 shares the global session-expiry transition."""
+
+    with _server(tmp_path, _sample()) as server:
+        profile = tmp_path / "browser-profile"
+
+        def inspect(_command, evaluate) -> None:
+            before = evaluate("window.TracebackLab.state.sample.id12")
+            evaluate("""(() => {
+              const original = window.fetch;
+              window.fetch = (...args) => String(args[0]).startsWith('/api/samples/')
+                ? Promise.resolve(new Response('{}', {status:401})) : original.apply(window, args);
+              document.getElementById('readiness-refresh').click();
+            })()""")
+            for _ in range(40):
+                if evaluate("window.TracebackLab.state.sessionExpired"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("readiness refresh 401 did not expire the session")
+            assert evaluate("window.TracebackLab.state.sample.id12") == before
+            assert evaluate("document.getElementById('freshness-state').dataset.stale === 'true'")
+            assert evaluate("document.body.dataset.disconnected === '1'")
+            assert evaluate("document.getElementById('status').textContent.includes('Session expired')")
+            assert evaluate("!document.getElementById('recovery-action').textContent.includes('Export')")
+
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/methods"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'id="recorded-readiness"' in dom,
+            interact=inspect,
+        )
+
+
+@needs_chrome
+def test_readiness_refresh_does_not_duplicate_after_rerender(tmp_path) -> None:
+    """The in-flight guard outlives a replacement Methods button."""
+
+    sample = _sample()
+    with _server(tmp_path, sample) as server:
+        profile = tmp_path / "browser-profile"
+
+        def inspect(_command, evaluate) -> None:
+            evaluate("""(() => {
+              const original = window.fetch;
+              window.sampleFetches = 0;
+              window.fetch = (...args) => String(args[0]) === '/api/samples/3f9a1c2b7e04'
+                ? (window.sampleFetches++, new Promise((resolve) => { window.finishSampleRefresh = resolve; }))
+                : original.apply(window, args);
+              document.getElementById('readiness-refresh').click();
+              window.TracebackLab.render();
+              document.getElementById('readiness-refresh').click();
+            })()""")
+            assert evaluate("window.sampleFetches === 1")
+            assert evaluate("document.getElementById('readiness-refresh').disabled")
+            evaluate("window.finishSampleRefresh(new Response(__PAYLOAD__, {status:200}))".replace(
+                "__PAYLOAD__", json.dumps(json.dumps(sample))))
+            for _ in range(40):
+                if evaluate("window.TracebackLab.state.selectedRefresh === null"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("selected refresh did not settle")
+            assert evaluate("window.sampleFetches === 1")
+            assert evaluate("!document.getElementById('readiness-refresh').disabled")
+            assert evaluate("document.getElementById('freshness-state').dataset.stale === 'false'")
+
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/methods"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'id="recorded-readiness"' in dom,
+            interact=inspect,
+        )
+
+
+@needs_chrome
 @pytest.mark.parametrize("width", [375, 1280])
 def test_methods_consumes_validated_route_context_and_keeps_refresh_focus(width, tmp_path) -> None:
     sample = _sample()

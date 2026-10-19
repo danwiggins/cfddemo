@@ -634,8 +634,12 @@
     }
     const slot = h("div", {}, h("p", {}, "Loading…"));
     section.append(slot);
-    fetch(`/api/samples/${sample.id12}/artifact/full/cell-origin/composition`, { credentials: "same-origin" })
-      .then((r) => { if (!r.ok) throw new Error("data reference invalid"); return r.json(); })
+    const revision = L.state.navigationRevision;
+    const hash = location.hash;
+    L.requestJson(`/api/samples/${sample.id12}/artifact/full/cell-origin/composition`, {
+      isCurrent: () => revision === L.state.navigationRevision && hash === location.hash &&
+        L.state.sample?.id12 === sample.id12,
+    })
       .then((data) => {
         const rows = data.contributors.filter((c) => c.fraction > 0 || (c.interval && c.interval[1] > 0)).sort((x, y) => y.fraction - x.fraction);
         const w = 560, rowH = 22, left = 170, hgt = rows.length * rowH + 30;
@@ -661,7 +665,10 @@
           dataTable("All cell-type contributions, including zero-share rows", ["Cell type", "Share", "Interval low", "Interval high", "Interval"],
             data.contributors.map(compositionRow))));
       })
-      .catch((error) => slot.replaceWith(h("div", { class: "problem" }, `Chart could not be drawn (${error.message}).`)));
+      .catch((error) => {
+        if (error.kind !== "obsolete" && slot.isConnected) slot.replaceWith(h("div", { class: "problem" },
+          "Chart could not be drawn. Retry loading this selected result."));
+      });
     return section;
   }
 
@@ -1025,39 +1032,23 @@
     const feedback = h("p", { role: "status", "aria-live": "polite", class: remembered.stale ? "problem" : "help" },
       remembered.stale ? "Refresh failed. The recorded projection below is stale; current environment readiness remains unknown." : "");
     const refresh = h("button", { id: "readiness-refresh", type: "button", class: "control", "data-requires-server": "" }, "Refresh recorded run");
+    refresh.disabled = !!(state.selectedRefresh?.key === `${key}:${location.hash}` &&
+      state.selectedRefresh.revision === state.navigationRevision);
     refresh.addEventListener("click", async () => {
-      const revision = state.navigationRevision;
-      const hash = location.hash;
-      const selected = state.sample?.id12;
-      const controller = new AbortController();
-      const deadline = setTimeout(() => controller.abort(), 10000);
+      if (refresh.disabled) return;
       refresh.disabled = true;
       feedback.className = "help";
       feedback.textContent = "Refreshing recorded run…";
-      try {
-        const response = await fetch(`/api/samples/${encodeURIComponent(sample.id12)}`, {
-          credentials: "same-origin", signal: controller.signal,
-        });
-        if (!response.ok) throw new Error("sample refresh unavailable");
-        const current = await response.json();
-        if (current.found !== true || current.id12 !== sample.id12 ||
-            !Array.isArray(current.catalog) || !Array.isArray(current.algorithms)) {
-          throw new Error("sample refresh unavailable");
-        }
-        if (revision !== state.navigationRevision || hash !== location.hash || selected !== state.sample?.id12) return;
-        state.readinessRefresh = { ...state.readinessRefresh,
-          [`${current.id12}:${current.full_input_id || "unknown"}`]: { checkedAt: new Date().toISOString(), stale: false } };
-        state.sample = current;
-        L.render();
+      const outcome = await L.refreshSelectedSample();
+      if (outcome.kind === "ok") {
         document.getElementById("readiness-refresh")?.focus();
-      } catch (_error) {
-        if (revision !== state.navigationRevision || hash !== location.hash || selected !== state.sample?.id12) return;
-        state.readinessRefresh = { ...state.readinessRefresh, [key]: { ...remembered, stale: true } };
+      } else if (outcome.kind === "session") {
+        feedback.className = "problem";
+        feedback.textContent = "Session expired. Use a fresh one-use Lab link to load this result.";
+      } else if (outcome.kind !== "obsolete" && refresh.isConnected) {
         feedback.className = "problem";
         feedback.textContent = "Refresh failed. The recorded projection below is stale; current environment readiness remains unknown.";
-      } finally {
-        clearTimeout(deadline);
-        if (refresh.isConnected) refresh.disabled = false;
+        refresh.disabled = false;
       }
     });
     panel.append(refresh, feedback);
@@ -1121,8 +1112,12 @@
 
   // -- shared helpers for L1.7 ------------------------------------------------------------------
   function artifact(sample, algorithmId, panelId, label = "full") {
-    return fetch(`/api/samples/${sample.id12}/artifact/${label}/${algorithmId}/${panelId}`, { credentials: "same-origin" })
-      .then((r) => { if (!r.ok) throw new Error("data reference invalid"); return r.json(); });
+    const revision = L.state.navigationRevision;
+    const hash = location.hash;
+    return L.requestJson(`/api/samples/${sample.id12}/artifact/${label}/${algorithmId}/${panelId}`, {
+      isCurrent: () => revision === L.state.navigationRevision && hash === location.hash &&
+        L.state.sample?.id12 === sample.id12,
+    });
   }
   function algo(sample, id) { return sample.algorithms.find((a) => a.algorithm_id === id); }
   function value(sample, id, metric) {
@@ -1277,7 +1272,7 @@
           ? h("p", { class: "help" }, `Methylation link unavailable: ${data.methylation_link.reason || "no supported joint input"}.`) : "",
         details,
       );
-    }).catch((error) => slot.replaceWith(h("p", { class: "problem" }, `4-mer table unavailable (${error.message}). The scalar result remains in Findings.`)));
+    }).catch((_error) => slot.replaceWith(h("p", { class: "problem" }, "4-mer table unavailable. Retry loading this selected result; the scalar result remains in Findings.")));
     return [section];
   }
 
@@ -1340,7 +1335,7 @@
         h("tbody", {}, ...data.scores.map((row) => h("tr", {}, h("th", { scope: "row" }, row.assay),
           h("td", {}, row.cell_type), h("td", { class: "num" }, fmt(row.score, "correlation", { unitDisplay: false }))))));
       slot.replaceWith(h("details", {}, h("summary", {}, "All 898 raw scores"), h("div", { class: "table-wrap" }, table)));
-    }).catch((error) => slot.replaceWith(h("p", { class: "problem" }, `Cell-type scores unavailable (${error.message}).`)));
+    }).catch((_error) => slot.replaceWith(h("p", { class: "problem" }, "Cell-type scores unavailable. Retry loading this selected result.")));
     return [section];
   }
 
@@ -1506,7 +1501,7 @@
           primary.bin_start_bp.map((start, i) => [start, start + step / 2, primary.gc_corrected_coverage[i]]))),
         dataTable("Griffin TF-site lists", ["Site list", "Sites", "Central coverage", "Amplitude"], rows),
       );
-    }).catch((error) => slot.replaceWith(h("p", { class: "problem" }, `Griffin profile unavailable (${error.message}).`)));
+    }).catch((_error) => slot.replaceWith(h("p", { class: "problem" }, "Griffin profile unavailable. Retry loading this selected result.")));
     return [section];
   }
 
@@ -1539,7 +1534,7 @@
         ]),
         h("p", { class: "help" }, `Maximum absolute 4-mer frequency difference: ${motifDifference === undefined ? "not recorded" : motifDifference.toExponential(2)}. Pearson compares patterns and does not establish absolute frequency equality. Exact short/long count agreement: ${data.delfi.upstream_counts_equal ? "yes" : "no"}. ${data.note}`),
       );
-    }).catch((error) => slot.replaceWith(h("p", { class: "problem" }, `Paired-end cross-check unavailable (${error.message}).`)));
+    }).catch((_error) => slot.replaceWith(h("p", { class: "problem" }, "Paired-end cross-check unavailable. Retry loading this selected result.")));
     return [section];
   }
 
@@ -1575,7 +1570,7 @@
           yAxis: { type: "value", name: "mean coverage ×" },
           series: [{ type: "line", showSymbol: false, data: points, lineStyle: { color: "#1f5f8b" } }],
         }, dataTable("TSS coverage in 50 bp bins", ["Bin interval (bp)", "Mean coverage ×"], rows)));
-    }).catch((error) => slot.replaceWith(h("div", { class: "problem" }, `TSS profile could not be drawn (${error.message}).`)));
+    }).catch((_error) => slot.replaceWith(h("div", { class: "problem" }, "TSS profile could not be drawn. Retry loading this selected result.")));
     return [section];
   }
 
@@ -1639,7 +1634,7 @@
         h("p", { class: "help" }, `Short group n = ${fmtCount(data.short_n)}, mean = ${fmt(data.short_mean, "fraction")}; long group n = ${fmtCount(data.long_n)}, mean = ${fmt(data.long_mean, "fraction")}. A missing mean is not zero.`),
         h("div", { class: "table-wrap" }, table),
       );
-    }).catch((error) => slot.replaceWith(h("p", { class: "problem" }, `Size × methylation table unavailable (${error.message}). The scalar result remains above.`)));
+    }).catch((_error) => slot.replaceWith(h("p", { class: "problem" }, "Size × methylation table unavailable. Retry loading this selected result; the scalar result remains above.")));
     return [section];
   }
 
@@ -1827,11 +1822,16 @@
     out.push(shell);
     let request = 0;
     let results = null;
+    const revision = L.state.navigationRevision;
+    const hash = location.hash;
+    const viewCurrent = () => revision === L.state.navigationRevision && hash === location.hash &&
+      L.state.sample?.id12 === sample.id12;
     const show = (cohort) => {
       const current = ++request;
       results.replaceChildren(h("p", {}, "Loading comparison…"));
-      fetch(`/api/cohorts/${encodeURIComponent(cohort.cohort_id)}/samples/${sample.id12}/compare`, { credentials: "same-origin" })
-        .then((response) => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.json(); })
+      L.requestJson(`/api/cohorts/${encodeURIComponent(cohort.cohort_id)}/samples/${sample.id12}/compare`, {
+        isCurrent: () => viewCurrent() && current === request,
+      })
         .then((data) => {
           if (!results.isConnected || current !== request) return;
           if (data.state === "cohort_unavailable" || data.state === "target_unavailable") {
@@ -1910,11 +1910,12 @@
           results.replaceChildren(...nodes);
         })
         .catch((error) => {
-          if (results.isConnected && current === request) results.replaceChildren(h("p", { class: "problem" }, `Comparison could not be loaded (${error.message}). Check the Lab server, then reload.`));
+          if (error.kind !== "obsolete" && viewCurrent() && results.isConnected && current === request) {
+            results.replaceChildren(h("p", { class: "problem" }, "Comparison could not be loaded. Retry this selected cohort."));
+          }
         });
     };
-    fetch("/api/cohorts", { credentials: "same-origin" })
-      .then((response) => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.json(); })
+    L.requestJson("/api/cohorts", { isCurrent: viewCurrent })
       .then((data) => {
         if (!slot.isConnected) return;
         const unavailable = data.unavailable || [];
@@ -1938,7 +1939,9 @@
         show(data.cohorts[0]);
       })
       .catch((error) => {
-        if (slot.isConnected) slot.replaceChildren(h("p", { class: "problem" }, `Cohorts could not be loaded (${error.message}). Check the Lab server, then reload.`));
+        if (error.kind !== "obsolete" && viewCurrent() && slot.isConnected) {
+          slot.replaceChildren(h("p", { class: "problem" }, "Cohorts could not be loaded. Retry this selected view."));
+        }
       });
     out.push(sampleCompare(sample));
     return out;
@@ -1980,9 +1983,13 @@
     let request = 0;
     const show = () => {
       const current = ++request;
+      const revision = L.state.navigationRevision;
+      const hash = location.hash;
+      const other = picker.value;
+      const isCurrent = () => current === request && revision === L.state.navigationRevision &&
+        hash === location.hash && L.state.sample?.id12 === sample.id12 && picker.value === other;
       result.replaceChildren(h("p", {}, "Loading sample comparison…"));
-      fetch(`/api/samples/${sample.id12}/compare/${encodeURIComponent(picker.value)}`, { credentials: "same-origin" })
-        .then((response) => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.json(); })
+      L.requestJson(`/api/samples/${sample.id12}/compare/${encodeURIComponent(other)}`, { isCurrent })
         .then((data) => {
           if (!result.isConnected || current !== request) return;
           if (data.state !== "ready") {
@@ -2017,7 +2024,9 @@
           result.replaceChildren(...nodes);
         })
         .catch((error) => {
-          if (result.isConnected && current === request) result.replaceChildren(h("p", { class: "problem" }, `Sample comparison could not be loaded (${error.message}). Reload Compare.`));
+          if (error.kind !== "obsolete" && isCurrent() && result.isConnected) {
+            result.replaceChildren(h("p", { class: "problem" }, "Sample comparison could not be loaded. Retry this selected pair."));
+          }
         });
     };
     picker.addEventListener("change", show);

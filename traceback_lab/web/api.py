@@ -92,8 +92,15 @@ def _safe_result_selections(sample: Any, order: list[str]) -> dict[str, Any]:
 def _recovery_problem(problem: LabProblem) -> dict[str, str]:
     """Only operator-safe fields cross the local Compare API boundary."""
 
+    unsafe_path = re.compile(r"(?<![A-Za-z0-9])/[^\s`'\"<>]+|[A-Za-z]:[\\/]|file://|--root\s+(?!['\"]?<ROOT>)")
+    cause = problem.cause if not unsafe_path.search(problem.cause) else (
+        "The selected Lab record could not be read or verified."
+    )
+    fix = problem.fix if not unsafe_path.search(problem.fix) else (
+        "Check the Lab guide, restore the affected record from a known-good backup if needed, then retry Compare."
+    )
     return {"code": problem.code, "summary": problem.summary,
-            "cause": problem.cause, "fix": problem.fix, "docs": problem.docs}
+            "cause": cause, "fix": fix, "docs": problem.docs}
 
 
 _AGREEMENT_AXES = (
@@ -984,7 +991,7 @@ class LabApi:
             problem = LabProblem(
                 "TBX-LAB-017", cause=f"cohort {cohort_id} has no published generation",
                 fix="Run `" + shlex.join(["traceback", "lab", "cohort", "build", "--cohort", cohort_id,
-                                          "--root", str(self.store.root)]) + "`, then reload Compare",
+                                          "--root", "<ROOT>"]) + "`, then reload Compare",
             )
             return {"found": True, "id12": id12, "cohort_id": cohort_id,
                     "state": "cohort_unavailable", "metrics": [], "unscored": [],

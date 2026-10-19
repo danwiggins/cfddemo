@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 import time
@@ -1222,6 +1223,175 @@ def test_pending_navigation_is_cancelled_when_status_disconnects(tmp_path) -> No
 
 
 @needs_chrome
+@pytest.mark.parametrize("failure", ["unavailable", "invalid", "network", "session"])
+def test_failed_sample_navigation_restores_rendered_identity(tmp_path, failure) -> None:
+    """A failed requested hash never remains above another sample's result."""
+
+    requested = "aaaaaaaaaaaa"
+    with _server(tmp_path, _sample()) as server:
+        listing = server.app.api.samples()
+        server.app.api.samples = lambda: {**listing, "samples": [
+            listing["samples"][0], {**listing["samples"][0], "id12": requested},
+        ]}
+
+        def inspect(_command, evaluate) -> None:
+            evaluate("""(() => {
+              const original = window.fetch;
+              window.releaseRequested = null;
+              window.fetch = (...args) => String(args[0]) === '/api/samples/aaaaaaaaaaaa'
+                ? new Promise((resolve, reject) => { window.releaseRequested = {resolve, reject}; })
+                : original.apply(window, args);
+              location.hash = '#/sample/aaaaaaaaaaaa/findings';
+            })()""")
+            for _ in range(40):
+                if evaluate("!!window.releaseRequested"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("requested sample fetch did not start")
+            if failure == "network":
+                evaluate("window.releaseRequested.reject(new TypeError('private /Users/example/input.bam'))")
+            else:
+                response = {
+                    "unavailable": "new Response('{}', {status: 503})",
+                    "invalid": "new Response('{', {status: 200})",
+                    "session": "new Response('{}', {status: 401})",
+                }[failure]
+                evaluate(f"window.releaseRequested.resolve({response})")
+            for _ in range(40):
+                ready = evaluate("window.TracebackLab.state.sessionExpired" if failure == "session"
+                                 else "!!window.TracebackLab.state.loadFailure")
+                if ready:
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail(f"{failure} did not resolve to visible recovery")
+            state = evaluate("""(() => ({ hash: location.hash,
+              rendered: window.TracebackLab.state.renderedHash,
+              sample: window.TracebackLab.state.sample?.id12,
+              selected: document.getElementById('sample-switcher').value,
+              title: document.querySelector('#main h1')?.textContent,
+              stale: document.getElementById('freshness-state').dataset.stale,
+              status: document.getElementById('status').textContent,
+              action: document.getElementById('recovery-action').textContent,
+              expired: window.TracebackLab.state.sessionExpired
+            }))()""")
+            assert state["hash"] == state["rendered"] == f"#/sample/{ID12}/findings", state
+            assert state["sample"] == state["selected"] == ID12 and state["title"].startswith("Findings"), state
+            assert state["stale"] == "true", state
+            assert "/Users/" not in str(state), state
+            if failure == "session":
+                assert state["expired"] and "Session expired" in state["status"], state
+                assert "fresh one-use link" in state["action"], state
+            else:
+                assert "Could not open selected sample" in state["status"], state
+                assert "Retry loading this selection" in state["action"], state
+
+        profile = tmp_path / "browser-profile"
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/findings"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'aria-current="page">Findings' in dom,
+            interact=inspect,
+        )
+
+
+@needs_chrome
+def test_first_sample_load_failure_has_no_old_result(tmp_path) -> None:
+    """A first-load API failure has its own recovery view and no invented sample."""
+
+    requested = "aaaaaaaaaaaa"
+    with _server(tmp_path, _sample()) as server:
+        def unavailable(_id12):
+            raise OSError("private /Users/example/input.bam")
+        server.app.api.sample = unavailable
+        profile = tmp_path / "browser-profile"
+
+        def inspect(_command, evaluate) -> None:
+            shown = evaluate("""(() => ({
+              hash: location.hash, title: document.querySelector('#main h1')?.textContent,
+              sample: window.TracebackLab.state.sample,
+              retry: document.getElementById('recovery-action').textContent,
+              body: document.getElementById('main').textContent
+            }))()""")
+            assert shown["hash"] == f"#/sample/{requested}/findings", shown
+            assert shown["title"] == "Could not open selected sample" and shown["sample"] is None, shown
+            assert "Retry loading this selection" in shown["retry"] and "/Users/" not in str(shown), shown
+
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{requested}/findings"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'Could not open selected sample' in dom,
+            interact=inspect,
+        )
+
+
+@needs_chrome
+@pytest.mark.parametrize("older_first", [True, False])
+def test_older_sample_error_cannot_replace_newer_selection(tmp_path, older_first) -> None:
+    """An obsolete 401 is discarded in either response completion order."""
+
+    older, newer = "aaaaaaaaaaaa", "bbbbbbbbbbbb"
+    selected = copy.deepcopy(_sample())
+    selected["id12"] = newer
+    with _server(tmp_path, _sample()) as server:
+        listing = server.app.api.samples()
+        server.app.api.samples = lambda: {**listing, "samples": [
+            listing["samples"][0], {**listing["samples"][0], "id12": older},
+            {**listing["samples"][0], "id12": newer},
+        ]}
+
+        def inspect(_command, evaluate) -> None:
+            evaluate("""(() => {
+              const original = window.fetch;
+              window.pendingSelections = {};
+              window.fetch = (...args) => ['/api/samples/aaaaaaaaaaaa', '/api/samples/bbbbbbbbbbbb'].includes(String(args[0]))
+                ? new Promise((resolve) => { window.pendingSelections[String(args[0])] = resolve; })
+                : original.apply(window, args);
+              location.hash = '#/sample/aaaaaaaaaaaa/findings';
+            })()""")
+            for _ in range(40):
+                if evaluate("!!window.pendingSelections['/api/samples/aaaaaaaaaaaa']"):
+                    break
+                time.sleep(0.05)
+            evaluate("location.hash = '#/sample/bbbbbbbbbbbb/findings'")
+            for _ in range(40):
+                if evaluate("!!window.pendingSelections['/api/samples/bbbbbbbbbbbb']"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("newer selected sample fetch did not start")
+            release_old = "window.pendingSelections['/api/samples/aaaaaaaaaaaa'](new Response('{}', {status:401}))"
+            release_new = "window.pendingSelections['/api/samples/bbbbbbbbbbbb'](new Response(__PAYLOAD__, {status:200}))".replace(
+                "__PAYLOAD__", json.dumps(json.dumps(selected)))
+            if older_first:
+                evaluate(release_old)
+                evaluate(release_new)
+            else:
+                evaluate(release_new)
+                evaluate(release_old)
+            for _ in range(40):
+                if evaluate(f"window.TracebackLab.state.sample?.id12 === '{newer}'"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("newer selected sample did not render")
+            time.sleep(0.05)
+            assert evaluate(f"location.hash === '#/sample/{newer}/findings'")
+            assert evaluate("document.querySelector('#main h1')?.textContent.startsWith('Findings')")
+            assert evaluate("window.TracebackLab.state.sessionExpired === false")
+            assert evaluate("document.getElementById('sample-switcher').value") == newer
+
+        profile = tmp_path / "browser-profile"
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/findings"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'aria-current="page">Findings' in dom,
+            interact=inspect,
+        )
+
+
+@needs_chrome
 def test_hung_status_observations_count_as_missed_polls(tmp_path) -> None:
     """Three unanswered polls disconnect the page within the polling budget."""
 
@@ -1258,6 +1428,66 @@ def test_hung_status_observations_count_as_missed_polls(tmp_path) -> None:
             [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
              f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/trust-qc"],
             profile, ok=lambda d: 'data-ready="1"' in d and "Run log line for bam-qc" in d,
+            interact=inspect, timeout=90,
+        )
+
+
+@needs_chrome
+def test_reconnected_status_does_not_confirm_stale_selected_result(tmp_path) -> None:
+    """Status reachability needs a separate same-selection sample refresh."""
+
+    phase = {"down": False}
+    with _server(tmp_path, _sample()) as server:
+        kind, source = server.app.assets["/assets/lab.js"]
+        server.app.assets["/assets/lab.js"] = (kind, source.replace(b"const POLL_MS = 15000;", b"const POLL_MS = 500;"))
+        original_status = server.app.api.status
+
+        def status():
+            if phase["down"]:
+                raise OSError("synthetic disconnect")
+            return original_status()
+
+        server.app.api.status = status
+
+        def inspect(_command, evaluate) -> None:
+            evaluate("""(() => {
+              const original = window.fetch;
+              window.failSelectedRefresh = true;
+              window.fetch = (...args) => String(args[0]) === '/api/samples/3f9a1c2b7e04' && window.failSelectedRefresh
+                ? Promise.resolve(new Response('{}', {status:503})) : original.apply(window, args);
+            })()""")
+            phase["down"] = True
+            for _ in range(40):
+                if evaluate("window.TracebackLab.state.connectionLost"):
+                    break
+                time.sleep(0.2)
+            else:
+                pytest.fail("page did not reach its three-miss disconnected state")
+            assert evaluate("document.getElementById('freshness-state').dataset.stale === 'true'")
+            phase["down"] = False
+            for _ in range(40):
+                if evaluate("!window.TracebackLab.state.connectionLost && window.TracebackLab.state.refreshFailureKind === 'unavailable'"):
+                    break
+                time.sleep(0.2)
+            else:
+                pytest.fail("status recovery did not attempt the selected refresh")
+            assert evaluate("document.getElementById('freshness-state').dataset.stale === 'true'")
+            assert evaluate(f"window.TracebackLab.state.sample.id12 === '{ID12}'")
+            assert evaluate(f"location.hash === '#/sample/{ID12}/findings'")
+            evaluate("window.failSelectedRefresh = false; document.querySelector('#recovery-action button').click()")
+            for _ in range(40):
+                if evaluate("document.getElementById('freshness-state').dataset.stale === 'false'"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("successful selected refresh did not clear stale status")
+            assert evaluate(f"window.TracebackLab.state.sample.id12 === '{ID12}'")
+
+        profile = tmp_path / "browser-profile"
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/findings"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'aria-current="page">Findings' in dom,
             interact=inspect, timeout=90,
         )
 
