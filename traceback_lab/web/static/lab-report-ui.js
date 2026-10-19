@@ -193,7 +193,8 @@
       h("h1", {}, "Traceback Lab research report"),
       field("Captured UTC", report.generated_at), field("Sample", report.sample_id),
       field("Input", report.full_input_id), field("Source", report.source_id),
-      field("Recorded date (UTC)", report.recorded_utc), field("Interpretation version", report.interpretation_version),
+      field("Recorded date (UTC)", report.recorded_utc), field("Recorded date kind", report.recorded_utc_kind),
+      field("Interpretation version", report.interpretation_version),
       field("Cohort version", report.cohort_version),
       h("p", {}, "Freshly captured report; values may differ from the earlier page."),
       h("h2", {}, "Limitations"), h("ul", {}, ...report.limitations.map((item) => h("li", {}, item))));
@@ -214,6 +215,7 @@
           field("Displayed value", `${row.display_value}${row.display_unit === "%" ? "%" : row.display_unit ? ` ${row.display_unit}` : ""}`),
           field("Exact API value", row.raw_value == null ? "unavailable" : `${row.raw_value}${row.raw_unit ? ` ${row.raw_unit}` : " (unit not declared)"}`),
           field("Interpretation", row.interpretation_state),
+          field("Interpretation reason", row.interpretation_reason),
           field("Recorded support count", detail.support), field("Reference", detail.reference),
           field("Confounders", detail.confounders), field("Next steps", detail.nextSteps),
           field("Measurement", detail.guide?.definition),

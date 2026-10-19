@@ -6,6 +6,7 @@ import ast
 import csv
 import io
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -30,7 +31,8 @@ def test_report_shape_csv_protection_and_private_diagnostics() -> None:
       const source = 'a'.repeat(64), input = 'b'.repeat(64);
       const sample = {
         found: true, id12: source.slice(0, 12), source_id: source, full_input_id: input,
-        example: false, run_utc: '', interpretation_version: 'v1', cohort_version: null,
+        example: false, run_utc: '', completed_utc: null,
+        interpretation_version: 'v1', cohort_version: null,
         catalog: [{algorithm_id: 'sex-check'}, {algorithm_id: 'copy-number'},
           {algorithm_id: 'bam-qc'}, {algorithm_id: 'fragment-size'}, {algorithm_id: 'hidden-step'}],
         algorithms: [
@@ -68,7 +70,8 @@ def test_report_shape_csv_protection_and_private_diagnostics() -> None:
     assert model["schema_version"] == "2"
     assert list(model) == [
         "schema_version", "generated_at", "research_use_only", "example", "sample_id",
-        "source_id", "full_input_id", "recorded_utc", "interpretation_version", "cohort_version",
+        "source_id", "full_input_id", "recorded_utc", "recorded_utc_kind",
+        "interpretation_version", "cohort_version",
         "limitations", "metrics",
     ]
     assert len(model["metrics"]) == 3
@@ -76,15 +79,17 @@ def test_report_shape_csv_protection_and_private_diagnostics() -> None:
     assert model["metrics"][1]["raw_value"] is None
     assert model["metrics"][2]["raw_value"] == -0.2
     assert model["metrics"][0]["computed_at"] == "2026-10-19T12:00:00Z"
-    assert model["recorded_utc"] is None and model["metrics"][0]["raw_value"] == "female"
-    assert "otherwise the latest input-use time" in " ".join(model["limitations"])
+    assert model["recorded_utc"] is None and model["recorded_utc_kind"] == "unknown"
+    assert model["metrics"][0]["raw_value"] == "female"
+    assert "No recorded completion or input-use timestamp" in " ".join(model["limitations"])
     assert "nonfinite" in " ".join(model["limitations"])
     assert "Method copy-number: skipped (depth)" in " ".join(model["limitations"])
     assert data["csv"].startswith("schema_version,generated_at,")
     csv_rows = list(csv.DictReader(io.StringIO(data["csv"])))
     assert len(csv_rows) == 3
-    assert len(csv_rows[0]) == 28
+    assert len(csv_rows[0]) == 30
     assert "recorded_utc" in csv_rows[0] and "run_utc" not in csv_rows[0]
+    assert csv_rows[0]["recorded_utc_kind"] == "unknown"
     assert list(csv_rows[0]).index("recorded_support_n") == list(csv_rows[0]).index("raw_unit") + 1
     assert all(row["schema_version"] == "2" for row in csv_rows)
     assert "\r\n" in data["csv"] and "'\"-0.2\"" not in data["csv"]
@@ -110,7 +115,8 @@ def test_report_discloses_partial_input_selection_omissions_and_recorded_support
       });
       const sample = {
         found: true, id12: source.slice(0, 12), source_id: source, full_input_id: input,
-        example: false, run_utc: '2026-10-19T11:00:00Z', interpretation_version: 'v1', cohort_version: null,
+        example: false, run_utc: '2026-10-19T11:00:00Z', completed_utc: null,
+        interpretation_version: 'v1', cohort_version: null,
         excluded_chunks: [-1, 9], unreadable_results: ['bam-qc', '/private/unreadable'],
         ambiguous_results: ['sex-check'], malformed_result_selections: true,
         catalog: [
@@ -141,6 +147,7 @@ def test_report_discloses_partial_input_selection_omissions_and_recorded_support
     model = data["model"]
     assert model["schema_version"] == "2"
     assert model["recorded_utc"] == "2026-10-19T11:00:00Z"
+    assert model["recorded_utc_kind"] == "input_use"
     assert "run_utc" not in model
     assert [row["algorithm_id"] for row in model["metrics"]] == ["depth"] * 4
     assert [row["recorded_support_n"] for row in model["metrics"]] == [0, 29, None, None]
@@ -156,12 +163,97 @@ def test_report_discloses_partial_input_selection_omissions_and_recorded_support
     assert "Some recorded support counts were invalid" in limitations
     csv_rows = list(csv.DictReader(io.StringIO(data["csv"])))
     assert len(csv_rows) == 4
-    assert len(csv_rows[0]) == 28
+    assert len(csv_rows[0]) == 30
     assert all(row["recorded_utc"] == "2026-10-19T11:00:00Z" for row in csv_rows)
+    assert all(row["recorded_utc_kind"] == "input_use" for row in csv_rows)
     assert [row["recorded_support_n"] for row in csv_rows] == ["0", "29", "", ""]
     for private in ("/private/unreadable", "/private/catalog", "/private/failure",
                     "/private/support"):
         assert private not in data["json"] and private not in data["csv"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js unavailable")
+def test_report_date_kind_and_interpretation_reason_roundtrip() -> None:
+    data = _node(r"""
+      require(process.argv[1]);
+      const core = globalThis.TracebackLabReport;
+      const source = 'a'.repeat(64), input = 'b'.repeat(64);
+      const metrics = [
+        {metric_id: 'tumor_fraction', value: 0.2, unit: 'fraction',
+          state: 'not_interpretable', reason: 'no_pon'},
+        {metric_id: 'tumor_fraction', value: 0.2, unit: 'fraction',
+          state: 'no_reference', reason: 'cohort_too_small'},
+        {metric_id: 'tumor_fraction', value: 0.2, unit: 'fraction',
+          state: 'above_typical', reason: 'no_pon'},
+        {metric_id: 'tumor_fraction', value: 0.2, unit: 'fraction',
+          state: 'not_interpretable', reason: 'cohort_too_small'},
+        {metric_id: 'tumor_fraction', value: 0.2, unit: 'fraction',
+          state: 'not_interpretable', reason: '/private/secret-read'},
+      ];
+      const sample = {found: true, id12: source.slice(0, 12), source_id: source,
+        full_input_id: input, example: false, run_utc: '2026-10-19T11:00:00Z',
+        completed_utc: '2026-10-19T11:00:00Z', interpretation_version: 'v1',
+        cohort_version: null, catalog: [{algorithm_id: 'copy-number'}],
+        algorithms: [{algorithm_id: 'copy-number', status: 'ok', metrics,
+          provenance: {tool: 'lab', tool_version: '1', parameters_sha256: 'c'.repeat(64),
+            input_id: input, source_id: source, reference_id: 'ref',
+            timestamp_utc: '2026-10-19T12:00:00Z'}}]};
+      const formatterReasons = [];
+      const format = (metric, options) => {
+        formatterReasons.push(options.reason);
+        return {displayValue: '20', displayUnit: '%'};
+      };
+      const report = core.project(sample, '2026-10-19T16:00:00Z', format);
+      const code = (value) => { try { core.project(value, '2026-10-19T16:00:00Z', format); return null; }
+        catch (error) { return error.code; } };
+      const missing = {...sample}; delete missing.completed_utc;
+      process.stdout.write(JSON.stringify({model: report, json: JSON.parse(core.json(report)),
+        csv: core.csv(report), formatterReasons,
+        inputUse: core.project({...sample, completed_utc: null}, '2026-10-19T16:00:00Z', format),
+        unknownMissing: core.project(missing, '2026-10-19T16:00:00Z', format),
+        unknownEmpty: core.project({...sample, completed_utc: null, run_utc: ''},
+          '2026-10-19T16:00:00Z', format),
+        malformed: code({...sample, completed_utc: '/private/time'}),
+        mismatch: code({...sample, completed_utc: '2026-10-19T10:00:00Z'})}));
+    """)
+    model = data["model"]
+    assert model["recorded_utc"] == "2026-10-19T11:00:00Z"
+    assert model["recorded_utc_kind"] == "completion"
+    assert data["inputUse"]["recorded_utc_kind"] == "input_use"
+    assert data["unknownMissing"]["recorded_utc_kind"] == "unknown"
+    assert "Completion metadata was absent" in " ".join(data["unknownMissing"]["limitations"])
+    assert data["unknownEmpty"]["recorded_utc"] is None
+    assert data["unknownEmpty"]["recorded_utc_kind"] == "unknown"
+    assert data["malformed"] == data["mismatch"] == "invalid_report_identity"
+    reasons = [row["interpretation_reason"] for row in model["metrics"]]
+    assert reasons == ["no_pon", "cohort_too_small", None, None, None]
+    assert all(row["raw_value"] == 0.2 for row in model["metrics"])
+    assert data["formatterReasons"] and set(data["formatterReasons"]) == {None}
+    assert "Some interpretation reasons were omitted" in " ".join(model["limitations"])
+    assert "/private/secret-read" not in json.dumps(data["json"]) and "/private/secret-read" not in data["csv"]
+    assert data["json"] == model
+    csv_rows = list(csv.DictReader(io.StringIO(data["csv"])))
+    assert len(csv_rows[0]) == 30
+    assert all(row["recorded_utc_kind"] == "completion" for row in csv_rows)
+    assert [row["interpretation_reason"] for row in csv_rows] == [
+        "no_pon", "cohort_too_small", "", "", "",
+    ]
+
+
+def test_report_interpretation_reason_allowlists_match_engine() -> None:
+    from traceback_lab.interpretation.engine import (
+        NO_REFERENCE_REASONS,
+        NOT_INTERPRETABLE_REASONS,
+    )
+
+    source = REPORT.read_text()
+
+    def js_reason_set(name: str) -> set[str]:
+        body = source.split(f"const {name} = new Set([", 1)[1].split("]);", 1)[0]
+        return set(re.findall(r'"([^"]+)"', body))
+
+    assert js_reason_set("notInterpretableReasons") == set(NOT_INTERPRETABLE_REASONS)
+    assert js_reason_set("noReferenceReasons") == set(NO_REFERENCE_REASONS)
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js unavailable")
