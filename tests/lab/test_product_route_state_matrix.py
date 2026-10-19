@@ -40,7 +40,8 @@ def _algorithm(sample: dict, algorithm_id: str) -> dict:
 def _mark(sample: dict, algorithm_id: str, status: str, *, reason: str | None = None) -> None:
     row = _algorithm(sample, algorithm_id)
     row.update(status=status, skip_reason=reason, skip_message="recorded fixture reason",
-               failure={"code": "FIXTURE_FAILURE"} if status == "failed" else None, metrics=[])
+               failure={"first_line": "synthetic failure", "stderr_tail": ["synthetic failure"]}
+               if status == "failed" else None, metrics=[])
     catalog = next(row for row in sample["catalog"] if row["algorithm_id"] == algorithm_id)
     catalog.update(status=status, skip_reason=reason)
 
@@ -224,6 +225,15 @@ def test_product_route_state_matrix(state: str, tmp_path: Path, record_property)
         def inspect(command, evaluate) -> None:
             for index, route in enumerate(SAMPLE_ROUTES):
                 if state == "expired_session" and index:
+                    # A fresh one-use link requires a new document.  Navigating
+                    # between hashes on the expired page retains its JS state.
+                    command("Page.navigate", {"url": "about:blank"})
+                    for _ in range(80):
+                        if evaluate("location.href === 'about:blank'"):
+                            break
+                        time.sleep(0.05)
+                    else:
+                        raise AssertionError("expired page did not leave the old document")
                     command("Page.navigate", {"url": server.issue_link() + f"&route=/sample/{id12}/{route}"})
                     _until(evaluate, lambda row: row["rendered"] == f"#/sample/{id12}/{route}" and not row["expired"])
                 row = _visit(evaluate, route, id12, navigate=index > 0 and state != "expired_session")
