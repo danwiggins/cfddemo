@@ -163,7 +163,9 @@ def test_landing_pixel_budget_at_1280x800(page_root, tmp_path) -> None:
         assert int(body["defended-visible"]) >= 1
     else:
         assert int(body["defended-visible"]) >= min(3, total) and total >= 1
-    assert body["clia-fully-visible"] == "true"
+    main = dom.split("<main", 1)[1].split("</main>", 1)[0]
+    assert main.index('class="panel landing-intro"') < main.index('class="landing-band"') < main.index('class="clia-panel"')
+    assert all(f'href="#/sample/{_id12(page_root)}/{lens}"' in main for lens in ("signals", "trust-qc", "methods"))
     assert body["page-scroll-x"] == "false"
     for text in (
         "What CLIA means for this demo", "FLAG: LEGAL — verify", "Defended results", "Depth → utility",

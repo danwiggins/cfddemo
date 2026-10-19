@@ -464,7 +464,7 @@ def test_listing_retries_when_source_inputs_change_after_snapshot(tmp_path, monk
     ("history_unavailable", "Completion history unavailable"),
 ))
 @pytest.mark.parametrize("route_kind", ("bare", "explicit"))
-def test_recovery_home_keeps_clia_panel_first_and_disclosures(tmp_path, state, title, route_kind) -> None:
+def test_recovery_home_keeps_clia_disclosures_with_sample_overview(tmp_path, state, title, route_kind) -> None:
     store = LabStore(tmp_path / "root")
     store.ensure()
     source, input_id = "a" * 64, "8" * 64
@@ -491,8 +491,14 @@ def test_recovery_home_keeps_clia_panel_first_and_disclosures(tmp_path, state, t
     assert main is not None
     content = main.group(1)
     assert content.index("<h1") < content.index('<section class="clia-panel"')
-    assert content.index('<section class="clia-panel"') == content.index("<section")
+    if route_kind == "explicit" and state == "no_completed":
+        assert content.index('<section class="panel landing-intro"') == content.index("<section")
+        assert content.index('<section class="panel landing-intro"') < content.index('<section class="clia-panel"')
+    else:
+        assert content.index('<section class="clia-panel"') == content.index("<section")
     assert content.count('<section class="clia-panel"') == 1
+    if route_kind == "explicit" and state == "no_completed":
+        assert f"Sample {source[:12]}" in dom and "No completed Lab run yet" in dom
     assert "What CLIA means for this demo" in content
     assert 'aria-expanded="false"' in content
     assert 'aria-controls="clia-full"' in content
@@ -545,7 +551,7 @@ def test_unavailable_lens_does_not_gain_landing_panel(tmp_path, state) -> None:
 
 
 @needs_chrome
-def test_provisional_home_keeps_clia_before_excluded_chunk_notice(tmp_path) -> None:
+def test_provisional_home_keeps_excluded_chunk_notice_beside_overview(tmp_path) -> None:
     store = LabStore(tmp_path / "root")
     store.ensure()
     source, input_id = "a" * 64, "8" * 64
@@ -567,5 +573,6 @@ def test_provisional_home_keeps_clia_before_excluded_chunk_notice(tmp_path) -> N
     main = re.search(r"<main\b[^>]*>(.*?)</main>", dom, re.DOTALL)
     assert main is not None
     content = main.group(1)
-    assert content.index('<section class="clia-panel"') < content.index('<div class="status-line"')
+    assert content.index('class="panel landing-intro"') < content.index('<div class="status-line"')
     assert content.index('<div class="status-line"') < content.index('class="headline"')
+    assert content.index('class="headline"') < content.index('<section class="clia-panel"')

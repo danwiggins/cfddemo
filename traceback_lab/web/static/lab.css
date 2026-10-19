@@ -64,6 +64,8 @@ pre.stderr { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; 
 /* ---- S6c: landing, Findings, Stability ---------------------------------------------- */
 .app-header { flex-wrap: nowrap; }
 .app-header .flag-pill { font-size: .875rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.sample-context { margin: 0; padding: .2rem .5rem; border: 1px solid var(--rule); border-radius: .3rem; font-size: .875rem; overflow-wrap: anywhere; }
+.sample-context-kind { font-weight: 750; }
 .lab-status { flex-basis: auto; }
 .lab-chrome .lab-status:not(:empty) { display: block; }
 #main { width: min(76rem, calc(100% - 2rem)); margin-inline: auto; display: block; padding-block: .25rem 3rem; }
@@ -80,6 +82,16 @@ pre.stderr { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; 
 .clia-toggle { background: #ffffff; color: var(--ink); }
 .clia-full p { max-width: 70ch; }
 .headline { margin: .35rem 0 .25rem; font-size: 1.1rem; font-weight: 700; }
+.landing-intro { margin: .25rem 0 .75rem; }
+.landing-intro h2 { margin: 0 0 .25rem; }
+.landing-identity { margin: .25rem 0 .5rem; }
+.landing-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: .5rem 1rem; margin: .5rem 0; }
+.landing-summary div { min-width: 0; }
+.landing-summary dt { font-size: .875rem; color: var(--muted); }
+.landing-summary dd { margin: 0; font-weight: 700; }
+.landing-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .75rem; }
+.landing-actions a { padding: .5rem .75rem; border: 2px solid var(--ink); border-radius: .35rem; background: #ffffff; color: var(--ink); font-weight: 700; text-decoration: none; }
+.landing-actions a:first-child { background: var(--ink); color: #ffffff; }
 .landing-band { display: grid; grid-template-columns: 1fr; gap: 1rem; }
 .landing-band .panel { margin-top: 0; padding-top: .25rem; }
 .defended-rows { list-style: none; margin: 0 0 .25rem; padding: 0; }
