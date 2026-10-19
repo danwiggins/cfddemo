@@ -211,7 +211,7 @@ def parse_library(library_text: str, licenses_text: str) -> Library:
     for alg, count in headlines.items():
         _require(count == 1, alg, f"exactly one headline metric is required, found {count}")
     hidden = frozenset(library.get("hidden_algorithms") or ())
-    raw_methods = library.get("method_catalog") or {}
+    raw_methods = library.get("method_catalog", {})
     _require(isinstance(raw_methods, Mapping), "method_catalog", "must be a mapping")
     methods: dict[str, dict[str, Any]] = {}
     required_fields = {"description", "question", "limitations", "requirements"}
