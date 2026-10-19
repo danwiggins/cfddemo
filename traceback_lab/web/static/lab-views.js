@@ -1487,12 +1487,13 @@
       if (!other || other.status !== "ok") {
         panel.append(absent(other, id, hasChart ? sample : null), ...(other ? context(sample, id, seen) : []));
       } else {
-        panel.append(...context(sample, id, seen), h("table", { class: "data-table" },
+        panel.append(...context(sample, id, seen), h("div", { class: "table-wrap", tabindex: "0",
+          role: "region", "aria-label": `${id} scalar metrics` }, h("table", { class: "data-table" },
           h("thead", {}, h("tr", {}, ...["Metric", "Value", "Interpretation state"].map((label) => h("th", { scope: "col" }, label)))),
           h("tbody", {}, ...other.metrics.filter((m) => m.value === null || typeof m.value !== "object")
             .map((m) => h("tr", {}, h("th", { scope: "row" }, m.label), h("td", {},
               rawCell(fmtMetric(m, { algorithmId: id }), m.value, m.unit, `${id}/${m.metric_id}`)),
-              h("td", {}, stateChip(m)))))));
+              h("td", {}, stateChip(m))))))));
         if (id === "end-motifs") {
           const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading end-motif frequencies…"));
           panel.append(h("p", { class: "help" }, "Aligned-reference 4-mers at both fragment ends; all 256 motifs are in the data table."), slot);
@@ -1858,7 +1859,7 @@
         const exactFitCaveat = support.markers_covered === 2
           ? " With two covered markers, an interior fit is exactly determined; zero residual does not establish fit quality." : "";
         section.append(h("p", { class: "help" },
-          `Methylation numerical fit: ${fmtCount(support.markers_covered)} covered markers, ${fmtCount(support.cpg_calls_used)} CpG calls; condition number ${support.reference_condition_number === null ? "unavailable" : fmt(support.reference_condition_number, null)}. ${residual}${exactFitCaveat} These counts do not establish biological calibration.`));
+          `Methylation numerical fit: ${fmtCount(support.markers_covered)} covered markers, ${fmtCount(support.cpg_calls_used)} CpG calls; condition number ${support.reference_condition_number === null ? "unavailable" : fmt(support.reference_condition_number, null, { missingUnit: false })}. ${residual}${exactFitCaveat} These counts do not establish biological calibration.`));
         if (support.markers_covered === 0)
           section.append(h("p", { class: "problem" }, "No registered CpG marker has a usable C+m call on this input. Check zero-based CpG-C positions, the genome reference, and modification-call coverage."));
       }
