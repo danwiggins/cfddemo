@@ -230,13 +230,38 @@ def test_report_download_writes_json_and_csv_from_one_capture(tmp_path) -> None:
                 time.sleep(0.05)
             assert evaluate("!!document.querySelector('.report-preview')")
             evaluate("""(() => {
+              window.reportDownloadPayloads = {};
+              const create = URL.createObjectURL.bind(URL);
+              URL.createObjectURL = (blob) => {
+                const kind = blob.type.startsWith('application/json') ? 'json'
+                  : blob.type.startsWith('text/csv') ? 'csv' : null;
+                const url = create(blob);
+                if (kind) blob.text().then((text) => { window.reportDownloadPayloads[kind] = text; });
+                return url;
+              };
+            })()""")
+            evaluate("""(() => {
               const buttons = [...document.querySelectorAll('.report-actions button')];
               buttons[0].click(); buttons[1].click();
             })()""")
-            for _ in range(100):
-                if len(list(downloads.glob("*.json"))) == len(list(downloads.glob("*.csv"))) == 1:
+            deadline = time.monotonic() + 30
+            payloads = {}
+            while time.monotonic() < deadline:
+                if set(payloads) != {"json", "csv"}:
+                    payloads = evaluate("window.reportDownloadPayloads")
+                json_files = list(downloads.glob("*.json"))
+                csv_files = list(downloads.glob("*.csv"))
+                if (set(payloads) == {"json", "csv"} and len(json_files) == len(csv_files) == 1
+                        and json_files[0].read_bytes() == payloads["json"].encode("utf-8")
+                        and csv_files[0].read_bytes() == payloads["csv"].encode("utf-8")):
                     break
                 time.sleep(0.05)
+            else:
+                sizes = {path.name: path.stat().st_size for path in downloads.iterdir()}
+                expected = {kind: len(text.encode("utf-8")) for kind, text in payloads.items()}
+                raise AssertionError(
+                    f"Report downloads did not finish with captured Blob bytes: saved={sizes}, expected={expected}"
+                )
 
         _dom_cdp(
             [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
