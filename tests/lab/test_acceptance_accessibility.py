@@ -580,8 +580,15 @@ def test_revealed_controls_and_each_signals_tab_keep_target_and_page_bounds(size
 
             def audit(label: str) -> None:
                 result = evaluate("""(() => {
+                  const exposedByDetails = (el) => {
+                    for (let parent = el.parentElement; parent; parent = parent.parentElement) {
+                      if (parent.tagName === 'DETAILS' && !parent.open &&
+                          !parent.querySelector(':scope > summary')?.contains(el)) return false;
+                    }
+                    return true;
+                  };
                   const visible = (el) => { const style = getComputedStyle(el);
-                    return el.getClientRects().length > 0 && style.display !== 'none'
+                    return exposedByDetails(el) && el.getClientRects().length > 0 && style.display !== 'none'
                       && style.visibility !== 'hidden'; };
                   return {
                     width: document.documentElement.clientWidth,
@@ -600,9 +607,17 @@ def test_revealed_controls_and_each_signals_tab_keep_target_and_page_bounds(size
                 states.append(label)
 
             def reveal_all() -> None:
-                evaluate("""(() => { for (const button of document.querySelectorAll('#main button[aria-controls]')) {
+                evaluate("""(() => {
+                  const exposedByDetails = (el) => {
+                    for (let parent = el.parentElement; parent; parent = parent.parentElement) {
+                      if (parent.tagName === 'DETAILS' && !parent.open &&
+                          !parent.querySelector(':scope > summary')?.contains(el)) return false;
+                    }
+                    return true;
+                  };
+                  for (const button of document.querySelectorAll('#main button[aria-controls]')) {
                     const target = document.getElementById(button.getAttribute('aria-controls'));
-                    if (target?.hidden && button.getClientRects().length) button.click();
+                    if (target?.hidden && exposedByDetails(button) && button.getClientRects().length) button.click();
                   }
                   for (const details of document.querySelectorAll('#main details'))
                   details.open = true; })()""")
@@ -669,9 +684,16 @@ def _walk_live_tab_order(command, evaluate, selector: str, label: str) -> list[i
     expression = f"""(() => {{
       const all = [...document.querySelectorAll({json.dumps(selector)})];
       const current = all.indexOf(document.activeElement);
+      const exposedByDetails = (el) => {{
+        for (let parent = el.parentElement; parent; parent = parent.parentElement) {{
+          if (parent.tagName === 'DETAILS' && !parent.open &&
+              !parent.querySelector(':scope > summary')?.contains(el)) return false;
+        }}
+        return true;
+      }};
       const eligible = (el) =>
         (el.tabIndex >= 0 || (el.matches('.table-wrap') && el.scrollWidth > el.clientWidth + 1))
-        && !el.disabled && el.getClientRects().length
+        && !el.disabled && exposedByDetails(el) && el.getClientRects().length
         && getComputedStyle(el).visibility !== 'hidden';
       const next = all.findIndex((el, index) => index > current && eligible(el));
       const active = document.activeElement;
@@ -1308,6 +1330,41 @@ def test_failed_sample_navigation_restores_rendered_identity(tmp_path, failure) 
 
 
 @needs_chrome
+def test_full_source_route_accepts_canonical_id_and_rejects_prefix_collision(tmp_path) -> None:
+    """A full source route binds to source_id even when id12 is canonical."""
+
+    sample = _sample()
+    full_source = sample["source_id"]
+    collision = ID12 + "d" * 52
+    with _server(tmp_path, sample) as server:
+        server.app.api.sample = lambda id12: copy.deepcopy(sample) if id12 in (ID12, full_source, collision) else {
+            "found": False, "candidates": [],
+        }
+
+        def inspect(_command, evaluate) -> None:
+            assert evaluate(f"window.TracebackLab.state.sample.source_id === '{full_source}'")
+            assert evaluate(f"location.hash === '#/sample/{full_source}/findings'")
+            evaluate(f"location.hash = '#/sample/{collision}/findings'")
+            for _ in range(40):
+                if evaluate("!!window.TracebackLab.state.loadFailure"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("colliding source prefix was accepted")
+            assert evaluate(f"location.hash === '#/sample/{full_source}/findings'")
+            assert evaluate(f"window.TracebackLab.state.sample.source_id === '{full_source}'")
+            assert evaluate("document.getElementById('freshness-state').dataset.stale === 'true'")
+
+        profile = tmp_path / "browser-profile"
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{full_source}/findings"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'aria-current="page">Findings' in dom,
+            interact=inspect,
+        )
+
+
+@needs_chrome
 def test_navigation_retry_works_after_stale_poll_blocks_hash_changes(tmp_path) -> None:
     """The recovery action can retry while stale-result controls stay blocked."""
 
@@ -1323,7 +1380,9 @@ def test_navigation_retry_works_after_stale_poll_blocks_hash_changes(tmp_path) -
         ]}
         original_sample = server.app.api.sample
         valid = original_sample(ID12)
-        server.app.api.sample = lambda id12: {**valid, "id12": requested} if id12 == requested else original_sample(id12)
+        server.app.api.sample = lambda id12: {
+            **valid, "id12": requested, "source_id": requested + "c" * 52,
+        } if id12 == requested else original_sample(id12)
 
         def inspect(_command, evaluate) -> None:
             evaluate("""(() => {
@@ -1468,6 +1527,7 @@ def test_older_sample_error_cannot_replace_newer_selection(tmp_path, older_first
     older, newer = "aaaaaaaaaaaa", "bbbbbbbbbbbb"
     selected = copy.deepcopy(_sample())
     selected["id12"] = newer
+    selected["source_id"] = newer + "c" * 52
     with _server(tmp_path, _sample()) as server:
         listing = server.app.api.samples()
         server.app.api.samples = lambda: {**listing, "samples": [
@@ -1770,23 +1830,40 @@ def test_keyboard_walk_reaches_every_revealed_control_and_signals_subtab(tmp_pat
             walked = []
 
             def reveal_all(label: str) -> None:
-                controls = evaluate("""(() => [...document.querySelectorAll('#main button[aria-controls]')]
-                  .flatMap((button, index) => { const target = document.getElementById(button.getAttribute('aria-controls'));
-                    return target?.hidden && button.getClientRects().length ? [index] : []; }))()""")
+                count = evaluate("document.querySelectorAll('#main details > summary').length")
+                for index in range(count):
+                    state = evaluate(f"""(() => {{ const summary = document.querySelectorAll('#main details > summary')[{index}];
+                      const exposedByDetails = (el) => {{
+                        for (let parent = el.parentElement; parent; parent = parent.parentElement) {{
+                          if (parent.tagName === 'DETAILS' && !parent.open &&
+                              !parent.querySelector(':scope > summary')?.contains(el)) return false;
+                        }}
+                        return true;
+                      }};
+                      if (!exposedByDetails(summary) || !summary.getClientRects().length) return {{hidden: true}};
+                      summary.focus(); return {{open: summary.parentElement.open}}; }})()""")
+                    if state.get("hidden"):
+                        continue
+                    if not state["open"]:
+                        _key(command, "Enter", "Enter", 13)
+                        assert evaluate(f"document.querySelectorAll('#main details > summary')[{index}].parentElement.open"), (label, index)
+                controls = evaluate("""(() => {
+                  const exposedByDetails = (el) => {
+                    for (let parent = el.parentElement; parent; parent = parent.parentElement) {
+                      if (parent.tagName === 'DETAILS' && !parent.open &&
+                          !parent.querySelector(':scope > summary')?.contains(el)) return false;
+                    }
+                    return true;
+                  };
+                  return [...document.querySelectorAll('#main button[aria-controls]')]
+                    .flatMap((button, index) => { const target = document.getElementById(button.getAttribute('aria-controls'));
+                      return target?.hidden && exposedByDetails(button) && button.getClientRects().length ? [index] : []; });
+                })()""")
                 for index in controls:
                     button = f"document.querySelectorAll('#main button[aria-controls]')[{index}]"
                     evaluate(f"{button}.focus()")
                     _key(command, "Enter", "Enter", 13)
                     assert evaluate(f"!document.getElementById({button}.getAttribute('aria-controls')).hidden"), (label, index)
-                count = evaluate("document.querySelectorAll('#main details > summary').length")
-                for index in range(count):
-                    state = evaluate(f"""(() => {{ const summary = document.querySelectorAll('#main details > summary')[{index}];
-                      if (!summary.getClientRects().length) return {{hidden: true}};
-                      summary.focus(); return {{open: summary.parentElement.open}}; }})()""")
-                    assert not state.get("hidden"), (label, index)
-                    if not state["open"]:
-                        _key(command, "Enter", "Enter", 13)
-                        assert evaluate(f"document.querySelectorAll('#main details > summary')[{index}].parentElement.open"), (label, index)
 
             def walk(label: str) -> None:
                 evaluate("document.querySelector('.skip-link').focus()")

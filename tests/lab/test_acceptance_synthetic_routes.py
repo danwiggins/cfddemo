@@ -119,7 +119,7 @@ def _sample() -> dict:
             "metrics": metrics,
             "provenance": {
                 "tool": "synthetic-fixture", "tool_version": "1", "parameters_sha256": "a" * 64,
-                "input_id": "b" * 64, "source_id": "c" * 64,
+                "input_id": "b" * 64, "source_id": ID12 + "c" * 52,
                 "attempt_id": "a-20261016T000000000000-abcd1234",
                 "reference_id": "synthetic", "timestamp_utc": "2026-10-16T00:00:00Z",
             },
@@ -132,7 +132,7 @@ def _sample() -> dict:
         for row in licensed
     ]
     return {
-        "found": True, "id12": ID12, "source_id": "c" * 64,
+        "found": True, "id12": ID12, "source_id": ID12 + "c" * 52,
         "full_input_id": "b" * 64, "example": False,
         "run_utc": "2026-10-16T00:00:00Z", "completed_utc": "2026-10-16T00:00:00Z",
         "depth": {"approx_depth_x": 1.0},
@@ -289,7 +289,7 @@ def test_landing_defaults_to_completed_run_with_newer_active_sample(tmp_path) ->
     active_id12 = "bbbbbbbbbbbb"
     active = copy.deepcopy(completed)
     active["id12"] = active_id12
-    active["source_id"] = "d" * 64
+    active["source_id"] = active_id12 + "d" * 52
     active["completed_utc"] = None
     active["headline"] = {"sentence": "Active fixture has no completed results.", "unlock": None}
     active["algorithms"] = []
@@ -714,7 +714,7 @@ STATUS_CASES = [
 
 def _run_marker() -> dict:
     return {"run_id": "r-20261015-0101-abcd", "command": "run", "step": "bam-qc",
-            "source_id": "c" * 64, "input_id": "b" * 64}
+            "source_id": ID12 + "c" * 52, "input_id": "b" * 64}
 
 
 @needs_chrome
