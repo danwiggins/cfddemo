@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -347,3 +348,123 @@ def test_sample_pair_disables_unavailable_peer_and_explains_empty_choice(tmp_pat
         assert 'value="' + SOURCE_B[:12] + '" disabled=""' in unresolved
         assert "private-source-id" not in unresolved
         assert "Reload the sample list" in unresolved
+
+
+@pytest.mark.skipif(__import__("tests.lab.test_lab_server", fromlist=["_chrome"])._chrome() is None,
+                    reason="no Chrome/Chromium for Compare request-order check")
+def test_compare_keeps_latest_pair_and_cohort_and_ignores_old_401(tmp_path) -> None:
+    from tests.lab.test_acceptance_synthetic_routes import ID12, _sample, _server
+    from tests.lab.test_lab_server import _chrome, _dom_cdp
+
+    peer_b, peer_c = "2" * 12, "3" * 12
+    sample = _sample()
+    with _server(tmp_path, sample) as server:
+        server.app.api.samples = lambda: {"samples": [
+            {"id12": id12, "run_utc": "", "depth_x": 1.0, "example": False}
+            for id12 in (ID12, peer_b, peer_c)
+        ], "root_has_runs": True}
+        server.app.api.cohorts = lambda: {"cohorts": [
+            {"cohort_id": name, "cohort_version": f"initial-{name}",
+             "kind": "internal_cohort", "member_n": 11, "pon_n": 0}
+            for name in ("b", "a")
+        ], "unavailable": []}
+
+        def cohort_payload(name: str, version: str) -> dict:
+            return {"found": True, "state": "ready", "id12": ID12,
+                    "input_id": sample["full_input_id"], "cohort_id": name,
+                    "cohort_version": version, "kind": "internal_cohort",
+                    "member_n": 11, "pon_n": 0, "target_aligner": "fixture",
+                    "aligner_counts": {}, "metrics": [], "unscored": []}
+
+        def pair_payload(peer: str, marker: str) -> dict:
+            return {"found": True, "state": "ready", "id12_a": ID12,
+                    "id12_b": peer, "input_id_a": sample["full_input_id"],
+                    "input_id_b": f"{102 if peer == peer_b else 103:064x}",
+                    "aligner_a": "fixture", "aligner_b": marker,
+                    "metrics": [], "unscored": []}
+
+        server.app.api.compare = lambda id12, name: cohort_payload(name, f"initial-{name}")
+        server.app.api.compare_samples = lambda a, b: pair_payload(b, "initial-pair")
+
+        def interact(_command, evaluate) -> None:
+            def until(expression: str) -> None:
+                for _ in range(60):
+                    if evaluate(expression):
+                        return
+                    time.sleep(0.05)
+                pytest.fail(f"Compare did not reach expected state: {expression}")
+
+            pair = "document.querySelector('#compare-sample-title').parentElement"
+            cohort = "document.querySelector('#compare-title').parentElement"
+            evaluate("""(() => {
+              const original = window.fetch.bind(window);
+              window.comparePending = [];
+              window.fetch = (url, options) => {
+                const path = String(url);
+                if (path.includes('/compare/') || path.includes('/compare'))
+                  return new Promise((resolve) => window.comparePending.push({path, resolve}));
+                return original(url, options);
+              };
+              window.releaseCompare = (index, payload, status = 200) => {
+                const pending = window.comparePending[index];
+                pending.resolve(new Response(JSON.stringify(payload), {
+                  status, headers: {'Content-Type': 'application/json'}
+                }));
+                return pending.path;
+              };
+            })()""")
+
+            def select(selector: str, value: str) -> None:
+                evaluate(f"""(() => {{ const picker = document.querySelector({json.dumps(selector)});
+                  picker.value = {json.dumps(value)};
+                  picker.dispatchEvent(new Event('change')); }})()""")
+
+            def release(index: int, payload: dict, status: int = 200) -> None:
+                evaluate(f"window.releaseCompare({index}, {json.dumps(payload)}, {status})")
+
+            select("#compare-other-sample", peer_c)
+            select("#compare-other-sample", peer_b)
+            until("window.comparePending.length === 2")
+            release(1, pair_payload(peer_b, "latest-pair"))
+            until(f"{pair}.innerText.includes('latest-pair')")
+            release(0, pair_payload(peer_c, "stale-pair"))
+            time.sleep(0.05)
+            assert "stale-pair" not in evaluate(f"{pair}.innerText")
+
+            select("#compare-other-sample", peer_c)
+            select("#compare-other-sample", peer_b)
+            until("window.comparePending.length === 4")
+            release(3, {}, 503)
+            until(f"{pair}.innerText.includes('Sample comparison unavailable')")
+            release(2, pair_payload(peer_c, "stale-after-error"))
+            time.sleep(0.05)
+            assert "stale-after-error" not in evaluate(f"{pair}.innerText")
+            evaluate(f"{pair}.querySelector('button').click()")
+            until("window.comparePending.length === 5")
+            release(4, pair_payload(peer_b, "retried-pair"))
+            until(f"{pair}.innerText.includes('retried-pair')")
+
+            select("#compare-title + div select", "a")
+            select("#compare-title + div select", "b")
+            until("window.comparePending.length === 7")
+            release(6, cohort_payload("b", "latest-b"))
+            until(f"{cohort}.innerText.includes('latest-b')")
+            release(5, cohort_payload("a", "stale-a"))
+            time.sleep(0.05)
+            assert "stale-a" not in evaluate(f"{cohort}.innerText")
+
+            select("#compare-other-sample", peer_c)
+            until("window.comparePending.length === 8")
+            evaluate(f"location.hash = '#/sample/{ID12}/methods'")
+            until("document.querySelector('#main h1')?.textContent.trim() === 'Methods'")
+            release(7, {}, 401)
+            time.sleep(0.05)
+            assert evaluate("window.TracebackLab.state.sessionExpired") is False
+            assert evaluate("document.querySelector('#main h1')?.textContent.trim()") == "Methods"
+
+        profile = tmp_path / "compare-order-browser"
+        _dom_cdp([
+            _chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+            f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/compare",
+        ], profile, ok=lambda page: 'data-ready="1"' in page and "initial-pair" in page
+            and "initial-b" in page, interact=interact)
