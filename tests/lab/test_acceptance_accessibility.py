@@ -461,16 +461,19 @@ def test_keyboard_focus_order_disclosures_dialog_and_route_focus(tmp_path) -> No
             command("Page.bringToFront")
             assert evaluate("document.activeElement?.tagName") == "H1"
             evaluate("document.querySelector('.skip-link').focus()")
-            expected = evaluate("""(() => [...document.querySelectorAll('a[href], button, select, summary, input')]
+            expected = evaluate("""(() => [...document.querySelectorAll('a[href], button, select, summary, input, [tabindex], .table-wrap')]
               .flatMap((el, index) => el.tabIndex >= 0 && !el.disabled && el.getClientRects().length
-                && getComputedStyle(el).visibility !== 'hidden' ? [index] : []))()""")
+                && getComputedStyle(el).visibility !== 'hidden'
+                && !(() => { for (let parent = el.parentElement; parent; parent = parent.parentElement)
+                  if (parent.matches('details:not([open])') && el !== parent.querySelector(':scope > summary')) return true;
+                  return false; })() ? [index] : []))()""")
             assert len(expected) >= 8
             indices = []
             for next_index in expected[1:]:
                 _key(command, "Tab", "Tab", 9)
                 state = evaluate("""(() => {
                   const active = document.activeElement;
-                  const order = [...document.querySelectorAll('a[href], button, select, summary, input')];
+                  const order = [...document.querySelectorAll('a[href], button, select, summary, input, [tabindex], .table-wrap')];
                   return {index: order.indexOf(active), tag: active.tagName, id: active.id,
                     focusVisible: active.matches(':focus-visible'), outline: getComputedStyle(active).outlineWidth};
                 })()""")
@@ -1126,14 +1129,17 @@ def test_keyboard_traversal_and_revealed_controls_on_every_sample_route(tmp_path
                 assert evaluate("document.activeElement === document.querySelector('#main h1')"), route
                 time.sleep(0.1)
                 evaluate("document.querySelector('.skip-link').focus()")
-                expected = evaluate("""(() => [...document.querySelectorAll('a[href], button, select, summary, input, [tabindex]')]
+                expected = evaluate("""(() => [...document.querySelectorAll('a[href], button, select, summary, input, [tabindex], .table-wrap')]
                   .flatMap((el, index) => el.tabIndex >= 0 && !el.disabled && el.getClientRects().length
-                    && getComputedStyle(el).visibility !== 'hidden' ? [index] : []))()""")
+                    && getComputedStyle(el).visibility !== 'hidden'
+                    && !(() => { for (let parent = el.parentElement; parent; parent = parent.parentElement)
+                      if (parent.matches('details:not([open])') && el !== parent.querySelector(':scope > summary')) return true;
+                      return false; })() ? [index] : []))()""")
                 assert len(expected) >= 2, route
                 for next_index in expected[1:]:
                     _key(command, "Tab", "Tab", 9)
                     state = evaluate("""(() => { const active = document.activeElement;
-                      return {index: [...document.querySelectorAll('a[href], button, select, summary, input, [tabindex]')].indexOf(active),
+                      return {index: [...document.querySelectorAll('a[href], button, select, summary, input, [tabindex], .table-wrap')].indexOf(active),
                         visible: active.matches(':focus-visible'), outline: getComputedStyle(active).outlineWidth}; })()""")
                     assert state["index"] == next_index and state["visible"], (route, state)
                     assert float(state["outline"].removesuffix("px")) >= 3, (route, state)
@@ -1204,7 +1210,10 @@ def test_keyboard_walk_reaches_every_revealed_control_and_signals_subtab(tmp_pat
                 expected = evaluate("""(() => [...document.querySelectorAll('a[href], button, select, summary, input, [tabindex], .table-wrap')]
                   .flatMap((el, index) => (el.tabIndex >= 0 || (el.matches('.table-wrap') && el.scrollWidth > el.clientWidth + 1))
                     && !el.disabled && el.getClientRects().length
-                    && getComputedStyle(el).visibility !== 'hidden' ? [index] : []))()""")
+                    && getComputedStyle(el).visibility !== 'hidden'
+                    && !(() => { for (let parent = el.parentElement; parent; parent = parent.parentElement)
+                      if (parent.matches('details:not([open])') && el !== parent.querySelector(':scope > summary')) return true;
+                      return false; })() ? [index] : []))()""")
                 assert len(expected) >= 2, label
                 for next_index in expected[1:]:
                     _key(command, "Tab", "Tab", 9)

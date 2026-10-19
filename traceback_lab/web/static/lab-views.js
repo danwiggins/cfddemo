@@ -600,11 +600,16 @@
     const extras = (m) => [h("span", {}, ...(m.entry && m.entry.flags || []).map((flag) => metricFlag(m, flag)),
       ...(m.entry && m.entry.license_ids || []).map((id) => seen.has(id) ? licenseRef(sample, id) : (seen.add(id), licenseRef(sample, id)))), unverifiedBadge(m.entry)];
     out.push(collapsed(`Not interpretable (${groups.not_interpretable.length})`, reasons(groups.not_interpretable), ["Metric", "Value", "Reason", "Needs", ""],
-      groups.not_interpretable.map((m) => [m.label, fmtMetric(m), (m.reason || "").replace(/_/g, " "), m.entry && m.entry.min_depth_x ? `${m.entry.min_depth_x}x` : "—", extras(m)])));
+      groups.not_interpretable.map((m) => [m.label,
+        rawCell(fmtMetric(m), m.value, m.unit, `${m.label}, Not interpretable`),
+        (m.reason || "").replace(/_/g, " "), m.entry && m.entry.min_depth_x ? `${m.entry.min_depth_x}x` : "—", extras(m)])));
     out.push(collapsed(`No reference (${groups.no_reference.length})`, reasons(groups.no_reference), ["Metric", "Value", "Reason", "Reference shown", ""],
-      groups.no_reference.map((m) => [m.label, fmtMetric(m), (m.reason || "").replace(/_/g, " "), m.caption || "—", extras(m)])));
+      groups.no_reference.map((m) => [m.label,
+        rawCell(fmtMetric(m), m.value, m.unit, `${m.label}, No reference`),
+        (m.reason || "").replace(/_/g, " "), m.caption || "—", extras(m)])));
     out.push(collapsed(`In range (${groups.in_range.length})`, "", ["Metric", "Value", "Reference", ""],
-      groups.in_range.map((m) => [m.label, fmtMetric(m), strip(m), extras(m)])));
+      groups.in_range.map((m) => [m.label,
+        rawCell(fmtMetric(m), m.value, m.unit, `${m.label}, In range`), strip(m), extras(m)])));
     // Full callouts for licenses first used in the grouped rows (callout-once per route).
     const pending = (sample.licenses || []).filter((lic) => !document.getElementById(`license-${lic.license_id}`) && [...seen].includes(lic.license_id));
     const cardIds = new Set(out.flatMap((node) => node instanceof Element ? [...node.querySelectorAll(".license-callout")].map((c) => c.id) : []));
@@ -841,7 +846,8 @@
         const e = m.entry || {};
         const ref = e.reference || {};
         rows.push(h("tr", {},
-          h("th", { scope: "row" }, m.label), h("td", {}, rawCell(fmtMetric(m, { algorithmId: a.algorithm_id }), m.value, m.unit)),
+          h("th", { scope: "row" }, m.label), h("td", {}, rawCell(fmtMetric(m, { algorithmId: a.algorithm_id }), m.value, m.unit,
+            `${a.algorithm_id}/${m.metric_id}`)),
           h("td", {}, a.provenance.tool, " ", a.provenance.tool_version),
           h("td", { class: "mono" }, h("details", {}, h("summary", {}, a.provenance.parameters_sha256.slice(0, 12)), provenance(sample, a.algorithm_id))),
           h("td", { class: "mono" }, a.provenance.input_id.slice(0, 12)),
@@ -1208,7 +1214,8 @@
       } else {
         panel.append(...context(sample, id, seen), h("table", { class: "data-table" },
           h("tbody", {}, ...other.metrics.filter((m) => m.value === null || typeof m.value !== "object")
-            .map((m) => h("tr", {}, h("th", { scope: "row" }, m.label), h("td", {}, fmtMetric(m, { algorithmId: id })))))));
+            .map((m) => h("tr", {}, h("th", { scope: "row" }, m.label), h("td", {},
+              rawCell(fmtMetric(m, { algorithmId: id }), m.value, m.unit, `${id}/${m.metric_id}`)))))));
         if (id === "end-motifs") {
           const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading end-motif frequencies…"));
           panel.append(h("p", { class: "help" }, "Aligned-reference 4-mers at both fragment ends; all 256 motifs are in the data table."), slot);
@@ -1439,7 +1446,9 @@
     const seen = new Set();
     if (!present.length && !joint.length) return [h("p", { class: "empty" }, "No methylation summary algorithm has run on this sample yet (Phase 1). Cell-type composition is in Body map.")];
     return [...joint, ...present.map((a) => h("section", { class: "panel" }, h("h2", {}, a.algorithm_id), a.status === "ok"
-      ? h("table", { class: "data-table" }, h("tbody", {}, ...a.metrics.filter((m) => m.value === null || typeof m.value !== "object").map((m) => h("tr", {}, h("th", { scope: "row" }, m.label), h("td", {}, fmtMetric(m, { algorithmId: a.algorithm_id })), h("td", {}, stateChip(m))))))
+      ? h("table", { class: "data-table" }, h("tbody", {}, ...a.metrics.filter((m) => m.value === null || typeof m.value !== "object").map((m) => h("tr", {}, h("th", { scope: "row" }, m.label),
+        h("td", {}, rawCell(fmtMetric(m, { algorithmId: a.algorithm_id }), m.value, m.unit,
+          `${a.algorithm_id}/${m.metric_id}`)), h("td", {}, stateChip(m))))))
       : absent(a, a.algorithm_id), ...context(sample, a.algorithm_id, seen)))];
   }
 
@@ -1678,10 +1687,13 @@
                 h("summary", {}, `Eligible values (${values.length})`),
                 h("table", { class: "data-table" }, h("caption", {}, "Anonymous compatible cohort members after self-exclusion"),
                   h("thead", {}, h("tr", {}, h("th", { scope: "col" }, "Member"), h("th", { scope: "col" }, "Value"))),
-                  h("tbody", {}, ...values.map((value, i) => h("tr", {}, h("th", { scope: "row" }, String(i + 1)), h("td", {}, fmtMetricValue(metric, value))))))) : "";
+                  h("tbody", {}, ...values.map((value, i) => h("tr", {}, h("th", { scope: "row" }, String(i + 1)),
+                    h("td", {}, rawCell(fmtMetricValue(metric, value), value, metric.unit,
+                      `${metric.label}, eligible member ${i + 1}`))))))) : "";
               return h("tr", {},
                 h("th", { scope: "row" }, metric.label),
-                h("td", {}, fmtMetric(metric)),
+                h("td", {}, rawCell(fmtMetric(metric), metric.value, metric.unit,
+                  `${metric.label}, this sample`)),
                 h("td", {}, stateChip(metric), strip(metric), valueTable),
                 h("td", { class: "num" }, fmtCount(metric.eligible_n)),
                 h("td", {}, alignerCounts),
@@ -1789,9 +1801,12 @@
             const rows = data.metrics.map((metric) => h("tr", {},
               h("th", { scope: "row" }, metric.algorithm_id, " · ", metric.label),
               h("td", {}, sampleOverlay(metric)),
-              h("td", { class: "num" }, fmtMetricValue(metric, metric.value_a)),
-              h("td", { class: "num" }, fmtMetricValue(metric, metric.value_b)),
-              h("td", { class: "num" }, fmtMetricValue(metric, metric.delta_b_minus_a, { role: "difference" }))));
+              h("td", { class: "num" }, rawCell(fmtMetricValue(metric, metric.value_a), metric.value_a,
+                metric.unit, `${metric.label}, sample A`)),
+              h("td", { class: "num" }, rawCell(fmtMetricValue(metric, metric.value_b), metric.value_b,
+                metric.unit, `${metric.label}, sample B`)),
+              h("td", { class: "num" }, rawCell(fmtMetricValue(metric, metric.delta_b_minus_a, { role: "difference" }),
+                metric.delta_b_minus_a, metric.unit, `${metric.label}, B minus A`))));
             nodes.push(h("div", { class: "table-wrap", tabindex: "0", role: "region", "aria-label": "Sample A and B comparison" },
               h("table", { class: "data-table" },
                 h("caption", {}, `Sample A ${data.id12_a} versus B ${data.id12_b}; displayed values and B−A`),

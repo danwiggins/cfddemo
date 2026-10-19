@@ -725,7 +725,7 @@ def test_synthetic_status_copy_in_live_region(state, copy_text, tmp_path) -> Non
         run = dom.split("<h2>Run</h2>", 1)[1].split("</table>", 1)[0]
         assert re.search(r'<th scope="row">bam-qc</th><td[^>]*>ok(?:\s|<)', run)
         assert 'latest run in progress' in run
-        assert '0.0 s (selected result)' in run
+        assert '0 s (selected result)' in run
     if state == "interrupted":
         run = dom.split("<h2>Run</h2>", 1)[1].split("</table>", 1)[0]
         assert re.search(r'<th scope="row">bam-qc</th><td[^>]*>ok(?:\s|<)', run)
@@ -738,7 +738,7 @@ def test_synthetic_status_copy_in_live_region(state, copy_text, tmp_path) -> Non
     if state in ("run-finished", "results-changed"):
         assert ">Reload</button>" in dom
     if state == "results-changed":
-        assert "0.0 s" in dom
+        assert "0 s" in dom
         assert "99.9 s" not in dom
     if state == "disconnected":
         assert 'data-disconnected="1"' in dom

@@ -30,6 +30,8 @@ def _observe(server, tmp_path, route, wait_for=""):
             rawRows: table ? [...table.querySelectorAll('tbody tr')].map((tr) =>
               [...tr.querySelectorAll('td')].map((td) =>
                 td.querySelector('details.raw-value code')?.textContent.trim() || null)).filter((row) => row.length) : [],
+            rawLabels: table ? [...table.querySelectorAll('details.raw-value summary')].map((summary) =>
+              summary.getAttribute('aria-label')) : [],
             followingRows: details?.nextElementSibling?.matches('details.chart-table')
               ? [...details.nextElementSibling.querySelectorAll('tbody tr')].map((tr) =>
                 [...tr.querySelectorAll('td')].map((td) =>
@@ -73,6 +75,8 @@ def test_reference_strip_families_have_formatted_adjacent_values(tmp_path) -> No
     assert ["0.01 (unit not declared)", "0.2 (unit not declared)", "0.123 (unit not declared)"] == [row[1] for row in published_chart["rows"]]
     assert [row[1] for row in published_chart["rawRows"]] == [
         "0.01 unit not declared", "0.2 unit not declared", "0.123456789 unit not declared"]
+    assert all("published reference strip" in label and "Value" in label
+               for label in published_chart["rawLabels"])
     assert [row[1] for row in exploratory_chart["rows"]] == [
         "0.1 (unit not declared)", "0.5 (unit not declared)", "0.111 (unit not declared)",
         "0.222 (unit not declared)", "0.444 (unit not declared)", "0.346 (unit not declared)"]

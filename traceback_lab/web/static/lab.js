@@ -12,6 +12,15 @@
     document.body.dataset.cspViolations = String(violations.length);
     document.body.dataset.cspLast = violations[violations.length - 1];
   });
+  if (!window.TracebackLabFormat?.formatMetric || !window.TracebackLabFormat?.formatResultMetric) {
+    const message = "Lab display unavailable: metric formatter did not load. Reload this page.";
+    const main = document.getElementById("main");
+    if (main) main.textContent = message;
+    const status = document.getElementById("status");
+    if (status) status.textContent = message;
+    document.body.dataset.ready = "0";
+    return;
+  }
 
   const POLL_MS = 15000;
   const MISSED_LIMIT = 3;
@@ -53,6 +62,27 @@
     for (const child of children.flat()) {
       if (child === null || child === undefined || child === false) continue;
       el.append(child instanceof Node ? child : document.createTextNode(String(child)));
+    }
+    if (tag === "div" && el.classList.contains("table-wrap")) {
+      if (!el.hasAttribute("tabindex")) el.setAttribute("tabindex", "0");
+      if (!el.hasAttribute("role")) el.setAttribute("role", "region");
+      if (!el.hasAttribute("aria-label")) {
+        const caption = el.querySelector("table caption")?.textContent?.trim();
+        el.setAttribute("aria-label", caption || "Scrollable data table");
+      }
+    }
+    if (tag === "table") {
+      const caption = el.querySelector(":scope > caption")?.textContent?.trim() || "Table";
+      const headers = [...el.querySelectorAll(":scope > thead > tr > th")].map((th) => th.textContent.trim());
+      [...el.querySelectorAll(":scope > tbody > tr")].forEach((row, rowIndex) => {
+        const subject = row.querySelector(":scope > th[scope='row']")?.textContent?.trim() || `row ${rowIndex + 1}`;
+        [...row.children].forEach((cell, columnIndex) => {
+          cell.querySelectorAll("details.raw-value > summary").forEach((summary) => {
+            if (!summary.hasAttribute("aria-label")) summary.setAttribute("aria-label",
+              `Raw value: ${caption}, ${subject}, ${headers[columnIndex] || "value"}`);
+          });
+        });
+      });
     }
     // Async route content may arrive after the disconnected state was set.
     if ((tag === "button" || tag === "select") && "data-requires-server" in (attrs || {})) {
@@ -390,10 +420,11 @@
   }
 
   // -- charts ---------------------------------------------------------------------------
-  function rawCell(display, raw, unit) {
+  function rawCell(display, raw, unit, context = null) {
     const exact = raw === null || raw === undefined ? "null" : String(raw);
     return h("div", { class: "value-with-raw" }, h("span", { class: "display-value" }, display), " ",
-      h("details", { class: "raw-value" }, h("summary", {}, "Raw value"), h("code", {}, `${exact} ${unit || "unit not declared"}`)));
+      h("details", { class: "raw-value" }, h("summary", { "aria-label": context ? `Raw value: ${context}` : null }, "Raw value"),
+        h("code", {}, `${exact} ${unit || "unit not declared"}`)));
   }
   function chartCell(value) {
     if (value instanceof Node) return value;
@@ -403,7 +434,14 @@
     const table = h("table", { class: "data-table" },
       h("caption", {}, caption),
       h("thead", {}, h("tr", {}, ...headers.map((name) => h("th", { scope: "col" }, name)))),
-      h("tbody", {}, ...rows.map((row) => h("tr", {}, ...row.map((cell) => h("td", {}, chartCell(cell)))))));
+      h("tbody", {}, ...rows.map((row) => h("tr", {}, ...row.map((cell, index) => {
+        if (cell instanceof Node && cell.classList?.contains("value-with-raw")) {
+          const subject = row[0] instanceof Node ? row[0].textContent : String(row[0]);
+          cell.querySelector("details.raw-value summary")?.setAttribute("aria-label",
+            `Raw value: ${caption}, ${subject}, ${headers[index]}`);
+        }
+        return h("td", {}, chartCell(cell));
+      })))));
     return h("details", { class: "chart-table" }, h("summary", {}, "Data table"), h("div", { class: "table-wrap" }, table));
   }
 
@@ -582,7 +620,8 @@
     // QC bands.
     const banded = [];
     for (const a of sample.algorithms) for (const m of a.metrics) if (m.qc_band)
-      banded.push([m.label, fmtMetric(m, { algorithmId: a.algorithm_id }), m.qc_band]);
+      banded.push([m.label, rawCell(fmtMetric(m, { algorithmId: a.algorithm_id }), m.value, m.unit,
+        `${a.algorithm_id}/${m.metric_id}, QC band`), m.qc_band]);
     const glyph = { pass: "✓ pass", warn: "! warn", fail: "✕ fail" };
     out.push(h("section", { class: "panel" }, h("h2", {}, "QC bands"),
       h("p", { class: "help" }, "provisional (not from literature)"),
