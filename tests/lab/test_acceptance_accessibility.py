@@ -652,6 +652,46 @@ def test_live_status_changes_keep_focus_and_open_disclosure(tmp_path) -> None:
 
 
 @needs_chrome
+def test_key_dialog_close_does_not_steal_new_focus(tmp_path) -> None:
+    """A queued close event must not undo focus travel after the dialog closes."""
+
+    with _server(tmp_path, _sample()) as server:
+        def inspect(_command, evaluate) -> None:
+            evaluate("""(() => {
+              const button = document.getElementById('key-button');
+              const dialog = document.getElementById('key-dialog');
+              const select = document.getElementById('sample-switcher');
+              window.closeFocusOrder = [];
+              document.addEventListener('focusin', (event) =>
+                window.closeFocusOrder.push(event.target.id), {capture: true});
+              button.focus();
+              dialog.showModal();
+              dialog.addEventListener('close', () => { window.keyDialogCloseObserved = true; }, {once: true});
+              dialog.close();
+              select.focus();
+              window.focusMovedBeforeCloseEvent = document.activeElement === select;
+            })()""")
+            assert evaluate("window.focusMovedBeforeCloseEvent")
+            for _ in range(20):
+                if evaluate("window.keyDialogCloseObserved === true"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("Key dialog close event did not fire")
+            assert evaluate("document.activeElement === document.getElementById('sample-switcher')"), evaluate(
+                "window.closeFocusOrder"
+            )
+
+        profile = tmp_path / "browser-profile"
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/trust-qc"],
+            profile, ok=lambda d: 'data-ready="1"' in d and "Run log line for bam-qc" in d,
+            interact=inspect, timeout=90,
+        )
+
+
+@needs_chrome
 def test_disconnected_page_blocks_fetch_controls_until_reconnected(tmp_path) -> None:
     """AC21: a stalled server must not leave the run-log fetch button live."""
 
