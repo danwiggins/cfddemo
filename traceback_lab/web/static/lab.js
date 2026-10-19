@@ -614,9 +614,15 @@
       ["QC band", "✓ pass · ! warn · ✕ fail — provisional (not from literature)"],
     ];
     document.getElementById("key-body").replaceChildren(h("table", {}, h("tbody", {}, ...rows.map(([a, b]) => h("tr", {}, h("th", { scope: "row" }, a), h("td", {}, b))))));
-    button.addEventListener("click", () => dialog.showModal());
+    button.addEventListener("click", () => {
+      button.focus();
+      dialog.showModal();
+    });
     document.getElementById("key-close").addEventListener("click", () => dialog.close());
-    dialog.addEventListener("close", () => button.focus());
+    dialog.addEventListener("close", () => {
+      const active = document.activeElement;
+      if (active === document.body || dialog.contains(active)) button.focus();
+    });
   }
 
   // -- polling (D22: generation + heartbeat, never the lock) --------------------------------
