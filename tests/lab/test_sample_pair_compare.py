@@ -294,10 +294,11 @@ def test_sample_pair_selector_overlay_and_table_fallback(tmp_path, monkeypatch, 
     assert "Sample A" in html and "Sample B" in html and "B−A" in html
     assert f"input ID (abbrev.) {INPUT_A[:12]}…{INPUT_A[-6:]}" in html
     assert f"input ID (abbrev.) {INPUT_B[:12]}…{INPUT_B[-6:]}" in html
-    assert all(f'<td class="num">{value}</td>' in html for value in expected)
+    assert all(f'<span class="display-value">{value}</span>' in html for value in expected)
     if unit == "fraction":
         assert "B minus A 5 percentage points" in html
-        assert "<td>5 percentage points</td>" in html
+        assert '<span class="display-value">5 percentage points</span>' in html
+        assert '<code>0.04999999999999999 fraction</code>' in html or '<code>0.05 fraction</code>' in html
     assert "not protocol compatible" in html
     assert "selected panel of normals differs" in html
     assert "Source IDs do not establish a shared donor or timepoint" in html
