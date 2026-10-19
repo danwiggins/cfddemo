@@ -341,6 +341,17 @@
     if (state.sessionExpired) return Promise.resolve({ kind: "session" });
     if (!previous?.found) return Promise.resolve({ kind: "unavailable" });
     const hash = location.hash || "#/";
+    if (!state.renderedHash || hash !== state.renderedHash) {
+      const refreshButton = document.getElementById("readiness-refresh");
+      if (refreshButton) {
+        refreshButton.disabled = false;
+        const feedback = refreshButton.nextElementSibling;
+        if (feedback?.getAttribute("role") === "status") {
+          feedback.textContent = "Selection is changing; refresh after the selected view loads.";
+        }
+      }
+      return Promise.resolve({ kind: "obsolete" });
+    }
     const key = `${previous.id12}:${previous.full_input_id || "unknown"}:${hash}`;
     if (state.selectedRefresh?.key === key &&
         state.selectedRefresh.revision === state.navigationRevision) return state.selectedRefresh.promise;
@@ -420,7 +431,16 @@
       status.prepend(message);
     }
     if (message.textContent !== (text || "")) message.textContent = text || "";
-    status.querySelector("[data-library-error]")?.remove();
+    let libraryError = status.querySelector("[data-library-error]");
+    const library = state.lastStatus?.library;
+    if (library?.error) {
+      const notice = ` Interpretation library on disk is invalid (${library.error}). Showing v${library.version}, loaded at ${library.loaded_at}.`;
+      if (!libraryError) {
+        libraryError = h("span", { class: "problem", "data-library-error": "" });
+        status.append(libraryError);
+      }
+      if (libraryError.textContent !== notice) libraryError.textContent = notice;
+    } else libraryError?.remove();
     let reload = status.querySelector("button.reload");
     if (action) {
       if (!reload) {
@@ -522,6 +542,8 @@
       } }, state.connectionLost ? "Retry connection" : generationChanged ? "Reload Lab" : "Retry selected refresh");
       retry.disabled = !!state.selectedRefresh;
       action.append("Next action: ", retry);
+      if (!generationChanged) action.append(" ", h("button", { type: "button", class: "control",
+        onclick: () => location.reload() }, "Reload Lab"));
     } else if (!state.loading && !state.samples.length) {
       action.append("Next action: ", h("a", {
         href: "https://github.com/danwiggins/cfddemo/blob/main/docs/LAB-GUIDE.md#first-five-minutes",
@@ -1226,10 +1248,6 @@
         setPollStatus("Results changed on disk since this page loaded.", "Reload");
       } else {
         setPollStatus("");
-      }
-      if (status.library && status.library.error) {
-        document.getElementById("status").append(h("span", { class: "problem", "data-library-error": "" },
-          ` Interpretation library on disk is invalid (${status.library.error}). Showing v${status.library.version}, loaded at ${status.library.loaded_at}.`));
       }
       if (wasDisconnected && state.sample?.found) {
         const refreshed = await refreshSelectedSample();
