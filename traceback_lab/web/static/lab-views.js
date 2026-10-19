@@ -888,7 +888,8 @@
         const requirements = row.requirements || [];
         const recorded = row.status === "ok" ? "ran" : row.status;
         const provenance = provenanceAlgorithms.has(row.algorithm_id)
-          ? h("button", { type: "button", class: "control" }, "Go to recorded provenance") : null;
+          ? h("button", { type: "button", class: "control",
+            "aria-label": `Go to recorded provenance for ${row.label} (${row.algorithm_id})` }, "Go to recorded provenance") : null;
         if (provenance) provenance.addEventListener("click", () => {
           const target = document.getElementById("method-provenance");
           target?.scrollIntoView();
@@ -906,11 +907,12 @@
               row.requires_mm_tags ? " MM tags required." : ""),
             requirements.length ? h("ul", {}, ...requirements.map((item) => h("li", {}, item)))
               : h("p", {}, "No additional registered asset is listed in the method explanation; a run can still have input-specific gates."),
-            row.min_depth_x ? h("p", {}, `Literature depth minimum: ${row.min_depth_x}x; this is not a readiness verdict.`) : "",
+            row.min_depth_x ? h("p", {}, `Headline metric literature depth minimum: ${row.min_depth_x}x; other metrics may differ. This is not a readiness verdict.`) : "",
             h("p", {}, `Evidence note: ${row.footnote || "none published"}`,
               row.footnote_source ? ` (${row.footnote_source})` : "",
               row.has_library_entry && !row.citation_checked ? " · UNVERIFIED citation" : ""),
-            h("p", {}, h("a", { href: `#/sample/${sample.id12}/evidence` }, "Evidence, citations and licenses"),
+            h("p", {}, h("a", { href: `#/sample/${sample.id12}/evidence`,
+              "aria-label": `Evidence, citations and licenses for ${row.label} (${row.algorithm_id})` }, "Evidence, citations and licenses"),
               provenance ? [" · ", provenance] : "")));
       }));
     };
@@ -958,7 +960,7 @@
     out.push(h("section", { class: "panel", "aria-labelledby": "method-catalog-title" },
       h("h2", { id: "method-catalog-title" }, "Method catalog"),
       h("p", {}, `${counts.visible_methods ?? catalog.length} visible methods from ${counts.registered_steps ?? catalog.length} registered steps. `,
-        `${hidden.length} processing steps (${hidden.join(", ") || "none"}) are hidden because they are shared intermediates, not biological results.`),
+        `${hidden.length} processing ${hidden.length === 1 ? "step" : "steps"} (${hidden.join(", ") || "none"}) ${hidden.length === 1 ? "is" : "are"} hidden because ${hidden.length === 1 ? "it is a shared intermediate" : "they are shared intermediates"}, not biological results.`),
       h("p", { class: "help" }, "Recorded result availability is input-specific. Current environment readiness is unknown until an explicit check; a past result does not prove tools or assets are still available."),
       h("label", { for: "method-search" }, "Search methods"), search,
       h("label", { for: "method-status" }, "Recorded result"), status,
@@ -1876,6 +1878,30 @@
   }
 
   // -- Compare: each response is pinned to one immutable cohort generation ---------
+  function compareInputId(inputId) {
+    return typeof inputId === "string" && /^[0-9a-f]{64}$/.test(inputId)
+      ? `${inputId.slice(0, 12)}…${inputId.slice(-6)}` : "unavailable";
+  }
+
+  const COHORT_EXCLUSION = {
+    self: "this sample removed before the cohort-size check",
+    missing_result: "member has no usable result for this method",
+    incompatible: "member uses a different protocol or method configuration",
+    missing_metric: "member has no value for this metric",
+  };
+  const PAIR_UNSCORED = {
+    selected_pon_not_paired: "selected panel of normals differs or cannot be verified for this pair",
+    selected_method_not_paired: "selected method results cannot be paired",
+    missing_or_not_ok: "a current successful result is missing on one or both samples",
+    not_current_result: "a stored result is no longer current for its registered method",
+    incompatible_protocol: "the inputs or method configurations are not protocol compatible",
+    missing_metric: "one sample has no value for this metric",
+    non_scalar: "this metric is not a scalar number",
+    missing_or_non_numeric: "one or both scalar values are missing or nonnumeric",
+    unit_mismatch: "the two results use different units",
+    not_interpretable: "one or both values are not interpretable",
+  };
+
   function recoveryNotice(subject, problem) {
     const detail = problem || {};
     return h("div", { class: "problem" },
@@ -1884,6 +1910,20 @@
       detail.cause ? h("p", {}, detail.cause) : "",
       h("p", {}, h("strong", {}, "Next action: "), detail.fix || "Reload Compare and check the Lab run log."),
       detail.docs ? h("p", { class: "help" }, `Guide: ${detail.docs}`) : "");
+  }
+
+  function compareRequestNotice(subject, kind, retry) {
+    const cause = {
+      timeout: "The Lab server did not answer within 10 seconds.",
+      invalid: "The server returned an incomplete comparison response.",
+      unavailable: "The selected comparison or Lab server is unavailable.",
+    }[kind] || "The selected comparison could not be loaded.";
+    return h("div", { class: "problem" },
+      h("p", { class: "problem-title" }, `${subject} unavailable`),
+      h("p", {}, `Cause: ${cause}`),
+      h("p", {}, "Next action: Check the Lab server and selected inputs, then ",
+        h("button", { type: "button", class: "control", "data-requires-server": "", onclick: retry },
+          "retry this selection"), "."));
   }
 
   function compare(sample) {
@@ -1899,24 +1939,50 @@
     let results = null;
     const revision = L.state.navigationRevision;
     const hash = location.hash;
-    const viewCurrent = () => revision === L.state.navigationRevision && hash === location.hash &&
-      L.state.sample?.id12 === sample.id12;
+    const viewCurrent = () => slot.isConnected && revision === L.state.navigationRevision &&
+      hash === location.hash && L.state.sample?.id12 === sample.id12 &&
+      L.state.sample?.full_input_id === sample.full_input_id;
     const show = (cohort) => {
       const current = ++request;
       results.replaceChildren(h("p", {}, "Loading comparison…"));
       L.requestJson(`/api/cohorts/${encodeURIComponent(cohort.cohort_id)}/samples/${sample.id12}/compare`, {
-        isCurrent: () => viewCurrent() && current === request,
+        isCurrent: () => viewCurrent() && results.isConnected && current === request,
+        allow404: true,
       })
         .then((data) => {
-          if (!results.isConnected || current !== request) return;
+          if (!viewCurrent() || !results.isConnected || current !== request) return;
+          if (!data || typeof data !== "object") {
+            results.replaceChildren(compareRequestNotice("Cohort comparison", "invalid", () => show(cohort)));
+            return;
+          }
+          if (data.found === false) {
+            results.replaceChildren(h("p", { class: "problem" },
+              "The selected sample could not be resolved. Reload the sample list and choose it again."));
+            return;
+          }
           if (data.state === "cohort_unavailable" || data.state === "target_unavailable") {
             results.replaceChildren(recoveryNotice(data.state === "target_unavailable" ? "This sample" : `Cohort ${cohort.cohort_id}`, data.problem));
             return;
           }
+          if (data.found !== true || data.id12 !== sample.id12 || data.cohort_id !== cohort.cohort_id
+              || typeof data.cohort_version !== "string" || !Array.isArray(data.metrics)
+              || data.metrics.some((metric) => !metric || typeof metric !== "object")
+              || (data.unscored != null && !Array.isArray(data.unscored))) {
+            results.replaceChildren(compareRequestNotice("Cohort comparison", "invalid", () => show(cohort)));
+            return;
+          }
+          if (sample.full_input_id && data.input_id !== sample.full_input_id) {
+            results.replaceChildren(h("p", { class: "problem" },
+              "The selected sample now uses a different full input. Reload the sample before comparing."));
+            return;
+          }
           const nodes = [
-            h("p", {}, `Generation ${data.cohort_version} · ${data.member_n} distinct members · PoN n = ${data.pon_n} (separate denominator).`),
+            h("p", {}, `Sample ${data.id12} · input ID (abbrev.) ${compareInputId(data.input_id)} · cohort ${data.cohort_id} generation ${data.cohort_version} · ${data.member_n} distinct members · PoN n = ${data.pon_n} (separate denominator).`),
           ];
-          if (data.cohort_version !== cohort.cohort_version) nodes.push(h("p", { class: "status-line" }, "A newer cohort generation was published after the list loaded. This comparison uses the generation named above; reload to refresh the list."));
+          if (data.cohort_version !== cohort.cohort_version) nodes.push(h("p", { class: "status-line" },
+            "A newer cohort generation was published after the list loaded. This comparison uses the generation named above. ",
+            h("button", { type: "button", class: "control", "data-requires-server": "", onclick: () => location.reload() },
+              "Reload cohort list")));
           if (data.kind === "provisional_external") nodes.push(h("p", { class: "status-line" }, "Provisional external reference: protocol mismatch. Interpret ranges cautiously."));
           if (data.state === "example_unscorable") {
             nodes.push(h("p", { class: "empty" }, "EXAMPLE (synthetic) cannot be scored against a real kit cohort."));
@@ -1926,6 +1992,10 @@
           if (data.state === "stale_target") {
             nodes.push(h("p", { class: "status-line" }, "The sample changed while Compare loaded. Reload to compare its current full input."));
             results.replaceChildren(...nodes);
+            return;
+          }
+          if (data.state !== "ready" || typeof data.target_aligner !== "string") {
+            results.replaceChildren(compareRequestNotice("Cohort comparison", "invalid", () => show(cohort)));
             return;
           }
           if (data.pon_problem) nodes.push(h("p", { class: "problem" }, `Panel of normals unavailable: copy-number and dependent comparisons are withheld; independent metrics remain comparable. ${data.pon_problem.fix}`));
@@ -1939,10 +2009,11 @@
             h("thead", {}, h("tr", {}, h("th", { scope: "col" }, "Aligner"), h("th", { scope: "col" }, "Members"))),
             h("tbody", {}, ...alignerRows));
           nodes.push(h("div", { class: "table-wrap", tabindex: "0", role: "region", "aria-label": "Generation aligner counts" }, alignerTable));
-          if (!data.metrics.length) nodes.push(h("p", { class: "empty" }, "No current compatible cohort-reference metric is available for this sample. Missing or failed metrics are not zero."));
+          if (!data.metrics.length) nodes.push(h("p", { class: "empty" }, "No current compatible cohort-reference metric is available for this sample. Missing or failed metrics are not zero. Inspect method results and cohort eligibility, then reload Compare."));
           else {
             const rows = data.metrics.map((metric) => {
-              const exclusions = Object.entries(metric.excluded || {}).map(([reason, count]) => `${reason.replace(/_/g, " ")}: ${count}`).join("; ") || "none";
+              const exclusions = Object.entries(metric.excluded || {}).map(([reason, count]) =>
+                `${COHORT_EXCLUSION[reason] || "other exclusion"}: ${count}`).join("; ") || "none";
               const alignerCounts = Object.entries(metric.aligner_counts || {}).map(([name, count]) => `${name}: ${count}`).join("; ") || "none";
               const original = metric.original_reference || {};
               const sourceReference = !metric.original_reference ? "no library entry" :
@@ -1971,7 +2042,9 @@
                 h("th", { scope: "row" }, metric.label),
                 h("td", {}, rawCell(fmtMetric(metric), metric.value, metric.unit,
                   `${metric.label}, this sample`)),
-                h("td", {}, stateChip(metric), strip(metric), valueTable),
+                h("td", {}, stateChip(metric), strip(metric),
+                  metric.reason === "cohort_too_small" ? h("p", { class: "help" },
+                    `Only ${metric.eligible_n} compatible values remain after exclusions; at least 10 are required for a cohort comparison.`) : "", valueTable),
                 h("td", { class: "num" }, fmtCount(metric.eligible_n)),
                 h("td", {}, alignerCounts),
                 h("td", {}, exclusions),
@@ -1989,13 +2062,17 @@
         })
         .catch((error) => {
           if (error.kind !== "obsolete" && viewCurrent() && results.isConnected && current === request) {
-            results.replaceChildren(h("p", { class: "problem" }, "Comparison could not be loaded. Retry this selected cohort."));
+            results.replaceChildren(compareRequestNotice("Cohort comparison", error.kind, () => show(cohort)));
           }
         });
     };
     L.requestJson("/api/cohorts", { isCurrent: viewCurrent })
       .then((data) => {
         if (!slot.isConnected) return;
+        if (!Array.isArray(data.cohorts) || (data.unavailable && !Array.isArray(data.unavailable))) {
+          slot.replaceChildren(compareRequestNotice("Cohort list", "invalid", () => location.reload()));
+          return;
+        }
         const unavailable = data.unavailable || [];
         const rootProblem = data.problem ? recoveryNotice("Cohort storage", data.problem) : "";
         const unavailablePanel = unavailable.length ? h("section", { class: "panel", "aria-labelledby": "compare-unavailable-title" },
@@ -2018,7 +2095,7 @@
       })
       .catch((error) => {
         if (error.kind !== "obsolete" && viewCurrent() && slot.isConnected) {
-          slot.replaceChildren(h("p", { class: "problem" }, "Cohorts could not be loaded. Retry this selected view."));
+          slot.replaceChildren(compareRequestNotice("Cohort list", error.kind, () => location.reload()));
         }
       });
     out.push(sampleCompare(sample));
@@ -2038,10 +2115,10 @@
         svg("circle", { cx: x(a), cy: 15, r: 5, class: "sample-a" }),
         svg("path", { d: `M${x(b)},9 l6,6 -6,6 -6,-6 z`, class: "sample-b" })),
       dataTable(`${metric.label}: sample A and B overlay`, ["Mark", "Value"],
-        [["Sample A", rawCell(fmtMetricValue(metric, a), a, metric.unit)],
-          ["Sample B", rawCell(fmtMetricValue(metric, b), b, metric.unit)],
+        [["Sample A", rawCell(fmtMetricValue(metric, a), a, metric.unit, `${metric.label}, sample A overlay`)],
+          ["Sample B", rawCell(fmtMetricValue(metric, b), b, metric.unit, `${metric.label}, sample B overlay`)],
           ["B−A", rawCell(fmtMetricValue(metric, metric.delta_b_minus_a, { role: "difference" }),
-            metric.delta_b_minus_a, metric.unit)]]),
+            metric.delta_b_minus_a, metric.unit, `${metric.label}, B minus A overlay`)]]),
       h("figcaption", {}, "A ● · B ◆; local display scale"));
   }
 
@@ -2051,13 +2128,23 @@
       h("p", { class: "help" }, "Cross-sectional comparison of two distinct samples. Source IDs do not establish a shared donor or timepoint. Only compatible current full-input results are paired; B−A is an arithmetic difference in the displayed unit, not a clinical threshold."));
     const others = (L.state.samples || []).filter((row) => row.id12 !== sample.id12 && !row.example);
     if (!others.length) {
-      section.append(h("p", { class: "empty" }, "No other real sample is available under this ROOT."));
+      section.append(h("p", { class: "empty" },
+        "No second real sample is available under this ROOT. Run another real sample at full depth, then reload Compare."));
       return section;
     }
+    const unavailable = (row) => ["completed_input_unavailable", "completion_history_unavailable"].includes(row.state);
     const picker = h("select", { id: "compare-other-sample", "data-requires-server": "" },
-      ...others.map((row) => h("option", { value: row.id12 }, row.id12)));
+      ...others.map((row) => h("option", { value: row.id12, disabled: unavailable(row) },
+        `${row.id12}${unavailable(row) ? " · unavailable current full input" : ""}`)));
     const result = h("div", { "aria-live": "polite" });
     section.append(h("label", { for: "compare-other-sample" }, "Sample B "), picker, result);
+    if (others.every(unavailable)) {
+      picker.disabled = true;
+      result.replaceChildren(h("p", { class: "empty" },
+        "No eligible second sample has a readable current full input. Restore or run another real sample under this ROOT, then reload Compare."));
+      return section;
+    }
+    picker.value = others.find((row) => !unavailable(row)).id12;
     let request = 0;
     const show = () => {
       const current = ++request;
@@ -2065,11 +2152,27 @@
       const hash = location.hash;
       const other = picker.value;
       const isCurrent = () => current === request && revision === L.state.navigationRevision &&
-        hash === location.hash && L.state.sample?.id12 === sample.id12 && picker.value === other;
+        hash === location.hash && L.state.sample?.id12 === sample.id12 &&
+        L.state.sample?.full_input_id === sample.full_input_id && picker.value === other && result.isConnected;
       result.replaceChildren(h("p", {}, "Loading sample comparison…"));
-      L.requestJson(`/api/samples/${sample.id12}/compare/${encodeURIComponent(other)}`, { isCurrent })
+      L.requestJson(`/api/samples/${sample.id12}/compare/${encodeURIComponent(other)}`, {
+        isCurrent, allow404: true,
+      })
         .then((data) => {
-          if (!result.isConnected || current !== request) return;
+          if (!isCurrent()) return;
+          if (!data || typeof data !== "object") {
+            result.replaceChildren(compareRequestNotice("Sample comparison", "invalid", show));
+            return;
+          }
+          if (data.found === false) {
+            result.replaceChildren(h("p", { class: "problem" },
+              "A selected sample could not be resolved. Reload the sample list and choose both samples again."));
+            return;
+          }
+          if (data.found !== true || typeof data.state !== "string") {
+            result.replaceChildren(compareRequestNotice("Sample comparison", "invalid", show));
+            return;
+          }
           if (data.state !== "ready") {
             const messages = {
               same_sample: "Choose a different sample.",
@@ -2080,7 +2183,18 @@
             result.replaceChildren(h("p", { class: "problem" }, messages[data.state] || "The selected comparison is unavailable."));
             return;
           }
-          const nodes = [h("p", {}, `Sample A ${data.id12_a} · Sample B ${data.id12_b}. A: ${data.aligner_a}; B: ${data.aligner_b}. Only equal compatibility keys and exact selected results appear below.`)];
+          if (data.id12_a !== sample.id12 || data.id12_b !== other ||
+              !Array.isArray(data.metrics) || !Array.isArray(data.unscored) ||
+              data.metrics.some((metric) => !metric || typeof metric !== "object")) {
+            result.replaceChildren(compareRequestNotice("Sample comparison", "invalid", show));
+            return;
+          }
+          if (sample.full_input_id && data.input_id_a !== sample.full_input_id) {
+            result.replaceChildren(h("p", { class: "problem" },
+              "Sample A now uses a different full input. Reload the sample before comparing."));
+            return;
+          }
+          const nodes = [h("p", {}, `Sample A ${data.id12_a} · input ID (abbrev.) ${compareInputId(data.input_id_a)}; sample B ${data.id12_b} · input ID (abbrev.) ${compareInputId(data.input_id_b)}. A: ${data.aligner_a}; B: ${data.aligner_b}. Only equal compatibility keys and exact selected results appear below.`)];
           if (data.metrics.length) {
             const rows = data.metrics.map((metric) => h("tr", {},
               h("th", { scope: "row" }, metric.algorithm_id, " · ", metric.label),
@@ -2096,17 +2210,19 @@
                 h("caption", {}, `Sample A ${data.id12_a} versus B ${data.id12_b}; displayed values and B−A`),
                 h("thead", {}, h("tr", {}, ...["Metric", "Overlay", "Sample A", "Sample B", "B−A"].map((name) => h("th", { scope: "col" }, name)))),
                 h("tbody", {}, ...rows))));
-          } else nodes.push(h("p", { class: "empty" }, "No compatible scalar metric is available for this pair. Missing values are not zero."));
-          if (data.unscored.some((row) => row.reason === "not_current_result")) nodes.push(h("p", { class: "help" },
+          } else nodes.push(h("p", { class: "empty" },
+            "No compatible scalar metric is available for this pair. Missing values are not zero. Inspect both samples’ Methods results or choose another sample B."));
+          if (data.unscored.some((row) => row?.reason === "not_current_result")) nodes.push(h("p", { class: "help" },
             "A stored result is no longer current for its registered method. Recompute with the current method, or restore its registration before comparing."));
           if (data.unscored.length) nodes.push(h("details", {}, h("summary", {}, `Not paired (${data.unscored.length})`),
             dataTable("Unpaired metrics and reasons", ["Algorithm", "Metric", "Reason"],
-              data.unscored.map((row) => [row.algorithm_id, row.metric_id, row.reason.replace(/_/g, " ")]))));
+              data.unscored.map((row) => [row?.algorithm_id || "unavailable", row?.metric_id || "unavailable",
+                PAIR_UNSCORED[row?.reason] || "reason unavailable"]))));
           result.replaceChildren(...nodes);
         })
         .catch((error) => {
           if (error.kind !== "obsolete" && isCurrent() && result.isConnected) {
-            result.replaceChildren(h("p", { class: "problem" }, "Sample comparison could not be loaded. Retry this selected pair."));
+            result.replaceChildren(compareRequestNotice("Sample comparison", error.kind, show));
           }
         });
     };

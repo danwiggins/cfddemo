@@ -184,6 +184,44 @@ def test_loader_refusals(mutator, message) -> None:
         parse_library(_mutate(mutator), LICENSES)
 
 
+@pytest.mark.parametrize("change,message", [
+    ("nonmapping", "method_catalog: must be a mapping"),
+    ("unknown", "unknown or hidden algorithm 'unregistered-method'"),
+    ("hidden", "unknown or hidden algorithm 'read-summary'"),
+    ("extra", "method_catalog/bam-qc: requires description"),
+    ("missing", "method_catalog/bam-qc: requires description"),
+    ("blank_description", "method_catalog/bam-qc: description must be nonempty text"),
+    ("nonstring_question", "method_catalog/bam-qc: question must be nonempty text"),
+    ("requirements_not_list", "method_catalog/bam-qc: requirements must be a list"),
+    ("blank_requirement", "method_catalog/bam-qc: requirements must be a list"),
+    ("duplicate_requirement", "method_catalog/bam-qc: requirements must be a list"),
+])
+def test_method_catalog_loader_refuses_malformed_metadata(change, message) -> None:
+    def mutate(data):
+        methods = data["method_catalog"]
+        if change == "nonmapping":
+            data["method_catalog"] = []
+        elif change in {"unknown", "hidden"}:
+            methods["unregistered-method" if change == "unknown" else "read-summary"] = dict(methods["bam-qc"])
+        elif change == "extra":
+            methods["bam-qc"]["unsupported"] = "no"
+        elif change == "missing":
+            methods["bam-qc"].pop("question")
+        elif change == "blank_description":
+            methods["bam-qc"]["description"] = "  "
+        elif change == "nonstring_question":
+            methods["bam-qc"]["question"] = 7
+        elif change == "requirements_not_list":
+            methods["bam-qc"]["requirements"] = "asset"
+        elif change == "blank_requirement":
+            methods["bam-qc"]["requirements"] = ["  "]
+        elif change == "duplicate_requirement":
+            methods["bam-qc"]["requirements"] = ["asset", "asset"]
+
+    with pytest.raises(LibraryError, match=message):
+        parse_library(_mutate(mutate), LICENSES)
+
+
 @pytest.mark.parametrize("checked", [
     {"by": "reviewer", "date": "2026-10-17"},
     {"by": "reviewer", "date": "2026-10-17", "note": "  "},

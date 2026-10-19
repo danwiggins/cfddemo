@@ -61,7 +61,7 @@ method_catalog:
   sex-check:
     description: "Relative chromosome X and Y read density."
     question: "Is the chromosomal pattern consistent with recorded sample information?"
-    limitations: "This does not determine gender; mixed DNA sources and unusual biology complicate interpretation."
+    limitations: "This is not a diagnostic sex or gender determination; mixed DNA sources and unusual biology complicate interpretation."
     requirements: []
   dd-cfdna-chry:
     description: "Input-calibrated chrY-based donor fraction for a male donor and female recipient."

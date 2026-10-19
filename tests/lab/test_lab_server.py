@@ -392,6 +392,23 @@ def test_invalid_library_on_disk_keeps_the_last_good_one(monkeypatch, tmp_path) 
     del engine
 
 
+def test_invalid_method_catalog_on_disk_keeps_last_good_without_path(monkeypatch, tmp_path) -> None:
+    import yaml
+
+    holder = api_module.LibraryHolder()
+    good = holder.get()
+    edited = yaml.safe_load(api_module.LIBRARY_FILE.read_text())
+    edited["method_catalog"]["bam-qc"]["requirements"] = ["duplicate", "duplicate"]
+    broken = tmp_path / "private" / "library.yaml"
+    broken.parent.mkdir()
+    broken.write_text(yaml.safe_dump(edited))
+    monkeypatch.setattr(api_module, "LIBRARY_FILE", broken)
+    assert holder.get() is good
+    error = holder.health()["error"]
+    assert "method_catalog/bam-qc" in error and "requirements" in error
+    assert str(tmp_path) not in error
+
+
 def _serve_lines_after_ready(root: Path, *, timeout: float = 60) -> list[str]:
     from traceback_lab.serve_command import serve_command
 
