@@ -203,6 +203,10 @@ def test_mobile_edge_lens_pointer_click_reaches_route(tmp_path) -> None:
               nav.scrollLeft = 0;
               const link = nav.querySelector('a[href$="/stability"]');
               const frame = nav.getBoundingClientRect();
+              // Font metrics differ by host. Place 12px of Stability at the
+              // right edge before proving the pointer lands on that link.
+              nav.scrollLeft += link.getBoundingClientRect().left - frame.right + 12;
+              nav.dispatchEvent(new Event('scroll'));
               const rect = link.getBoundingClientRect();
               const x = frame.right - 4;
               const y = (rect.top + rect.bottom) / 2;
@@ -215,6 +219,7 @@ def test_mobile_edge_lens_pointer_click_reaches_route(tmp_path) -> None:
                 }), true);
               }
               return { x, y, href: link.getAttribute('href'),
+                frameRight: frame.right, linkLeft: rect.left, linkRight: rect.right,
                 partlyVisible: rect.left < frame.right && rect.right > frame.right,
                 hit: document.elementFromPoint(x, y)?.closest('a')?.getAttribute('href'),
                 scrollLeft: nav.scrollLeft };
@@ -356,6 +361,7 @@ def test_lens_navigation_labels_controls_and_history(width, tmp_path) -> None:
                   shrink: getComputedStyle(link).flexShrink, height: link.getBoundingClientRect().height})),
                 controls: controls.map((control) => ({name: control.getAttribute('aria-label'),
                   target: control.getAttribute('aria-controls'), disabled: control.disabled,
+                  ariaDisabled: control.getAttribute('aria-disabled'),
                   visible: getComputedStyle(control).display !== 'none',
                   width: control.getBoundingClientRect().width,
                   height: control.getBoundingClientRect().height}))
@@ -381,7 +387,7 @@ def test_lens_navigation_labels_controls_and_history(width, tmp_path) -> None:
                 evaluate("document.querySelector('.lens-scroll-next').focus()")
                 _key(command, "Enter", "Enter", 13)
                 at_end = snapshot(evaluate)
-                assert at_end["scrollLeft"] > moved["scrollLeft"] and at_end["controls"][1]["disabled"], at_end
+                assert at_end["scrollLeft"] > moved["scrollLeft"] and at_end["controls"][1]["ariaDisabled"] == "true", at_end
                 assert evaluate("document.activeElement === document.querySelector('.lens-scroll-next')")
                 _key(command, "Enter", "Enter", 13)
                 assert snapshot(evaluate)["scrollLeft"] == at_end["scrollLeft"]
@@ -396,6 +402,7 @@ def test_lens_navigation_labels_controls_and_history(width, tmp_path) -> None:
                 else:
                     pytest.fail("Previous views did not reach the first edge")
                 at_start = snapshot(evaluate)
+                assert at_start["controls"][0]["ariaDisabled"] == "true", at_start
                 assert evaluate("document.activeElement === document.querySelector('.lens-scroll-prev')")
                 _key(command, "Enter", "Enter", 13)
                 assert snapshot(evaluate)["scrollLeft"] == at_start["scrollLeft"]
