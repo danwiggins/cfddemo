@@ -829,7 +829,6 @@
   function methods(sample) {
     const out = [h("p", { class: "breadcrumb" }, `Lab › ${sample.id12} › Methods`), h("h1", { class: "view-title" }, "Methods"),
       h("p", {}, `Interpretation library v${sample.interpretation_version} · cohort ${sample.cohort_version || "none yet"} · provenance stamp only (no signing). `, flagPill("PII", "FLAG: PII — file paths often embed donor names. Hashes only, never paths."))];
-    out.push(recordedReadiness(sample));
     const catalog = sample.catalog || [];
     const counts = sample.method_counts || {};
     const search = h("input", { id: "method-search", type: "search", autocomplete: "off",
@@ -844,9 +843,11 @@
       ...families.map((value) => h("option", { value }, value)));
     const count = h("p", { role: "status", "aria-live": "polite" });
     const catalogRows = h("div", { id: "method-catalog-results" });
+    let pinnedAlgorithm = null;
     const showCatalog = () => {
       const needle = search.value.trim().toLocaleLowerCase();
       const selected = catalog.filter((row) => {
+        if (pinnedAlgorithm && row.algorithm_id !== pinnedAlgorithm) return false;
         if (status.value && row.status !== status.value) return false;
         if (family.value && row.family !== family.value) return false;
         return !needle || [row.algorithm_id, row.label, row.description, row.question,
@@ -888,10 +889,47 @@
               " · ", provenance)));
       }));
     };
-    search.addEventListener("input", showCatalog);
-    status.addEventListener("change", showCatalog);
-    family.addEventListener("change", showCatalog);
+    const userFilter = (event) => {
+      if (pinnedAlgorithm && event.target !== search) search.value = "";
+      pinnedAlgorithm = null;
+      showCatalog();
+    };
+    search.addEventListener("input", userFilter);
+    status.addEventListener("change", userFilter);
+    family.addEventListener("change", userFilter);
+    const route = L.state.route || {};
+    const requested = route.context || {};
+    const requestedAlgorithm = requested.algorithm;
+    const requestedMetric = requested.metric;
+    const requestedFamily = requested.family;
+    const method = catalog.find((row) => row.algorithm_id === requestedAlgorithm);
+    const recorded = (sample.algorithms || []).find((row) => row.algorithm_id === requestedAlgorithm);
+    let focusContext = null;
+    let contextMessage = "";
+    if (route.contextInvalid || (requestedMetric && !requestedAlgorithm)) {
+      contextMessage = "This method link has invalid context. Showing all methods.";
+    } else if (requestedFamily && !families.includes(requestedFamily)) {
+      contextMessage = "Requested family is unavailable for this sample. Showing all methods.";
+    } else if (requestedAlgorithm && !method) {
+      contextMessage = "Requested method is unavailable for this sample. Showing all methods.";
+    } else if (method && requestedFamily && method.family !== requestedFamily) {
+      contextMessage = "Requested method is outside that family. Showing all methods.";
+    } else if (requestedAlgorithm || requestedFamily) {
+      if (requestedFamily) family.value = requestedFamily;
+      if (requestedAlgorithm) { search.value = requestedAlgorithm; pinnedAlgorithm = requestedAlgorithm; }
+      focusContext = requestedAlgorithm ? { kind: "method", algorithm: requestedAlgorithm } : { kind: "family" };
+      if (requestedMetric) {
+        const metric = recorded?.metrics?.find((row) => row.metric_id === requestedMetric);
+        if (metric && (metric.value === null || typeof metric.value !== "object")) {
+          focusContext = { kind: "metric", algorithm: requestedAlgorithm, metric: requestedMetric };
+        } else {
+          contextMessage = "Requested metric is unavailable in this recorded input. Showing its method.";
+        }
+      }
+    }
     const hidden = counts.hidden_processing_steps || [];
+    if (contextMessage) out.push(h("p", { id: "method-context-feedback", role: "status", class: "problem" }, contextMessage));
+    out.push(recordedReadiness(sample));
     out.push(h("section", { class: "panel", "aria-labelledby": "method-catalog-title" },
       h("h2", { id: "method-catalog-title" }, "Method catalog"),
       h("p", {}, `${counts.visible_methods ?? catalog.length} visible methods from ${counts.registered_steps ?? catalog.length} registered steps. `,
@@ -916,7 +954,7 @@
         if (m.value !== null && typeof m.value === "object") continue;
         const e = m.entry || {};
         const ref = e.reference || {};
-        rows.push(h("tr", {},
+        rows.push(h("tr", { "data-algorithm-id": a.algorithm_id, "data-metric-id": m.metric_id },
           h("th", { scope: "row" }, m.label), h("td", {}, rawCell(fmtMetric(m, { algorithmId: a.algorithm_id }), m.value, m.unit)),
           h("td", {}, a.provenance.tool, " ", a.provenance.tool_version),
           h("td", { class: "mono" }, h("details", {}, h("summary", {}, a.provenance.parameters_sha256.slice(0, 12)), provenance(sample, a.algorithm_id))),
@@ -933,6 +971,24 @@
       h("caption", {}, "Every number with its provenance"),
       h("thead", {}, h("tr", {}, ...["Metric", "Value", "Tool", "Provenance stamp (parameters sha256)", "Input", "Reference", "Computed (UTC)", "License", "Citation", "Range source"].map((t) => h("th", { scope: "col" }, t)))),
       h("tbody", {}, ...rows))));
+    if (focusContext) {
+      const revision = L.state.navigationRevision;
+      const hash = location.hash;
+      const key = `${revision}:${hash}`;
+      if (L.state.methodContextApplied !== key) requestAnimationFrame(() => {
+        if (revision !== L.state.navigationRevision || hash !== location.hash || L.state.sample?.id12 !== sample.id12) return;
+        const target = focusContext.kind === "family" ? document.getElementById("method-family")
+          : focusContext.kind === "metric"
+            ? [...document.querySelectorAll("#method-provenance tbody tr")].find((row) =>
+              row.dataset.algorithmId === focusContext.algorithm && row.dataset.metricId === focusContext.metric)
+            : document.getElementById(`method-${focusContext.algorithm}`);
+        if (!target?.isConnected) return;
+        if (focusContext.kind !== "family") target.tabIndex = -1;
+        target.focus({ preventScroll: true });
+        target.scrollIntoView({ block: "center", inline: "nearest" });
+        L.state.methodContextApplied = key;
+      });
+    }
     return out;
   }
 
