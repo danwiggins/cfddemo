@@ -212,12 +212,13 @@ def test_navigation_order_with_compare(page_root, tmp_path) -> None:
 def test_stability_names_both_halves_without_a_numeric_verdict(
     page_root, tmp_path, monkeypatch, relative, shown,
 ) -> None:
-    from traceback_lab import views
+    from traceback_lab.web.api import LabApi
 
-    original = views.stability_panels
+    real_sample = LabApi.sample
 
-    def panels_with_missing_halves(sample, library=None):
-        panels = original(sample, library)
+    def sample_with_missing_halves(api, id12):
+        payload = real_sample(api, id12)
+        panels = payload["stability"]
         states = [
             (("skipped", "depth"), ("failed", "algorithm failed")),
             (("unavailable", "selected result unavailable"), ("not_interpretable", "metric value unavailable")),
@@ -239,9 +240,9 @@ def test_stability_names_both_halves_without_a_numeric_verdict(
         panels[2]["split_warning"] = "an unrecognized split label is present"
         for point in panels[2]["points"]:
             point.update({"state": "not_interpretable", "unit": "none", "deviation": None, "band": None})
-        return panels
+        return payload
 
-    monkeypatch.setattr(views, "stability_panels", panels_with_missing_halves)
+    monkeypatch.setattr(LabApi, "sample", sample_with_missing_halves)
     with RunningLabServer(LabStore(page_root)) as server:
         dom = _dom(server, tmp_path, route=f"/sample/{_id12(page_root)}/stability",
                    want=lambda page: "Split halves: split A skipped" in page)
@@ -335,7 +336,7 @@ def test_unchecked_library_entries_keep_their_badges_without_citations(page_root
         evidence = _dom(server, tmp_path / "evidence", route=f"/sample/{sample_id}/evidence",
                         want=lambda dom: "Unchecked catalog probe" in dom)
 
-    rows = re.findall(r"<tr>(.*?)</tr>", methods, re.S)
+    rows = re.findall(r"<tr(?:\s[^>]*)?>(.*?)</tr>", methods, re.S)
     cards = re.findall(r'<article class="evidence-card"[^>]*>(.*?)</article>', evidence, re.S)
     for blocks, label, expected in (
         (rows, "Unchecked metric probe", 1), (rows, "Checked metric probe", 0),
