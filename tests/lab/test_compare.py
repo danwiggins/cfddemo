@@ -544,7 +544,7 @@ def test_compare_and_joint_panel_render_in_native_tables(tmp_path, monkeypatch) 
     input_id = f"{101:064x}"
     assert f"input ID (abbrev.) {input_id[:12]}…{input_id[-6:]}" in compare
     assert "at least 10 are required for a cohort comparison" in compare
-    assert "missing metric: 1" in compare and "minimap2 2.28; samtools 1.20: 9" in compare
+    assert "member has no value for this metric: 1" in compare and "minimap2 2.28; samtools 1.20: 9" in compare
     assert "Eligible values (9)" in compare and "Original library reference" in compare
     assert 'aria-label="Comparison metrics"' in compare and 'aria-label="Generation aligner counts"' in compare
     assert compare.count('tabindex="0" role="region"') >= 2
