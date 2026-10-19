@@ -9,6 +9,11 @@ signature. The signed `traceback run` path has its own methods and records.
 
 **Research use only. Not CLIA-validated. Not a diagnosis.**
 
+From a repository checkout, run `uv sync` once, then run the `traceback`
+commands below with `uv run` as shown in the first-run steps. If the CLI is
+already installed, the bare `traceback` commands used elsewhere in this guide
+are equivalent.
+
 ## First five minutes
 
 On a Mac with only `uv`, samtools and minimap2 (`brew install samtools
@@ -32,18 +37,31 @@ M-series Mac. Copy-number is skipped (`example_reference`): it needs
 hg38-scale assets. The sample carries an **EXAMPLE (synthetic)** pill.
 `lab serve --open` prints the one-use link and opens it.
 
+If an already-open Lab page says there are no runs, use the ROOT printed by
+the serving process for `lab doctor --root R` and `lab run --example --root R`.
+Reload the page after the example completes. Its landing starts with an
+overview; choose **Explore signals** for the result lenses and **Check
+reliability** before interpreting a result. The example is synthetic and
+does not establish scientific or clinical qualification.
+
 Measured time to the page on a clean Mac by a teammate: not yet measured
 (target ≤ 5 minutes).
 
 ## One-time setup for real kits
 
 1. `brew install samtools minimap2` (samtools ≥ 1.20, minimap2 ≥ 2.28).
-2. Register hg38: `traceback reference register --fasta hg38.fa --id hg38 --root R`.
-3. For copy-number: `traceback toolchain install ichor`, then
-   `traceback method-asset register --from-toolchain copy-number --root R`.
-4. `traceback lab doctor --root R` shows setup checks and recovery commands;
+2. Register hg38: `uv run traceback reference register --fasta hg38.fa --id hg38 --root R`.
+3. For copy-number: `uv run traceback toolchain install ichor`, then
+   `uv run traceback method-asset register --from-toolchain copy-number --root R`.
+4. `uv run traceback lab doctor --root R` shows setup checks and recovery commands;
    inspect readiness for the methods you intend to run. Other methods have
    additional optional tools, assets, or input-scoped calibrations below.
+
+Before running a real chunk directory, confirm the platform, basecall and
+modification channels, depth, and method-specific assets required for your
+intended methods. Use the same ROOT for reference registration, the run, and
+the local page. An environment check does not make a result available or
+validate its interpretation.
 
 ## Duration and disk for a real run
 
@@ -783,15 +801,25 @@ serve as a history of every interrupted run.
 
 ## What the page shows
 
-- **Landing (`#/`)**: the CLIA explainer (short version, "Read the full
-  explainer" expands in place, full text at `#/about/clia`), one computed
-  headline sentence, the **defended results** (headline metrics that are
+- **Landing (`#/`)**: a selected-sample overview names the ID, built-in
+  synthetic-example status, recorded UTC date, approximate depth,
+  visible method states, hidden intermediate failures and result-selection
+  problems. The date is the completed run's terminal date when recorded, or
+  the latest input-use date otherwise; live work is reported in the header.
+  One-link actions open
+  Signals, Trust/QC, and Methods. The selected-sample status stays outside the
+  switcher across lenses; the header separately reports live run status. The
+  overview is followed by one computed headline sentence and the **defended
+  results** (headline metrics that are
   usable at half depth, stable across split halves, PROVEN or NEWER,
   citation-checked and, for copy-number, whose synthetic spike at TF 0.10 was
   recovered), the **depth → utility curve** (one row per algorithm; cells at
   10/25/50/100% of the reads; literature minimums drawn as "literature, not
-  measured"), the **positive controls** (SYNTHETIC, REPEATABILITY,
-  KNOWN-STATUS), the samples table and the license callouts.
+  measured"), and the **positive controls** (SYNTHETIC, REPEATABILITY,
+  KNOWN-STATUS). The CLIA explainer remains on the landing after those result
+  panels (short version, "Read the full explainer" expands in place, full text
+  at `#/about/clia`), followed by the samples table and license callouts. The
+  research-use notice is shown in the page header on every route.
 - **Findings**: only above/below-reference results are cards (sorted by tier,
   then severity); not-interpretable, no-reference and in-range metrics are
   counted, collapsible rows. Before the kit cohort exists (n < 10) most
@@ -844,6 +872,31 @@ serve as a history of every interrupted run.
   algorithm without inventing a metric-level panel from damaged data.
   When a metric lacks a stability rule or numeric values, the downsample cell
   says no stability verdict instead of calling it unstable.
+- **Methods**: search or filter the 35 currently visible methods by recorded
+  result and family, review research questions and limits, and open the
+  provenance table. The visible count is generated from the registry; the two
+  shared processing steps are described separately. The readiness summary
+  explains recorded skips, failures and absent results without interpreting
+  any of them as a negative biological finding.
+
+### Readiness for a recorded run
+
+The Methods summary describes the selected input and the results published for
+that run. It groups recorded skip reasons such as missing or malformed assets,
+platform mismatch, insufficient support, missing modification channels and
+upstream failures. The labels do not certify that the toolchain or assets are
+ready now. Current environment readiness and its checked-at time stay unknown
+on the page; run `traceback lab doctor --root <ROOT>` locally for a current
+setup check. Replace `<ROOT>` with your local root. After correcting a recorded
+issue, `traceback lab run <FILE> --root <ROOT>` is a template for rerunning the
+intended input; a stored sample can instead be rerun by its id12 as described
+above. The page never runs these commands or downloads assets.
+
+**Refresh recorded run** requests one current authenticated sample projection
+with a 10-second deadline. It does not run doctor or scientific preflight.
+A failed refresh keeps the previous projection visibly stale and keeps current
+environment readiness unknown. If you navigate to another sample or view while
+the request is in flight, that response is discarded.
 
 ## Building a Lab cohort
 

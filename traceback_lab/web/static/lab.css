@@ -20,6 +20,10 @@ body.lab { background: #f3f1ec; }
 .lenses { width: min(76rem, calc(100% - 2rem)); margin: .25rem auto 0; display: flex; flex-wrap: wrap; gap: .25rem 1rem; border-bottom: 1px solid var(--rule); }
 .lenses a { display: inline-flex; align-items: center; min-height: 2.75rem; padding: 0 .25rem; color: var(--ink); text-decoration: none; font-weight: 650; border-bottom: 3px solid transparent; }
 .lenses a[aria-current="page"] { border-bottom-color: var(--ink); }
+.readiness-issues { padding-left: 1.5rem; }
+.readiness-issues li { margin-block: .4rem; }
+.readiness-command { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-block: .35rem; }
+.readiness-command code { overflow-wrap: anywhere; user-select: text; }
 .breadcrumb { margin: 0; color: var(--muted); }
 .tier { display: inline-block; padding: .15rem .45rem; border-radius: 4px; font-size: .875rem; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; }
 .tier-PROVEN { background: var(--ink); color: #ffffff; border: 2px solid var(--ink); }
@@ -64,11 +68,21 @@ pre.stderr { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; 
 /* ---- S6c: landing, Findings, Stability ---------------------------------------------- */
 .app-header { flex-wrap: nowrap; }
 .app-header .flag-pill { font-size: .875rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.sample-context { margin: 0; padding: .2rem .5rem; border: 1px solid var(--rule); border-radius: .3rem; font-size: .875rem; overflow-wrap: anywhere; }
+.sample-context-kind { font-weight: 750; }
+.onboarding-guide, .onboarding-real { max-width: 70rem; }
+.onboarding-steps { padding-left: 1.5rem; }
+.onboarding-steps li { padding: .3rem 0; }
+.onboarding-steps li > p { margin: .25rem 0; }
+.onboarding-command { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem; margin: .4rem 0 .65rem; }
+.onboarding-command code { display: block; max-width: 100%; padding: .45rem .6rem; background: #f6f6f4; border: 1px solid var(--rule); border-radius: .25rem; overflow-wrap: anywhere; user-select: all; }
+.onboarding-command .control { min-height: 2.75rem; }
 .lab-status { flex-basis: auto; }
 .lab-chrome .lab-status:not(:empty) { display: block; }
 #main { width: min(76rem, calc(100% - 2rem)); margin-inline: auto; display: block; padding-block: .25rem 3rem; }
 .clia-panel { margin: 0; padding: .5rem .75rem; background: #ffffff; border: 1px solid var(--rule); border-radius: .5rem; overflow: visible; }
 .loading-clia { min-height: 12rem; box-sizing: border-box; }
+.loading-intro { min-height: 14rem; box-sizing: border-box; }
 .loading-headline { min-height: 2.5rem; }
 .loading-defended, .loading-curve { min-height: 13rem; }
 .loading-controls, .loading-lens { min-height: 10rem; }
@@ -80,6 +94,18 @@ pre.stderr { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; 
 .clia-toggle { background: #ffffff; color: var(--ink); }
 .clia-full p { max-width: 70ch; }
 .headline { margin: .35rem 0 .25rem; font-size: 1.1rem; font-weight: 700; }
+.landing-intro { margin: .25rem 0 .75rem; }
+.landing-intro h2 { margin: 0 0 .25rem; }
+.landing-identity { margin: .25rem 0 .5rem; }
+.landing-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); gap: .5rem 1rem; margin: .5rem 0; }
+.landing-summary div { min-width: 0; }
+.landing-summary dt { font-size: .875rem; color: var(--muted); }
+.landing-summary dd { margin: 0; font-weight: 700; }
+.landing-summary dd .help { display: block; margin: .15rem 0 0; font-weight: 400; }
+.landing-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .75rem; }
+.landing-actions a { padding: .5rem .75rem; border: 2px solid var(--ink); border-radius: .35rem; background: #ffffff; color: var(--ink); font-weight: 700; text-decoration: none; }
+.landing-actions a:first-child { background: var(--ink); color: #ffffff; }
+.lab .landing-actions a.disabled { background: #ffffff; color: var(--muted); border-color: var(--muted); }
 .landing-band { display: grid; grid-template-columns: 1fr; gap: 1rem; }
 .landing-band .panel { margin-top: 0; padding-top: .25rem; }
 .defended-rows { list-style: none; margin: 0 0 .25rem; padding: 0; }
@@ -135,6 +161,7 @@ pre.stderr { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; 
 }
 @media (max-width: 1199px) { .multiples { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 767px) {
+  .loading-intro { min-height: 25rem; }
   .multiples { grid-template-columns: 1fr; }
   .app-header { flex-wrap: wrap; }
   .curve-row { grid-template-columns: 1fr; }

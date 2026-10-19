@@ -21,6 +21,7 @@
   ];
   const state = {
     samples: [],
+    rootHasRuns: false,
     defaultSampleId12: null,
     completedInputUnavailable: false,
     completionHistoryUnavailable: false,
@@ -189,6 +190,26 @@
     );
   }
 
+  function renderSampleContext() {
+    const context = document.getElementById("sample-context");
+    const sample = state.sample && state.sample.found && state.route.name !== "unknown" ? state.sample : null;
+    if (!sample) {
+      context.replaceChildren(state.loading ? "Loading sample…" : "No sample selected");
+      return;
+    }
+    const listed = state.samples.find((row) => row.id12 === sample.id12);
+    const example = sample.example ?? listed?.example;
+    const kind = example === undefined ? "Synthetic status unavailable"
+      : example ? "EXAMPLE (synthetic)" : "Not marked as the built-in synthetic example";
+    const availability = sample.state === "completed_input_unavailable" ? "completed input unavailable"
+      : sample.state === "completion_history_unavailable" ? "completion history unavailable"
+        : sample.completed_utc ? `completion recorded ${sample.completed_utc.slice(0, 10)}`
+          : sample.completed_utc === null ? "no completion recorded for this sample"
+            : "selected sample";
+    context.replaceChildren(`Sample ${sample.id12} · `,
+      h("span", { class: "sample-context-kind" }, kind), ` · ${availability}`);
+  }
+
   function updateNavFade() {
     const nav = document.getElementById("lenses");
     const overflow = !nav.hidden && nav.scrollWidth > nav.clientWidth + 1;
@@ -231,6 +252,7 @@
 
   function render() {
     renderSwitcher();
+    renderSampleContext();
     renderNav();
     const main = document.getElementById("main");
     main.replaceChildren();
@@ -240,13 +262,15 @@
       main.append(h("h1", { class: route.name === "home" ? "visually-hidden" : "view-title" }, "Loading…"));
       if (route.name === "home") {
         main.append(
-          h("section", { class: "clia-panel loading-clia" },
-            h("h2", { class: "clia-title" }, "What CLIA means for this demo"), h("p", {}, "Loading…")),
+          h("section", { class: "panel landing-intro loading-intro" },
+            h("h2", {}, "Sample overview"), h("p", {}, "Loading…")),
           h("p", { class: "headline loading-headline" }, "Loading…"),
           h("div", { class: "landing-band" },
             h("section", { class: "panel defended loading-defended" }, h("h2", {}, "Defended results"), h("p", {}, "Loading…")),
             h("section", { class: "panel curve loading-curve" }, h("h2", {}, "Depth → utility"), h("p", {}, "Loading…")),
             h("section", { class: "panel controls loading-controls" }, h("h2", {}, "Positive controls"), h("p", {}, "Loading…"))),
+          h("section", { class: "clia-panel loading-clia" },
+            h("h2", { class: "clia-title" }, "What CLIA means for this demo"), h("p", {}, "Loading…")),
         );
       } else main.append(h("section", { class: "panel loading-lens" }, h("p", {}, "Loading…")));
       return;
@@ -312,7 +336,7 @@
           h("p", {}, `Provisional: this input excludes ${sample.excluded_chunks.length} truncated chunks; depth reflects the reads present.`),
           h("details", {}, h("summary", {}, `Excluded chunk indexes (${sample.excluded_chunks.length})`),
             h("p", {}, `Excluded chunk indexes: ${sample.excluded_chunks.join(", ")}.`)));
-        const anchor = route.name === "home" ? main.querySelector(".clia-panel") : main.querySelector("h1");
+        const anchor = route.name === "home" ? main.querySelector(".landing-intro") : main.querySelector("h1");
         if (anchor) anchor.after(notice); else main.prepend(notice);
       }
     };
@@ -324,14 +348,40 @@
   }
 
   function emptyState() {
-    const copy = (text) => h("p", {}, h("code", {}, text), " ", h("button", { type: "button", class: "control", onclick: () => navigator.clipboard && navigator.clipboard.writeText(text) }, "Copy"));
+    const copy = (text) => h("div", { class: "onboarding-command" }, h("code", {}, text),
+      h("button", { type: "button", class: "control", "aria-label": `Copy command: ${text}`,
+        onclick: () => navigator.clipboard && navigator.clipboard.writeText(text) }, "Copy command"));
     return [
       h("h1", { class: "view-title" }, "Traceback Lab"),
+      h("p", { class: "empty" }, state.rootHasRuns
+        ? "No Lab samples are available under this server's ROOT, although run history exists. Inspect the run log with `uv run traceback lab runs --root ROOT_PATH`. Replace ROOT_PATH below with the ROOT shown where `lab serve` started."
+        : "No Lab runs under this server's ROOT. Use the same ROOT shown in the terminal where `lab serve` started. Replace ROOT_PATH in the commands below with that value."),
+      h("section", { class: "panel onboarding-guide", "aria-labelledby": "onboarding-example-title" },
+        h("h2", { id: "onboarding-example-title" }, "Start with a synthetic example"),
+        h("p", {}, "From the repository checkout, run these commands in a terminal. The page does not run them for you."),
+        copy("uv sync"),
+        h("ol", { class: "onboarding-steps" },
+          h("li", {}, h("strong", {}, "Check setup"), copy("uv run traceback lab doctor --root ROOT_PATH")),
+          h("li", {}, h("strong", {}, "Generate the example"), copy("uv run traceback lab run --example --root ROOT_PATH")),
+          h("li", {}, h("strong", {}, "Open the local page"),
+            h("p", {}, "This page is already being served. If you stopped the server, restart it with the same ROOT:"),
+            copy("uv run traceback lab serve --open --root ROOT_PATH")),
+          h("li", {}, h("strong", {}, "Explore signals"),
+            h("p", {}, "Reload this page after the example finishes, then choose Explore signals on its landing. Check reliability before interpreting a result."),
+            h("button", { type: "button", class: "control", "data-requires-server": "", onclick: () => location.reload() }, "Reload Lab"))),
+        h("p", {}, h("a", { href: "https://github.com/danwiggins/cfddemo/blob/main/docs/LAB-GUIDE.md#first-five-minutes", target: "_blank", rel: "noreferrer noopener" }, "Full example guide on GitHub (external)")),
+        h("p", { class: "help" }, "The example is synthetic. Completing setup does not establish scientific or clinical qualification.")),
+      h("section", { class: "panel onboarding-real", "aria-labelledby": "onboarding-real-title" },
+        h("h2", { id: "onboarding-real-title" }, "Prepare a real input"),
+        h("p", {}, "Use a real-kit reference and the protocol required by each method. The built-in example reference is not suitable for real input."),
+        h("ol", { class: "onboarding-steps" },
+          h("li", {}, "Check samtools ≥ 1.20 and minimap2 ≥ 2.28, then run doctor with the same ROOT."),
+          h("li", {}, "Register a verified hg38 reference for real input.", copy("uv run traceback reference register --fasta HG38_FASTA --id hg38 --root ROOT_PATH")),
+          h("li", {}, "Confirm platform, basecall/modification channels, depth, and any method-specific assets before a run."),
+          h("li", {}, "Select your own chunk directory and run with the registered reference.", copy("uv run traceback lab run CHUNK_DIR --reference hg38 --root ROOT_PATH"))),
+        h("p", {}, h("a", { href: "https://github.com/danwiggins/cfddemo/blob/main/docs/LAB-GUIDE.md#one-time-setup-for-real-kits", target: "_blank", rel: "noreferrer noopener" }, "Real-kit setup guide on GitHub (external)")),
+        h("p", { class: "help" }, "Doctor checks the environment. A successful setup does not make a result available or validate a scientific interpretation.")),
       window.TracebackLabViews.landingCliaPanel(),
-      h("p", { class: "empty" }, "No Lab runs under this server's ROOT (printed in the terminal where `lab serve` started). Check setup, try the synthetic example, or run your own chunk directory with the same ROOT, then reload."),
-      copy("traceback lab doctor"),
-      copy("traceback lab run --example"),
-      h("p", {}, h("code", {}, "traceback lab run <chunk dir>")),
     ];
   }
 
@@ -807,6 +857,7 @@
       }
       const listing = await api("/api/samples");
       state.samples = listing.samples;
+      state.rootHasRuns = !!listing.root_has_runs;
       state.defaultSampleId12 = listing.default_sample_id12 !== undefined
         ? listing.default_sample_id12 : (listing.samples[0] && listing.samples[0].id12) || null;
       state.completedInputUnavailable = !!listing.completed_input_unavailable;
