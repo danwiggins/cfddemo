@@ -993,9 +993,13 @@ provisional-input warning when truncated chunks were excluded, and disclose
 malformed or unavailable selection details without copying private filenames
 or error diagnostics. A report with no eligible scalar rows is refused.
 Exports are limited to 5,000 rows and 5 MiB per file; an over-limit report is
-refused without a partial download. The print view adds recorded method
-questions, requirements, support counts, references and signal definitions
-where available; an absent denominator or source context remains unavailable.
+refused without a partial download. The print view shows the schema version
+once, then adds recorded method questions, requirements, support counts,
+literature references and signal definitions where available. Each metric also
+prints its validated tool, tool version, full parameters SHA-256, attempt ID,
+reference asset ID and computed UTC from the captured report. The reference
+asset ID is provenance, distinct from the literature reference; an absent
+attempt ID, denominator or source context is shown as unavailable.
 Research-use and synthetic-example markings stay with the printed report.
 No export or printout establishes scientific or clinical qualification.
 
