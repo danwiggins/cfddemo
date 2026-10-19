@@ -221,8 +221,10 @@
       if (!(event.target instanceof HTMLAnchorElement) || getComputedStyle(nav).flexWrap !== "nowrap") return;
       const frame = nav.getBoundingClientRect();
       const link = event.target.getBoundingClientRect();
-      if (link.left < frame.left) nav.scrollLeft += link.left - frame.left;
-      else if (link.right > frame.right) nav.scrollLeft += link.right - frame.right;
+      // Keep focus clear of the 1.25rem edge fade as keyboard travel scrolls.
+      if (link.left < frame.left + 24 || link.right > frame.right - 24) {
+        nav.scrollLeft += link.left - frame.left - (nav.clientWidth - link.width) / 2;
+      }
       updateNavFade();
     });
   }
