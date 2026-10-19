@@ -182,6 +182,10 @@
     return h("p", {}, h("strong", {}, `${label}: `), value == null || value === "" ? "unavailable" : String(value));
   }
 
+  function provenanceText(value) {
+    return value == null || value === "" ? "unavailable" : String(value);
+  }
+
   function printTree(capture) {
     const { report, context } = capture;
     const root = h("section", { id: "lab-report-print", "aria-label": "Captured research report",
@@ -191,6 +195,7 @@
       h("div", { class: "report-print-limits" },
         "Visible registered scalar metrics only; hidden steps, arrays, artifacts and taxon detail omitted. Values may differ from the earlier page."),
       h("h1", {}, "Traceback Lab research report"),
+      field("Schema version", report.schema_version),
       field("Captured UTC", report.generated_at), field("Sample", report.sample_id),
       field("Input", report.full_input_id), field("Source", report.source_id),
       field("Recorded date (UTC)", report.recorded_utc), field("Recorded date kind", report.recorded_utc_kind),
@@ -220,7 +225,15 @@
           field("Confounders", detail.confounders), field("Next steps", detail.nextSteps),
           field("Measurement", detail.guide?.definition),
           field("Denominator / filter", detail.guide?.denominator),
-          field("Measurement limitation", detail.guide?.limitation)));
+          field("Measurement limitation", detail.guide?.limitation),
+          h("div", { class: "report-print-provenance", "aria-label": "Validated result provenance" },
+            h("p", {}, h("strong", {}, "Result provenance — "),
+              `Tool: ${provenanceText(row.tool)}; Tool version: ${provenanceText(row.tool_version)}; `,
+              `Computed UTC: ${provenanceText(row.computed_at)}.`),
+            h("p", {},
+              `Parameters SHA-256: ${provenanceText(row.parameters_sha256)}; `,
+              `Attempt ID: ${provenanceText(row.attempt_id)}; `,
+              `Reference asset ID: ${provenanceText(row.reference_id)}.`))));
       }
       root.append(section);
     }

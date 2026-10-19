@@ -30,7 +30,9 @@ def test_report_capture_download_print_and_selection_invalidation(tmp_path) -> N
     sample = _reportable_sample()
     sample["example"] = True
     sample["completed_utc"] = sample["run_utc"]
+    sample["cohort_version"] = "cohort-v7"
     copy_number = next(row for row in sample["algorithms"] if row["algorithm_id"] == "copy-number")
+    copy_number["provenance"]["attempt_id"] = None
     next(row for row in copy_number["metrics"] if row["metric_id"] == "tumor_fraction").update(
         state="not_interpretable", reason="no_pon",
     )
@@ -69,6 +71,8 @@ def test_report_capture_download_print_and_selection_invalidation(tmp_path) -> N
                 const root = document.querySelector('#lab-report-print');
                 const marks = root.querySelector('.report-print-marks');
                 const limits = root.querySelector('.report-print-limits');
+                const tumorRow = [...root.querySelectorAll('.report-print-metric')]
+                  .find((row) => row.textContent.includes('Metric ID: tumor_fraction'));
                 const visible = (node) => {
                   const bounds = node.getBoundingClientRect();
                   return bounds.width > 0 && bounds.height > 0;
@@ -81,6 +85,14 @@ def test_report_capture_download_print_and_selection_invalidation(tmp_path) -> N
                   input: root.textContent.includes(window.TracebackLab.state.sample.full_input_id),
                   dateKind: root.textContent.includes('Recorded date kind: completion'),
                   reason: root.textContent.includes('Interpretation reason: no_pon'),
+                  schemaCount: [...root.querySelectorAll('p')]
+                    .filter((node) => node.textContent.startsWith('Schema version: ')).length,
+                  schema: root.textContent.includes('Schema version: 2'),
+                  cohortVersion: root.textContent.includes('Cohort version: cohort-v7'),
+                  provenanceBlocks: root.querySelectorAll('.report-print-provenance').length,
+                  tumorProvenance: tumorRow?.querySelector('.report-print-provenance')?.textContent || '',
+                  changedAfterCapture: root.textContent.includes('changed-after-capture') ||
+                    root.textContent.includes('cohort-v9'),
                   definition: root.textContent.includes('most frequent aligned reference span'),
                   count: root.querySelectorAll('.report-print-metric').length,
                   privateData: root.textContent.includes('/private/read-identifiers'),
@@ -96,6 +108,9 @@ def test_report_capture_download_print_and_selection_invalidation(tmp_path) -> N
             assert evaluate("!!document.querySelector('.report-preview')")
             observed["calls_after_prepare"] = len(calls) - before
             observed["preview"] = evaluate("document.querySelector('.report-preview').textContent")
+            sample["cohort_version"] = "cohort-v9"
+            copy_number["provenance"]["tool"] = "changed-after-capture"
+            next(row for row in copy_number["metrics"] if row["metric_id"] == "tumor_fraction")["reason"] = "qc"
             evaluate("""(() => {
               const buttons = [...document.querySelectorAll('.report-actions button')];
               buttons[0].click(); buttons[1].click();
@@ -151,11 +166,25 @@ def test_report_capture_download_print_and_selection_invalidation(tmp_path) -> N
     assert observed["blobs"][1].startswith("schema_version,generated_at,")
     model = json.loads(observed["blobs"][0])
     assert model["recorded_utc_kind"] == "completion"
+    assert model["cohort_version"] == "cohort-v7"
     assert any(row["interpretation_reason"] == "no_pon" for row in model["metrics"])
     assert b"recorded_utc_kind" in observed["blobs"][1].encode()
     assert b"interpretation_reason" in observed["blobs"][1].encode()
     assert observed["print"]["input"] and observed["print"]["definition"]
     assert observed["print"]["dateKind"] and observed["print"]["reason"]
+    assert observed["print"]["schema"] and observed["print"]["schemaCount"] == 1
+    assert observed["print"]["cohortVersion"] and not observed["print"]["changedAfterCapture"]
+    assert observed["print"]["provenanceBlocks"] == observed["print"]["count"]
+    tumor = next(row for row in model["metrics"]
+                 if row["algorithm_id"] == "copy-number" and row["metric_id"] == "tumor_fraction")
+    provenance = observed["print"]["tumorProvenance"]
+    assert "Result provenance" in provenance
+    assert "Tool: synthetic-fixture" in provenance and "Tool version: 1" in provenance
+    assert f"Parameters SHA-256: {tumor['parameters_sha256']}" in provenance
+    assert tumor["attempt_id"] is None and "Attempt ID: unavailable" in provenance
+    assert f"Reference asset ID: {tumor['reference_id']}" in provenance
+    assert f"Computed UTC: {tumor['computed_at']}" in provenance
+    assert tumor["tool"] == "synthetic-fixture" and tumor["interpretation_reason"] == "no_pon"
     assert observed["print"]["count"] > 0
     assert not observed["print"]["privateData"]
     assert "RESEARCH USE ONLY" in observed["print"]["marks"]
