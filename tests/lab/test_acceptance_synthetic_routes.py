@@ -134,7 +134,8 @@ def _sample() -> dict:
     return {
         "found": True, "id12": ID12, "source_id": "c" * 64,
         "full_input_id": "b" * 64, "example": False,
-        "run_utc": "2026-10-16T00:00:00Z", "depth": {"approx_depth_x": 1.0},
+        "run_utc": "2026-10-16T00:00:00Z", "completed_utc": "2026-10-16T00:00:00Z",
+        "depth": {"approx_depth_x": 1.0},
         "excluded_chunks": [], "interpretation_version": LIBRARY.version,
         "cohort_version": None, "cohort_n": 0,
         "algorithms": algorithms, "catalog": catalog, "unreadable_results": [],
@@ -289,6 +290,7 @@ def test_landing_defaults_to_completed_run_with_newer_active_sample(tmp_path) ->
     active = copy.deepcopy(completed)
     active["id12"] = active_id12
     active["source_id"] = "d" * 64
+    active["completed_utc"] = None
     active["headline"] = {"sentence": "Active fixture has no completed results.", "unlock": None}
     active["algorithms"] = []
     active["catalog"] = []
@@ -330,11 +332,31 @@ def test_landing_defaults_to_completed_run_with_newer_active_sample(tmp_path) ->
                                             else "No completed Lab run yet") in dom
                 assert f'href="#/?sample={active_id12}"' in dom
                 assert "Select a sample" in dom
+                assert "No sample selected" in dom
             else:
                 assert heading is not None and heading.group(1) == expected, label
                 assert f'href="#/sample/{active_id12}/findings"' in dom
             if label == "explicit-active":
-                assert "selected sample view" in dom and "A Lab run is in progress" in dom
+                assert "no completion recorded for this sample" in dom and "A Lab run is in progress" in dom
+
+
+@needs_chrome
+def test_landing_recorded_date_is_not_labeled_as_latest_activity_during_rerun(tmp_path) -> None:
+    sample = _sample()
+    with _server(tmp_path, sample) as server:
+        server.app.api.status = lambda: {
+            "generation": 2,
+            "active": {"run_id": "r-20261018-0000-abcd", "command": "run", "step": "bam-qc",
+                       "started_utc": "2026-10-18T00:00:00Z", "source_id": sample["source_id"],
+                       "input_id": "e" * 64},
+            "interrupted": None,
+            "library": sample["library_health"],
+        }
+        dom = _dom(server, tmp_path / "browser", route="/",
+                   want=lambda page: "A Lab run is in progress" in page and "Recorded completion (UTC)" in page)
+    assert f'<dt>Recorded completion (UTC)</dt><dd>{sample["run_utc"][:10]}<p class="help">' in dom
+    assert "Completion recorded for this selected sample" in dom
+    assert "Latest recorded activity" not in dom
 
 
 @needs_chrome
@@ -349,10 +371,13 @@ def test_landing_actions_keep_synthetic_status_on_each_destination(tmp_path) -> 
             assert evaluate("document.getElementById('sample-context').closest('header') !== null")
             assert evaluate("document.getElementById('sample-context').textContent").count("EXAMPLE (synthetic)") == 1
             assert evaluate("document.querySelector('.landing-intro').textContent").count("EXAMPLE (synthetic)") == 1
+            evaluate("document.querySelector('.landing-actions a').classList.add('disabled')")
+            assert evaluate("getComputedStyle(document.querySelector('.landing-actions a')).backgroundColor") == "rgb(255, 255, 255)"
+            evaluate("document.querySelector('.landing-actions a').classList.remove('disabled')")
             actions = (
                 ("Explore signals", "signals", "Signals"),
-                ("Check reliability", "trust-qc", "Trust/QC"),
-                ("Method readiness", "methods", "Methods"),
+                ("Check reliability", "trust-qc", "Trust / QC"),
+                ("Explore methods", "methods", "Methods"),
             )
             for label, lens, heading in actions:
                 href = evaluate(f"[...document.querySelectorAll('.landing-actions a')].find(a => a.textContent === {json.dumps(label)})?.getAttribute('href')")
@@ -362,12 +387,15 @@ def test_landing_actions_keep_synthetic_status_on_each_destination(tmp_path) -> 
                     if evaluate("location.hash") == href and evaluate("document.querySelector('#main h1')?.textContent.trim()") == heading:
                         break
                     time.sleep(0.05)
+                assert evaluate("location.hash") == href
+                assert evaluate("document.querySelector('#main h1')?.textContent.trim()") == heading
                 observed.append((label, evaluate("location.hash"), evaluate("document.getElementById('sample-context').textContent")))
                 evaluate("location.hash = '#/'")
                 for _ in range(100):
                     if evaluate("document.querySelector('.landing-actions') !== null"):
                         break
                     time.sleep(0.05)
+                assert evaluate("document.querySelector('.landing-actions') !== null")
             for lens in SAMPLE_ROUTES:
                 route = f"#/sample/{ID12}/{lens}"
                 evaluate(f"location.hash = {json.dumps(route)}")
@@ -380,6 +408,13 @@ def test_landing_actions_keep_synthetic_status_on_each_destination(tmp_path) -> 
             command("Emulation.setEmulatedMedia", {"media": "print"})
             assert evaluate("getComputedStyle(document.getElementById('sample-context')).display") != "none"
             assert "EXAMPLE (synthetic)" in evaluate("document.getElementById('sample-context').textContent")
+            evaluate("location.hash = '#/about/clia'")
+            for _ in range(100):
+                if evaluate("window.TracebackLab.state.renderedHash") == "#/about/clia":
+                    break
+                time.sleep(0.05)
+            assert evaluate("window.TracebackLab.state.renderedHash") == "#/about/clia"
+            assert evaluate("document.getElementById('sample-context').textContent").endswith("completion recorded 2026-10-16")
 
         _dom_cdp(
             [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
@@ -397,10 +432,13 @@ def test_landing_names_result_selection_problems_beside_recorded_counts(tmp_path
     sample["unreadable_results"] = ["bam-qc"]
     sample["ambiguous_results"] = ["fragment-size"]
     sample["malformed_result_selections"] = True
+    sample["algorithms"] = [algorithm for algorithm in sample["algorithms"] if algorithm["algorithm_id"] != "bam-qc"]
+    sample["algorithms"].append({"algorithm_id": "read-summary", "status": "failed", "hidden": True})
     with _server(tmp_path, sample) as server:
         dom = _dom(server, tmp_path / "browser", route="/",
                    want=lambda page: "Result selection problems" in page)
-    assert f"{len(sample['algorithms'])} visible entries" in dom
+    assert f"{len(sample['algorithms']) - 1} visible entries" in dom
+    assert "1 hidden intermediate failed; see Trust/QC" in dom
     assert "1 unreadable" in dom and "1 ambiguous" in dom
     assert "malformed selection present" in dom
 
@@ -758,10 +796,15 @@ def test_loading_copy_while_synthetic_listing_is_in_flight(tmp_path) -> None:
 
         server.app.api.samples = delayed_listing
         profile = Path(tmp_path / "browser-profile")
+
+        def check_reservation(_command, evaluate) -> None:
+            assert evaluate("parseFloat(getComputedStyle(document.querySelector('.loading-intro')).minHeight)") >= 200
+
         dom = _dom_cdp(
             [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
              f"--user-data-dir={profile}", server.issue_link()],
             profile, ok=lambda d: "Loading Lab results…" in d, timeout=12,
+            interact=check_reservation,
         )
     assert "Loading Lab results…" in dom and "Loading…" in dom
 
@@ -778,6 +821,7 @@ def test_empty_copy_and_complete_example_commands(tmp_path) -> None:
         about = _dom(server, tmp_path / "clia", route="/about/clia",
                      want=lambda page: "What CLIA is." in page)
     assert '<section class="clia-panel"' in dom
+    assert "Unknown requested sample" in unknown
     short = re.search(r'<div class="clia-short">(.*?)</div>', dom, re.DOTALL)
     full = re.search(r'<div class="clia-full"[^>]*>(.*?)</div>', dom, re.DOTALL)
     assert short is not None and full is not None

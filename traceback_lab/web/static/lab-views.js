@@ -154,6 +154,7 @@
       failed: rows.filter((algorithm) => algorithm.status === "failed").length,
       other: rows.filter((algorithm) => !["ok", "skipped", "failed"].includes(algorithm.status)).length,
     };
+    const intermediateFailures = (sample.algorithms || []).filter((algorithm) => algorithm.hidden && algorithm.status === "failed").length;
     const selectionProblems = [
       (sample.unreadable_results || []).length ? `${sample.unreadable_results.length} unreadable` : null,
       (sample.ambiguous_results || []).length ? `${sample.ambiguous_results.length} ambiguous` : null,
@@ -164,16 +165,22 @@
       h("p", { class: "landing-identity" }, `Sample ${sample.id12} · `,
         h("span", { class: "sample-context-kind" }, sample.example ? "EXAMPLE (synthetic)" : "Not marked as the built-in synthetic example")),
       h("dl", { class: "landing-summary" },
-        h("div", {}, h("dt", {}, "Latest recorded activity"), h("dd", {}, sample.run_utc ? sample.run_utc.slice(0, 10) : "Unavailable")),
-        h("div", {}, h("dt", {}, "Approximate depth"), h("dd", {}, sample.depth?.approx_depth_x == null ? "Unavailable" : `${sample.depth.approx_depth_x.toPrecision(3)}x`)),
+        h("div", {}, h("dt", {}, sample.completed_utc ? "Recorded completion (UTC)" : "Latest input use (UTC)"),
+          h("dd", {}, sample.run_utc ? sample.run_utc.slice(0, 10) : "Unavailable",
+            h("p", { class: "help" }, sample.completed_utc
+              ? "Completion recorded for this selected sample. Active and interrupted work is reported in the header."
+              : "No completion recorded for this selected sample. This date is input use, not a completed run."))),
+        h("div", {}, h("dt", {}, "Approximate depth"), h("dd", {}, sample.depth?.approx_depth_x == null ? "Unavailable" : `${sample.depth.approx_depth_x.toPrecision(3)}x`,
+          h("span", { class: "help" }, "Aligned-base depth; eligible reads."))),
         h("div", {}, h("dt", {}, "Recorded method states"), h("dd", {}, rows.length
           ? `${rows.length} visible entries: ${counts.ok} OK · ${counts.skipped} skipped · ${counts.failed} failed${counts.other ? ` · ${counts.other} other` : ""}`
           : "No recorded visible method results")),
+        intermediateFailures ? h("div", {}, h("dt", {}, "Intermediate failures"), h("dd", { class: "problem" }, `${intermediateFailures} hidden intermediate${intermediateFailures === 1 ? "" : "s"} failed; see Trust/QC`)) : "",
         selectionProblems ? h("div", {}, h("dt", {}, "Result selection problems"), h("dd", { class: "problem" }, selectionProblems)) : ""),
       h("nav", { class: "landing-actions", "aria-label": "Explore this sample" },
         h("a", { href: `#/sample/${sample.id12}/signals` }, "Explore signals"),
         h("a", { href: `#/sample/${sample.id12}/trust-qc` }, "Check reliability"),
-        h("a", { href: `#/sample/${sample.id12}/methods` }, "Method readiness")));
+        h("a", { href: `#/sample/${sample.id12}/methods` }, "Explore methods")));
     const out = [h("h1", { class: "visually-hidden" }, `Traceback Lab — ${sample.id12}`), overview];
     const sentence = h("p", { class: "headline", id: "headline" }, sample.headline.sentence);
     if (sample.headline.unlock) sentence.append(" ", h("span", { title: "literature, not measured" }, sample.headline.unlock.text), h("span", { class: "visually-hidden" }, " (literature, not measured)"));
@@ -636,8 +643,12 @@
     }
     const slot = h("div", {}, h("p", {}, "Loading…"));
     section.append(slot);
-    fetch(`/api/samples/${sample.id12}/artifact/full/cell-origin/composition`, { credentials: "same-origin" })
-      .then((r) => { if (!r.ok) throw new Error("data reference invalid"); return r.json(); })
+    const revision = L.state.navigationRevision;
+    const hash = location.hash;
+    L.requestJson(`/api/samples/${sample.id12}/artifact/full/cell-origin/composition`, {
+      isCurrent: () => revision === L.state.navigationRevision && hash === location.hash &&
+        L.state.sample?.id12 === sample.id12,
+    })
       .then((data) => {
         const rows = data.contributors.filter((c) => c.fraction > 0 || (c.interval && c.interval[1] > 0)).sort((x, y) => y.fraction - x.fraction);
         const w = 560, rowH = 22, left = 170, hgt = rows.length * rowH + 30;
@@ -663,7 +674,10 @@
           dataTable("All cell-type contributions, including zero-share rows", ["Cell type", "Share", "Interval low", "Interval high", "Interval"],
             data.contributors.map(compositionRow))));
       })
-      .catch((error) => slot.replaceWith(h("div", { class: "problem" }, `Chart could not be drawn (${error.message}).`)));
+      .catch((error) => {
+        if (error.kind !== "obsolete" && slot.isConnected) slot.replaceWith(h("div", { class: "problem" },
+          "Chart could not be drawn. Retry loading this selected result."));
+      });
     return section;
   }
 
@@ -831,6 +845,117 @@
   function methods(sample) {
     const out = [h("p", { class: "breadcrumb" }, `Lab › ${sample.id12} › Methods`), h("h1", { class: "view-title" }, "Methods"),
       h("p", {}, `Interpretation library v${sample.interpretation_version} · cohort ${sample.cohort_version || "none yet"} · provenance stamp only (no signing). `, flagPill("PII", "FLAG: PII — file paths often embed donor names. Hashes only, never paths."))];
+    const catalog = sample.catalog || [];
+    const counts = sample.method_counts || {};
+    const search = h("input", { id: "method-search", type: "search", autocomplete: "off",
+      "aria-label": "Search methods" });
+    const statuses = [...new Set(catalog.map((row) => row.status))].sort();
+    const status = h("select", { id: "method-status", "aria-label": "Filter methods by recorded result" },
+      h("option", { value: "" }, "All recorded results"),
+      ...statuses.map((value) => h("option", { value }, value)));
+    const families = [...new Set(catalog.map((row) => row.family).filter(Boolean))].sort();
+    const family = h("select", { id: "method-family", "aria-label": "Filter methods by family" },
+      h("option", { value: "" }, "All families"),
+      ...families.map((value) => h("option", { value }, value)));
+    const count = h("p", { role: "status", "aria-live": "polite" });
+    const catalogRows = h("div", { id: "method-catalog-results" });
+    let pinnedAlgorithm = null;
+    const showCatalog = () => {
+      const needle = search.value.trim().toLocaleLowerCase();
+      const selected = catalog.filter((row) => {
+        if (pinnedAlgorithm && row.algorithm_id !== pinnedAlgorithm) return false;
+        if (status.value && row.status !== status.value) return false;
+        if (family.value && row.family !== family.value) return false;
+        return !needle || [row.algorithm_id, row.label, row.description, row.question,
+          row.limitations, ...(row.requirements || [])].some((value) =>
+          String(value || "").toLocaleLowerCase().includes(needle));
+      });
+      count.textContent = `${selected.length} of ${catalog.length} visible methods shown`;
+      if (!selected.length) {
+        catalogRows.replaceChildren(h("p", { class: "empty" },
+          "No methods match these filters. Clear the search or choose another recorded result or family."));
+        return;
+      }
+      catalogRows.replaceChildren(...selected.map((row) => {
+        const readFloor = row.min_eligible_reads
+          ? `Registry floor: ${fmt(row.min_eligible_reads)} eligible reads.`
+          : "No generic registry read floor; method-specific gates may still apply.";
+        const platforms = (row.platforms || []).map((value) => value === "ont" ? "ONT" : value === "illumina" ? "Illumina" : value).join(", ");
+        const requirements = row.requirements || [];
+        const recorded = row.status === "ok" ? "ran" : row.status;
+        const provenance = h("button", { type: "button", class: "control" }, "Go to recorded provenance");
+        provenance.addEventListener("click", () => document.getElementById("method-provenance")?.scrollIntoView());
+        return h("article", { class: "panel", id: `method-${row.algorithm_id}` },
+          h("h3", {}, row.label, " ", h("span", { class: "help" }, `(${row.algorithm_id})`)),
+          h("p", {}, row.description || "Method explanation unavailable."),
+          h("p", {}, `Family: ${row.family || "unclassified"} · Recorded result: ${recorded}`,
+            row.skip_reason ? ` (${row.skip_reason.replace(/_/g, " ")})` : ""),
+          h("details", {}, h("summary", {}, "Question, limits and prerequisites"),
+            h("p", {}, h("strong", {}, "Research question: "), row.question || "Not documented."),
+            h("p", {}, h("strong", {}, "Limits: "), row.limitations || "Not documented."),
+            h("p", {}, `Declared platforms: ${platforms || "unspecified"}. ${readFloor}`,
+              row.requires_mm_tags ? " MM tags required." : ""),
+            requirements.length ? h("ul", {}, ...requirements.map((item) => h("li", {}, item)))
+              : h("p", {}, "No additional registered asset is listed in the method explanation; a run can still have input-specific gates."),
+            row.min_depth_x ? h("p", {}, `Literature depth minimum: ${fmt(row.min_depth_x)}x; this is not a readiness verdict.`) : "",
+            h("p", {}, `Evidence note: ${row.footnote || "none published"}`,
+              row.footnote_source ? ` (${row.footnote_source})` : "",
+              row.citation_checked ? "" : " · UNVERIFIED citation"),
+            h("p", {}, h("a", { href: `#/sample/${sample.id12}/evidence` }, "Evidence, citations and licenses"),
+              " · ", provenance)));
+      }));
+    };
+    const userFilter = (event) => {
+      if (pinnedAlgorithm && event.target !== search) search.value = "";
+      pinnedAlgorithm = null;
+      showCatalog();
+    };
+    search.addEventListener("input", userFilter);
+    status.addEventListener("change", userFilter);
+    family.addEventListener("change", userFilter);
+    const route = L.state.route || {};
+    const requested = route.context || {};
+    const requestedAlgorithm = requested.algorithm;
+    const requestedMetric = requested.metric;
+    const requestedFamily = requested.family;
+    const method = catalog.find((row) => row.algorithm_id === requestedAlgorithm);
+    const recorded = (sample.algorithms || []).find((row) => row.algorithm_id === requestedAlgorithm);
+    let focusContext = null;
+    let contextMessage = "";
+    if (route.contextInvalid || (requestedMetric && !requestedAlgorithm)) {
+      contextMessage = "This method link has invalid context. Showing all methods.";
+    } else if (requestedFamily && !families.includes(requestedFamily)) {
+      contextMessage = "Requested family is unavailable for this sample. Showing all methods.";
+    } else if (requestedAlgorithm && !method) {
+      contextMessage = "Requested method is unavailable for this sample. Showing all methods.";
+    } else if (method && requestedFamily && method.family !== requestedFamily) {
+      contextMessage = "Requested method is outside that family. Showing all methods.";
+    } else if (requestedAlgorithm || requestedFamily) {
+      if (requestedFamily) family.value = requestedFamily;
+      if (requestedAlgorithm) { search.value = requestedAlgorithm; pinnedAlgorithm = requestedAlgorithm; }
+      focusContext = requestedAlgorithm ? { kind: "method", algorithm: requestedAlgorithm } : { kind: "family" };
+      if (requestedMetric) {
+        const metric = recorded?.metrics?.find((row) => row.metric_id === requestedMetric);
+        if (metric && (metric.value === null || typeof metric.value !== "object")) {
+          focusContext = { kind: "metric", algorithm: requestedAlgorithm, metric: requestedMetric };
+        } else {
+          contextMessage = "Requested metric is unavailable in this recorded input. Showing its method.";
+        }
+      }
+    }
+    const hidden = counts.hidden_processing_steps || [];
+    if (contextMessage) out.push(h("p", { id: "method-context-feedback", role: "status", class: "problem" }, contextMessage));
+    out.push(recordedReadiness(sample));
+    out.push(h("section", { class: "panel", "aria-labelledby": "method-catalog-title" },
+      h("h2", { id: "method-catalog-title" }, "Method catalog"),
+      h("p", {}, `${counts.visible_methods ?? catalog.length} visible methods from ${counts.registered_steps ?? catalog.length} registered steps. `,
+        `${hidden.length} processing steps (${hidden.join(", ") || "none"}) are hidden because they are shared intermediates, not biological results.`),
+      h("p", { class: "help" }, "Recorded result availability is input-specific. Current environment readiness is unknown until an explicit check; a past result does not prove tools or assets are still available."),
+      h("label", { for: "method-search" }, "Search methods"), search,
+      h("label", { for: "method-status" }, "Recorded result"), status,
+      h("label", { for: "method-family" }, "Family"), family,
+      count, catalogRows));
+    showCatalog();
     const rows = [];
     const seen = new Set();
     const firstUse = (id) => {
@@ -845,7 +970,7 @@
         if (m.value !== null && typeof m.value === "object") continue;
         const e = m.entry || {};
         const ref = e.reference || {};
-        rows.push(h("tr", {},
+        rows.push(h("tr", { "data-algorithm-id": a.algorithm_id, "data-metric-id": m.metric_id },
           h("th", { scope: "row" }, m.label), h("td", {}, rawCell(fmtMetric(m, { algorithmId: a.algorithm_id }), m.value, m.unit,
             `${a.algorithm_id}/${m.metric_id}`)),
           h("td", {}, a.provenance.tool, " ", a.provenance.tool_version),
@@ -858,18 +983,151 @@
           h("td", {}, ref.kind === "none" || !ref.kind ? "none" : `${ref.kind}${ref.source ? ": " + ref.source : ""}`)));
       }
     }
-    out.push(h("div", { class: "table-wrap", tabindex: "0", role: "region",
+    out.push(h("div", { class: "table-wrap", id: "method-provenance", tabindex: "0", role: "region",
       "aria-label": "Every number with its provenance" }, h("table", { class: "data-table" },
       h("caption", {}, "Every number with its provenance"),
       h("thead", {}, h("tr", {}, ...["Metric", "Value", "Tool", "Provenance stamp (parameters sha256)", "Input", "Reference", "Computed (UTC)", "License", "Citation", "Range source"].map((t) => h("th", { scope: "col" }, t)))),
       h("tbody", {}, ...rows))));
+    if (focusContext) {
+      const revision = L.state.navigationRevision;
+      const hash = location.hash;
+      const key = `${revision}:${hash}`;
+      if (L.state.methodContextApplied !== key) requestAnimationFrame(() => {
+        if (revision !== L.state.navigationRevision || hash !== location.hash || L.state.sample?.id12 !== sample.id12) return;
+        const target = focusContext.kind === "family" ? document.getElementById("method-family")
+          : focusContext.kind === "metric"
+            ? [...document.querySelectorAll("#method-provenance tbody tr")].find((row) =>
+              row.dataset.algorithmId === focusContext.algorithm && row.dataset.metricId === focusContext.metric)
+            : document.getElementById(`method-${focusContext.algorithm}`);
+        if (!target?.isConnected) return;
+        if (focusContext.kind !== "family") target.tabIndex = -1;
+        target.focus({ preventScroll: true });
+        target.scrollIntoView({ block: "center", inline: "nearest" });
+        L.state.methodContextApplied = key;
+      });
+    }
     return out;
+  }
+
+  const READINESS_GUIDE = "https://github.com/danwiggins/cfddemo/blob/main/docs/LAB-GUIDE.md#";
+  const READINESS_REASONS = {
+    missing_asset: ["Registered asset missing", "Check the method's registered asset or input-scoped calibration.", "one-time-setup-for-real-kits"],
+    asset_unavailable: ["Registered asset unavailable", "Inspect the selected asset registration before rerunning.", "one-time-setup-for-real-kits"],
+    invalid_asset: ["Registered asset malformed", "Restore the registered asset from a verified source before rerunning.", "one-time-setup-for-real-kits"],
+    platform: ["Input platform mismatch", "Use an input with a supported, declared platform for this method.", "tbx-lab-024"],
+    platform_unverified: ["Platform support unverified", "Review the method's platform and opt-in limits before attempting it.", "algorithms"],
+    depth: ["Insufficient recorded depth", "Review the recorded input gate and eligible-read support.", "algorithms"],
+    low_support: ["Insufficient marker support", "Review marker-level support and the method's documented limit.", "algorithms"],
+    missing_tags: ["Modification tags unavailable", "Check whether the input carries the required MM/ML calls and declared basecall model.", "running-on-a-kit"],
+    missing_channel: ["Modification channel unavailable", "Check whether the basecall model provides the required modification channel.", "algorithms"],
+    upstream: ["Upstream result unavailable", "Inspect and repair the preceding recorded step before rerunning this method.", "running-on-a-kit"],
+    missing_toolchain: ["Toolchain unavailable for recorded run", "Use the local doctor and method setup guide to check the required tools.", "one-time-setup-for-real-kits"],
+    reference: ["Reference incompatible or unavailable", "Check the registered reference and input compatibility.", "tbx-lab-004"],
+    example_reference: ["Synthetic example limit", "This method needs real input or resources that the synthetic example does not include.", "first-five-minutes"],
+    no_pon: ["Panel of normals unavailable", "Build or select a protocol-matched panel before relying on this result.", "building-a-lab-cohort"],
+    disk: ["Insufficient disk for recorded run", "Check the disk budget and retry only after capacity is available.", "tbx-lab-010"],
+  };
+
+  function recordedReadiness(sample) {
+    const state = L.state;
+    const refreshState = state.readinessRefresh || {};
+    const key = `${sample.id12}:${sample.full_input_id || "unknown"}`;
+    const remembered = refreshState[key] || {};
+    const panel = h("section", { class: "panel", id: "recorded-readiness", "aria-labelledby": "recorded-readiness-title" },
+      h("h2", { id: "recorded-readiness-title" }, "Readiness for this recorded run"),
+      h("p", {}, `Recorded input ${sample.full_input_id ? sample.full_input_id.slice(0, 12) : "unknown"} · platform ${sample.platform || "unknown"} · interpretation v${sample.interpretation_version || "unknown"}${sample.example ? " · EXAMPLE (synthetic)" : ""}.`),
+      h("p", { class: "help" }, "Recorded result availability describes the selected run, not current tool or asset readiness. A skipped, failed or absent method is not a negative biological finding."),
+      h("p", {}, "Current environment has not been checked here. Run traceback lab doctor --root <ROOT> locally."),
+      h("p", {}, "Current environment checked at: unknown. Sample projection refreshed at: ", remembered.checkedAt || "not requested", "."));
+    const feedback = h("p", { role: "status", "aria-live": "polite", class: remembered.stale ? "problem" : "help" },
+      remembered.stale ? "Refresh failed. The recorded projection below is stale; current environment readiness remains unknown." : "");
+    const refresh = h("button", { id: "readiness-refresh", type: "button", class: "control", "data-requires-server": "" }, "Refresh recorded run");
+    refresh.disabled = !!(state.selectedRefresh?.key === `${key}:${location.hash}` &&
+      state.selectedRefresh.revision === state.navigationRevision);
+    refresh.addEventListener("click", async () => {
+      if (refresh.disabled) return;
+      refresh.disabled = true;
+      feedback.className = "help";
+      feedback.textContent = "Refreshing recorded run…";
+      const outcome = await L.refreshSelectedSample();
+      if (outcome.kind === "ok") {
+        document.getElementById("readiness-refresh")?.focus();
+      } else if (outcome.kind === "session") {
+        feedback.className = "problem";
+        feedback.textContent = "Session expired. Use a fresh one-use Lab link to load this result.";
+      } else if (outcome.kind !== "obsolete" && refresh.isConnected) {
+        feedback.className = "problem";
+        feedback.textContent = "Refresh failed. The recorded projection below is stale; current environment readiness remains unknown.";
+        refresh.disabled = false;
+      }
+    });
+    panel.append(refresh, feedback);
+    const byId = new Map((sample.algorithms || []).map((row) => [row.algorithm_id, row]));
+    const catalog = Array.isArray(sample.catalog) ? sample.catalog : [];
+    const groups = new Map();
+    let available = 0;
+    for (const row of catalog) {
+      if (row.status === "ok") { available += 1; continue; }
+      const reason = row.status === "skipped" ? READINESS_REASONS[row.skip_reason] : null;
+      const issue = reason || (row.status === "failed"
+        ? ["Recorded step failed", "Inspect the run log and documented failure before retrying.", "tbx-lab-016"]
+        : row.status === "unreadable" || row.status === "ambiguous"
+          ? ["Selected result unavailable", "Inspect the selected result and restore its local files if needed.", "tbx-lab-020"]
+          : row.status === "not run"
+            ? ["Method not run", "No recorded result is available; prerequisite status is unknown.", "running-on-a-kit"]
+            : ["Other recorded skip or unknown state", "Review the method's recorded result and local run log.", "running-on-a-kit"]);
+      const [label, action, anchor] = issue;
+      if (!groups.has(label)) groups.set(label, { action, anchor, rows: [] });
+      groups.get(label).rows.push({ row, algorithm: byId.get(row.algorithm_id) });
+    }
+    panel.append(h("p", {}, catalog.length
+      ? `${available} recorded results available; ${[...groups.values()].reduce((n, group) => n + group.rows.length, 0)} methods need review or have no recorded result.`
+      : "Recorded method availability is unknown because this sample projection has no catalog."));
+    if (groups.size) panel.append(h("ul", { class: "readiness-issues" }, ...[...groups].map(([label, group]) =>
+      h("li", {}, h("strong", {}, `${label} (${group.rows.length}): `),
+        group.rows.map(({ row }) => `${row.label || row.algorithm_id} (${row.algorithm_id})`).join(", "), ". ", group.action, " ",
+        h("a", { href: READINESS_GUIDE + group.anchor, target: "_blank", rel: "noopener noreferrer" }, "Read guide"),
+        ...group.rows.flatMap(({ row, algorithm }) =>
+          row.skip_reason === "depth" && algorithm?.input_gate
+            ? [h("p", { class: "help" }, `${row.label || row.algorithm_id} recorded gate: ${algorithm.input_gate}`)]
+            : row.skip_reason === "platform"
+              ? [h("p", { class: "help" }, `${row.label || row.algorithm_id}: recorded input ${sample.platform || "unknown"}; declared platforms ${(row.platforms || []).join(", ") || "unknown"}.`)]
+              : [])))));
+    else if (catalog.length) panel.append(h("p", { class: "help" }, "Every visible method has a recorded result. This does not establish current environment readiness or clinical validity."));
+    const cohort = sample.cohort_state;
+    if ((cohort && cohort !== "ready") || sample.cohort_problem) {
+      const code = sample.cohort_problem?.code;
+      const anchor = typeof code === "string" && /^TBX-LAB-0(?:0[1-9]|1[0-9]|2[0-5])$/.test(code)
+        ? code.toLowerCase() : "building-a-lab-cohort";
+      panel.append(h("p", { class: "help" },
+        cohort === "example" ? "Cohort reference: synthetic example; real-cohort comparison is unavailable." :
+          `Cohort reference: ${({ ready: "ready with a recorded panel issue", not_built: "not built", cohort_unavailable: "unavailable", target_unavailable: "target unavailable", stale_target: "selected target stale" })[cohort] || "unknown"}.`,
+        " ", h("a", { href: READINESS_GUIDE + anchor, target: "_blank", rel: "noopener noreferrer" }, "Cohort guide")));
+    }
+    const copyStatus = h("p", { role: "status", "aria-live": "polite" });
+    const command = (value, label) => {
+      const button = h("button", { type: "button", class: "control", "aria-label": `Copy ${label} command` }, "Copy");
+      button.addEventListener("click", async () => {
+        try { await navigator.clipboard.writeText(value); copyStatus.textContent = "Copied command"; }
+        catch (_error) { copyStatus.textContent = "Copy failed. Select the command text to copy it manually."; }
+      });
+      return h("div", { class: "readiness-command" }, h("code", {}, value), button);
+    };
+    panel.append(h("h3", {}, "Safe local next actions"),
+      h("p", { class: "help" }, "Replace placeholders on your own machine. Doctor checks current setup; a rerun uses the intended input only after its recorded issue is resolved."),
+      command("traceback lab doctor --root <ROOT>", "doctor"),
+      command("traceback lab run <FILE> --root <ROOT>", "run"), copyStatus);
+    return panel;
   }
 
   // -- shared helpers for L1.7 ------------------------------------------------------------------
   function artifact(sample, algorithmId, panelId, label = "full") {
-    return fetch(`/api/samples/${sample.id12}/artifact/${label}/${algorithmId}/${panelId}`, { credentials: "same-origin" })
-      .then((r) => { if (!r.ok) throw new Error("data reference invalid"); return r.json(); });
+    const revision = L.state.navigationRevision;
+    const hash = location.hash;
+    return L.requestJson(`/api/samples/${sample.id12}/artifact/${label}/${algorithmId}/${panelId}`, {
+      isCurrent: () => revision === L.state.navigationRevision && hash === location.hash &&
+        L.state.sample?.id12 === sample.id12,
+    });
   }
   function algo(sample, id) { return sample.algorithms.find((a) => a.algorithm_id === id); }
   function value(sample, id, metric) {
@@ -1070,7 +1328,7 @@
           ? h("p", { class: "help" }, `Methylation link unavailable: ${data.methylation_link.reason || "no supported joint input"}.`) : "",
         details,
       );
-    }).catch((error) => slot.replaceWith(h("p", { class: "problem" }, `4-mer table unavailable (${error.message}). The scalar result remains in Findings.`)));
+    }).catch((_error) => slot.replaceWith(h("p", { class: "problem" }, "4-mer table unavailable. Retry loading this selected result; the scalar result remains in Findings.")));
     return [section];
   }
 
@@ -1133,7 +1391,7 @@
         h("tbody", {}, ...data.scores.map((row) => h("tr", {}, h("th", { scope: "row" }, row.assay),
           h("td", {}, row.cell_type), h("td", { class: "num" }, fmt(row.score, "correlation", { unitDisplay: false }))))));
       slot.replaceWith(h("details", {}, h("summary", {}, "All 898 raw scores"), h("div", { class: "table-wrap" }, table)));
-    }).catch((error) => slot.replaceWith(h("p", { class: "problem" }, `Cell-type scores unavailable (${error.message}).`)));
+    }).catch((_error) => slot.replaceWith(h("p", { class: "problem" }, "Cell-type scores unavailable. Retry loading this selected result.")));
     return [section];
   }
 
@@ -1302,7 +1560,7 @@
           primary.bin_start_bp.map((start, i) => [start, start + step / 2, primary.gc_corrected_coverage[i]]))),
         dataTable("Griffin TF-site lists", ["Site list", "Sites", "Central coverage", "Amplitude"], rows),
       );
-    }).catch((error) => slot.replaceWith(h("p", { class: "problem" }, `Griffin profile unavailable (${error.message}).`)));
+    }).catch((_error) => slot.replaceWith(h("p", { class: "problem" }, "Griffin profile unavailable. Retry loading this selected result.")));
     return [section];
   }
 
@@ -1335,7 +1593,7 @@
         ]),
         h("p", { class: "help" }, `Maximum absolute 4-mer frequency difference: ${motifDifference === undefined ? "not recorded" : motifDifference.toExponential(2)}. Pearson compares patterns and does not establish absolute frequency equality. Exact short/long count agreement: ${data.delfi.upstream_counts_equal ? "yes" : "no"}. ${data.note}`),
       );
-    }).catch((error) => slot.replaceWith(h("p", { class: "problem" }, `Paired-end cross-check unavailable (${error.message}).`)));
+    }).catch((_error) => slot.replaceWith(h("p", { class: "problem" }, "Paired-end cross-check unavailable. Retry loading this selected result.")));
     return [section];
   }
 
@@ -1371,7 +1629,7 @@
           yAxis: { type: "value", name: "mean coverage ×" },
           series: [{ type: "line", showSymbol: false, data: points, lineStyle: { color: "#1f5f8b" } }],
         }, dataTable("TSS coverage in 50 bp bins", ["Bin interval (bp)", "Mean coverage ×"], rows)));
-    }).catch((error) => slot.replaceWith(h("div", { class: "problem" }, `TSS profile could not be drawn (${error.message}).`)));
+    }).catch((_error) => slot.replaceWith(h("div", { class: "problem" }, "TSS profile could not be drawn. Retry loading this selected result.")));
     return [section];
   }
 
@@ -1435,7 +1693,7 @@
         h("p", { class: "help" }, `Short group n = ${fmtCount(data.short_n)}, mean = ${fmt(data.short_mean, "fraction")}; long group n = ${fmtCount(data.long_n)}, mean = ${fmt(data.long_mean, "fraction")}. A missing mean is not zero.`),
         h("div", { class: "table-wrap" }, table),
       );
-    }).catch((error) => slot.replaceWith(h("p", { class: "problem" }, `Size × methylation table unavailable (${error.message}). The scalar result remains above.`)));
+    }).catch((_error) => slot.replaceWith(h("p", { class: "problem" }, "Size × methylation table unavailable. Retry loading this selected result; the scalar result remains above.")));
     return [section];
   }
 
@@ -1625,11 +1883,16 @@
     out.push(shell);
     let request = 0;
     let results = null;
+    const revision = L.state.navigationRevision;
+    const hash = location.hash;
+    const viewCurrent = () => revision === L.state.navigationRevision && hash === location.hash &&
+      L.state.sample?.id12 === sample.id12;
     const show = (cohort) => {
       const current = ++request;
       results.replaceChildren(h("p", {}, "Loading comparison…"));
-      fetch(`/api/cohorts/${encodeURIComponent(cohort.cohort_id)}/samples/${sample.id12}/compare`, { credentials: "same-origin" })
-        .then((response) => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.json(); })
+      L.requestJson(`/api/cohorts/${encodeURIComponent(cohort.cohort_id)}/samples/${sample.id12}/compare`, {
+        isCurrent: () => viewCurrent() && current === request,
+      })
         .then((data) => {
           if (!results.isConnected || current !== request) return;
           if (data.state === "cohort_unavailable" || data.state === "target_unavailable") {
@@ -1711,11 +1974,12 @@
           results.replaceChildren(...nodes);
         })
         .catch((error) => {
-          if (results.isConnected && current === request) results.replaceChildren(h("p", { class: "problem" }, `Comparison could not be loaded (${error.message}). Check the Lab server, then reload.`));
+          if (error.kind !== "obsolete" && viewCurrent() && results.isConnected && current === request) {
+            results.replaceChildren(h("p", { class: "problem" }, "Comparison could not be loaded. Retry this selected cohort."));
+          }
         });
     };
-    fetch("/api/cohorts", { credentials: "same-origin" })
-      .then((response) => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.json(); })
+    L.requestJson("/api/cohorts", { isCurrent: viewCurrent })
       .then((data) => {
         if (!slot.isConnected) return;
         const unavailable = data.unavailable || [];
@@ -1739,7 +2003,9 @@
         show(data.cohorts[0]);
       })
       .catch((error) => {
-        if (slot.isConnected) slot.replaceChildren(h("p", { class: "problem" }, `Cohorts could not be loaded (${error.message}). Check the Lab server, then reload.`));
+        if (error.kind !== "obsolete" && viewCurrent() && slot.isConnected) {
+          slot.replaceChildren(h("p", { class: "problem" }, "Cohorts could not be loaded. Retry this selected view."));
+        }
       });
     out.push(sampleCompare(sample));
     return out;
@@ -1781,9 +2047,13 @@
     let request = 0;
     const show = () => {
       const current = ++request;
+      const revision = L.state.navigationRevision;
+      const hash = location.hash;
+      const other = picker.value;
+      const isCurrent = () => current === request && revision === L.state.navigationRevision &&
+        hash === location.hash && L.state.sample?.id12 === sample.id12 && picker.value === other;
       result.replaceChildren(h("p", {}, "Loading sample comparison…"));
-      fetch(`/api/samples/${sample.id12}/compare/${encodeURIComponent(picker.value)}`, { credentials: "same-origin" })
-        .then((response) => { if (!response.ok) throw new Error(`HTTP ${response.status}`); return response.json(); })
+      L.requestJson(`/api/samples/${sample.id12}/compare/${encodeURIComponent(other)}`, { isCurrent })
         .then((data) => {
           if (!result.isConnected || current !== request) return;
           if (data.state !== "ready") {
@@ -1821,7 +2091,9 @@
           result.replaceChildren(...nodes);
         })
         .catch((error) => {
-          if (result.isConnected && current === request) result.replaceChildren(h("p", { class: "problem" }, `Sample comparison could not be loaded (${error.message}). Reload Compare.`));
+          if (error.kind !== "obsolete" && isCurrent() && result.isConnected) {
+            result.replaceChildren(h("p", { class: "problem" }, "Sample comparison could not be loaded. Retry this selected pair."));
+          }
         });
     };
     picker.addEventListener("change", show);
