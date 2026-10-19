@@ -886,14 +886,14 @@
     {
       algorithm: "fragment-size", metric: "mode_bp", title: "Fragment length",
       definition: "The most frequent aligned reference span (reference end minus reference start) from 100–250 bp.",
-      denominator: "Eligible aligned spans from 100–250 bp",
+      denominator: "100–250 bp spans on primary mapped canonical-contig reads, MAPQ ≥20, excluding duplicates and QC failures",
       limitation: "An aligned span is not a directly observed physical fragment length. Library size bias and sample handling can shift the mode; it does not identify a tissue or disease.",
     },
     {
       algorithm: "global-5mc", metric: "cpg_5mc_fraction", title: "Genome-wide 5mC fraction",
-      definition: "CpG C+m site calls assigned to 5mC by the largest modification probability, divided by all CpG C+m site calls on eligible reads, both strands.",
-      denominator: "Eligible CpG C+m site calls",
-      limitation: "This is exploratory and depends on the basecaller modification model, call quality, and cell mixture. No validated ONT cfDNA reference or biological conclusion follows from this value alone.",
+      definition: "CpG C+m site calls assigned to 5mC by the largest of the 5mC, 5hmC, and canonical probabilities, divided by all eligible CpG C+m site calls, both strands.",
+      denominator: "CpG C+m site calls on primary mapped canonical-contig reads, MAPQ ≥20, excluding duplicates and QC failures",
+      limitation: "This is exploratory and depends on the basecaller modification model, call quality, and cell mixture. No validated reference is supplied for this run; this value alone supports no biological conclusion.",
     },
     {
       algorithm: "bam-qc", metric: "mapped_fraction", title: "Mapped-read share",
