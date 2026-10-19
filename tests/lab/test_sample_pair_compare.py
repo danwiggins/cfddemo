@@ -265,7 +265,9 @@ def test_sample_pair_selector_overlay_and_table_fallback(tmp_path, monkeypatch, 
         {"id12": SOURCE_B[:12], "run_utc": "", "depth_x": 1.0, "example": False},
     ], "root_has_runs": True})
     monkeypatch.setattr(web_api.LabApi, "sample", lambda self, id12: {
-        "found": True, "id12": id12, "algorithms": [], "catalog": [], "licenses": [],
+        "found": True, "id12": id12, "source_id": SOURCE_A if id12 == SOURCE_A[:12] else SOURCE_B,
+        "full_input_id": INPUT_A if id12 == SOURCE_A[:12] else INPUT_B,
+        "algorithms": [], "catalog": [], "licenses": [],
         "cohort_n": 0, "cohort_version": None, "interpretation_version": "fixture",
         "excluded_chunks": [],
     })
@@ -319,7 +321,9 @@ def test_sample_pair_disables_unavailable_peer_and_explains_empty_choice(tmp_pat
     ]
     monkeypatch.setattr(web_api.LabApi, "samples", lambda self: {"samples": rows, "root_has_runs": True})
     monkeypatch.setattr(web_api.LabApi, "sample", lambda self, id12: {
-        "found": True, "id12": id12, "algorithms": [], "catalog": [], "licenses": [],
+        "found": True, "id12": id12, "source_id": SOURCE_A if id12 == SOURCE_A[:12] else SOURCE_B,
+        "full_input_id": INPUT_A if id12 == SOURCE_A[:12] else INPUT_B,
+        "algorithms": [], "catalog": [], "licenses": [],
         "cohort_n": 0, "cohort_version": None, "interpretation_version": "fixture",
         "excluded_chunks": [],
     })
