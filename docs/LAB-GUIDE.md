@@ -1090,11 +1090,15 @@ A warning (exit 0): the samtools or minimap2 version changed since this sample w
 
 ### TBX-LAB-020
 
-Unexpected internal error (exit 7). Run `traceback lab runs RUN_ID`, then
-report the code and the command. For `cohort add` or `cohort build`, this code
-also identifies a missing, malformed or unsafe stored source/input record.
-Restore the named regular JSON file from a known-good backup before retrying;
-the cohort's published generation is left unchanged.
+Unexpected internal error (exit 7). For an unexpected failure, run
+`traceback lab runs RUN_ID`, then report the code and command. In `cohort add`,
+`cohort build`, or Compare, this code can also identify a missing, malformed,
+or unsafe stored source/input record. Restore the named regular JSON file from
+a known-good backup; a missing input manifest cannot be replaced by rerunning
+under the same ROOT while its input directory remains. If that manifest cannot
+be restored, re-ingest under a fresh ROOT, rebuild the cohort there, then serve
+that ROOT and open Compare. The previously published cohort generation is left
+unchanged by the failed read.
 
 ### TBX-LAB-021
 
