@@ -11,15 +11,22 @@ import tarfile
 from dataclasses import replace
 from pathlib import Path
 
-import pytest
 import pysam
+import pytest
 
-from tests.lab.test_landing import _dom, needs_chrome
 from tests.lab.fake_algorithms import ASSET_PROBE
+from tests.lab.test_landing import _dom, needs_chrome
 from traceback_lab.algorithms import lionheart
 from traceback_lab.algorithms.read_summary import READ_SUMMARY
 from traceback_lab.interpretation.engine import load_library
-from traceback_lab.registry import InputContext, PlanItem, Ready, execution_identity, plan, validate_algorithm
+from traceback_lab.registry import (
+    InputContext,
+    PlanItem,
+    Ready,
+    execution_identity,
+    plan,
+    validate_algorithm,
+)
 from traceback_lab.runner import RunTarget, run_plan
 from traceback_lab.scrub import Scrubber
 from traceback_lab.store import LabStore, new_run_id
@@ -433,7 +440,8 @@ def test_lionheart_scores_are_labeled_research_only_in_signals(tmp_path) -> None
     library = load_library()
     license_id = "lionheart-resources-research"
     sample = {
-        "found": True, "id12": ID12, "source_id": "a" * 64, "full_input_id": "b" * 64,
+        "found": True, "id12": ID12, "source_id": ID12 + "a" * (64 - len(ID12)),
+        "full_input_id": "b" * 64,
         "example": False, "run_utc": "2026-10-16T00:00:00Z", "cohort_n": 0,
         "algorithms": [{"algorithm_id": "lionheart", "status": "ok", "hidden": False,
                         "skip_reason": None, "metrics": [{"metric_id": "cell_types_scored", "value": 898}],
