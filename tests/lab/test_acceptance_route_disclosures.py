@@ -59,23 +59,31 @@ def test_methods_search_and_filters_keep_provenance_available(tmp_path) -> None:
     sample = _sample()
     sample["catalog"][0]["status"] = "skipped"
     sample["catalog"][0]["skip_reason"] = "missing_asset"
+    sample["algorithms"] = [row for row in sample["algorithms"] if row["algorithm_id"] != "epi-clock"]
+    next(row for row in sample["catalog"] if row["algorithm_id"] == "epi-clock")["status"] = "not run"
     with _server(tmp_path, sample) as server:
         profile = tmp_path / "browser-profile"
 
         def interact(_command, evaluate) -> None:
             assert evaluate("document.querySelectorAll('#method-catalog-results article').length") == len(REGISTRY)
             assert evaluate("document.getElementById('method-provenance') !== null")
+            assert evaluate("document.querySelector('#method-status option[value=ok]').textContent") == "ran"
             assert evaluate("document.querySelector('#main').textContent.includes('Current environment readiness is unknown')")
             assert evaluate("""(() => { const input = document.getElementById('method-search');
               input.value = 'Weidner'; input.dispatchEvent(new Event('input', {bubbles: true}));
               return [...document.querySelectorAll('#method-catalog-results article')]
                 .map((row) => row.id); })()""") == ["method-epi-clock"]
+            assert not evaluate("document.querySelector('#method-epi-clock button')")
             assert evaluate("""(() => { const input = document.getElementById('method-search');
               input.value = ''; input.dispatchEvent(new Event('input', {bubbles: true}));
               const select = document.getElementById('method-status'); select.value = 'skipped';
               select.dispatchEvent(new Event('change', {bubbles: true}));
               return [...document.querySelectorAll('#method-catalog-results article')]
                 .map((row) => row.id); })()""") == ["method-bam-qc"]
+            assert evaluate("""(() => { const article = document.getElementById('method-bam-qc');
+              article.querySelector('details').open = true;
+              article.querySelector('button').click();
+              return document.activeElement?.id === 'method-provenance'; })()""")
             assert evaluate("""(() => { const select = document.getElementById('method-family');
               select.value = 'methylation'; select.dispatchEvent(new Event('change', {bubbles: true}));
               return document.querySelector('#method-catalog-results').textContent.includes('No methods match'); })()""")
