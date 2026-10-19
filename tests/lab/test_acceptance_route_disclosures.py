@@ -9,6 +9,7 @@ import time
 import pytest
 
 from tests.lab.test_acceptance_synthetic_routes import ID12, LICENSE_IDS, _license_nodes, _sample, _server
+from tests.lab.test_acceptance_accessibility import _key
 from tests.lab.test_lab_server import _chrome, _dom_cdp
 from tests.lab.test_landing import _dom, _id12, needs_chrome, page_root as _landing_page_root
 from traceback_lab.interpretation.engine import Entry, Library, load_library
@@ -190,7 +191,7 @@ def test_readiness_refresh_success_and_copy_feedback(tmp_path) -> None:
     with _server(tmp_path, sample) as server:
         profile = tmp_path / "browser-profile"
 
-        def inspect(_command, evaluate) -> None:
+        def inspect(command, evaluate) -> None:
             payload = json.dumps(refreshed)
             evaluate("""window.refreshPaths = [];
               window.fetch = async (path, options) => {
@@ -198,7 +199,9 @@ def test_readiness_refresh_success_and_copy_feedback(tmp_path) -> None:
                 return new Response(JSON.stringify(__PAYLOAD__), {status: 200,
                   headers: {'Content-Type': 'application/json'}});
               };""".replace("__PAYLOAD__", payload))
-            evaluate("document.getElementById('readiness-refresh').click()")
+            command("Page.bringToFront")
+            evaluate("document.getElementById('readiness-refresh').focus()")
+            _key(command, "Enter", "Enter", 13)
             for _ in range(40):
                 if evaluate("window.TracebackLab.state.sample.catalog[0].status === 'skipped'"):
                     break
@@ -211,6 +214,7 @@ def test_readiness_refresh_success_and_copy_feedback(tmp_path) -> None:
             assert evaluate("document.getElementById('recorded-readiness').textContent.includes('Registered asset missing')")
             assert evaluate("document.getElementById('recorded-readiness').textContent.includes('Current environment checked at: unknown')")
             assert evaluate("document.activeElement?.id === 'readiness-refresh'")
+            assert evaluate("document.activeElement?.matches(':focus-visible')")
             evaluate("""Object.defineProperty(navigator, 'clipboard', {configurable:true,
               value:{writeText: async (text) => { window.copiedCommand = text; }}});
               document.querySelector('.readiness-command button').click();""")
