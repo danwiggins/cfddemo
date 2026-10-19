@@ -133,7 +133,8 @@ def _sample() -> dict:
     return {
         "found": True, "id12": ID12, "source_id": "c" * 64,
         "full_input_id": "b" * 64, "example": False,
-        "run_utc": "2026-10-16T00:00:00Z", "depth": {"approx_depth_x": 1.0},
+        "run_utc": "2026-10-16T00:00:00Z", "completed_utc": "2026-10-16T00:00:00Z",
+        "depth": {"approx_depth_x": 1.0},
         "excluded_chunks": [], "interpretation_version": LIBRARY.version,
         "cohort_version": None, "cohort_n": 0,
         "algorithms": algorithms, "catalog": catalog, "unreadable_results": [],
@@ -180,6 +181,7 @@ def test_landing_defaults_to_completed_run_with_newer_active_sample(tmp_path) ->
     active = copy.deepcopy(completed)
     active["id12"] = active_id12
     active["source_id"] = "d" * 64
+    active["completed_utc"] = None
     active["headline"] = {"sentence": "Active fixture has no completed results.", "unlock": None}
     active["algorithms"] = []
     active["catalog"] = []
@@ -226,7 +228,7 @@ def test_landing_defaults_to_completed_run_with_newer_active_sample(tmp_path) ->
                 assert heading is not None and heading.group(1) == expected, label
                 assert f'href="#/sample/{active_id12}/findings"' in dom
             if label == "explicit-active":
-                assert "selected sample" in dom and "A Lab run is in progress" in dom
+                assert "no completion recorded for this sample" in dom and "A Lab run is in progress" in dom
 
 
 @needs_chrome
@@ -242,9 +244,9 @@ def test_landing_recorded_date_is_not_labeled_as_latest_activity_during_rerun(tm
             "library": sample["library_health"],
         }
         dom = _dom(server, tmp_path / "browser", route="/",
-                   want=lambda page: "A Lab run is in progress" in page and "Recorded date (UTC)" in page)
-    assert f'<dt>Recorded date (UTC)</dt><dd>{sample["run_utc"][:10]}<p class="help">' in dom
-    assert "Completion date when recorded; otherwise latest input-use date" in dom
+                   want=lambda page: "A Lab run is in progress" in page and "Recorded completion (UTC)" in page)
+    assert f'<dt>Recorded completion (UTC)</dt><dd>{sample["run_utc"][:10]}<p class="help">' in dom
+    assert "Completion recorded for this selected sample" in dom
     assert "Latest recorded activity" not in dom
 
 
@@ -303,7 +305,7 @@ def test_landing_actions_keep_synthetic_status_on_each_destination(tmp_path) -> 
                     break
                 time.sleep(0.05)
             assert evaluate("window.TracebackLab.state.renderedHash") == "#/about/clia"
-            assert evaluate("document.getElementById('sample-context').textContent").endswith("selected sample")
+            assert evaluate("document.getElementById('sample-context').textContent").endswith("completion recorded 2026-10-16")
 
         _dom_cdp(
             [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
