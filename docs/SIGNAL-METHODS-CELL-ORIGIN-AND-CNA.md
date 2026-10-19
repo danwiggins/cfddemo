@@ -186,8 +186,8 @@ content_sha256)`, `method_registry.py:165-168`), and both enter the hash.
 The numbers stay out of the repo.
 
 **Tooling and BAM facts:**
-- **modkit** is installed at `~/.local/opt/modkit-0.6.4/bin/modkit` (not on
-  PATH). Its sha256 does **not** match the `extract full` adapter's pinned
+- **modkit** 0.6.4 was installed outside `PATH` in the reviewed local
+  environment. Its sha256 does **not** match the `extract full` adapter's pinned
   executable digest (`modkit_adapter.py:40-41`), so that adapter would reject
   the binary on this Mac.
 - **`samtools` and `minimap2`** are in `/opt/homebrew/bin`.

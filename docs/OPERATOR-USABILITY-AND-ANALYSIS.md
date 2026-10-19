@@ -17,8 +17,9 @@ protocol, or makes a record fit for clinical use. Every output keeps its
 The golden path works end to end on one real BAM: `reference register`,
 `preflight`, `run`, `verify`, `catalog import` and `serve` (operator review,
 2026-10-04: 47 s `run`, 0.8 s import). Four reviews of `e76e9d0` (local
-review notes covering run files, algorithms, UI, code and test quality,
-and screenshots, 2026-10-04) found that the
+notes named `run-files.md`, `algo.md`, `ui.md`, `code.md` and
+`test-quality.md`, plus screenshots, dated 2026-10-04; none are in this
+repository) found that the
 next three things the operator wants all fail:
 
 1. **More BAMs.** A zip of more BAMs is pending. MinKNOW output is unaligned;
@@ -640,7 +641,7 @@ Run autonomously. Intermediate questions were auto-decided with the six autoplan
 
 Process notes (deviations, recorded in the audit trail): the four Claude subagent voices were launched in parallel at the start, because each is required to have no prior-phase context, so ordering does not change their input; the Codex voices ran in phase order, each with the prior phases' findings. Codex prompts went in on stdin from a file (`codex exec -s read-only - < prompt`), so `< /dev/null` was not also possible. Design mockups (plan-design-review Step 0.5) were not generated: autonomous run, no design binary session. Every phase's AskUserQuestion was auto-decided except the premise gate and User Challenges.
 
-Date note (raised by both CEO voices): the evidence directory is named `review2-2026-10-04` because its reviews were written after 00:00 UTC on 2026-10-04, which is the evening of 2026-10-03 Pacific. The spec date (2026-10-03) is local time. "Verified against `e76e9d0`" means the code; `fd12d1f` adds only this document.
+Date note (raised by both CEO voices): the local review notes are dated 2026-10-04 because they were written after 00:00 UTC, during the evening of 2026-10-03 Pacific. The spec date (2026-10-03) is local time. "Verified against `e76e9d0`" means the code; `fd12d1f` adds only this document.
 
 ## Phase 1: CEO review (mode: SELECTIVE EXPANSION)
 
