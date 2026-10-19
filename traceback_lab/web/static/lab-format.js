@@ -61,9 +61,12 @@
     const algorithmId = options.algorithmId || metric.algorithm_id;
     const role = options.role || (FRACTION_DIFFERENCES.has(`${algorithmId}/${metric.metric_id}`)
       ? "difference" : "value");
+    const valueKind = options.valueKind || metric.value_kind || metric.entry?.value_kind || null;
+    const nonnumericCategory = valueKind === "categorical" &&
+      (typeof metric.value === "boolean" || typeof metric.value === "string");
     return formatMetric(metric.value, metric.unit, {
       ...options, role, reason: options.reason ?? metric.reason,
-      valueKind: options.valueKind || metric.value_kind || metric.entry?.value_kind || null,
+      valueKind, missingUnit: options.missingUnit ?? !nonnumericCategory,
     });
   }
 

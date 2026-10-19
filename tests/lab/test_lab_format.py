@@ -43,12 +43,17 @@ def test_metric_display_units_roles_and_precision() -> None:
         value: -0.045, unit: "fraction", reason: null, entry: {value_kind: "signed"}};
       const undeclared = {algorithm_id: "probe", metric_id: "share",
         value: 0.5, unit: null, entry: {value_kind: "proportion"}};
+      const categorical = {algorithm_id: "copy-number", metric_id: "identifiable",
+        value: false, unit: null, entry: {value_kind: "categorical"}};
       const outputs = cases.map((args) => formatMetric(...args));
       const delta = formatResultMetric(source);
       const fragmentDelta = formatResultMetric({...source, algorithm_id: "frag-x-meth",
         metric_id: "short_fragment_hypomethylation_delta"});
       process.stdout.write(JSON.stringify({outputs, delta, fragmentDelta,
-        undeclared: formatResultMetric(undeclared), source}));
+        undeclared: formatResultMetric(undeclared),
+        categoricalFalse: formatResultMetric(categorical),
+        categoricalText: formatResultMetric({...categorical, metric_id: "pon_policy", value: "none"}),
+        categoricalNumber: formatResultMetric({...categorical, value: 0.5}), source}));
     """
     result = subprocess.run(
         [shutil.which("node"), "-", str(FORMAT)], input=script, text=True,
@@ -69,4 +74,7 @@ def test_metric_display_units_roles_and_precision() -> None:
     assert payload["delta"]["text"] == "-4.5 percentage points"
     assert payload["fragmentDelta"]["text"] == "-4.5 percentage points"
     assert payload["undeclared"]["text"] == "0.5 (unit not declared)"
+    assert payload["categoricalFalse"]["text"] == "false"
+    assert payload["categoricalText"]["text"] == "none"
+    assert payload["categoricalNumber"]["text"] == "0.5 (unit not declared)"
     assert payload["source"]["value"] == -0.045 and payload["source"]["unit"] == "fraction"
