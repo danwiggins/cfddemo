@@ -30,6 +30,7 @@ body.lab { background: #f3f1ec; }
 .lens-scroll-control:disabled, .lens-scroll-control[aria-disabled="true"] { opacity: .45; cursor: default; }
 .readiness-issues { padding-left: 1.5rem; }
 .readiness-issues li { margin-block: .4rem; }
+#method-catalog-results li { overflow-wrap: anywhere; }
 .readiness-command { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-block: .35rem; }
 .readiness-command code { overflow-wrap: anywhere; user-select: text; }
 .breadcrumb { margin: 0; color: var(--muted); }
