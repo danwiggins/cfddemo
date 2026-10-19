@@ -174,6 +174,12 @@ def test_report_rejects_identity_empty_model_and_row_or_byte_limits() -> None:
       const code = (fn) => { try { fn(); return null; } catch (error) { return error.code; } };
       const invalid = code(() => report.project({...sample, full_input_id: '/private'},
         '2026-10-19T16:00:00Z', format));
+      const missingVersion = code(() => report.project({...sample, interpretation_version: undefined},
+        '2026-10-19T16:00:00Z', format));
+      const numericVersion = code(() => report.project({...sample, interpretation_version: 123},
+        '2026-10-19T16:00:00Z', format));
+      const numericCohort = code(() => report.project({...sample, cohort_version: 123},
+        '2026-10-19T16:00:00Z', format));
       const empty = code(() => report.project({...sample, algorithms: []},
         '2026-10-19T16:00:00Z', format));
       const boundary = report.project({...sample, algorithms: [{...algorithm,
@@ -183,11 +189,14 @@ def test_report_rejects_identity_empty_model_and_row_or_byte_limits() -> None:
       const large = report.project(sample, '2026-10-19T16:00:00Z',
         () => ({displayValue: 'x'.repeat(119), displayUnit: 'reads'}));
       const fake = code(() => report.csv({...large}));
-      process.stdout.write(JSON.stringify({invalid, empty, boundary: boundary.metrics.length,
+      process.stdout.write(JSON.stringify({invalid, missingVersion, numericVersion,
+        numericCohort, empty, boundary: boundary.metrics.length,
         rowLimit, fake, frozen: Object.isFrozen(large.metrics[0])}));
     """)
     assert data == {
-        "invalid": "invalid_report_identity", "empty": "no_report_rows", "boundary": 5000,
+        "invalid": "invalid_report_identity", "missingVersion": "invalid_report_identity",
+        "numericVersion": "invalid_report_identity", "numericCohort": "invalid_report_identity",
+        "empty": "no_report_rows", "boundary": 5000,
         "rowLimit": "report_too_many_rows", "fake": "invalid_report_model", "frozen": True,
     }
 
@@ -241,11 +250,17 @@ def test_current_visible_metric_fixture_and_tenfold_scale() -> None:
         const format = (m) => ({displayValue: m.value == null ? 'unavailable' : String(m.value),
           displayUnit: m.unit});
         const current = report.project(sample, '2026-10-19T16:00:00Z', format);
+        const all = sample.algorithms.filter((algorithm) => !algorithm.hidden)
+          .flatMap((algorithm) => algorithm.metrics.map((metric) =>
+            `${algorithm.algorithm_id}/${metric.metric_id}`));
+        const exported = new Set(current.metrics.map((metric) =>
+          `${metric.algorithm_id}/${metric.metric_id}`));
+        const omitted = all.filter((identity) => !exported.has(identity)).sort();
         const expanded = {...sample, algorithms: sample.algorithms.map((algorithm) => ({
           ...algorithm, metrics: Array.from({length: 10}, () => algorithm.metrics).flat(),
         }))};
         const tenfold = report.project(expanded, '2026-10-19T16:00:00Z', format);
-        process.stdout.write(JSON.stringify({current: current.metrics.length,
+        process.stdout.write(JSON.stringify({current: current.metrics.length, omitted,
           tenfold: tenfold.metrics.length, jsonBytes: new TextEncoder().encode(report.json(tenfold)).length,
           csvBytes: new TextEncoder().encode(report.csv(tenfold)).length}));
       });
@@ -255,7 +270,14 @@ def test_current_visible_metric_fixture_and_tenfold_scale() -> None:
         capture_output=True, text=True, check=True,
     )
     data = json.loads(result.stdout)
-    assert data["current"] > 100
+    assert data["current"] == 182
+    # The fixture assigns 1.0 to every metric, including producers whose real
+    # values are booleans, approved categories, or vectors.
+    assert data["omitted"] == [
+        "copy-number/identifiable", "copy-number/pon_policy",
+        "hypometh-reads/u_x_m_counts", "meth-tf/identifiable",
+        "modbase-qc/mod_codes", "sex-check/call",
+    ]
     assert data["tenfold"] == data["current"] * 10
     assert data["jsonBytes"] < 5 * 1024 * 1024
     assert data["csvBytes"] < 5 * 1024 * 1024

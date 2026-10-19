@@ -321,6 +321,9 @@
   }
 
   function validProvenance(value, sample) {
+    // Match envelope.py's lexical forms and sample linkage. A lexical match does
+    // not prove an upstream producer never reused a plausible read ID or secret
+    // as a tool/reference identifier; producer-side constraints remain necessary.
     return value && typeof value === "object" &&
       typeof value.tool === "string" && tool.test(value.tool) &&
       typeof value.tool_version === "string" && toolVersion.test(value.tool_version) &&
@@ -359,8 +362,10 @@
         typeof sample.id12 !== "string" || !/^[0-9a-f]{12,64}$/.test(sample.id12) ||
         !sha.test(sample.source_id) || !sample.source_id.startsWith(sample.id12) ||
         !sha.test(sample.full_input_id) || typeof sample.example !== "boolean" ||
+        typeof sample.interpretation_version !== "string" ||
         !version.test(sample.interpretation_version) ||
-        !(sample.cohort_version == null || version.test(sample.cohort_version)) ||
+        !(sample.cohort_version == null ||
+          (typeof sample.cohort_version === "string" && version.test(sample.cohort_version))) ||
         !(sample.run_utc === "" || validInstant(sample.run_utc)) ||
         !validInstant(generatedAt) || !Array.isArray(sample.catalog) ||
         !Array.isArray(sample.algorithms) || typeof formatResultMetric !== "function") {
