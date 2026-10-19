@@ -406,7 +406,14 @@ def test_landing_actions_keep_synthetic_status_on_each_destination(tmp_path) -> 
                 assert evaluate("window.TracebackLab.state.renderedHash") == route
                 assert "EXAMPLE (synthetic)" in evaluate("document.getElementById('sample-context').textContent")
             command("Emulation.setEmulatedMedia", {"media": "print"})
-            assert evaluate("getComputedStyle(document.getElementById('sample-context')).display") != "none"
+            # Descendant computed display alone misses a hidden print ancestor.
+            assert evaluate("""(() => {
+              const banner = document.getElementById('sample-context');
+              const bounds = banner.getBoundingClientRect();
+              return bounds.width > 0 && bounds.height > 0 &&
+                [...document.querySelectorAll('body > header, body > main')].every(node =>
+                  getComputedStyle(node).display !== 'none');
+            })()""")
             assert "EXAMPLE (synthetic)" in evaluate("document.getElementById('sample-context').textContent")
             evaluate("location.hash = '#/about/clia'")
             for _ in range(100):
