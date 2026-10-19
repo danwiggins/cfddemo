@@ -125,6 +125,7 @@ pre.stderr { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; 
 .signal-guide-value { font-size: 1.1rem; }
 .signal-guide-missing { margin-top: 1rem; border-top: 1px solid var(--rule); }
 .signal-guide-unavailable { background: #f6f7f8; }
+.raw-value { display: inline-block; margin-left: .3rem; font-size: .8rem; }
 .card-details { overflow-wrap: anywhere; }
 .card-head { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
 .card-value { font-size: 1.25rem; margin: .25rem 0; }
