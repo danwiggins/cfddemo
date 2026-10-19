@@ -243,6 +243,88 @@ def test_readiness_refresh_success_and_copy_feedback(tmp_path) -> None:
         )
 
 
+@needs_chrome
+@pytest.mark.parametrize("width", [375, 1280])
+def test_methods_consumes_validated_route_context_and_keeps_refresh_focus(width, tmp_path) -> None:
+    sample = _sample()
+    metric_id = sample["algorithms"][0]["metrics"][0]["metric_id"]
+    with _server(tmp_path, sample) as server:
+        profile = tmp_path / "browser-profile"
+
+        def inspect(_command, evaluate) -> None:
+            def context(value: dict, *, invalid: bool = False) -> None:
+                evaluate("""(() => { const lab = window.TracebackLab;
+                  lab.state.navigationRevision += 1;
+                  lab.state.route.context = __CONTEXT__;
+                  lab.state.route.contextInvalid = __INVALID__;
+                  lab.render(); })()""".replace("__CONTEXT__", json.dumps(value)).replace("__INVALID__", json.dumps(invalid)))
+
+            def wait_for(expression: str) -> None:
+                for _ in range(40):
+                    if evaluate(expression):
+                        return
+                    time.sleep(0.05)
+                pytest.fail(f"method context did not settle: {expression}")
+
+            context({"algorithm": "epi-clock", "metric": None, "family": None})
+            wait_for("document.activeElement?.id === 'method-epi-clock'")
+            assert evaluate("document.querySelectorAll('#method-catalog-results article').length") == 1
+
+            context({"algorithm": "depth", "metric": None, "family": None})
+            wait_for("document.activeElement?.id === 'method-depth'")
+            assert evaluate("document.querySelectorAll('#method-catalog-results article').length") == 1
+            assert not evaluate("document.documentElement.scrollWidth > document.documentElement.clientWidth + 1")
+            evaluate("""const input = document.getElementById('method-search'); input.value = '';
+              input.dispatchEvent(new Event('input', {bubbles:true}));""")
+            assert evaluate("document.querySelectorAll('#method-catalog-results article').length") == len(REGISTRY)
+
+            context({"algorithm": "bam-qc", "metric": metric_id, "family": None})
+            wait_for(f"document.activeElement?.dataset.metricId === '{metric_id}'")
+            assert evaluate("document.activeElement?.dataset.algorithmId") == "bam-qc"
+
+            context({"algorithm": None, "metric": None, "family": "methylation"})
+            wait_for("document.activeElement?.id === 'method-family'")
+            assert evaluate("document.getElementById('method-family').value") == "methylation"
+
+            context({"algorithm": "not-registered", "metric": None, "family": None})
+            assert evaluate("document.getElementById('method-context-feedback').textContent.includes('unavailable for this sample')")
+            assert evaluate("document.querySelectorAll('#method-catalog-results article').length") == len(REGISTRY)
+
+            context({"algorithm": None, "metric": None, "family": "not-a-family"})
+            assert evaluate("document.getElementById('method-context-feedback').textContent.includes('family is unavailable')")
+            assert evaluate("document.querySelectorAll('#method-catalog-results article').length") == len(REGISTRY)
+
+            context({"algorithm": "bam-qc", "metric": "not_a_metric", "family": None})
+            wait_for("document.activeElement?.id === 'method-bam-qc'")
+            assert evaluate("document.getElementById('method-context-feedback').textContent.includes('metric is unavailable')")
+            assert evaluate("document.querySelectorAll('#method-catalog-results article').length") == 1
+
+            context({"algorithm": "bam-qc", "metric": None, "family": "methylation"})
+            assert evaluate("document.getElementById('method-context-feedback').textContent.includes('outside that family')")
+            assert evaluate("document.querySelectorAll('#method-catalog-results article').length") == len(REGISTRY)
+
+            context({"algorithm": None, "metric": None, "family": None}, invalid=True)
+            assert evaluate("document.getElementById('method-context-feedback').textContent.includes('invalid context')")
+
+            context({"algorithm": "epi-clock", "metric": None, "family": None})
+            wait_for("document.activeElement?.id === 'method-epi-clock'")
+            evaluate("""window.fetch = async () => new Response(JSON.stringify(__PAYLOAD__),
+              {status: 200, headers: {'Content-Type': 'application/json'}});""".replace(
+                  "__PAYLOAD__", json.dumps(sample)))
+            evaluate("document.getElementById('readiness-refresh').click()")
+            wait_for("document.activeElement?.id === 'readiness-refresh'")
+            time.sleep(0.05)
+            assert evaluate("document.activeElement?.id === 'readiness-refresh'")
+
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", f"--window-size={width},800",
+             server.issue_link() + f"&route=/sample/{ID12}/methods"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'id="method-catalog-results"' in dom,
+            interact=inspect, viewport=(width, 800),
+        )
+
+
 def test_stored_modkit_result_keeps_its_license_without_labeling_new_decoder() -> None:
     entry = LIBRARY.headline("cell-origin")
     assert entry is not None

@@ -851,6 +851,13 @@ serve as a history of every interrupted run.
   explains recorded skips, failures and absent results without interpreting
   any of them as a negative biological finding.
 
+Methods links can carry `algorithm`, `metric` (with an algorithm), or `family`
+in the existing hash query, for example
+`#/sample/<ID12>/methods?algorithm=epi-clock`. The selected sample validates
+the target. An unavailable method or family shows all methods with an
+explanation; an unavailable metric shows its method. Browser Back and reload
+restore the link context.
+
 ### Readiness for a recorded run
 
 The Methods summary describes the selected input and the results published for
