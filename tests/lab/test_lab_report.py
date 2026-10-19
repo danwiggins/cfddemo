@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import ast
+import csv
+import io
 import json
 import shutil
 import subprocess
@@ -63,6 +65,7 @@ def test_report_shape_csv_protection_and_private_diagnostics() -> None:
       process.stdout.write(JSON.stringify({model, csv, json, filename: report.filename(model, 'csv')}));
     """)
     model = data["model"]
+    assert model["schema_version"] == "2"
     assert list(model) == [
         "schema_version", "generated_at", "research_use_only", "example", "sample_id",
         "source_id", "full_input_id", "run_utc", "interpretation_version", "cohort_version",
@@ -77,11 +80,81 @@ def test_report_shape_csv_protection_and_private_diagnostics() -> None:
     assert "nonfinite" in " ".join(model["limitations"])
     assert "Method copy-number: skipped (depth)" in " ".join(model["limitations"])
     assert data["csv"].startswith("schema_version,generated_at,")
+    csv_rows = list(csv.DictReader(io.StringIO(data["csv"])))
+    assert len(csv_rows) == 3
+    assert len(csv_rows[0]) == 28
+    assert list(csv_rows[0]).index("recorded_support_n") == list(csv_rows[0]).index("raw_unit") + 1
+    assert all(row["schema_version"] == "2" for row in csv_rows)
     assert "\r\n" in data["csv"] and "'\"-0.2\"" not in data["csv"]
     assert "\"'-0.2\"" in data["csv"]  # display text is formula-protected
     assert data["filename"] == "traceback-research-aaaaaaaaaaaa-20261019T160000Z.csv"
     for private in ("/private", "Plausible read ID R0033892", "credential123", "R9988",
                     "Looks like a valid metric", "ACGT", "hidden-step"):
+        assert private not in data["json"] and private not in data["csv"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js unavailable")
+def test_report_discloses_partial_input_selection_omissions_and_recorded_support() -> None:
+    data = _node(r"""
+      require(process.argv[1]);
+      const report = globalThis.TracebackLabReport;
+      const source = 'a'.repeat(64), input = 'b'.repeat(64);
+      const provenance = {tool: 'lab', tool_version: '1', parameters_sha256: 'c'.repeat(64),
+        input_id: input, source_id: source, reference_id: 'ref',
+        timestamp_utc: '2026-10-19T12:00:00Z'};
+      const envelope = (algorithm_id, metric_id, value, unit, n) => ({
+        algorithm_id, status: 'ok', provenance,
+        metrics: [{metric_id, value, unit, n}],
+      });
+      const sample = {
+        found: true, id12: source.slice(0, 12), source_id: source, full_input_id: input,
+        example: false, run_utc: '', interpretation_version: 'v1', cohort_version: null,
+        excluded_chunks: [2, 9], unreadable_results: ['bam-qc', '/private/unreadable'],
+        ambiguous_results: ['sex-check'], malformed_result_selections: true,
+        catalog: [
+          {algorithm_id: 'depth', status: 'ok'},
+          {algorithm_id: 'bam-qc', status: 'unreadable', error: '/private/catalog'},
+          {algorithm_id: 'sex-check', status: 'ambiguous'},
+          {algorithm_id: 'fragment-size', status: 'not run'},
+          {algorithm_id: 'copy-number', status: 'skipped', skip_reason: 'depth'},
+          {algorithm_id: 'mtdna', status: 'failed', failure: '/private/failure'},
+        ],
+        algorithms: [
+          {...envelope('depth', 'eligible_reads', 21, 'reads', 0),
+            metrics: [
+              {metric_id: 'eligible_reads', value: 21, unit: 'reads', n: 0},
+              {metric_id: 'eligible_reads', value: 22, unit: 'reads', n: 29},
+              {metric_id: 'eligible_reads', value: 23, unit: 'reads', n: null},
+              {metric_id: 'eligible_reads', value: 24, unit: 'reads', n: '/private/support'},
+            ]},
+          envelope('bam-qc', 'mapped_fraction', 0.75, 'fraction', 42),
+          envelope('sex-check', 'call', 'female', null, 42),
+          envelope('fragment-size', 'mode_bp', 167, 'bp', 42),
+        ],
+      };
+      const format = (metric) => ({displayValue: String(metric.value), displayUnit: metric.unit});
+      const model = report.project(sample, '2026-10-19T16:00:00Z', format);
+      process.stdout.write(JSON.stringify({model, csv: report.csv(model), json: report.json(model)}));
+    """)
+    model = data["model"]
+    assert model["schema_version"] == "2"
+    assert [row["algorithm_id"] for row in model["metrics"]] == ["depth"] * 4
+    assert [row["recorded_support_n"] for row in model["metrics"]] == [0, 29, None, None]
+    limitations = " | ".join(model["limitations"])
+    assert "Provisional input: 2 truncated chunks were excluded" in limitations
+    assert "Method bam-qc: selected result unreadable; no scalar rows." in limitations
+    assert "Method sex-check: selected result ambiguous; no scalar rows." in limitations
+    assert "Method fragment-size: not run; no scalar rows." in limitations
+    assert "Method copy-number: skipped (depth); no scalar rows." in limitations
+    assert "Method mtdna: failed; no scalar rows." in limitations
+    assert "Malformed result selections were detected" in limitations
+    assert "Some recorded support counts were invalid" in limitations
+    csv_rows = list(csv.DictReader(io.StringIO(data["csv"])))
+    assert len(csv_rows) == 4
+    assert len(csv_rows[0]) == 28
+    assert [row["recorded_support_n"] for row in csv_rows] == ["0", "29", "", ""]
+    for private in ("/private/unreadable", "/private/catalog", "/private/failure",
+                    "/private/support"):
         assert private not in data["json"] and private not in data["csv"]
 
 
