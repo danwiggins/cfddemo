@@ -937,7 +937,7 @@ note, or states "G1 not yet cleared".
 **Direction.** Both strategy reviewers recommended a one-week feasibility check
 before the build. The user chose to **build as specced** (D1). These items stay
 in scope and are recorded only so the scientist can see them before G1:
-- marker coverage at about 0.2x is unverified;
+- marker coverage at the reviewed local input depth is unverified;
 - the bootstrap resamples per marker, not per molecule, so intervals are likely
   too narrow;
 - the 3% lower limit comes from Illumina data with a PoN.
