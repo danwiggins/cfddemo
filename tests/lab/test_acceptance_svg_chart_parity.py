@@ -124,8 +124,8 @@ def test_stability_svg_table_exposes_band_endpoints_and_split_values(tmp_path) -
     assert charts and all(chart["label"] and chart["adjacent"] for chart in charts)
     first = charts[0]
     assert first["headers"][1] == "Input fraction (%)"
-    assert first["headers"][3] == "Deviation (%)"
-    assert first["headers"][4:6] == ["Band low (%)", "Band high (%)"]
+    assert first["headers"][3] == "Relative deviation (%)"
+    assert first["headers"][4:6] == ["Relative band low (%)", "Relative band high (%)"]
     assert first["bands"] and first["bands"][0]["height"] > 0
     def y(value):
         return 70 - (value / 50) * 58
