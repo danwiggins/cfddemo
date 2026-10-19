@@ -1319,7 +1319,7 @@ def test_failed_sample_navigation_restores_rendered_identity(tmp_path, failure) 
             }))()""")
             assert state["hash"] == state["rendered"] == f"#/sample/{ID12}/findings", state
             assert state["sample"] == state["selected"] == ID12 and state["title"].startswith("Findings"), state
-            assert state["stale"] == "true", state
+            assert state["stale"] == ("true" if failure == "session" else "false"), state
             assert "/Users/" not in str(state), state
             if failure == "session":
                 assert state["expired"] and "Session expired" in state["status"], state
@@ -1362,7 +1362,7 @@ def test_full_source_route_accepts_canonical_id_and_rejects_prefix_collision(tmp
                 pytest.fail("colliding source prefix was accepted")
             assert evaluate(f"location.hash === '#/sample/{full_source}/findings'")
             assert evaluate(f"window.TracebackLab.state.sample.source_id === '{full_source}'")
-            assert evaluate("document.getElementById('freshness-state').dataset.stale === 'true'")
+            assert evaluate("document.getElementById('freshness-state').dataset.stale === 'false'")
 
         profile = tmp_path / "browser-profile"
         _dom_cdp(
@@ -1374,8 +1374,8 @@ def test_full_source_route_accepts_canonical_id_and_rejects_prefix_collision(tmp
 
 
 @needs_chrome
-def test_navigation_retry_works_after_stale_poll_blocks_hash_changes(tmp_path) -> None:
-    """The recovery action can retry while stale-result controls stay blocked."""
+def test_navigation_retry_keeps_confirmed_result_available(tmp_path) -> None:
+    """Retry B while A stays confirmed and the sample switcher stays usable."""
 
     requested = "aaaaaaaaaaaa"
     with _server(tmp_path, _sample()) as server:
@@ -1407,12 +1407,15 @@ def test_navigation_retry_works_after_stale_poll_blocks_hash_changes(tmp_path) -
               location.hash = '#/sample/aaaaaaaaaaaa/findings';
             })()""")
             for _ in range(40):
-                if evaluate("!!window.TracebackLab.state.loadFailure && document.body.dataset.disconnected === '1'"):
+                if evaluate("!!window.TracebackLab.state.loadFailure"):
                     break
                 time.sleep(0.05)
             else:
-                pytest.fail("failed navigation did not reach blocked stale state")
+                pytest.fail("failed navigation did not show recovery")
             assert evaluate(f"location.hash === '#/sample/{ID12}/findings'")
+            time.sleep(0.7)
+            assert evaluate("document.body.dataset.disconnected === '0'")
+            assert evaluate("document.getElementById('freshness-state').dataset.stale === 'false'")
             evaluate("document.querySelector('#recovery-action button').click()")
             for _ in range(40):
                 if evaluate(f"window.TracebackLab.state.sample?.id12 === '{requested}' && document.body.dataset.disconnected === '0'"):
@@ -1429,6 +1432,122 @@ def test_navigation_retry_works_after_stale_poll_blocks_hash_changes(tmp_path) -
              f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/findings"],
             profile, ok=lambda dom: 'data-ready="1"' in dom and 'aria-current="page">Findings' in dom,
             interact=inspect,
+        )
+
+
+@needs_chrome
+def test_unknown_sample_navigation_recovers_after_connection_returns(tmp_path) -> None:
+    """An unknown route has no result to mark stale after a disconnect."""
+
+    phase = {"down": False}
+    with _server(tmp_path, _sample()) as server:
+        kind, source = server.app.assets["/assets/lab.js"]
+        server.app.assets["/assets/lab.js"] = (
+            kind, source.replace(b"const POLL_MS = 15000;", b"const POLL_MS = 500;"),
+        )
+        original_status = server.app.api.status
+
+        def status():
+            if phase["down"]:
+                raise OSError("synthetic disconnect")
+            return original_status()
+
+        server.app.api.status = status
+
+        def inspect(_command, evaluate) -> None:
+            phase["down"] = True
+            for _ in range(40):
+                if evaluate("window.TracebackLab.state.connectionLost"):
+                    break
+                time.sleep(0.2)
+            else:
+                pytest.fail("unknown-sample view did not disconnect")
+            assert evaluate("window.TracebackLab.state.resultStale === false")
+            assert evaluate("document.getElementById('freshness-state').textContent.includes('no selected result loaded')")
+            phase["down"] = False
+            for _ in range(40):
+                if evaluate("document.body.dataset.disconnected === '0'"):
+                    break
+                time.sleep(0.2)
+            else:
+                pytest.fail("unknown-sample view stayed locked after status recovered")
+            assert evaluate("document.querySelector('#main a[href=\"#/\"]').getAttribute('aria-disabled') === null")
+            evaluate("document.querySelector('#main a[href=\"#/\"]').click()")
+            for _ in range(40):
+                if evaluate(f"location.hash === '#/' && window.TracebackLab.state.sample?.id12 === '{ID12}'"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("Back to Lab home did not leave the unknown-sample route")
+
+        profile = tmp_path / "browser-profile"
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + "&route=/sample/aaaaaaaaaaaa/findings"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and "Unknown sample" in dom,
+            interact=inspect, timeout=90,
+        )
+
+
+@needs_chrome
+def test_failed_other_sample_keeps_confirmed_sample_and_switcher_available(tmp_path) -> None:
+    """A failed B request cannot make A stale or prevent selecting C."""
+
+    failed, next_id = "aaaaaaaaaaaa", "bbbbbbbbbbbb"
+    with _server(tmp_path, _sample()) as server:
+        kind, source = server.app.assets["/assets/lab.js"]
+        server.app.assets["/assets/lab.js"] = (
+            kind, source.replace(b"const POLL_MS = 15000;", b"const POLL_MS = 500;"),
+        )
+        listing = server.app.api.samples()
+        server.app.api.samples = lambda: {**listing, "samples": [
+            listing["samples"][0], {**listing["samples"][0], "id12": failed},
+            {**listing["samples"][0], "id12": next_id},
+        ]}
+        original_sample = server.app.api.sample
+        selected = copy.deepcopy(original_sample(ID12))
+        selected["id12"] = next_id
+        selected["source_id"] = next_id + "c" * 52
+        for algorithm in selected["algorithms"]:
+            algorithm["provenance"]["source_id"] = selected["source_id"]
+        server.app.api.sample = lambda id12: copy.deepcopy(selected) if id12 == next_id else original_sample(id12)
+
+        def inspect(_command, evaluate) -> None:
+            evaluate("""(() => {
+              const original = window.fetch;
+              window.fetch = (...args) => String(args[0]) === '/api/samples/aaaaaaaaaaaa'
+                ? Promise.resolve(new Response('{}', {status:503})) : original.apply(window, args);
+              location.hash = '#/sample/aaaaaaaaaaaa/findings';
+            })()""")
+            for _ in range(40):
+                if evaluate("!!window.TracebackLab.state.loadFailure"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("failed B request did not show recovery")
+            time.sleep(0.7)
+            assert evaluate(f"location.hash === '#/sample/{ID12}/findings'")
+            assert evaluate(f"window.TracebackLab.state.sample?.id12 === '{ID12}'")
+            assert evaluate("document.getElementById('freshness-state').dataset.stale === 'false'")
+            assert evaluate("document.body.dataset.disconnected === '0'")
+            assert evaluate("!document.getElementById('sample-switcher').disabled")
+            evaluate(f"""(() => {{ const picker = document.getElementById('sample-switcher');
+              picker.value = '{next_id}'; picker.dispatchEvent(new Event('change', {{bubbles:true}})); }})()""")
+            for _ in range(40):
+                if evaluate(f"window.TracebackLab.state.sample?.id12 === '{next_id}'"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("sample C could not be opened after B failed")
+            assert evaluate(f"location.hash === '#/?sample={next_id}'")
+            assert evaluate("window.TracebackLab.state.loadFailure === null")
+
+        profile = tmp_path / "browser-profile"
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/findings"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'aria-current="page">Findings' in dom,
+            interact=inspect, timeout=90,
         )
 
 
