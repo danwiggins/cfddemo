@@ -958,7 +958,10 @@ class LabApi:
         if sample is None:
             problem = LabProblem(
                 "TBX-LAB-017", cause=f"sample {id12} has no readable current full input",
-                fix="Inspect `traceback lab runs`, restore the source record if needed, then rerun the sample",
+                fix=("Inspect `traceback lab runs` and restore the source record, completed-run log, "
+                     "or pinned input manifest from a known-good backup as needed. If the pinned input "
+                     "cannot be restored, re-ingest the original input under a fresh ROOT, rebuild "
+                     "the cohort there, then serve that ROOT and open Compare"),
             )
             return {"found": True, "id12": id12, "cohort_id": cohort_id,
                     "state": "target_unavailable", "metrics": [], "unscored": [],

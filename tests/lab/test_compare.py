@@ -278,10 +278,7 @@ def test_compare_target_unavailable_has_no_metrics(tmp_path, monkeypatch) -> Non
     assert payload["problem"]["fix"] == problem.fix
 
 
-@pytest.mark.parametrize("disappearance", ("source_membership", "manifest"))
-def test_compare_pinned_input_disappearing_after_view_has_specific_recovery(
-    tmp_path, monkeypatch, disappearance,
-) -> None:
+def _completed_compare_store_with_newer_input(tmp_path):
     store = LabStore(tmp_path)
     source_id = _sample(store, 1)
     input_id = _sha(101)
@@ -310,6 +307,32 @@ def test_compare_pinned_input_disappearing_after_view_has_specific_recovery(
     generation_dir.mkdir(parents=True)
     (generation_dir / "generation.json").write_text(generation.model_dump_json(by_alias=True))
     (generation_dir.parent.parent / "current.json").write_text('{"version":7}')
+    return store, source_id, input_id
+
+
+def test_compare_missing_completed_manifest_before_view_has_workable_recovery(tmp_path) -> None:
+    store, source_id, input_id = _completed_compare_store_with_newer_input(tmp_path)
+    api = web_api.LabApi(store)
+    assert api.compare(source_id[:12], "healthy")["state"] == "ready"
+    (store.inputs_dir / input_id / "manifest.json").unlink()
+
+    payload = api.compare(source_id[:12], "healthy")
+
+    assert payload["found"] is True and payload["state"] == "target_unavailable"
+    assert payload["metrics"] == [] and payload["unscored"] == []
+    assert payload["problem"]["code"] == "TBX-LAB-017"
+    fix = payload["problem"]["fix"]
+    assert "source record" in fix and "input manifest" in fix
+    assert "known-good backup" in fix
+    assert "fresh ROOT" in fix and "rebuild the cohort" in fix and "serve that ROOT" in fix
+    assert "rerun the sample" not in fix
+
+
+@pytest.mark.parametrize("disappearance", ("source_membership", "manifest"))
+def test_compare_pinned_input_disappearing_after_view_has_specific_recovery(
+    tmp_path, monkeypatch, disappearance,
+) -> None:
+    store, source_id, input_id = _completed_compare_store_with_newer_input(tmp_path)
     api = web_api.LabApi(store)
     assert api.compare(source_id[:12], "healthy")["state"] == "ready"
     real_load = web_api.views.load_sample
