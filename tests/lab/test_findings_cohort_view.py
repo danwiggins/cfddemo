@@ -82,4 +82,5 @@ def test_cohort_findings_counts_and_readiness_are_explicit(tmp_path, monkeypatch
         assert "reload or recompute this sample" in stale
         assert "EXAMPLE sample; no kit cohort reference" in example
     assert "Short fragment share" in dom and "Observed cohort min–max" in dom
+    assert "<td>12%</td>" in dom
     assert 'data-csp-violations="0"' in dom

@@ -162,13 +162,60 @@ def _server(tmp_path, sample):
                                      "library": sample["library_health"]}
     server.app.api.samples = lambda: {"samples": [{
         "id12": ID12, "run_utc": sample["run_utc"], "depth_x": 1.0,
-        "example": False, "counts": {"ok": len(REGISTRY), "skipped": 0, "failed": 0},
+        "example": sample["example"], "counts": {"ok": len(REGISTRY), "skipped": 0, "failed": 0},
         "outside_reference": len(REGISTRY), "controls": {"spike": None, "split": False},
         "unreadable_results": sample["unreadable_results"],
     }], "root_has_runs": True}
     server.app.api.sample = lambda id12: copy.deepcopy(sample) if id12 == ID12 else {"found": False, "candidates": []}
     server.app.api.cohorts = lambda: {"cohorts": [], "unavailable": []}
     return server
+
+
+@needs_chrome
+def test_guided_signals_use_recorded_values_and_show_unavailable_reasons(tmp_path) -> None:
+    sample = _sample()
+    sample["example"] = True
+    guide = {
+        ("fragment-size", "mode_bp"): (167, "bp", 24),
+        ("global-5mc", "cpg_5mc_fraction"): (0.83, "fraction", 120),
+        ("bam-qc", "mapped_fraction"): (0.92, "fraction", 200),
+    }
+    for algorithm in sample["algorithms"]:
+        for metric in algorithm["metrics"]:
+            key = (algorithm["algorithm_id"], metric["metric_id"])
+            if key in guide:
+                metric["value"], metric["unit"], metric["n"] = guide[key]
+    sample["stability"] = [{"algorithm_id": "fragment-size", "metric_id": "mode_bp",
+                            "verdict": "usable to 0.5"}]
+    with _server(tmp_path / "available", sample) as server:
+        dom = _dom(server, tmp_path / "available-dom", route=f"/sample/{ID12}/signals",
+                   want=lambda page: 'data-guide-signal="bam-qc/mapped_fraction"' in page)
+    cards = re.findall(r'<article class="signal-guide-card" data-guide-signal="([^"]+)">(.*?)</article>', dom, re.S)
+    assert [key for key, _ in cards] == [f"{algorithm}/{metric}" for algorithm, metric in guide]
+    for (key, value), (_, card) in zip(guide.items(), cards, strict=True):
+        observed, unit, count = value
+        expected = f"{observed} bp" if unit == "bp" else f"{observed * 100:g}%"
+        assert f"Observed: <strong>{expected}</strong>" in card, key
+        assert f"{count}</p>" in card, key
+        assert "Method and source" in card and "Result provenance" in card
+        assert "Interpretation limit:" in card and "Stability" in card and "Trust/QC" in card
+    assert "seeded synthetic example" in dom and "no biological finding" in dom
+    assert "Stability: usable to 0.5" in cards[0][1]
+    assert "Unavailable guided signals" not in dom
+
+    sample["algorithms"] = [algorithm for algorithm in sample["algorithms"]
+                            if algorithm["algorithm_id"] != "global-5mc"]
+    mapped = next(algorithm for algorithm in sample["algorithms"] if algorithm["algorithm_id"] == "bam-qc")
+    next(metric for metric in mapped["metrics"] if metric["metric_id"] == "mapped_fraction").update(
+        value=None, reason="no_primary_reads")
+    sample["unreadable_results"] = ["global-5mc"]
+    with _server(tmp_path / "unavailable", sample) as server:
+        dom = _dom(server, tmp_path / "unavailable-dom", route=f"/sample/{ID12}/signals",
+                   want=lambda page: "Unavailable guided signals (2)" in page)
+    assert dom.index('data-guide-signal="fragment-size/mode_bp"') < dom.index("Unavailable guided signals (2)")
+    assert dom.index("Unavailable guided signals (2)") < dom.index('data-guide-signal="global-5mc/cpg_5mc_fraction"')
+    assert "unavailable (selected result unreadable)" in dom
+    assert "unavailable (no primary reads)" in dom
 
 
 @needs_chrome
@@ -224,6 +271,76 @@ def test_landing_defaults_to_completed_run_with_newer_active_sample(tmp_path) ->
             else:
                 assert heading is not None and heading.group(1) == expected, label
                 assert f'href="#/sample/{active_id12}/findings"' in dom
+            if label == "explicit-active":
+                assert "selected sample view" in dom and "A Lab run is in progress" in dom
+
+
+@needs_chrome
+def test_landing_actions_keep_synthetic_status_on_each_destination(tmp_path) -> None:
+    sample = _sample()
+    sample["example"] = True
+    observed = []
+    with _server(tmp_path, sample) as server:
+        profile = tmp_path / "scientist-landing"
+
+        def visit(command, evaluate) -> None:
+            assert evaluate("document.getElementById('sample-context').closest('header') !== null")
+            assert evaluate("document.getElementById('sample-context').textContent").count("EXAMPLE (synthetic)") == 1
+            assert evaluate("document.querySelector('.landing-intro').textContent").count("EXAMPLE (synthetic)") == 1
+            actions = (
+                ("Explore signals", "signals", "Signals"),
+                ("Check reliability", "trust-qc", "Trust/QC"),
+                ("Method readiness", "methods", "Methods"),
+            )
+            for label, lens, heading in actions:
+                href = evaluate(f"[...document.querySelectorAll('.landing-actions a')].find(a => a.textContent === {json.dumps(label)})?.getAttribute('href')")
+                assert href == f"#/sample/{ID12}/{lens}"
+                evaluate(f"[...document.querySelectorAll('.landing-actions a')].find(a => a.textContent === {json.dumps(label)}).click()")
+                for _ in range(100):
+                    if evaluate("location.hash") == href and evaluate("document.querySelector('#main h1')?.textContent.trim()") == heading:
+                        break
+                    time.sleep(0.05)
+                observed.append((label, evaluate("location.hash"), evaluate("document.getElementById('sample-context').textContent")))
+                evaluate("location.hash = '#/'")
+                for _ in range(100):
+                    if evaluate("document.querySelector('.landing-actions') !== null"):
+                        break
+                    time.sleep(0.05)
+            for lens in SAMPLE_ROUTES:
+                route = f"#/sample/{ID12}/{lens}"
+                evaluate(f"location.hash = {json.dumps(route)}")
+                for _ in range(100):
+                    if evaluate("window.TracebackLab.state.renderedHash") == route:
+                        break
+                    time.sleep(0.05)
+                assert evaluate("window.TracebackLab.state.renderedHash") == route
+                assert "EXAMPLE (synthetic)" in evaluate("document.getElementById('sample-context').textContent")
+            command("Emulation.setEmulatedMedia", {"media": "print"})
+            assert evaluate("getComputedStyle(document.getElementById('sample-context')).display") != "none"
+            assert "EXAMPLE (synthetic)" in evaluate("document.getElementById('sample-context').textContent")
+
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + "&route=/"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'class="landing-actions"' in dom,
+            interact=visit,
+        )
+    assert [route for _, route, _ in observed] == [f"#/sample/{ID12}/{lens}" for lens in ("signals", "trust-qc", "methods")]
+    assert all("EXAMPLE (synthetic)" in context for _, _, context in observed)
+
+
+@needs_chrome
+def test_landing_names_result_selection_problems_beside_recorded_counts(tmp_path) -> None:
+    sample = _sample()
+    sample["unreadable_results"] = ["bam-qc"]
+    sample["ambiguous_results"] = ["fragment-size"]
+    sample["malformed_result_selections"] = True
+    with _server(tmp_path, sample) as server:
+        dom = _dom(server, tmp_path / "browser", route="/",
+                   want=lambda page: "Result selection problems" in page)
+    assert f"{len(sample['algorithms'])} visible entries" in dom
+    assert "1 unreadable" in dom and "1 ambiguous" in dom
+    assert "malformed selection present" in dom
 
 
 def test_disclosure_fixture_is_nonvacuous_and_registry_complete() -> None:

@@ -36,7 +36,9 @@
     runLogLines: new Map(),
     staleRunLogCleared: false,
   };
-  window.TracebackLab = { state, LENSES, h, render, chart, dataTable, fmt };
+  window.TracebackLab = { state, LENSES, h, render, chart, dataTable, rawCell, fmt, fmtMetric, fmtMetricValue, fmtCount,
+    formatMetric: window.TracebackLabFormat.formatMetric,
+    formatResultMetric: window.TracebackLabFormat.formatResultMetric };
 
   // -- tiny DOM helper -----------------------------------------------------------
   function h(tag, attrs, ...children) {
@@ -83,14 +85,21 @@
     }
   }
 
-  function fmt(value, unit) {
-    if (value === null || value === undefined) return "—";
-    if (typeof value === "number") {
-      const text = Number.isInteger(value) ? value.toLocaleString("en-US") : (Math.abs(value) < 0.01 && value !== 0 ? value.toExponential(2) : value.toFixed(Math.abs(value) < 1 ? 3 : 1));
-      return unit && unit !== "fraction" ? `${text} ${unit}` : text;
-    }
-    if (typeof value === "boolean") return value ? "yes" : "no";
-    return String(value);
+  function fmt(value, unit, options = {}) {
+    return window.TracebackLabFormat.formatMetric(value, unit, {
+      missingUnit: unit !== undefined, ...options,
+    }).text;
+  }
+  function fmtMetric(metric, options = {}) {
+    return window.TracebackLabFormat.formatResultMetric(metric, options).text;
+  }
+  function fmtMetricValue(metric, value, options = {}) {
+    return fmtMetric({ ...metric, value }, { reason: null, ...options });
+  }
+  function fmtCount(value) {
+    return window.TracebackLabFormat.formatMetric(value, null, {
+      valueKind: "count", missingUnit: false,
+    }).text;
   }
 
   // -- session ------------------------------------------------------------------------
@@ -120,12 +129,33 @@
   }
 
   // -- routes -------------------------------------------------------------------------
+  function parseContext(params) {
+    const keys = ["algorithm", "metric", "family"];
+    const context = { algorithm: null, metric: null, family: null };
+    const known = new URLSearchParams();
+    let invalid = false;
+    for (const key of keys) {
+      const values = params.getAll(key);
+      if (values.length > 1) invalid = true;
+      for (const value of values) known.append(key, value);
+      if (values.length === 1) {
+        if (/^[A-Za-z0-9_-]{1,64}$/.test(values[0])) context[key] = values[0];
+        else invalid = true;
+      }
+    }
+    if (known.toString().length > 256 || (context.metric && !context.algorithm)) invalid = true;
+    return invalid
+      ? { context: { algorithm: null, metric: null, family: null }, contextInvalid: true,
+        contextError: "Context link is invalid; showing the selected sample." }
+      : { context, contextInvalid: false, contextError: null };
+  }
+
   function parseRoute() {
     const hash = location.hash.replace(/^#/, "") || "/";
     const [pathPart, query = ""] = hash.split("?");
     const params = new URLSearchParams(query);
     let match = pathPart.match(/^\/sample\/([0-9a-f]{12,64})\/([a-z-]+)$/);
-    if (match) return { name: "lens", id12: match[1], lens: match[2] };
+    if (match) return { name: "lens", id12: match[1], lens: match[2], ...parseContext(params) };
     if (pathPart === "/" || pathPart === "") {
       const sample = params.get("sample");
       if (sample && !/^[0-9a-f]{12,64}$/.test(sample)) return { name: "unknown", id12: sample };
@@ -184,9 +214,27 @@
       ...(state.sample && state.sample.found ? [] : [h("option", { value: "", selected: true, disabled: true }, "Select a sample")]),
       ...state.samples.map((row) =>
         h("option", { value: row.id12, selected: state.sample && state.sample.id12 === row.id12 },
-          `${row.id12} · ${row.run_utc ? row.run_utc.slice(0, 10) : "—"} · ${row.depth_x !== null ? row.depth_x.toFixed(2) + "x" : "—"}${row.example ? " · EXAMPLE (synthetic)" : ""}${row.state === "completed_input_unavailable" ? " · completed input unavailable" : row.state === "completion_history_unavailable" ? " · completion history unavailable" : ""}`)
+          `${row.id12} · ${row.run_utc ? row.run_utc.slice(0, 10) : "—"} · ${fmt(row.depth_x, "x")}${row.example ? " · EXAMPLE (synthetic)" : ""}${row.state === "completed_input_unavailable" ? " · completed input unavailable" : row.state === "completion_history_unavailable" ? " · completion history unavailable" : ""}`)
       )
     );
+  }
+
+  function renderSampleContext() {
+    const context = document.getElementById("sample-context");
+    const sample = state.sample && state.sample.found && state.route.name !== "unknown" ? state.sample : null;
+    if (!sample) {
+      context.replaceChildren("No sample selected");
+      return;
+    }
+    const listed = state.samples.find((row) => row.id12 === sample.id12);
+    const example = sample.example ?? listed?.example;
+    const kind = example ? "EXAMPLE (synthetic)" : "Not marked as the built-in synthetic example";
+    const availability = sample.state === "completed_input_unavailable" ? "completed input unavailable"
+      : sample.state === "completion_history_unavailable" ? "completion history unavailable"
+        : !state.defaultSampleId12 && !state.completedInputUnavailable && !state.completionHistoryUnavailable
+          ? "No completed Lab run yet" : "selected sample view";
+    context.replaceChildren(`Sample ${sample.id12} · `,
+      h("span", { class: "sample-context-kind" }, kind), ` · ${availability}`);
   }
 
   function updateNavFade() {
@@ -272,6 +320,7 @@
 
   function render() {
     renderSwitcher();
+    renderSampleContext();
     renderNav();
     const main = document.getElementById("main");
     main.replaceChildren();
@@ -281,13 +330,15 @@
       main.append(h("h1", { class: route.name === "home" ? "visually-hidden" : "view-title" }, "Loading…"));
       if (route.name === "home") {
         main.append(
-          h("section", { class: "clia-panel loading-clia" },
-            h("h2", { class: "clia-title" }, "What CLIA means for this demo"), h("p", {}, "Loading…")),
+          h("section", { class: "panel landing-intro loading-intro" },
+            h("h2", {}, "Sample overview"), h("p", {}, "Loading…")),
           h("p", { class: "headline loading-headline" }, "Loading…"),
           h("div", { class: "landing-band" },
             h("section", { class: "panel defended loading-defended" }, h("h2", {}, "Defended results"), h("p", {}, "Loading…")),
             h("section", { class: "panel curve loading-curve" }, h("h2", {}, "Depth → utility"), h("p", {}, "Loading…")),
             h("section", { class: "panel controls loading-controls" }, h("h2", {}, "Positive controls"), h("p", {}, "Loading…"))),
+          h("section", { class: "clia-panel loading-clia" },
+            h("h2", { class: "clia-title" }, "What CLIA means for this demo"), h("p", {}, "Loading…")),
         );
       } else main.append(h("section", { class: "panel loading-lens" }, h("p", {}, "Loading…")));
       return;
@@ -353,7 +404,7 @@
           h("p", {}, `Provisional: this input excludes ${sample.excluded_chunks.length} truncated chunks; depth reflects the reads present.`),
           h("details", {}, h("summary", {}, `Excluded chunk indexes (${sample.excluded_chunks.length})`),
             h("p", {}, `Excluded chunk indexes: ${sample.excluded_chunks.join(", ")}.`)));
-        const anchor = route.name === "home" ? main.querySelector(".clia-panel") : main.querySelector("h1");
+        const anchor = route.name === "home" ? main.querySelector(".landing-intro") : main.querySelector("h1");
         if (anchor) anchor.after(notice); else main.prepend(notice);
       }
     };
@@ -377,7 +428,15 @@
   }
 
   // -- charts ---------------------------------------------------------------------------
-  const chartCell = (value) => typeof value === "number" && Number.isFinite(value) ? String(value) : fmt(value);
+  function rawCell(display, raw, unit) {
+    const exact = raw === null || raw === undefined ? "null" : String(raw);
+    return h("div", { class: "value-with-raw" }, h("span", { class: "display-value" }, display), " ",
+      h("details", { class: "raw-value" }, h("summary", {}, "Raw value"), h("code", {}, `${exact} ${unit || "unit not declared"}`)));
+  }
+  function chartCell(value) {
+    if (value instanceof Node) return value;
+    return typeof value === "number" && Number.isFinite(value) ? String(value) : fmt(value);
+  }
   function dataTable(caption, headers, rows) {
     const table = h("table", { class: "data-table" },
       h("caption", {}, caption),
@@ -443,11 +502,11 @@
     }).catch((error) => {
       // No panel data reached the page, so there is no data table to open;
       // the summary metrics stay in the table below.
-      const rows = algorithm.metrics.map((m) => [m.label, m.value]);
+      const rows = algorithm.metrics.map((m) => [m.label, fmtMetric(m, { algorithmId: algorithm.algorithm_id })]);
       slot.replaceWith(h("div", {},
         h("div", { class: "problem" }, `Chart could not be drawn (${error.message}). The summary numbers are in the table below.`),
         h("div", { class: "table-wrap" }, h("table", { class: "data-table" }, h("caption", {}, "fragment-size summary"),
-          h("tbody", {}, ...rows.map(([label, value]) => h("tr", {}, h("th", { scope: "row" }, label), h("td", {}, fmt(value)))))))));
+          h("tbody", {}, ...rows.map(([label, value]) => h("tr", {}, h("th", { scope: "row" }, label), h("td", {}, value))))))));
     });
     return section;
   }
@@ -474,7 +533,7 @@
       const text = a.input_gate
         ? `${a.input_gate} → ${a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status === "failed" ? "failed" : "ran"}`
         : a.min_depth_x
-        ? `needs ${a.min_depth_x}x; this run ${depth !== null ? depth.toFixed(3) : "—"}x → ${a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status === "failed" ? "failed" : "ran"}`
+        ? `needs ${fmt(a.min_depth_x, "x")}; this run ${fmt(depth, "x")} → ${a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status === "failed" ? "failed" : "ran"}`
         : `any depth → ${a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status}`;
       return h("tr", {}, h("th", { scope: "row" }, a.algorithm_id), h("td", {}, bar), h("td", {}, text));
     });
@@ -493,12 +552,14 @@
       const status = a.status === "skipped" ? `skipped (${a.skip_reason})` : a.status;
       const matches = (run) => run && run.step === a.algorithm_id && run.source_id === sample.source_id && run.input_id === a.provenance?.input_id;
       const runNote = matches(active) ? "latest run in progress" : matches(interrupted) ? interruptedLabel : null;
-      const duration = a.duration_s !== null && a.duration_s !== undefined ? `${a.duration_s.toFixed(1)} s` : "—";
+      const duration = fmt(a.duration_s, "s");
       const cells = [h("th", { scope: "row" }, a.algorithm_id + (a.hidden ? " (intermediate)" : "")),
         h("td", { class: a.status === "failed" ? "problem" : null,
           "data-run-algorithm": a.algorithm_id, "data-run-input": a.provenance?.input_id || "" }, status, " ",
           h("span", { class: "state-chip run-note", "data-run-note": "", hidden: !runNote }, runNote || "")),
-        h("td", { class: "num", "data-run-duration": duration }, runNote === "latest run in progress" && duration !== "—"
+        h("td", { class: "num", "data-run-duration": duration,
+          "data-run-duration-available": Number.isFinite(a.duration_s) ? "1" : "0" },
+          runNote === "latest run in progress" && Number.isFinite(a.duration_s)
           ? `${duration} (selected result)` : duration)];
       const pin = a.provenance;
       const canPin = pin && /^[0-9a-f]{64}$/.test(pin.input_id) && /^[0-9a-f]{64}$/.test(pin.parameters_sha256) &&
@@ -558,7 +619,8 @@
       h("div", { class: "table-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, ...["Algorithm", "Status", "Duration", "Run log", "Detail"].map((t) => h("th", { scope: "col" }, t)))), h("tbody", {}, ...runRows)))));
     // QC bands.
     const banded = [];
-    for (const a of sample.algorithms) for (const m of a.metrics) if (m.qc_band) banded.push([m.label, fmt(m.value), m.qc_band]);
+    for (const a of sample.algorithms) for (const m of a.metrics) if (m.qc_band)
+      banded.push([m.label, fmtMetric(m, { algorithmId: a.algorithm_id }), m.qc_band]);
     const glyph = { pass: "✓ pass", warn: "! warn", fail: "✕ fail" };
     out.push(h("section", { class: "panel" }, h("h2", {}, "QC bands"),
       h("p", { class: "help" }, "provisional (not from literature)"),
@@ -594,10 +656,10 @@
         h("p", { class: "help" }, "Viral taxa here are Bracken estimates per million QC-passing, non-duplicate primary reads. The separate viral-reference panel counts side-reference alignments per million human-unmapped primaries, including QC-fail and duplicate-flagged reads; the rates are not directly comparable."),
         microbial.reason ? h("p", { class: "problem" }, microbial.reason) : "",
         microbial.microbial_rpm_primary !== undefined
-          ? h("p", {}, `Candidate microbial estimate: ${fmt(microbial.microbial_rpm_primary)} per million primary QC-passing reads; ${fmt(microbial.candidate_unmapped_reads)} unmapped reads submitted. Cohort 97.5th percentile: ${microbial.cohort_p975 === null ? "unavailable" : fmt(microbial.cohort_p975)}${microbial.cohort_p975 === null ? "" : ` (n=${microbial.cohort_n}, ${microbial.cohort_version})`}.`)
+          ? h("p", {}, `Candidate microbial estimate: ${fmt(microbial.microbial_rpm_primary, "estimated reads/million", { unitDisplay: false })} per million primary QC-passing reads; ${fmtCount(microbial.candidate_unmapped_reads)} unmapped reads submitted. Cohort 97.5th percentile: ${microbial.cohort_p975 === null ? "unavailable" : fmt(microbial.cohort_p975, "estimated reads/million", { unitDisplay: false })}${microbial.cohort_p975 === null ? "" : ` (n=${fmtCount(microbial.cohort_n)}, ${microbial.cohort_version})`}.`)
           : "",
         microbial.microbial_rpm_primary !== undefined
-          ? h("p", { class: "help" }, `${fmt(microbial.too_short_unmapped_reads)} unmapped reads were shorter than the registered Bracken length; ${fmt(microbial.missing_sequence_unmapped_reads)} lacked sequence. Neither group was classified. The per-million rate still divides by all primary QC-passing non-duplicate reads.`)
+          ? h("p", { class: "help" }, `${fmtCount(microbial.too_short_unmapped_reads)} unmapped reads were shorter than the registered Bracken length; ${fmtCount(microbial.missing_sequence_unmapped_reads)} lacked sequence. Neither group was classified. The per-million rate still divides by all primary QC-passing non-duplicate reads.`)
           : "",
         microbial.omitted_taxa ? h("p", { class: "help" }, `${microbial.omitted_taxa} lower-abundance taxa omitted from the bounded display. The headline estimate includes them, so it can exceed the sum of visible rows; absent taxa are not assumed zero in cohort comparisons.`) : "",
         microbial.taxa.length
@@ -605,8 +667,8 @@
             h("thead", {}, h("tr", {}, ...["Candidate taxon", "Group", "Estimate / million", "Cohort 97.5th pct", "Context"].map((label) => h("th", { scope: "col" }, label)))),
             h("tbody", {}, ...microbial.taxa.map((row) => h("tr", {},
               h("th", { scope: "row" }, `${row.name} (taxid ${row.taxid})`),
-              h("td", {}, row.category), h("td", {}, fmt(row.rpm_primary)),
-              h("td", {}, row.cohort_p975 === null ? `unavailable (n=${row.cohort_n})` : `${fmt(row.cohort_p975)} (n=${row.cohort_n})`),
+              h("td", {}, row.category), h("td", {}, fmt(row.rpm_primary, "estimated reads/million", { unitDisplay: false })),
+              h("td", {}, row.cohort_p975 === null ? `unavailable (n=${row.cohort_n})` : `${fmt(row.cohort_p975, "estimated reads/million", { unitDisplay: false })} (n=${row.cohort_n})`),
               h("td", {}, row.above_cohort_p975 === null ? "no cohort reference" : row.above_cohort_p975 ? "above cohort percentile" : "at or below cohort percentile"))))))
           : h("p", {}, microbial.microbial_rpm_primary === 0
             ? "No species-level microbial estimate was returned under this database and read-length policy. Reads classified above species rank do not establish absence."
@@ -624,7 +686,7 @@
             h("th", { scope: "row" }, pair.peer_id12),
             h("td", {}, pair.state === "unavailable" ? pair.reason : fmt(pair.metrics.relatedness)),
             h("td", {}, pair.state === "unavailable" ? "unavailable" : fmt(pair.metrics.concordance)),
-            h("td", {}, pair.state === "unavailable" ? "unavailable" : fmt(pair.metrics.n)))))))
+            h("td", {}, pair.state === "unavailable" ? "unavailable" : fmtCount(pair.metrics.n)))))))
           : h("p", { class: sample.identity_pairs_reason ? "problem" : "" },
             sample.identity_pairs_reason || "No current pair comparison. Prepare fingerprints with lab run --only identity, then use lab identity compare SAMPLE_A SAMPLE_B.")));
     }
@@ -686,7 +748,7 @@
       chip.hidden = !note;
       const duration = cell.nextElementSibling;
       const base = duration.dataset.runDuration;
-      duration.textContent = note === "latest run in progress" && base !== "—"
+      duration.textContent = note === "latest run in progress" && duration.dataset.runDurationAvailable === "1"
         ? `${base} (selected result)` : base;
     }
     const unavailable = new Set([...(sample.unreadable_results || []), ...(sample.ambiguous_results || [])]);

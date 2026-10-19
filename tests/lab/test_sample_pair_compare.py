@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 from types import SimpleNamespace
 
 import pytest
@@ -64,6 +63,7 @@ def test_sample_pair_reports_exact_b_minus_a_and_distinct_sources(tmp_path, monk
     assert payload["unscored"] == []
     row = payload["metrics"][0]
     assert (row["value_a"], row["value_b"], row["delta_b_minus_a"], row["unit"]) == (160.0, 170.0, 10.0, "bp")
+    assert row["value_kind"] == "positive"
     assert row["parameters_sha256_a"] == PARAM_A and row["parameters_sha256_b"] == PARAM_B
     assert api.compare_samples(SOURCE_A[:12], SOURCE_A[:12])["state"] == "same_sample"
 
@@ -251,7 +251,11 @@ def test_sample_pair_route_requires_session_and_passes_both_ids(tmp_path, monkey
 
 @pytest.mark.skipif(__import__("tests.lab.test_lab_server", fromlist=["_chrome"])._chrome() is None,
                     reason="no Chrome/Chromium for sample Compare DOM check")
-def test_sample_pair_selector_overlay_and_table_fallback(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("unit,value_a,value_b,expected", [
+    ("bp", 160.0, 170.0, ("160 bp", "170 bp", "10 bp")),
+    ("fraction", 0.10, 0.15, ("10%", "15%", "5 percentage points")),
+])
+def test_sample_pair_selector_overlay_and_table_fallback(tmp_path, monkeypatch, unit, value_a, value_b, expected) -> None:
     from tests.lab.test_lab_server import _chrome, _dom_cdp
     from traceback_lab.web.server import RunningLabServer
 
@@ -269,7 +273,8 @@ def test_sample_pair_selector_overlay_and_table_fallback(tmp_path, monkeypatch) 
         "found": True, "state": "ready", "id12_a": a, "id12_b": b,
         "aligner_a": "fixture aligner", "aligner_b": "fixture aligner",
         "metrics": [{"algorithm_id": "fragment-size", "metric_id": "mode_bp", "label": "Size mode",
-                     "unit": "bp", "value_a": 160.0, "value_b": 170.0, "delta_b_minus_a": 10.0}],
+                     "unit": unit, "value_a": value_a, "value_b": value_b,
+                     "delta_b_minus_a": value_b - value_a}],
         "unscored": [
             {"algorithm_id": "copy-number", "metric_id": "*", "reason": "incompatible_protocol"},
             {"algorithm_id": "instability", "metric_id": "*", "reason": "selected_pon_not_paired"},
@@ -286,10 +291,10 @@ def test_sample_pair_selector_overlay_and_table_fallback(tmp_path, monkeypatch) 
     assert 'for="compare-other-sample"' in html and 'id="compare-other-sample"' in html
     assert 'aria-label="Sample A and B comparison"' in html
     assert "Sample A" in html and "Sample B" in html and "B−A" in html
-    assert re.search(
-        r'<td class="num">160 bp</td><td class="num">170 bp</td><td class="num">10 bp</td>',
-        html,
-    )
+    assert all(f'<td class="num">{value}</td>' in html for value in expected)
+    if unit == "fraction":
+        assert "B minus A 5 percentage points" in html
+        assert "<td>5 percentage points</td>" in html
     assert "incompatible protocol" in html
     assert "selected pon not paired" in html
     assert "Source IDs do not establish a shared donor or timepoint" in html
