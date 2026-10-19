@@ -992,6 +992,7 @@ class LabApi:
         base = {
             "found": True,
             "id12": self._id12s()[source_id],
+            "input_id": sample.full.input_id,
             "cohort_id": cohort_id,
             "cohort_version": generation.version_id,
             "kind": generation.kind,

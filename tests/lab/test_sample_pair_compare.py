@@ -267,6 +267,7 @@ def test_sample_pair_selector_overlay_and_table_fallback(tmp_path, monkeypatch) 
     monkeypatch.setattr(web_api.LabApi, "cohorts", lambda self: {"cohorts": [], "unavailable": []})
     monkeypatch.setattr(web_api.LabApi, "compare_samples", lambda self, a, b: {
         "found": True, "state": "ready", "id12_a": a, "id12_b": b,
+        "input_id_a": INPUT_A, "input_id_b": INPUT_B,
         "aligner_a": "fixture aligner", "aligner_b": "fixture aligner",
         "metrics": [{"algorithm_id": "fragment-size", "metric_id": "mode_bp", "label": "Size mode",
                      "unit": "bp", "value_a": 160.0, "value_b": 170.0, "delta_b_minus_a": 10.0}],
@@ -286,11 +287,57 @@ def test_sample_pair_selector_overlay_and_table_fallback(tmp_path, monkeypatch) 
     assert 'for="compare-other-sample"' in html and 'id="compare-other-sample"' in html
     assert 'aria-label="Sample A and B comparison"' in html
     assert "Sample A" in html and "Sample B" in html and "B−A" in html
+    assert f"input ID (abbrev.) {INPUT_A[:12]}…{INPUT_A[-6:]}" in html
+    assert f"input ID (abbrev.) {INPUT_B[:12]}…{INPUT_B[-6:]}" in html
     assert re.search(
         r'<td class="num">160 bp</td><td class="num">170 bp</td><td class="num">10 bp</td>',
         html,
     )
-    assert "incompatible protocol" in html
-    assert "selected pon not paired" in html
+    assert "not protocol compatible" in html
+    assert "selected panel of normals differs" in html
     assert "Source IDs do not establish a shared donor or timepoint" in html
     assert 'data-csp-violations="0"' in html
+
+
+@pytest.mark.skipif(__import__("tests.lab.test_lab_server", fromlist=["_chrome"])._chrome() is None,
+                    reason="no Chrome/Chromium for sample Compare DOM check")
+def test_sample_pair_disables_unavailable_peer_and_explains_empty_choice(tmp_path, monkeypatch) -> None:
+    from tests.lab.test_lab_server import _chrome, _dom_cdp
+    from traceback_lab.web.server import RunningLabServer
+
+    rows = [
+        {"id12": SOURCE_A[:12], "run_utc": "", "depth_x": 1.0, "example": False},
+        {"id12": SOURCE_B[:12], "state": "completed_input_unavailable", "run_utc": "",
+         "depth_x": None, "example": False},
+    ]
+    monkeypatch.setattr(web_api.LabApi, "samples", lambda self: {"samples": rows, "root_has_runs": True})
+    monkeypatch.setattr(web_api.LabApi, "sample", lambda self, id12: {
+        "found": True, "id12": id12, "algorithms": [], "catalog": [], "licenses": [],
+        "cohort_n": 0, "cohort_version": None, "interpretation_version": "fixture",
+        "excluded_chunks": [],
+    })
+    monkeypatch.setattr(web_api.LabApi, "cohorts", lambda self: {"cohorts": [], "unavailable": []})
+    calls = []
+    monkeypatch.setattr(web_api.LabApi, "compare_samples", lambda self, a, b: calls.append((a, b)))
+
+    with RunningLabServer(LabStore(tmp_path)) as server:
+        def dom(profile_name, expected):
+            profile = tmp_path / profile_name
+            return _dom_cdp([
+                _chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+                f"--user-data-dir={profile}", "--window-size=360,740",
+                server.issue_link() + f"&route=/sample/{SOURCE_A[:12]}/compare",
+            ], profile, ok=lambda page: 'data-ready="1"' in page and expected in page, timeout=90)
+
+        empty = dom("pair-empty", "No eligible second sample")
+        assert 'disabled=""' in empty and "unavailable current full input" in empty
+        assert calls == []
+
+        rows.append({"id12": "3" * 12, "run_utc": "", "depth_x": 1.0, "example": False})
+        monkeypatch.setattr(web_api.LabApi, "compare_samples", lambda self, a, b: {
+            "found": False, "which": "b", "candidates": ["private-source-id"],
+        })
+        unresolved = dom("pair-unresolved", "could not be resolved")
+        assert 'value="' + SOURCE_B[:12] + '" disabled=""' in unresolved
+        assert "private-source-id" not in unresolved
+        assert "Reload the sample list" in unresolved

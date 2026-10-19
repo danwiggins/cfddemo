@@ -88,6 +88,7 @@ def test_compare_pins_one_generation_and_gates_after_leave_one_out(
 
     assert reads == ["healthy"]
     assert payload["cohort_version"] == "healthy:7"
+    assert payload["input_id"] == f"{101:064x}"
     assert payload["member_n"] == member_n
     assert payload["metrics"][0]["eligible_n"] == eligible_n
     assert len(payload["metrics"][0]["cohort_values"]) == eligible_n
@@ -435,6 +436,7 @@ def test_compare_and_joint_panel_render_in_native_tables(tmp_path, monkeypatch) 
     }]})
     monkeypatch.setattr(web_api.LabApi, "compare", lambda self, value, cohort: {
         "found": True, "id12": id12, "cohort_id": "healthy", "cohort_version": "healthy:7",
+        "input_id": f"{101:064x}",
         "kind": "internal_cohort", "member_n": 11, "pon_n": 0, "state": "ready",
         "target_aligner": "minimap2 2.28; samtools 1.20", "aligner_counts": {"minimap2 2.28; samtools 1.20": 11},
         "metrics": [{
@@ -524,6 +526,9 @@ def test_compare_and_joint_panel_render_in_native_tables(tmp_path, monkeypatch) 
 
     assert "FLAG: CLIA" in compare
     assert "No reference yet (cohort n = 9 of 10)" in compare
+    input_id = f"{101:064x}"
+    assert f"input ID (abbrev.) {input_id[:12]}…{input_id[-6:]}" in compare
+    assert "at least 10 are required for a cohort comparison" in compare
     assert "missing metric: 1" in compare and "minimap2 2.28; samtools 1.20: 9" in compare
     assert "Eligible values (9)" in compare and "Original library reference" in compare
     assert 'aria-label="Comparison metrics"' in compare and 'aria-label="Generation aligner counts"' in compare
