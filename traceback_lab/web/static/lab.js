@@ -273,14 +273,18 @@
     return { name: "unknown", id12: null };
   }
 
+  function sampleIdentityMatches(payload, requested) {
+    return typeof payload.id12 === "string" && /^[0-9a-f]{12,64}$/.test(payload.id12) &&
+      typeof payload.source_id === "string" && /^[0-9a-f]{64}$/.test(payload.source_id) &&
+      payload.source_id.startsWith(payload.id12) && payload.source_id.startsWith(requested);
+  }
+
   async function loadSample(id12, isCurrent = () => true) {
     if (!id12) return null;
     if (state.sample && state.sample.id12 === id12) return state.sample;
     const payload = await api(`/api/samples/${id12}`, null, { isCurrent });
     if (typeof payload.found !== "boolean") throw requestIssue("invalid");
-    if (payload.found && (typeof payload.id12 !== "string" ||
-        !/^[0-9a-f]{12,64}$/.test(payload.id12) ||
-        !(id12.startsWith(payload.id12) || payload.id12.startsWith(id12)))) throw requestIssue("invalid");
+    if (payload.found && !sampleIdentityMatches(payload, id12)) throw requestIssue("invalid");
     if (payload.found && !["completed_input_unavailable", "completion_history_unavailable"].includes(payload.state) &&
         (!Array.isArray(payload.algorithms) || !Array.isArray(payload.catalog))) throw requestIssue("invalid");
     return payload.found ? payload : { found: false, id12, candidates: payload.candidates || [] };
@@ -347,7 +351,8 @@
       try {
         const current = await requestJson(`/api/samples/${encodeURIComponent(previous.id12)}`, { isCurrent });
         if (!isCurrent()) return { kind: "obsolete" };
-        if (current.found !== true || current.id12 !== previous.id12 ||
+        if (current.found !== true || !sampleIdentityMatches(current, previous.id12) ||
+            current.id12 !== previous.id12 || current.source_id !== previous.source_id ||
             (!["completed_input_unavailable", "completion_history_unavailable"].includes(current.state) &&
               (!Array.isArray(current.catalog) || !Array.isArray(current.algorithms)))) {
           throw requestIssue("invalid");
