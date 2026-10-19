@@ -1723,7 +1723,7 @@
               h("td", { class: "num" }, fmtMetricValue(metric, metric.delta_b_minus_a, { role: "difference" }))));
             nodes.push(h("div", { class: "table-wrap", tabindex: "0", role: "region", "aria-label": "Sample A and B comparison" },
               h("table", { class: "data-table" },
-                h("caption", {}, `Sample A ${data.id12_a} versus B ${data.id12_b}; exact values and B−A`),
+                h("caption", {}, `Sample A ${data.id12_a} versus B ${data.id12_b}; displayed values and B−A`),
                 h("thead", {}, h("tr", {}, ...["Metric", "Overlay", "Sample A", "Sample B", "B−A"].map((name) => h("th", { scope: "col" }, name)))),
                 h("tbody", {}, ...rows))));
           } else nodes.push(h("p", { class: "empty" }, "No compatible scalar metric is available for this pair. Missing values are not zero."));
