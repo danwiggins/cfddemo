@@ -33,7 +33,7 @@ from .problems import EXIT_BLOCKED, EXIT_OK, LabProblem
 from .store import LabStore
 from .tools import MIN_MINIMAP2, MIN_SAMTOOLS, find_minimap2, find_samtools
 
-FULL_RUN_BYTES = 44 * 10**9  # a ~400-chunk FBB10481-sized run (D30)
+FULL_RUN_BYTES = 44 * 10**9  # budget for a ~400-chunk full run (D30)
 MIN_RAM = 16 * GIB
 
 

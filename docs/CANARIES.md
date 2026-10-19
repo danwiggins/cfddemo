@@ -184,5 +184,6 @@ The canary and the installer refuse to write a baseline, logs, temporary roots
 or the plist inside any Git work tree (paths are fully resolved, so symlinks and
 `..` do not get around it).
 
-On the 2.1 GB development BAM one pass takes about 3-5 minutes (input hashing,
-register, preflight, run); the scheduled `--repeat 2` run about twice that.
+One pass includes input hashing, registration, preflight and the run; the
+scheduled `--repeat 2` performs two passes. Workstation-specific input size
+and timing observations are omitted here; record future runs privately.

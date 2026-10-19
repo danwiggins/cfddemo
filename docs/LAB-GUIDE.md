@@ -49,10 +49,10 @@ Measured time to the page on a clean Mac by a teammate: not yet measured
 
 For a full ~400-chunk run (~44 GB of uBAM), the disk check asks for about
 2.2x the chunk bytes plus the minimap2 index the first time (hg38: ~8 GB)
-plus 2 GB. Measured on a 30-chunk partial run (3.55 GB): the hg38 index
-built in about 1.5 minutes, alignment took about 4.5 minutes at 8 threads
-(peak RSS ~10 GB for minimap2), the aligned BAM kept 0.65x of the chunk
-bytes, and every algorithm then ran in under a minute.
+plus 2 GB. A partial operator run exercised index building, alignment and
+algorithm execution; its input size, timings, peak memory and output ratio
+are omitted here. A partial run does not establish
+duration or resource needs for a full kit run.
 
 ## ROOT
 
@@ -175,8 +175,8 @@ of MinKNOW chunks (`*.bam`, not recursive). It:
 Alignment needs samtools ≥ 1.20 and minimap2 ≥ 2.28 (`brew install samtools
 minimap2`). The minimap2 index of the reference is built once under
 `ROOT/lab/refs/` (hg38: about 20–40 minutes and 8 GB); `--mmi PATH` reuses one
-you already have. The measured alignment speed is 2.8–5.5 minutes per GB of
-uBAM.
+you already have. Measure alignment speed on the operator's workstation and
+keep input-specific results private.
 
 The reference is the one registered under ROOT (`traceback reference
 register`); with several, pass `--reference ID`.

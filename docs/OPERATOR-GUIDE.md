@@ -200,18 +200,16 @@ samtools fastq -T MM,ML,MN IN.bam \
 samtools index OUT.sorted.bam
 ```
 
-`-T MM,ML,MN` and `-y` carry the modification tags through alignment. The
-aligned BAM has no `@RG` header line, so `preflight` reports TBX-MOD-001 WARN
-("basecall model not declared"); that needs no action for fragment length.
+`-T MM,ML,MN` and `-y` carry the modification tags through alignment. If the
+aligned BAM has no `@RG` model declaration, `preflight` reports TBX-MOD-001
+WARN ("basecall model not declared"); that needs no action for fragment length.
 Add `-t N` to minimap2 to use N threads (default 3).
 
-Measured once (Apple M5 Pro, 18 cores, 48 GB, macOS 26.4.1; minimap2 2.31,
-samtools 1.24; hg38 primary FASTA) on one 3.3 GB unaligned BAM of 3.9 M
-reads, wall time including `samtools index`: about 18 minutes with the
-command as printed (about 5.5 min per GB), about 9 minutes with `-t 16`
-(about 2.8 min per GB). minimap2 rebuilds the hg38 index each time, which is
-several minutes of that; `minimap2 -d REF.mmi REF.fa` once, then `REF.mmi` in
-place of `REF.fa`, skips it. Peak memory was about 8.5 GB.
+Alignment time and memory depend on the input, thread count, index reuse and
+host. Record input-specific benchmark values privately.
+minimap2 rebuilds the hg38 index when given `REF.fa`; run
+`minimap2 -d REF.mmi REF.fa` once, then use `REF.mmi` in place of `REF.fa` to
+reuse the index.
 
 **Merge per barcode only.** A MinKNOW run writes many small BAM chunks per
 sample under `bam_pass/barcodeNN/` (barcoded runs) or straight under
