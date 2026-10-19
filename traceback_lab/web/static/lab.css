@@ -198,6 +198,8 @@ pre.stderr { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; 
   #lab-report-print .report-print-limits { display: block; font-size: 8pt; margin: .5rem 0; }
   #lab-report-print .report-print-method { break-before: page; }
   #lab-report-print .report-print-metric { break-inside: avoid; border-top: 1px solid #999; padding: .3rem 0; }
+  #lab-report-print .report-print-license { break-inside: avoid; border-left: 2px solid #555; padding-left: .5rem; margin: .5rem 0; }
+  #lab-report-print .report-print-flag, #lab-report-print .report-print-advice-flag { font-weight: bold; }
   #lab-report-print .report-print-provenance { overflow-wrap: anywhere; }
   #lab-report-print h1, #lab-report-print h2, #lab-report-print h3 { break-after: avoid; }
   #lab-report-print p { margin: .25rem 0; overflow-wrap: anywhere; }

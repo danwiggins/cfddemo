@@ -73,6 +73,7 @@ def test_report_capture_download_print_and_selection_invalidation(tmp_path) -> N
                 const limits = root.querySelector('.report-print-limits');
                 const tumorRow = [...root.querySelectorAll('.report-print-metric')]
                   .find((row) => row.textContent.includes('Metric ID: tumor_fraction'));
+                const tumorMethod = tumorRow?.closest('.report-print-method');
                 const visible = (node) => {
                   const bounds = node.getBoundingClientRect();
                   return bounds.width > 0 && bounds.height > 0;
@@ -91,6 +92,12 @@ def test_report_capture_download_print_and_selection_invalidation(tmp_path) -> N
                   cohortVersion: root.textContent.includes('Cohort version: cohort-v7'),
                   provenanceBlocks: root.querySelectorAll('.report-print-provenance').length,
                   tumorProvenance: tumorRow?.querySelector('.report-print-provenance')?.textContent || '',
+                  tumorFlag: tumorRow?.querySelector('.report-print-flag')?.textContent || '',
+                  tumorLicense: tumorMethod?.querySelector('.report-print-license')?.textContent || '',
+                  licenseCount: tumorMethod?.querySelectorAll('.report-print-license').length,
+                  analyticalSteps: tumorRow?.textContent.includes('Next steps (analytical): Build the kit panel of normals'),
+                  clinicalSteps: tumorRow?.textContent.includes('Clinical setting: In a validated clinical setting'),
+                  adviceFlags: tumorRow?.querySelectorAll('.report-print-advice-flag').length,
                   changedAfterCapture: root.textContent.includes('changed-after-capture') ||
                     root.textContent.includes('cohort-v9'),
                   definition: root.textContent.includes('most frequent aligned reference span'),
@@ -179,6 +186,13 @@ def test_report_capture_download_print_and_selection_invalidation(tmp_path) -> N
                  if row["algorithm_id"] == "copy-number" and row["metric_id"] == "tumor_fraction")
     provenance = observed["print"]["tumorProvenance"]
     assert "Result provenance" in provenance
+    assert observed["print"]["tumorFlag"] == "FLAG: FDA — cancer-detection claim if marketed."
+    assert "GPL/AGPL COPYLEFT" in observed["print"]["tumorLicense"]
+    assert observed["print"]["licenseCount"] == 1
+    assert observed["print"]["analyticalSteps"] and observed["print"]["clinicalSteps"]
+    assert observed["print"]["adviceFlags"] == 2
+    assert any("Metric copy-number/tumor_fraction: FLAG: FDA" in item for item in model["limitations"])
+    assert any("License gpl-copyleft: GPL/AGPL COPYLEFT" in item for item in model["limitations"])
     assert "Tool: synthetic-fixture" in provenance and "Tool version: 1" in provenance
     assert f"Parameters SHA-256: {tumor['parameters_sha256']}" in provenance
     assert tumor["attempt_id"] is None and "Attempt ID: unavailable" in provenance
