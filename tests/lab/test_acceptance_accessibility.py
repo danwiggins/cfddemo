@@ -1127,7 +1127,9 @@ def test_keyboard_traversal_and_revealed_controls_on_every_sample_route(tmp_path
                 time.sleep(0.1)
                 evaluate("document.querySelector('.skip-link').focus()")
                 expected = evaluate("""(() => [...document.querySelectorAll('a[href], button, select, summary, input, [tabindex]')]
-                  .flatMap((el, index) => el.tabIndex >= 0 && !el.disabled && el.getClientRects().length
+                  .flatMap((el, index) => el.tabIndex >= 0 && !el.disabled
+                    && (!el.closest('details:not([open])') || el.matches('summary'))
+                    && el.getClientRects().length
                     && getComputedStyle(el).visibility !== 'hidden' ? [index] : []))()""")
                 assert len(expected) >= 2, route
                 for next_index in expected[1:]:

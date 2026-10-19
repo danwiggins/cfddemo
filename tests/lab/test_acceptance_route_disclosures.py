@@ -7,6 +7,7 @@ import json
 import pytest
 
 from tests.lab.test_acceptance_synthetic_routes import ID12, LICENSE_IDS, _license_nodes, _sample, _server
+from tests.lab.test_lab_server import _chrome, _dom_cdp
 from tests.lab.test_landing import _dom, _id12, needs_chrome, page_root as _landing_page_root
 from traceback_lab.interpretation.engine import Entry, Library, load_library
 from traceback_lab.registry import load_registry
@@ -43,6 +44,74 @@ def test_every_registered_algorithm_has_catalog_disclosures(algorithm_id: str) -
     }
     assert set(row["license_ids"]) == expected
     assert expected <= LIBRARY.licenses.keys()
+    assert row["description"] and row["question"] and row["limitations"]
+    assert row["family"] and row["platforms"]
+    assert row["environment_readiness"] == "unknown" and row["readiness_checked_at"] is None
+
+
+def test_method_explanations_cover_exactly_the_visible_registry() -> None:
+    assert set(LIBRARY.method_catalog) == set(REGISTRY)
+    assert LIBRARY.hidden_algorithms == {"read-summary", "meth-calls"}
+
+
+def test_catalog_numeric_prerequisites_match_algorithm_gates() -> None:
+    from traceback_lab.adapters.griffin_run import MIN_ELIGIBLE_AUTOSOMAL_PAIRS
+    from traceback_lab.algorithms.aligned_end_structure import MIN_DEPTH_X as END_DEPTH
+    from traceback_lab.algorithms.lionheart import RESOURCE_VERSION
+    from traceback_lab.algorithms.wps import MIN_DEPTH_X as WPS_DEPTH
+
+    methods = LIBRARY.method_catalog
+    assert f"At least {END_DEPTH:g}x observed eligible depth" in methods["aligned-end-structure"]["requirements"]
+    assert f"At least {WPS_DEPTH:g}x approximate autosomal depth" in methods["wps"]["requirements"]
+    assert MIN_ELIGIBLE_AUTOSOMAL_PAIRS == 5_000_000
+    assert "At least five million eligible autosomal pairs" in methods["griffin"]["requirements"]
+    assert any(RESOURCE_VERSION in text for text in methods["lionheart"]["requirements"])
+
+
+@needs_chrome
+def test_methods_search_and_filters_keep_provenance_available(tmp_path) -> None:
+    sample = _sample()
+    sample["catalog"][0]["status"] = "skipped"
+    sample["catalog"][0]["skip_reason"] = "missing_asset"
+    sample["algorithms"] = [row for row in sample["algorithms"] if row["algorithm_id"] != "epi-clock"]
+    next(row for row in sample["catalog"] if row["algorithm_id"] == "epi-clock")["status"] = "not run"
+    with _server(tmp_path, sample) as server:
+        profile = tmp_path / "browser-profile"
+
+        def interact(_command, evaluate) -> None:
+            assert evaluate("document.querySelectorAll('#method-catalog-results article').length") == len(REGISTRY)
+            assert evaluate("document.getElementById('method-provenance') !== null")
+            assert evaluate("document.querySelector('#method-status option[value=ok]').textContent") == "ran"
+            assert evaluate("document.querySelector('#main').textContent.includes('Current environment readiness is unknown')")
+            assert evaluate("""(() => { const input = document.getElementById('method-search');
+              input.value = 'Weidner'; input.dispatchEvent(new Event('input', {bubbles: true}));
+              return [...document.querySelectorAll('#method-catalog-results article')]
+                .map((row) => row.id); })()""") == ["method-epi-clock"]
+            assert not evaluate("document.querySelector('#method-epi-clock button')")
+            assert evaluate("document.querySelector('#method-epi-clock a[href$=\"/evidence\"]').getAttribute('aria-label').includes('Weidner')")
+            assert evaluate("""(() => { const input = document.getElementById('method-search');
+              input.value = ''; input.dispatchEvent(new Event('input', {bubbles: true}));
+              const select = document.getElementById('method-status'); select.value = 'skipped';
+              select.dispatchEvent(new Event('change', {bubbles: true}));
+              return [...document.querySelectorAll('#method-catalog-results article')]
+                .map((row) => row.id); })()""") == ["method-bam-qc"]
+            assert evaluate("""(() => { const article = document.getElementById('method-bam-qc');
+              article.querySelector('details').open = true;
+              article.querySelector('button').click();
+              return document.activeElement?.id === 'method-provenance'; })()""")
+            assert evaluate("document.querySelector('#method-bam-qc button').getAttribute('aria-label').includes('Mapped share')")
+            assert evaluate("""(() => { const select = document.getElementById('method-family');
+              select.value = 'methylation'; select.dispatchEvent(new Event('change', {bubbles: true}));
+              return document.querySelector('#method-catalog-results').textContent.includes('No methods match'); })()""")
+            assert evaluate("document.getElementById('method-provenance').textContent.includes('Every number with its provenance')")
+
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", "--window-size=1280,800",
+             server.issue_link() + f"&route=/sample/{ID12}/methods"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'id="method-catalog-results"' in dom,
+            interact=interact,
+        )
 
 
 def test_stored_modkit_result_keeps_its_license_without_labeling_new_decoder() -> None:
@@ -72,10 +141,11 @@ def test_catalog_keeps_nonheadline_metric_licenses_when_result_exists() -> None:
         {
             ("cell-origin", "headline"): Entry(
                 "cell-origin", "headline", {"headline": True, "label": "Cell origin", "tier": "NEWER",
-                                            "license_ids": ["headline-rights"]},
+                                            "license_ids": ["headline-rights"], "citations": ["doi:headline"]},
             ),
             ("cell-origin", "secondary"): Entry(
-                "cell-origin", "secondary", {"headline": False, "license_ids": ["secondary-rights"]},
+                "cell-origin", "secondary", {"headline": False, "license_ids": ["secondary-rights"],
+                                              "citations": ["doi:secondary", "doi:headline"]},
             ),
         },
         {"headline-rights": {}, "secondary-rights": {}, "modkit-ont-public": {}},
@@ -88,6 +158,7 @@ def test_catalog_keeps_nonheadline_metric_licenses_when_result_exists() -> None:
               "status": "ok", "skip_reason": None}],
         )
         assert set(catalog[0]["license_ids"]) == expected
+        assert catalog[0]["citations"] == ["doi:headline", "doi:secondary"]
 
 
 @pytest.mark.parametrize("route,subtab", [(route, None) for route in ROUTES] + [

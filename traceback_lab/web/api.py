@@ -838,7 +838,13 @@ class LabApi:
             "headline": headline_block,
             "derived": [{"label": view.label, "transform": view.transform} for view in sample.derived],
             "licenses": [{"license_id": key, **library.licenses[key]} for key in _all_used(used_licenses, library, order)],
-            "catalog": _catalog(library, order, algorithms, sample.full.unreadable, sample.full.ambiguous),
+            "method_counts": {
+                "registered_steps": len(order),
+                "hidden_processing_steps": sorted(set(order) & library.hidden_algorithms),
+                "visible_methods": sum(algorithm_id not in library.hidden_algorithms for algorithm_id in order),
+            },
+            "catalog": _catalog(library, order, algorithms, sample.full.unreadable, sample.full.ambiguous,
+                                registry=registry),
             "excluded": EXCLUDED,
             "library_health": {
                 **self.libraries.health(),
@@ -1385,10 +1391,12 @@ def _all_used(used: list[str], library: Library, order: list[str]) -> list[str]:
 def _catalog(
     library: Library, order: list[str], algorithms: list[dict[str, Any]],
     unreadable: set[str] | None = None, ambiguous: set[str] | None = None,
+    *, registry: Iterable[Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Every registered (non-hidden) algorithm with its tier, footnote and status here."""
+    """Read-time catalog of visible methods and selected-result availability."""
 
     by_id = {row["algorithm_id"]: row for row in algorithms}
+    registered = {algorithm.id: algorithm for algorithm in (registry if registry is not None else _registry())}
     unreadable = unreadable or set()
     ambiguous = ambiguous or set()
     rows = []
@@ -1397,12 +1405,18 @@ def _catalog(
             continue
         entry = library.headline(algorithm_id)
         licenses: list[str] = []
+        citations: list[str] = []
         for (alg, _), item in library.entries.items():
             if alg == algorithm_id:
                 for license_id in item.get("license_ids") or []:
                     if license_id not in licenses:
                         licenses.append(license_id)
+                for citation in item.get("citations") or []:
+                    if citation not in citations:
+                        citations.append(citation)
         performance = entry.get("performance") if entry else None
+        method = library.method_catalog.get(algorithm_id)
+        declared = registered.get(algorithm_id)
         result = by_id.get(algorithm_id)
         status = result["status"] if result else (
             "unreadable" if algorithm_id in unreadable else
@@ -1430,6 +1444,17 @@ def _catalog(
                 "citation_checked": bool(entry and entry.citation_verified),
                 "status": status,
                 "skip_reason": result["skip_reason"] if result else None,
+                "family": declared.family if declared else None,
+                "platforms": sorted(declared.requires.platforms) if declared else [],
+                "min_eligible_reads": declared.requires.min_eligible_reads if declared else None,
+                "requires_mm_tags": declared.requires.mm_tags if declared else None,
+                "description": method["description"] if method else None,
+                "question": method["question"] if method else None,
+                "limitations": method["limitations"] if method else None,
+                "requirements": list(method["requirements"]) if method else [],
+                "citations": citations,
+                "environment_readiness": "unknown",
+                "readiness_checked_at": None,
             }
         )
     return rows
