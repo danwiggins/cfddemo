@@ -9,6 +9,11 @@ signature. The signed `traceback run` path has its own methods and records.
 
 **Research use only. Not CLIA-validated. Not a diagnosis.**
 
+From a repository checkout, run `uv sync` once, then run the `traceback`
+commands below with `uv run` as shown in the first-run steps. If the CLI is
+already installed, the bare `traceback` commands used elsewhere in this guide
+are equivalent.
+
 ## First five minutes
 
 On a Mac with only `uv`, samtools and minimap2 (`brew install samtools
@@ -32,18 +37,61 @@ M-series Mac. Copy-number is skipped (`example_reference`): it needs
 hg38-scale assets. The sample carries an **EXAMPLE (synthetic)** pill.
 `lab serve --open` prints the one-use link and opens it.
 
+If an already-open Lab page says there are no runs, use the ROOT printed by
+the serving process for `lab doctor --root R` and `lab run --example --root R`.
+Reload the page after the example completes. Its landing starts with an
+overview; choose **Explore signals** for the result lenses and **Check
+reliability** before interpreting a result. The example is synthetic and
+does not establish scientific or clinical qualification.
+
 Measured time to the page on a clean Mac by a teammate: not yet measured
 (target ≤ 5 minutes).
+
+### Read the three guided signals
+
+On a selected sample, choose **Explore signals** from the landing. Signals
+starts with three recorded measurements; each card shows its denominator or
+filter, recorded support count when available, provisional QC band, stability
+state, interpretation limit, and links to Trust/QC, Stability, and the method's
+source and provenance. A skipped, failed, missing, or unreadable result stays
+unavailable instead of becoming a made-up value.
+
+- **Fragment length** (`fragment-size/mode_bp`) is the most frequent 100–250 bp
+  aligned reference span (reference end minus start) on primary mapped
+  canonical-contig reads at MAPQ ≥ 20, excluding duplicate and QC-failed
+  reads. It is not a directly observed physical molecule length; library and handling effects
+  can shift it.
+- **Genome-wide 5mC fraction** (`global-5mc/cpg_5mc_fraction`) counts CpG C+m
+  calls assigned to 5mC among eligible CpG C+m calls on primary mapped
+  canonical-contig reads at MAPQ ≥ 20, excluding duplicate and QC-failed
+  reads.
+  Its interpretation depends on the basecaller modification model, call
+  quality, and cell mixture; the card supplies no validated reference.
+- **Mapped-read share** (`bam-qc/mapped_fraction`) is mapped primary read rows
+  divided by all primary read rows in the read summary. It is an input and
+  alignment quality measure, not a cfDNA tissue or disease result. Its guided
+  card links to Trust/QC; it is not one of the three signal-family tabs.
+
+The synthetic example plants inputs to illustrate this workflow; the shown
+values are computed from its run. None of these three values alone establishes
+a biological finding. Continue to the full signal families and method source
+before interpreting any exploratory pattern.
 
 ## One-time setup for real kits
 
 1. `brew install samtools minimap2` (samtools ≥ 1.20, minimap2 ≥ 2.28).
-2. Register hg38: `traceback reference register --fasta hg38.fa --id hg38 --root R`.
-3. For copy-number: `traceback toolchain install ichor`, then
-   `traceback method-asset register --from-toolchain copy-number --root R`.
-4. `traceback lab doctor --root R` shows setup checks and recovery commands;
+2. Register hg38: `uv run traceback reference register --fasta hg38.fa --id hg38 --root R`.
+3. For copy-number: `uv run traceback toolchain install ichor`, then
+   `uv run traceback method-asset register --from-toolchain copy-number --root R`.
+4. `uv run traceback lab doctor --root R` shows setup checks and recovery commands;
    inspect readiness for the methods you intend to run. Other methods have
    additional optional tools, assets, or input-scoped calibrations below.
+
+Before running a real chunk directory, confirm the platform, basecall and
+modification channels, depth, and method-specific assets required for your
+intended methods. Use the same ROOT for reference registration, the run, and
+the local page. An environment check does not make a result available or
+validate its interpretation.
 
 ## Duration and disk for a real run
 
@@ -892,6 +940,40 @@ with a 10-second deadline. It does not run doctor or scientific preflight.
 A failed refresh keeps the previous projection visibly stale and keeps current
 environment readiness unknown. If you navigate to another sample or view while
 the request is in flight, that response is discarded.
+
+### Prepare, download, or print a research report
+
+On an available selected sample, use **Prepare Export / Print** in the sample
+page's **Export / print** panel. It makes one fresh authenticated request for
+that sample, with a 10-second deadline. The captured preview names its UTC
+capture time, sample, input and included scalar-row count, and lists
+limitations. Values may differ from the page you viewed earlier. If the
+session expires, the sample changes while preparation is in flight, or the
+selected result is unavailable, no report is prepared; use a fresh Lab link
+or select an available sample and try again.
+
+After inspecting the preview, **Download JSON**, **Download CSV**, and **Print
+captured report** use that same captured model. They do not fetch another
+sample or artifact. Changing samples clears the capture. The JSON v1 download
+keeps raw scalar values and declared raw units alongside formatted display
+values, method status, interpretation state and validated provenance. CSV
+repeats report identity and limitations for each row and quotes textual cells
+with spreadsheet-formula protection. Spreadsheet software may still interpret
+types on import; use JSON for authoritative scalar types. Filenames begin
+`traceback-research-` and include the sample ID and UTC capture time. A
+"Download started" message confirms only that the browser action was
+dispatched; check the browser for the saved file.
+
+Only visible registered scalar metrics enter these downloads. Hidden
+processing steps, vector values, unsupplied artifacts and taxon detail are
+excluded; skipped or failed methods appear in limitations rather than as
+invented numeric rows. A report with no eligible scalar rows is refused.
+Exports are limited to 5,000 rows and 5 MiB per file; an over-limit report is
+refused without a partial download. The print view adds recorded method
+questions, requirements, support counts, references and signal definitions
+where available; an absent denominator or source context remains unavailable.
+Research-use and synthetic-example markings stay with the printed report.
+No export or printout establishes scientific or clinical qualification.
 
 ## Building a Lab cohort
 
