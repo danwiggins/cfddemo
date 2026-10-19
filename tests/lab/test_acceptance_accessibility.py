@@ -1552,6 +1552,124 @@ def test_failed_other_sample_keeps_confirmed_sample_and_switcher_available(tmp_p
 
 
 @needs_chrome
+def test_invalid_library_notice_survives_poll_and_rerender(tmp_path) -> None:
+    """The status keeps the library disclosure until a healthy poll replaces it."""
+
+    sample = _sample()
+    sample["library_health"]["error"] = "line 212"
+    with _server(tmp_path, sample) as server:
+        kind, source = server.app.assets["/assets/lab.js"]
+        server.app.assets["/assets/lab.js"] = (
+            kind, source.replace(b"const POLL_MS = 15000;", b"const POLL_MS = 500;"),
+        )
+
+        def inspect(_command, evaluate) -> None:
+            notice = "document.querySelector('#status [data-library-error]')"
+            assert evaluate(f"{notice}?.textContent.includes('Interpretation library on disk is invalid')")
+            assert evaluate("document.querySelectorAll('#status [data-library-error]').length === 1")
+            evaluate("window.TracebackLab.render()")
+            assert evaluate(f"{notice}?.textContent.includes('Interpretation library on disk is invalid')")
+            evaluate(f"location.hash = '#/sample/{ID12}/evidence'")
+            for _ in range(40):
+                if evaluate("document.querySelector('#main h1')?.textContent === 'Evidence'"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("Evidence route did not render")
+            assert evaluate("document.querySelectorAll('#status [data-library-error]').length === 1")
+            sample["library_health"]["error"] = None
+            for _ in range(40):
+                if evaluate("document.querySelector('#status [data-library-error]') === null"):
+                    break
+                time.sleep(0.2)
+            else:
+                pytest.fail("healthy status poll did not clear the library warning")
+
+        profile = tmp_path / "browser-profile"
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/findings"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'data-library-error' in dom,
+            interact=inspect, timeout=90,
+        )
+
+
+@needs_chrome
+@pytest.mark.parametrize("succeeds", [True, False])
+def test_refresh_during_pending_navigation_does_not_cancel_selection(tmp_path, succeeds) -> None:
+    """A Methods refresh cannot commit A while B's route request is pending."""
+
+    requested = "bbbbbbbbbbbb"
+    initial = _sample()
+    selected = copy.deepcopy(initial)
+    selected["id12"] = requested
+    selected["source_id"] = requested + "c" * 52
+    for algorithm in selected["algorithms"]:
+        algorithm["provenance"]["source_id"] = selected["source_id"]
+    with _server(tmp_path, initial) as server:
+        listing = server.app.api.samples()
+        server.app.api.samples = lambda: {**listing, "samples": [
+            listing["samples"][0], {**listing["samples"][0], "id12": requested},
+        ]}
+
+        def inspect(_command, evaluate) -> None:
+            evaluate("""(() => {
+              const original = window.fetch;
+              window.refreshARequests = 0;
+              window.fetch = (...args) => {
+                if (String(args[0]) === '/api/samples/bbbbbbbbbbbb')
+                  return new Promise((resolve) => { window.releasePendingSelection = resolve; });
+                if (String(args[0]) === '/api/samples/3f9a1c2b7e04') window.refreshARequests += 1;
+                return original.apply(window, args);
+              };
+              location.hash = '#/sample/bbbbbbbbbbbb/findings';
+            })()""")
+            for _ in range(40):
+                if evaluate("typeof window.releasePendingSelection === 'function'"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("B navigation request did not start")
+            before = evaluate("window.TracebackLab.state.navigationRevision")
+            evaluate("document.getElementById('readiness-refresh').click()")
+            assert evaluate("window.TracebackLab.state.navigationRevision") == before
+            assert evaluate("window.refreshARequests === 0")
+            assert evaluate(f"window.TracebackLab.state.renderedHash === '#/sample/{ID12}/methods'")
+            assert evaluate("window.TracebackLab.state.selectedRefresh === null")
+            if succeeds:
+                evaluate("window.releasePendingSelection(new Response(JSON.stringify(__PAYLOAD__), {status:200}))".replace(
+                    "__PAYLOAD__", json.dumps(selected)))
+                for _ in range(40):
+                    if evaluate(f"window.TracebackLab.state.sample?.id12 === '{requested}'"):
+                        break
+                    time.sleep(0.05)
+                else:
+                    pytest.fail("B navigation was cancelled by refresh")
+                assert evaluate(f"location.hash === '#/sample/{requested}/findings'")
+                assert evaluate(f"window.TracebackLab.state.renderedHash === '#/sample/{requested}/findings'")
+                assert evaluate("document.querySelector('#main h1')?.textContent === 'Findings'")
+            else:
+                evaluate("window.releasePendingSelection(new Response('{}', {status:503}))")
+                for _ in range(40):
+                    if evaluate("!!window.TracebackLab.state.loadFailure"):
+                        break
+                    time.sleep(0.05)
+                else:
+                    pytest.fail("B failure did not return to the rendered A route")
+                assert evaluate(f"location.hash === '#/sample/{ID12}/methods'")
+                assert evaluate("document.querySelector('#main h1')?.textContent === 'Methods'")
+                assert evaluate("document.getElementById('readiness-refresh').disabled === false")
+
+        profile = tmp_path / "browser-profile"
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/methods"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'id="readiness-refresh"' in dom,
+            interact=inspect, timeout=90,
+        )
+
+
+@needs_chrome
 def test_timed_out_json_request_discards_late_401(tmp_path) -> None:
     """A response arriving after the explicit deadline cannot expire the page."""
 
@@ -1786,6 +1904,7 @@ def test_reconnected_status_does_not_confirm_stale_selected_result(tmp_path) -> 
             else:
                 pytest.fail("page did not reach its three-miss disconnected state")
             assert evaluate("document.getElementById('freshness-state').dataset.stale === 'true'")
+            assert evaluate("[...document.querySelectorAll('#recovery-action button')].some(button => button.textContent === 'Reload Lab' && !button.disabled)")
             phase["down"] = False
             for _ in range(40):
                 if evaluate("!window.TracebackLab.state.connectionLost && window.TracebackLab.state.refreshFailureKind === 'unavailable'"):
@@ -1799,6 +1918,7 @@ def test_reconnected_status_does_not_confirm_stale_selected_result(tmp_path) -> 
             time.sleep(0.7)
             assert evaluate("document.body.dataset.disconnected === '1'")
             assert evaluate("document.getElementById('sample-switcher').disabled")
+            assert evaluate("[...document.querySelectorAll('#recovery-action button')].some(button => button.textContent === 'Reload Lab' && !button.disabled)")
             evaluate("window.failSelectedRefresh = false; document.querySelector('#recovery-action button').click()")
             for _ in range(40):
                 if evaluate("document.getElementById('freshness-state').dataset.stale === 'false'"):
