@@ -8,16 +8,22 @@ import time
 
 import pytest
 
-from tests.lab.test_acceptance_synthetic_routes import ID12, LICENSE_IDS, _license_nodes, _sample, _server
 from tests.lab.test_acceptance_accessibility import _key
+from tests.lab.test_acceptance_synthetic_routes import (
+    ID12,
+    LICENSE_IDS,
+    _license_nodes,
+    _sample,
+    _server,
+)
 from tests.lab.test_lab_server import _chrome, _dom_cdp
-from tests.lab.test_landing import _dom, _id12, needs_chrome, page_root as _landing_page_root
+from tests.lab.test_landing import _dom, _id12, needs_chrome
+from tests.lab.test_landing import page_root as _landing_page_root
 from traceback_lab.interpretation.engine import Entry, Library, load_library
 from traceback_lab.registry import load_registry
 from traceback_lab.store import LabStore
 from traceback_lab.web.api import _catalog, _result_license_ids
 from traceback_lab.web.server import RunningLabServer
-
 
 LIBRARY = load_library()
 REGISTRY = [item.id for item in load_registry() if item.id not in LIBRARY.hidden_algorithms]
@@ -69,6 +75,9 @@ def test_catalog_numeric_prerequisites_match_algorithm_gates() -> None:
     assert MIN_ELIGIBLE_AUTOSOMAL_PAIRS == 5_000_000
     assert "At least five million eligible autosomal pairs" in methods["griffin"]["requirements"]
     assert any(RESOURCE_VERSION in text for text in methods["lionheart"]["requirements"])
+    assert "Experimental ONT single-end mode requires TRACEBACK_LIONHEART_ENABLE_ONT=1 opt-in" in (
+        methods["lionheart"]["requirements"]
+    )
 
 
 @needs_chrome

@@ -32,7 +32,9 @@ method_catalog:
     description: "Raw chromatin-accessibility correlation scores from the LIONHEART extraction workflow."
     question: "Does the coverage pattern resemble a registered accessibility reference?"
     limitations: "The Lab does not run LIONHEART cancer prediction; ONT use remains experimental."
-    requirements: ["Verified LIONHEART v003 resources and matching toolchain"]
+    requirements:
+      - "Experimental ONT single-end mode requires TRACEBACK_LIONHEART_ENABLE_ONT=1 opt-in"
+      - "Verified LIONHEART v003 resources and matching toolchain"
   short-read-fragment-size:
     description: "Paired-end template-length distribution from an Illumina-declared BAM."
     question: "How do short-read fragment lengths vary across compatible inputs?"
