@@ -135,8 +135,10 @@ Any in-place repair requires an offline backup and operator review first.
 It does not change the measured `sex-check` ratio, source or input identity, or
 cached results. Recording a new assertion advances the local page's change
 counter, including on a fully cached run; repeating the same assertion does
-not. Trust/QC compares a definite male/female call with the assertion at read
-time as a pre-analytic check. An absent assertion, unavailable measured call
+not. That change can prompt Reload without a newly completed analysis run; it
+does not change which primary input the landing selects. Trust/QC compares a
+definite male/female call with the assertion at read time as a pre-analytic
+check. An absent assertion, unavailable measured call
 (including a skipped or failed check), and a measured indeterminate call have
 distinct no-verdict explanations. The page marks the check as privacy-sensitive
 and does not present it as a diagnostic sex or gender determination. A conflicting
@@ -758,6 +760,11 @@ that default. A different registered sample can be opened explicitly with
 `#/?sample=<id12>`; selecting the same source during its rerun still shows
 that source's last completed primary input until the newer run completes. If
 no run has completed, the landing lists registered samples without selecting one.
+For a completed run, the displayed date is its terminal timestamp. A sample
+without a recorded completion shows its latest input-use time instead. Results
+come from the currently selected immutable attempts for a completed input,
+so a later attempt selection can change shown metrics after Reload without
+changing that input or its completion date.
 If a completed run's primary input is missing, restore that input or rerun the
 sample. If recorded completion history cannot be verified because a run log is
 missing or unreadable, restore the log or rerun; the landing does not substitute
@@ -1083,11 +1090,15 @@ A warning (exit 0): the samtools or minimap2 version changed since this sample w
 
 ### TBX-LAB-020
 
-Unexpected internal error (exit 7). Run `traceback lab runs RUN_ID`, then
-report the code and the command. For `cohort add` or `cohort build`, this code
-also identifies a missing, malformed or unsafe stored source/input record.
-Restore the named regular JSON file from a known-good backup before retrying;
-the cohort's published generation is left unchanged.
+Unexpected internal error (exit 7). For an unexpected failure, run
+`traceback lab runs RUN_ID`, then report the code and command. In `cohort add`,
+`cohort build`, or Compare, this code can also identify a missing, malformed,
+or unsafe stored source/input record. Restore the named regular JSON file from
+a known-good backup; a missing input manifest cannot be replaced by rerunning
+under the same ROOT while its input directory remains. If that manifest cannot
+be restored, re-ingest under a fresh ROOT, rebuild the cohort there, then serve
+that ROOT and open Compare. The previously published cohort generation is left
+unchanged by the failed read.
 
 ### TBX-LAB-021
 

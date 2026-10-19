@@ -958,7 +958,12 @@ class LabApi:
         if sample is None:
             problem = LabProblem(
                 "TBX-LAB-017", cause=f"sample {id12} has no readable current full input",
-                fix="Inspect `traceback lab runs`, restore the source record if needed, then rerun the sample",
+                fix=("Inspect `traceback lab runs` and restore the source record, completed-run log, "
+                     "or pinned input manifest from a known-good backup as needed. If the pinned "
+                     "manifest is intact, rerun the sample from its original input under this ROOT "
+                     "and reload Compare. If the manifest cannot be restored, re-ingest the original "
+                     "input under a fresh ROOT, rebuild the cohort there, then serve that ROOT "
+                     "and open Compare"),
             )
             return {"found": True, "id12": id12, "cohort_id": cohort_id,
                     "state": "target_unavailable", "metrics": [], "unscored": [],
@@ -999,16 +1004,22 @@ class LabApi:
         except LabProblem as problem:
             if problem.code == "TBX-LAB-021":
                 return {**base, "state": "example_unscorable", "metrics": [], "unscored": []}
-            return {**base, "state": "target_unavailable", "metrics": [], "unscored": [],
-                    "problem": _recovery_problem(problem)}
-        except ValueError as exc:
-            if str(exc) != "admitted source has no full aligned input":
-                raise
-            problem = LabProblem(
-                "TBX-LAB-017", cause=f"sample {id12} has no stored full aligned input",
-                fix="Inspect `traceback lab runs`, restore the sample's full input if needed, "
-                    "then rerun from its original input and reload Compare",
-            )
+            if (problem.code == "TBX-LAB-020"
+                    and problem.data.get("input_id") == sample.full.input_id
+                    and problem.data.get("field") in ("source input identity", "manifest")):
+                if problem.data["field"] == "source input identity":
+                    fix = (f"Restore the pinned source record entry for input {sample.full.input_id[:12]} "
+                           "from a known-good backup, or rerun the sample from its original input, "
+                           "then reload Compare")
+                else:
+                    fix = (f"Restore the pinned input manifest for input {sample.full.input_id[:12]} "
+                           "from a known-good backup. If it cannot be restored, re-ingest the original "
+                           "input under a fresh ROOT, rebuild the cohort there, then serve that ROOT "
+                           "and open Compare. The existing input directory cannot be replaced in place")
+                problem = LabProblem(
+                    "TBX-LAB-020", cause=problem.cause, fix=fix, data=problem.data,
+                    summary="Pinned input unavailable",
+                )
             return {**base, "state": "target_unavailable", "metrics": [], "unscored": [],
                     "problem": _recovery_problem(problem)}
         # Both reads must describe the same full input. A newer run may become

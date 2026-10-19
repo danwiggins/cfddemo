@@ -620,7 +620,13 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
     return EXIT_OK, _with_human(payload, lines, replace_data=True)
 
 
-def _preflight_budget(args: argparse.Namespace, store: LabStore, *, example_needs_generation: bool) -> None:
+def _preflight_budget(
+    args: argparse.Namespace,
+    store: LabStore,
+    *,
+    example_needs_generation: bool,
+    progress: Callable[[str], None],
+) -> None:
     """Refuse a known disk shortfall before the writer creates Lab bookkeeping.
 
     The cheap bound avoids a second chunk hash on ordinary runs. A possible
@@ -656,7 +662,11 @@ def _preflight_budget(args: argparse.Namespace, store: LabStore, *, example_need
     if upper.ok:
         return
 
-    chunkset = inspect_chunks(paths, store, skip_bad_chunks=args.skip_bad_chunks, write_cache=False)
+    progress("preflight  checking exact disk budget and input identity (read-only)")
+    chunkset = inspect_chunks(
+        paths, store, skip_bad_chunks=args.skip_bad_chunks, write_cache=False,
+        progress=lambda line: progress(f"preflight  {line.removeprefix('ingest  ')}"),
+    )
     input_platform = _declared_platform(chunkset)
     with_sex_assertion(source_record(store, chunkset.source_id) or {}, args.sex)
     verify_reference_source(store, reference, write_cache=False)
@@ -740,11 +750,25 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
     entries = registry.registry_entries()
     by_id = {alg.id: entry for entry, alg in entries}
     items = registry.plan([alg for _, alg in entries], only=_only(args.only), profile=args.profile)
-    _preflight_budget(args, store, example_needs_generation=example_needs_generation)
-    run_id = new_run_id()
-    started = time.monotonic()
-    progress(f"ROOT  {store.root}")
     previous_term = signal.signal(signal.SIGTERM, _interrupted_handler)
+    try:
+        progress(f"ROOT  {store.root}")
+        _preflight_budget(
+            args, store, example_needs_generation=example_needs_generation, progress=progress,
+        )
+        run_id = new_run_id()
+        started = time.monotonic()
+    except KeyboardInterrupt:
+        signal.signal(signal.SIGTERM, previous_term)
+        raise LabProblem(
+            "TBX-LAB-015",
+            cause="Interrupted during preflight, before the Lab writer started.",
+            fix="Rerun the same command; only missing results recompute",
+            data={"step": "preflight"},
+        ) from None
+    except BaseException:
+        signal.signal(signal.SIGTERM, previous_term)
+        raise
     try:
         with store.writer("run", run_id, step="ingest") as lock:
             log = store.run_log(run_id)

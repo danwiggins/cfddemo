@@ -8,9 +8,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.lab.test_cohort_store import _sample, _sha
 from traceback_lab import cohorts
 from traceback_lab.cohort_contracts import CohortGeneration, CohortMember, CohortResult
 from traceback_lab.cohorts import CohortListing
+from traceback_lab.completed_runs import record_completion
 from traceback_lab.envelope import Metric, ResultEnvelope, provenance
 from traceback_lab.interpretation.engine import Entry, Library, classify, load_library
 from traceback_lab.problems import LabProblem
@@ -273,29 +275,106 @@ def test_compare_target_unavailable_has_no_metrics(tmp_path, monkeypatch) -> Non
     assert payload["cohort_version"] == "healthy:7"
     assert payload["metrics"] == [] and payload["unscored"] == []
     assert payload["problem"]["code"] == "TBX-LAB-020"
+    assert payload["problem"]["summary"] == problem.summary
+    assert payload["problem"]["fix"] == problem.fix
 
 
-def test_compare_missing_full_input_has_prose_recovery(tmp_path, monkeypatch) -> None:
+def _completed_compare_store_with_newer_input(tmp_path):
     store = LabStore(tmp_path)
-    store.sources_dir.mkdir(parents=True)
-    (store.sources_dir / f"{_TARGET}.json").write_text(json.dumps({
-        "source_id": _TARGET, "example": False, "inputs": [],
-    }))
+    source_id = _sample(store, 1)
+    input_id = _sha(101)
+    active_input_id = _sha(201)
+    run_id = "r-20261017-1000-abcd"
+    log = store.run_log(run_id)
+    log.append("run_start", command="run")
+    log.append("sample", source_id=source_id, input_id=input_id)
+    log.append("run_end", status="ok", exit_code=0)
+    record_completion(store, run_id, source_id, input_id)
+    original_input_dir = store.inputs_dir / input_id
+    active_input_dir = store.inputs_dir / active_input_id
+    active_input_dir.mkdir()
+    active_manifest = json.loads((original_input_dir / "manifest.json").read_text())
+    active_manifest["input_id"] = active_input_id
+    (active_input_dir / "manifest.json").write_text(json.dumps(active_manifest))
+    (active_input_dir / "aligned.bam").write_bytes((original_input_dir / "aligned.bam").read_bytes())
+    source_path = store.sources_dir / f"{source_id}.json"
+    source_record = json.loads(source_path.read_text())
+    source_record["inputs"].append({"input_id": active_input_id, "kind": "aligned",
+                                    "used_utc": "2026-10-18T00:00:00Z"})
+    source_path.write_text(json.dumps(source_record))
+    assert cohorts.member_from_store(store, source_id, input_id=active_input_id).input_id == active_input_id
     generation = CohortGeneration(cohort_id="healthy", version=7, members=())
-    monkeypatch.setattr(web_api, "read_current", lambda store, cohort_id: generation)
-    monkeypatch.setattr(web_api.views, "load_sample", lambda store, source_id: SimpleNamespace(example=False, full=SimpleNamespace(input_id=f"{101:064x}")))
-    monkeypatch.setattr(cohorts, "member_for_generation", lambda store, generation, source_id, **_: (
-        _ for _ in ()
-    ).throw(ValueError("admitted source has no full aligned input")))
+    generation_dir = store.lab / "cohorts" / "healthy" / "generations" / "7"
+    generation_dir.mkdir(parents=True)
+    (generation_dir / "generation.json").write_text(generation.model_dump_json(by_alias=True))
+    (generation_dir.parent.parent / "current.json").write_text('{"version":7}')
+    return store, source_id, input_id
+
+
+def test_compare_missing_completed_manifest_before_view_has_workable_recovery(tmp_path) -> None:
+    store, source_id, input_id = _completed_compare_store_with_newer_input(tmp_path)
     api = web_api.LabApi(store)
-    monkeypatch.setattr(api, "_resolve", lambda id12: (_TARGET, []))
-    monkeypatch.setattr(api, "_id12s", lambda: {_TARGET: _TARGET[:12]})
+    assert api.compare(source_id[:12], "healthy")["state"] == "ready"
+    (store.inputs_dir / input_id / "manifest.json").unlink()
 
-    payload = api.compare(_TARGET[:12], "healthy")
+    payload = api.compare(source_id[:12], "healthy")
 
-    assert payload["state"] == "target_unavailable" and payload["metrics"] == []
-    assert "original input" in payload["problem"]["fix"]
-    assert "--root R" not in payload["problem"]["fix"] and "ID12" not in payload["problem"]["fix"]
+    assert payload["found"] is True and payload["state"] == "target_unavailable"
+    assert payload["metrics"] == [] and payload["unscored"] == []
+    assert payload["problem"]["code"] == "TBX-LAB-017"
+    fix = payload["problem"]["fix"]
+    assert "source record" in fix and "input manifest" in fix
+    assert "known-good backup" in fix
+    assert "If the pinned manifest is intact, rerun the sample" in fix
+    assert "under this ROOT" in fix
+    assert "fresh ROOT" in fix and "rebuild the cohort" in fix and "serve that ROOT" in fix
+    assert "If the manifest cannot be restored" in fix
+
+
+@pytest.mark.parametrize("disappearance", ("source_membership", "manifest"))
+def test_compare_pinned_input_disappearing_after_view_has_specific_recovery(
+    tmp_path, monkeypatch, disappearance,
+) -> None:
+    store, source_id, input_id = _completed_compare_store_with_newer_input(tmp_path)
+    api = web_api.LabApi(store)
+    assert api.compare(source_id[:12], "healthy")["state"] == "ready"
+    real_load = web_api.views.load_sample
+    loaded = []
+
+    def disappear_after_view(target_store, target_source):
+        sample = real_load(target_store, target_source)
+        assert sample is not None and sample.full.input_id == input_id
+        loaded.append(sample.full.input_id)
+        if disappearance == "source_membership":
+            path = store.sources_dir / f"{source_id}.json"
+            record = json.loads(path.read_text())
+            record["inputs"] = [entry for entry in record["inputs"] if entry["input_id"] != input_id]
+            path.write_text(json.dumps(record))
+        else:
+            (store.inputs_dir / input_id / "manifest.json").unlink()
+        return sample
+
+    monkeypatch.setattr(web_api.views, "load_sample", disappear_after_view)
+
+    payload = api.compare(source_id[:12], "healthy")
+
+    assert loaded == [input_id]
+    assert payload["state"] == "target_unavailable"
+    assert payload["cohort_version"] == "healthy:7"
+    assert payload["metrics"] == [] and payload["unscored"] == []
+    assert payload["problem"]["code"] == "TBX-LAB-020"
+    assert payload["problem"]["summary"] == "Pinned input unavailable"
+    assert input_id[:12] in payload["problem"]["cause"]
+    assert "Compare" in payload["problem"]["fix"]
+    if disappearance == "source_membership":
+        assert "source record entry" in payload["problem"]["fix"]
+        assert "rerun the sample from its original input" in payload["problem"]["fix"]
+        assert "fresh ROOT" not in payload["problem"]["fix"]
+    else:
+        assert "input manifest" in payload["problem"]["fix"]
+        assert "fresh ROOT" in payload["problem"]["fix"]
+        assert "rebuild the cohort there" in payload["problem"]["fix"]
+        assert "existing input directory cannot be replaced" in payload["problem"]["fix"]
 
 
 def test_example_is_explicitly_unscorable(tmp_path, monkeypatch) -> None:
