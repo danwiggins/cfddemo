@@ -129,12 +129,33 @@
   }
 
   // -- routes -------------------------------------------------------------------------
+  function parseContext(params) {
+    const keys = ["algorithm", "metric", "family"];
+    const context = { algorithm: null, metric: null, family: null };
+    const known = new URLSearchParams();
+    let invalid = false;
+    for (const key of keys) {
+      const values = params.getAll(key);
+      if (values.length > 1) invalid = true;
+      for (const value of values) known.append(key, value);
+      if (values.length === 1) {
+        if (/^[A-Za-z0-9_-]{1,64}$/.test(values[0])) context[key] = values[0];
+        else invalid = true;
+      }
+    }
+    if (known.toString().length > 256 || (context.metric && !context.algorithm)) invalid = true;
+    return invalid
+      ? { context: { algorithm: null, metric: null, family: null }, contextInvalid: true,
+        contextError: "Context link is invalid; showing the selected sample." }
+      : { context, contextInvalid: false, contextError: null };
+  }
+
   function parseRoute() {
     const hash = location.hash.replace(/^#/, "") || "/";
     const [pathPart, query = ""] = hash.split("?");
     const params = new URLSearchParams(query);
     let match = pathPart.match(/^\/sample\/([0-9a-f]{12,64})\/([a-z-]+)$/);
-    if (match) return { name: "lens", id12: match[1], lens: match[2] };
+    if (match) return { name: "lens", id12: match[1], lens: match[2], ...parseContext(params) };
     if (pathPart === "/" || pathPart === "") {
       const sample = params.get("sample");
       if (sample && !/^[0-9a-f]{12,64}$/.test(sample)) return { name: "unknown", id12: sample };
