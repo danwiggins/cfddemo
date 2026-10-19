@@ -371,7 +371,7 @@ So this spec hardens a deployment that doesn't exist yet, on code that the archi
 - **Repo age and pace.** First commit 2026-09-26; 477 commits in 7 days (153 on 2026-09-29). No `.github/workflows`, so no CI (as of 2026-10-02; CI landed in #91).
 - **The branch diff vs. local `main`** shows D10 files as well, because local `main` is behind `origin`. This branch's only own change is this spec.
 - **TODOS.md (16 lines)** already defers "additional operating systems … after the paid provider pilot", which is consistent with P3. It has no security items.
-- **The in-flight browser work** was uncommitted at review time in worktree `agent-a2f921bc99d6aee7a` (branch `epic-e/e12-browser-integration`, then at `eaac96a`; merged since as #93). Diff: +323 lines across `server.py`, `reader_session.py`, `explorer.py`, `app.js` and `index.html`, plus new files `web/longitudinal.py` (2185 lines) and `static/longitudinal.js`.
+- **The in-flight browser work** was uncommitted in a separate worktree at review time (branch `epic-e/e12-browser-integration`, then at `eaac96a`; merged since as #93). Diff: +323 lines across `server.py`, `reader_session.py`, `explorer.py`, `app.js` and `index.html`, plus new files `web/longitudinal.py` (2185 lines) and `static/longitudinal.js`.
   - It adds 3 GET and 4 POST longitudinal routes.
   - It adds `ReaderSessionBinder.session_credential`, which builds the D08 `ReaderGrantBinding` from **server-side session state**. That already covers the realistic part of H7.
 - **Design doc:** none for this branch. The office-hours prerequisite was skipped (P6).

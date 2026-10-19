@@ -658,7 +658,7 @@ BAM ──▶ preflight ──▶ seal copy ──▶ measure ──▶ sign ─
 
 **5. Code quality.** Finding C5: B4 says "reuse the demo flow" but not how. Auto-decided (P4 DRY, P5 explicit): extract `_execute_signed_run(root, request, source, files, stages, key)` from `_demo` and call it from both; `demo` output bytes must not change. No over-engineering found: each new module has one caller set. `local_authority.py` is the only new abstraction and it replaces a test helper being reused in production.
 
-**6. Tests.** Full diagram in Eng Section 3. CEO-level gaps: no test for ENOSPC (TBX-RUN-004), zero-eligible (TBX-RUN-005), operator-lock contention, or "catalog row never says qualified" for the real path (B5 AC5 covers files, not the API). All four added to the test plan artifact. The 2am-Friday test is the DoD script; the hostile-QA test is "import a bundle signed by a key removed from the trust registry".
+**6. Tests.** Full diagram in Eng Section 3. CEO-level gaps: no test for ENOSPC (TBX-RUN-004), zero-eligible (TBX-RUN-005), operator-lock contention, or "catalog row never says qualified" for the real path (B5 AC5 covers files, not the API). All four added to the local test plan. The 2am-Friday test is the DoD script; the hostile-QA test is "import a bundle signed by a key removed from the trust registry".
 
 **7. Performance.** Slow paths: sealing copies the 2.1 GB BAM (seconds to tens of seconds on SSD), FASTA MD5 over 3.2 GB (about 10-30 s), measurement scan 9.9 s. None is user-blocking at this scale. Memory: measurement streams; catalog rows are 1 per record. The ">= 2x input free space" doctor rule scales to about 60 GB for a 30 GB modBAM later, which is fine to state. No issues beyond X4.
 
@@ -1233,7 +1233,7 @@ Nothing below is decided. The spec body reflects the user's stated direction plu
 
 ## Implementation Tasks (aggregated)
 
-CEO tasks C-T1..C-T6 and Eng tasks E-T1..E-T10 are listed in their phases; their local planning records are not part of this repository. DX tasks:
+CEO tasks C-T1..C-T6 are listed in their phase. Eng tasks E-T1..E-T10 are recorded in local planning notes that are not part of this repository. DX tasks:
 - [ ] **D-T1 (P1, human: ~3h / CC: ~15min)** — B4 — cli-result v2 `data_origin`; help text. Files: `traceback_runner/cli.py`.
 - [ ] **D-T2 (P1, human: ~3h / CC: ~15min)** — B2/B4/B5a — `_problem` helper and six-field errors. Files: `traceback_runner/cli.py`.
 - [ ] **D-T3 (P1, human: ~4h / CC: ~30min)** — B8 — operator guide real-BAM section, README link, executed by the DoD. Files: `docs/OPERATOR-GUIDE.md`, `README.md`, `scripts/golden_path_acceptance.sh`.
