@@ -120,7 +120,7 @@
     if (!code) return;
     // An optional start route travels with the one-use link (e.g. for a deep link).
     const route = params.get("route");
-    const safe = route && /^\/[A-Za-z0-9/?=._-]{0,120}$/.test(route) ? route : "/";
+    const safe = route && /^\/[A-Za-z0-9/?=&._-]{0,383}$/.test(route) ? route : "/";
     history.replaceState(null, "", location.pathname + "#" + safe);
     const response = await fetch("/api/v1/session/bootstrap", {
       method: "POST",
@@ -196,7 +196,7 @@
   }
 
   // -- routes -------------------------------------------------------------------------
-  function parseContext(params) {
+  function parseContext(params, query, routeLength) {
     const keys = ["algorithm", "metric", "family"];
     const context = { algorithm: null, metric: null, family: null };
     const known = new URLSearchParams();
@@ -210,7 +210,8 @@
         else invalid = true;
       }
     }
-    if (known.toString().length > 256 || (context.metric && !context.algorithm)) invalid = true;
+    if (query.length > 256 || routeLength > 384 || known.toString().length > 256 ||
+        (context.metric && !context.algorithm)) invalid = true;
     return invalid
       ? { context: { algorithm: null, metric: null, family: null }, contextInvalid: true,
         contextError: "Context link is invalid; showing the selected sample." }
@@ -222,7 +223,7 @@
     const [pathPart, query = ""] = hash.split("?");
     const params = new URLSearchParams(query);
     let match = pathPart.match(/^\/sample\/([0-9a-f]{12,64})\/([a-z-]+)$/);
-    if (match) return { name: "lens", id12: match[1], lens: match[2], ...parseContext(params) };
+    if (match) return { name: "lens", id12: match[1], lens: match[2], ...parseContext(params, query, hash.length) };
     if (pathPart === "/" || pathPart === "") {
       const sample = params.get("sample");
       if (sample && !/^[0-9a-f]{12,64}$/.test(sample)) return { name: "unknown", id12: sample };

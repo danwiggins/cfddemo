@@ -178,7 +178,7 @@ def test_example_guides_three_recorded_signals(journey_root, tmp_path) -> None:
     with RunningLabServer(store) as server:
         dom = _dom(server, tmp_path, route=f"/sample/{id12}/signals",
                    want=lambda page: 'data-guide-signal="bam-qc/mapped_fraction"' in page)
-    cards = re.findall(r'<article class="signal-guide-card" data-guide-signal="([^"]+)">(.*?)</article>', dom, re.S)
+    cards = re.findall(r'<article class="signal-guide-card"[^>]*data-guide-signal="([^"]+)">(.*?)</article>', dom, re.S)
     assert [key for key, _ in cards] == [f"{algorithm_id}/{metric_id}" for algorithm_id, metric_id in selected]
     assert all("Observed: <strong>unavailable" not in card for _, card in cards)
     assert "seeded synthetic example" in dom and "no biological finding" in dom

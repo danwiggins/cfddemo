@@ -56,7 +56,11 @@ def test_echarts_scatter_values_match_adjacent_table_without_animation(route, ex
                 points: option?.series.filter((series) => series.type === 'scatter').flatMap((series) => series.data),
                 axes: [option?.xAxis[0].name, option?.yAxis[0].name],
                 rows: [...table.querySelectorAll('tbody tr')].map((row) =>
-                  [...row.querySelectorAll('td')].map((cell) => cell.textContent.trim())),
+                  [...row.querySelectorAll('td')].map((cell) =>
+                    (cell.querySelector('.display-value') || cell).textContent.trim())),
+                rawRows: [...table.querySelectorAll('tbody tr')].map((row) =>
+                  [...row.querySelectorAll('td')].map((cell) =>
+                    cell.querySelector('details.raw-value code')?.textContent.trim() || null)),
               };
             }))()"""))
 
@@ -77,6 +81,8 @@ def test_echarts_scatter_values_match_adjacent_table_without_animation(route, ex
         assert [[float(value.removesuffix("%").removesuffix(" bp").strip()) for value in pair]
                 for pair in table_pairs] == chart["points"]
         assert any("%" in name for name in chart["axes"])
+        if route == "/":
+            assert chart["rawRows"][0][:2] == ["0.1 fraction", "0.123456789 fraction"]
 
 
 @needs_chrome
@@ -112,7 +118,11 @@ def test_fragment_density_line_values_match_adjacent_table_without_animation(rou
                 xUnit: option?.xAxis[0].name,
                 yUnit: option?.yAxis[0].name,
                 rows: [...table.querySelectorAll('tbody tr')].map((row) =>
-                  [...row.querySelectorAll('td')].map((cell) => cell.textContent.trim())),
+                  [...row.querySelectorAll('td')].map((cell) =>
+                    (cell.querySelector('.display-value') || cell).textContent.trim())),
+                rawRows: [...table.querySelectorAll('tbody tr')].map((row) =>
+                  [...row.querySelectorAll('td')].map((cell) =>
+                    cell.querySelector('details.raw-value code')?.textContent.trim() || null)),
               };
             }))()"""))
 
@@ -139,6 +149,8 @@ def test_fragment_density_line_values_match_adjacent_table_without_animation(rou
         assert chart["points"] == expected
         assert [int(row[0]) for row in chart["rows"]] == spans
         assert [float(row[1].removesuffix("%")) for row in chart["rows"]] == expected
+        assert [float(row[1].split()[0]) for row in chart["rawRows"]] == [
+            counts[bp - 1] / denominator for bp in spans]
 
 
 @needs_chrome
