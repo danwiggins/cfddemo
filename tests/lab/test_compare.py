@@ -12,6 +12,7 @@ from tests.lab.test_cohort_store import _sample, _sha
 from traceback_lab import cohorts
 from traceback_lab.cohort_contracts import CohortGeneration, CohortMember, CohortResult
 from traceback_lab.cohorts import CohortListing
+from traceback_lab.completed_runs import record_completion
 from traceback_lab.envelope import Metric, ResultEnvelope, provenance
 from traceback_lab.interpretation.engine import Entry, Library, classify, load_library
 from traceback_lab.problems import LabProblem
@@ -284,6 +285,26 @@ def test_compare_pinned_input_disappearing_after_view_has_specific_recovery(
     store = LabStore(tmp_path)
     source_id = _sample(store, 1)
     input_id = _sha(101)
+    active_input_id = _sha(201)
+    run_id = "r-20261017-1000-abcd"
+    log = store.run_log(run_id)
+    log.append("run_start", command="run")
+    log.append("sample", source_id=source_id, input_id=input_id)
+    log.append("run_end", status="ok", exit_code=0)
+    record_completion(store, run_id, source_id, input_id)
+    original_input_dir = store.inputs_dir / input_id
+    active_input_dir = store.inputs_dir / active_input_id
+    active_input_dir.mkdir()
+    active_manifest = json.loads((original_input_dir / "manifest.json").read_text())
+    active_manifest["input_id"] = active_input_id
+    (active_input_dir / "manifest.json").write_text(json.dumps(active_manifest))
+    (active_input_dir / "aligned.bam").write_bytes((original_input_dir / "aligned.bam").read_bytes())
+    source_path = store.sources_dir / f"{source_id}.json"
+    source_record = json.loads(source_path.read_text())
+    source_record["inputs"].append({"input_id": active_input_id, "kind": "aligned",
+                                    "used_utc": "2026-10-18T00:00:00Z"})
+    source_path.write_text(json.dumps(source_record))
+    assert cohorts.member_from_store(store, source_id, input_id=active_input_id).input_id == active_input_id
     generation = CohortGeneration(cohort_id="healthy", version=7, members=())
     generation_dir = store.lab / "cohorts" / "healthy" / "generations" / "7"
     generation_dir.mkdir(parents=True)
@@ -301,7 +322,7 @@ def test_compare_pinned_input_disappearing_after_view_has_specific_recovery(
         if disappearance == "source_membership":
             path = store.sources_dir / f"{source_id}.json"
             record = json.loads(path.read_text())
-            record["inputs"] = []
+            record["inputs"] = [entry for entry in record["inputs"] if entry["input_id"] != input_id]
             path.write_text(json.dumps(record))
         else:
             (store.inputs_dir / input_id / "manifest.json").unlink()
@@ -317,9 +338,16 @@ def test_compare_pinned_input_disappearing_after_view_has_specific_recovery(
     assert payload["metrics"] == [] and payload["unscored"] == []
     assert payload["problem"]["code"] == "TBX-LAB-020"
     assert input_id[:12] in payload["problem"]["cause"]
-    assert "original input" in payload["problem"]["fix"]
     assert "Compare" in payload["problem"]["fix"]
-    assert "cohort build" not in payload["problem"]["fix"]
+    if disappearance == "source_membership":
+        assert "source record entry" in payload["problem"]["fix"]
+        assert "rerun the sample from its original input" in payload["problem"]["fix"]
+        assert "fresh ROOT" not in payload["problem"]["fix"]
+    else:
+        assert "input manifest" in payload["problem"]["fix"]
+        assert "fresh ROOT" in payload["problem"]["fix"]
+        assert "rebuild the cohort there" in payload["problem"]["fix"]
+        assert "existing input directory cannot be replaced" in payload["problem"]["fix"]
 
 
 def test_example_is_explicitly_unscorable(tmp_path, monkeypatch) -> None:
