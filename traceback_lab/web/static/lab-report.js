@@ -1,4 +1,4 @@
-/* Pure, bounded ResearchReportV1 projection. No DOM, fetch, or artifact access. */
+/* Pure, bounded ResearchReportV2 projection. No DOM, fetch, or artifact access. */
 (() => {
   "use strict";
 
@@ -301,7 +301,7 @@
   const columns = [
     "schema_version", "generated_at", "research_use_only", "example", "sample_id", "source_id",
     "full_input_id", "run_utc", "interpretation_version", "cohort_version", "limitations",
-    "algorithm_id", "metric_id", "label", "raw_value", "raw_unit", "display_value",
+    "algorithm_id", "metric_id", "label", "raw_value", "raw_unit", "recorded_support_n", "display_value",
     "display_unit", "status", "skip_reason", "interpretation_state", "tool", "tool_version",
     "parameters_sha256", "attempt_id", "reference_id", "computed_at",
   ];
@@ -377,14 +377,51 @@
       "Stable input and provenance identifiers may be linkable to other local records.",
     ];
     const note = (message) => { if (!limitations.includes(message)) limitations.push(message); };
-    const visible = new Set(sample.catalog.filter((row) => row && id.test(row.algorithm_id))
-      .map((row) => row.algorithm_id));
+    if (Array.isArray(sample.excluded_chunks)) {
+      const knownExcluded = sample.excluded_chunks.filter((chunk) => Number.isSafeInteger(chunk) && chunk >= 0);
+      if (knownExcluded.length) note(
+        `Provisional input: ${knownExcluded.length} truncated chunks were excluded; measurements reflect only the reads present.`,
+      );
+      if (knownExcluded.length !== sample.excluded_chunks.length)
+        note("Input-exclusion detail was invalid; collection completeness could not be confirmed.");
+    } else note("Input-exclusion status was unavailable; collection completeness could not be confirmed.");
+    const catalog = sample.catalog.filter((row) => row && typeof row.algorithm_id === "string" &&
+      id.test(row.algorithm_id) && Object.hasOwn(audited, row.algorithm_id));
+    const visible = new Set(catalog.map((row) => row.algorithm_id));
+    const selectionIssues = new Map();
+    for (const row of catalog) {
+      if (["unreadable", "ambiguous", "not run"].includes(row.status))
+        selectionIssues.set(row.algorithm_id, row.status);
+    }
+    for (const [field, status] of [["unreadable_results", "unreadable"], ["ambiguous_results", "ambiguous"]]) {
+      if (!Array.isArray(sample[field])) {
+        note("Result-selection detail was unavailable; method omissions may be incomplete.");
+        continue;
+      }
+      for (const algorithmId of sample[field]) {
+        if (typeof algorithmId === "string" && visible.has(algorithmId)) {
+          if (status === "unreadable" || selectionIssues.get(algorithmId) !== "unreadable")
+            selectionIssues.set(algorithmId, status);
+        }
+        else note("An unrecognized result-selection identity was omitted from this report.");
+      }
+    }
+    if (sample.malformed_result_selections === true)
+      note("Malformed result selections were detected; affected method results may be absent.");
+    else if (sample.malformed_result_selections !== false)
+      note("Result-selection detail was unavailable; method omissions may be incomplete.");
+    for (const [algorithmId, status] of selectionIssues) {
+      note(`Method ${algorithmId}: ${status === "not run" ? "not run" : `selected result ${status}`}; no scalar rows.`);
+    }
     const metrics = [];
     let scanned = 0;
+    const recorded = new Set();
     for (const algorithm of sample.algorithms) {
       if (!algorithm || !visible.has(algorithm.algorithm_id) ||
           !Object.hasOwn(audited, algorithm.algorithm_id) || algorithm.hidden === true) continue;
       const algorithmId = algorithm.algorithm_id;
+      recorded.add(algorithmId);
+      if (selectionIssues.has(algorithmId)) continue;
       const status = algorithm.status;
       const reason = status === "skipped" && reasons.has(algorithm.skip_reason) ? algorithm.skip_reason : null;
       if (status === "skipped" || status === "failed") {
@@ -422,6 +459,10 @@
           continue;
         }
         if (raw.nonfinite) note("Some nonfinite numeric values are unavailable in this report.");
+        const recordedSupportN = metric.n == null ? null
+          : Number.isSafeInteger(metric.n) && metric.n >= 0 ? metric.n : null;
+        if (metric.n != null && recordedSupportN == null)
+          note("Some recorded support counts were invalid and are shown as unavailable.");
         const interpretationState = metric.state == null || states.has(metric.state) ? metric.state ?? null : null;
         if (metric.state != null && interpretationState == null) note("Some interpretation states were unavailable.");
         // Pass only vetted scalar fields; free-form reason, entry, and API diagnostics never reach the formatter.
@@ -442,7 +483,7 @@
         if (metrics.length >= MAX_ROWS) fail("report_too_many_rows", "The report exceeds the 5,000 row export limit.");
         metrics.push({
           algorithm_id: algorithmId, metric_id: metric.metric_id, label,
-          raw_value: raw.value, raw_unit: metric.unit ?? null,
+          raw_value: raw.value, raw_unit: metric.unit ?? null, recorded_support_n: recordedSupportN,
           display_value: formatted.displayValue, display_unit: formatted.displayUnit ?? null,
           status, skip_reason: reason, interpretation_state: interpretationState,
           tool: algorithm.provenance.tool, tool_version: algorithm.provenance.tool_version,
@@ -453,9 +494,16 @@
         });
       }
     }
+    for (const row of catalog) {
+      if (recorded.has(row.algorithm_id) || selectionIssues.has(row.algorithm_id)) continue;
+      if (row.status === "skipped" || row.status === "failed") {
+        const reason = row.status === "skipped" && reasons.has(row.skip_reason) ? ` (${row.skip_reason})` : "";
+        note(`Method ${row.algorithm_id}: ${row.status}${reason}; no scalar rows.`);
+      }
+    }
     if (!metrics.length) fail("no_report_rows", "No eligible scalar metrics are available for this sample.");
     const report = {
-      schema_version: "1", generated_at: generatedAt, research_use_only: true,
+      schema_version: "2", generated_at: generatedAt, research_use_only: true,
       example: sample.example, sample_id: sample.id12, source_id: sample.source_id,
       full_input_id: sample.full_input_id, run_utc: sample.run_utc || null,
       interpretation_version: sample.interpretation_version,
