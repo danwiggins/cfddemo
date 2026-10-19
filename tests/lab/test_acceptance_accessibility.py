@@ -652,6 +652,42 @@ def test_live_status_changes_keep_focus_and_open_disclosure(tmp_path) -> None:
 
 
 @needs_chrome
+def test_key_dialog_restores_invoker_after_unfocused_click(tmp_path) -> None:
+    """A click that does not focus its button still returns focus to Key on Escape."""
+
+    with _server(tmp_path, _sample()) as server:
+        def inspect(command, evaluate) -> None:
+            opened = evaluate("""(() => {
+              const title = document.querySelector('main h1');
+              const button = document.getElementById('key-button');
+              const dialog = document.getElementById('key-dialog');
+              title.focus();
+              const titleFocused = document.activeElement === title;
+              window.keyDialogCloseObserved = false;
+              dialog.addEventListener('close', () => { window.keyDialogCloseObserved = true; }, {once: true});
+              button.click();
+              return {titleFocused, open: dialog.open, focusInside: dialog.contains(document.activeElement)};
+            })()""")
+            assert opened == {"titleFocused": True, "open": True, "focusInside": True}
+            _key(command, "Escape", "Escape", 27)
+            for _ in range(20):
+                if evaluate("window.keyDialogCloseObserved === true"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("Key dialog close event did not fire")
+            assert evaluate("document.activeElement === document.getElementById('key-button')")
+
+        profile = tmp_path / "browser-profile"
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/findings"],
+            profile, ok=lambda d: 'data-ready="1"' in d and 'class="finding-card"' in d,
+            interact=inspect, timeout=90,
+        )
+
+
+@needs_chrome
 def test_key_dialog_close_does_not_steal_new_focus(tmp_path) -> None:
     """A queued close event must not undo focus travel after the dialog closes."""
 
