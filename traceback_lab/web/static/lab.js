@@ -178,6 +178,7 @@
     const requestedHash = location.hash || "#/";
     const route = parseRoute();
     const target = route.id12 || (route.name === "home" ? state.defaultSampleId12 : null);
+    window.TracebackLabReportUI?.selectionChanged(target);
     const sample = route.name === "home" || route.name === "lens" ? await loadSample(target) : state.sample;
     if (revision !== state.navigationRevision || (location.hash || "#/") !== requestedHash) return;
     if (sample !== state.sample) state.runLogLines.clear();
@@ -367,6 +368,7 @@
         const anchor = route.name === "home" ? main.querySelector(".landing-intro") : main.querySelector("h1");
         if (anchor) anchor.after(notice); else main.prepend(notice);
       }
+      window.TracebackLabReportUI?.mount(main, sample);
     };
     if (route.name === "home" && views.landing) { appendSample(views.landing(sample)); return; }
     const chosen = lens || LENSES[0].id;
