@@ -160,7 +160,9 @@
     });
     try {
       const read = (async () => {
-        const response = await fetch(path, { credentials: "same-origin", signal: controller.signal });
+        const response = await fetch(path, {
+          credentials: "same-origin", cache: "no-store", signal: controller.signal,
+        });
         if (settled || !isCurrent()) throw requestIssue("obsolete");
         if (response.status === 401) {
           expireSession();

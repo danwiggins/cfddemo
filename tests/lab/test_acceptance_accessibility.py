@@ -1307,9 +1307,11 @@ def test_timed_out_json_request_discards_late_401(tmp_path) -> None:
         def inspect(_command, evaluate) -> None:
             evaluate("""(() => {
               const original = window.fetch;
-              window.fetch = (...args) => String(args[0]) === '/api/late-401'
-                ? new Promise((resolve) => { window.releaseLate401 = resolve; })
-                : original.apply(window, args);
+              window.fetch = (...args) => {
+                if (String(args[0]) !== '/api/late-401') return original.apply(window, args);
+                window.lateRequestCache = args[1]?.cache;
+                return new Promise((resolve) => { window.releaseLate401 = resolve; });
+              };
               window.lateOutcome = 'pending';
               window.TracebackLab.requestJson('/api/late-401', {timeoutMs: 20})
                 .then(() => { window.lateOutcome = 'unexpected success'; })
@@ -1321,6 +1323,7 @@ def test_timed_out_json_request_discards_late_401(tmp_path) -> None:
                 time.sleep(0.01)
             else:
                 pytest.fail("request did not reach its explicit deadline")
+            assert evaluate("window.lateRequestCache === 'no-store'")
             evaluate("window.releaseLate401(new Response('{}', {status:401}))")
             time.sleep(0.05)
             assert evaluate("window.lateOutcome === 'timeout'")
