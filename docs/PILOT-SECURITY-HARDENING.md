@@ -1,4 +1,4 @@
-<!-- /autoplan restore point: /Users/danwiggins/.gstack/projects/danwiggins-cfddemo/docs-pilot-security-hardening-autoplan-restore-20261002-113316.md -->
+<!-- /autoplan restore point: local planning snapshot, 2026-10-02 -->
 # Pilot security hardening
 
 Status: spec, 2026-10-02. Source: a structural security, privacy and trust review of `main` at `eaac96a`, verified against the code on `d3739ca`.
@@ -787,7 +787,7 @@ There are 2 critical gaps, and both exist **today**. Both are fixed by H6-min, w
   | Failure modes        | 6 total, 2 CRITICAL GAPS (both pre-existing)|
   | TODOS.md updates     | 6 items proposed (see Phase 3)              |
   | Scope proposals      | 6 proposed, 2 accepted, 4 deferred          |
-  | CEO plan             | written (~/.gstack ceo-plans)               |
+  | CEO plan             | written as a local planning record          |
   | Outside voice        | ran (codex + claude)                        |
   | Lake Score           | 9/11 recommendations chose complete option  |
   | Diagrams produced    | 5 (arch, data flow, error, dream, launch)   |
@@ -1010,7 +1010,7 @@ QUALITY: ★★★:0 ★★:1 ★:0
 
 **Chaos test.** Kill the server between bootstrap exchange and reader-launch. Expected: the page shows the stopped state, and `launch` exits non-zero.
 
-**Test plan artifact:** `~/.gstack/projects/danwiggins-cfddemo/danwiggins-docs-pilot-security-hardening-eng-review-test-plan-20261002-*.md`.
+**Test plan artifact:** recorded locally; not part of this repository.
 
 ### Section 4: Performance
 

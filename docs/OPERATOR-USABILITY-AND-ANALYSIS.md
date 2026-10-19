@@ -1,4 +1,4 @@
-<!-- /autoplan restore point: ~/.gstack/projects/danwiggins-cfddemo/docs-operator-usability-and-analysis-autoplan-restore-20261003-200941.md -->
+<!-- /autoplan restore point: local planning snapshot, 2026-10-03 -->
 # Operator usability, changeable analysis and an interpretable site
 
 Status: draft spec, 2026-10-03. Verified against `main` at `e76e9d0`.
@@ -1194,7 +1194,7 @@ QUALITY target: ★★★ for B1, B2a/b, C1, C6 (happy + edge + error); ★★ a
 
 Regression rule: B1 (`_is_local_request`) and A1 (exception narrowing) modify existing behaviour; both have regression tests named above (CRITICAL tag). The 2am-Friday test: DoD-1 on the real zip unaided. The hostile-QA test: a label of 80 characters containing `..` (must be refused at the CLI, never 500 the route). Chaos test: D8 lease loss mid-measure, then `resume`.
 
-Test plan artifact: `~/.gstack/projects/danwiggins-cfddemo/danwiggins-docs-operator-usability-and-analysis-eng-review-test-plan-20261003.md`.
+The test plan was recorded locally and is not part of this repository.
 
 ### Section 4: Performance
 

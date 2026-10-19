@@ -1,4 +1,4 @@
-<!-- /autoplan restore point: ~/.gstack/projects/danwiggins-cfddemo/docs-golden-path-mvp-slice-autoplan-restore-20261002-161756.md -->
+<!-- /autoplan restore point: local planning snapshot, 2026-10-02 -->
 # Golden-path MVP slice and engineering hygiene
 
 Status: draft spec, 2026-10-02. Verified against `main` at `d3739ca`.
@@ -864,7 +864,7 @@ COVERAGE (planned): 15/15 code paths, 12/12 flows have a named test  |  REG = re
 GAPS remaining: none in plan; real-BAM run is manual evidence only
 ```
 
-Regression rule applied: frozen v2-synthetic bundle (B3a AC1), frozen trust registry (B3b AC2), `demo` byte-equality (B4 AC8), and the B1 path fix are mandatory regression tests. Flakiness risks: A3 concurrency tests (bound every wait, assert liveness), 100-record startup budget (use a generous 5 s and generated records). Test plan artifact written to `~/.gstack/projects/danwiggins-cfddemo/` (see report).
+Regression rule applied: frozen v2-synthetic bundle (B3a AC1), frozen trust registry (B3b AC2), `demo` byte-equality (B4 AC8), and the B1 path fix are mandatory regression tests. Flakiness risks: A3 concurrency tests (bound every wait, assert liveness), 100-record startup budget (use a generous 5 s and generated records). The test plan was recorded locally and is not part of this repository.
 
 ### Section 4: Performance
 
@@ -1233,7 +1233,7 @@ Nothing below is decided. The spec body reflects the user's stated direction plu
 
 ## Implementation Tasks (aggregated)
 
-CEO tasks C-T1..C-T6 and Eng tasks E-T1..E-T10 are listed in their phases and written to `~/.gstack/projects/danwiggins-cfddemo/tasks-*-review-*.jsonl`. DX tasks:
+CEO tasks C-T1..C-T6 and Eng tasks E-T1..E-T10 are listed in their phases; their local planning records are not part of this repository. DX tasks:
 - [ ] **D-T1 (P1, human: ~3h / CC: ~15min)** — B4 — cli-result v2 `data_origin`; help text. Files: `traceback_runner/cli.py`.
 - [ ] **D-T2 (P1, human: ~3h / CC: ~15min)** — B2/B4/B5a — `_problem` helper and six-field errors. Files: `traceback_runner/cli.py`.
 - [ ] **D-T3 (P1, human: ~4h / CC: ~30min)** — B8 — operator guide real-BAM section, README link, executed by the DoD. Files: `docs/OPERATOR-GUIDE.md`, `README.md`, `scripts/golden_path_acceptance.sh`.
