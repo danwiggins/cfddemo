@@ -1218,6 +1218,8 @@ def test_trust_qc_run_note_is_scoped_without_replacing_result_status(tmp_path, k
                             "skip_reason": None, "skip_message": None, "failure": None,
                             "duration_s": 1.0, "min_depth_x": None, "metrics": [],
                             "provenance": {"input_id": input_id}}],
+            "catalog": [{"algorithm_id": "bam-qc", "label": "BAM QC", "status": "ok",
+                         "skip_reason": None}],
             "library_health": {"no_library_entry": 0, "unverified_citations": 0,
                                "version": "fixture", "error": None},
         }
