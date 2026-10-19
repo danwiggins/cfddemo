@@ -27,6 +27,7 @@ def _reportable_sample() -> dict:
 @needs_chrome
 def test_report_capture_download_print_and_selection_invalidation(tmp_path) -> None:
     sample = _reportable_sample()
+    sample["example"] = True
     observed = {}
     with _server(tmp_path, sample) as server:
         original = server.app.api.sample
@@ -40,7 +41,7 @@ def test_report_capture_download_print_and_selection_invalidation(tmp_path) -> N
         server.app.api.sample = counted
         profile = Path(tmp_path / "browser-profile")
 
-        def inspect(_command, evaluate) -> None:
+        def inspect(command, evaluate) -> None:
             before = len(calls)
             evaluate("""(() => {
               window.reportBlobs = [];
@@ -60,9 +61,17 @@ def test_report_capture_download_print_and_selection_invalidation(tmp_path) -> N
               window.print = () => {
                 window.reportPrintCalls += 1;
                 const root = document.querySelector('#lab-report-print');
+                const marks = root.querySelector('.report-print-marks');
+                const limits = root.querySelector('.report-print-limits');
+                const visible = (node) => {
+                  const bounds = node.getBoundingClientRect();
+                  return bounds.width > 0 && bounds.height > 0;
+                };
                 window.reportPrint = {
-                  marks: root.querySelector('.report-print-marks').textContent,
-                  limits: root.querySelector('.report-print-limits').textContent,
+                  marks: marks.textContent,
+                  limits: limits.textContent,
+                  marksVisible: visible(marks),
+                  limitsVisible: visible(limits),
                   input: root.textContent.includes(window.TracebackLab.state.sample.full_input_id),
                   definition: root.textContent.includes('most frequent aligned reference span'),
                   count: root.querySelectorAll('.report-print-metric').length,
@@ -81,8 +90,11 @@ def test_report_capture_download_print_and_selection_invalidation(tmp_path) -> N
             observed["preview"] = evaluate("document.querySelector('.report-preview').textContent")
             evaluate("""(() => {
               const buttons = [...document.querySelectorAll('.report-actions button')];
-              buttons[0].click(); buttons[1].click(); buttons[2].click();
+              buttons[0].click(); buttons[1].click();
             })()""")
+            command("Emulation.setEmulatedMedia", {"media": "print"})
+            evaluate("[...document.querySelectorAll('.report-actions button')][2].click()")
+            command("Emulation.setEmulatedMedia", {"media": "screen"})
             for _ in range(100):
                 if evaluate("window.reportBlobs.length === 2"):
                     break
@@ -133,9 +145,72 @@ def test_report_capture_download_print_and_selection_invalidation(tmp_path) -> N
     assert observed["print"]["count"] > 0
     assert not observed["print"]["privateData"]
     assert "RESEARCH USE ONLY" in observed["print"]["marks"]
+    assert "SYNTHETIC EXAMPLE" in observed["print"]["marks"]
     assert "artifacts and taxon detail omitted" in observed["print"]["limits"]
+    assert observed["print"]["marksVisible"] and observed["print"]["limitsVisible"]
     assert observed["after_session"] == {"blobs": 2, "printCalls": 1}
     assert observed["cleared"]
+
+
+@needs_chrome
+def test_report_uses_healthy_selection_despite_listing_flags_and_keeps_error_status(tmp_path) -> None:
+    sample = _reportable_sample()
+    with _server(tmp_path, sample) as server:
+        listing = server.app.api.samples
+        server.app.api.samples = lambda: {
+            **listing(),
+            "completed_input_unavailable": True,
+            "completion_history_unavailable": True,
+        }
+        selected_sample = server.app.api.sample
+        calls = []
+
+        def counted(id12):
+            calls.append(id12)
+            return selected_sample(id12)
+
+        server.app.api.sample = counted
+        profile = Path(tmp_path / "browser-profile")
+
+        def inspect(_command, evaluate) -> None:
+            assert evaluate("window.TracebackLab.state.sample?.found === true")
+            assert evaluate("window.TracebackLab.state.completedInputUnavailable === true")
+            assert evaluate("window.TracebackLab.state.completionHistoryUnavailable === true")
+            evaluate("window.reportStatusNode = document.querySelector('[data-report-status]')")
+            before = len(calls)
+            evaluate("document.querySelector('.report-export-panel button').click()")
+            for _ in range(100):
+                if evaluate("!!document.querySelector('.report-preview')"):
+                    break
+                time.sleep(0.05)
+            assert evaluate("!!document.querySelector('.report-preview')")
+            assert len(calls) - before == 1
+            assert evaluate("document.querySelector('[data-report-status]').classList.contains('problem')") is False
+
+            def unavailable(id12):
+                calls.append(id12)
+                return {"found": False, "candidates": []}
+
+            server.app.api.sample = unavailable
+            before = len(calls)
+            evaluate("document.querySelector('.report-export-panel button').click()")
+            for _ in range(100):
+                if evaluate("document.querySelector('[data-report-status]')?.textContent.includes('could not be refreshed')"):
+                    break
+                time.sleep(0.05)
+            assert len(calls) - before == 1
+            assert evaluate("!document.querySelector('.report-preview')")
+            assert evaluate("document.querySelector('[data-report-status]').classList.contains('problem')")
+            assert evaluate("document.querySelector('[data-report-status]').getAttribute('role')") == "status"
+            assert evaluate("window.reportStatusNode === document.querySelector('[data-report-status]')")
+
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/methods"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and
+            re.search(r'<section[^>]*class="[^"]*\breport-export-panel\b', dom) is not None,
+            interact=inspect, timeout=120,
+        )
 
 
 @needs_chrome

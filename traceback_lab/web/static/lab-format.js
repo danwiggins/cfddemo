@@ -66,8 +66,9 @@
     const nonnumericCategory = valueKind === "categorical" &&
       (typeof metric.value === "boolean" || typeof metric.value === "string");
     return formatMetric(metric.value, metric.unit, {
-      ...options, role, reason: Object.prototype.hasOwnProperty.call(options, "reason")
-        ? options.reason : metric.reason,
+      // The API's metric.reason describes interpretation state, not why a
+      // measurement is missing. Callers may supply a measurement reason.
+      ...options, role, reason: options.reason ?? null,
       valueKind, missingUnit: options.missingUnit ?? !nonnumericCategory,
     });
   }
