@@ -282,10 +282,25 @@ def test_lens_navigation_labels_controls_and_history(width, tmp_path) -> None:
                 assert moved["scrollLeft"] < initial["scrollLeft"] and not moved["controls"][1]["disabled"], moved
                 evaluate("document.querySelector('.lens-scroll-next').focus()")
                 _key(command, "Enter", "Enter", 13)
-                assert snapshot(evaluate)["scrollLeft"] > moved["scrollLeft"]
+                at_end = snapshot(evaluate)
+                assert at_end["scrollLeft"] > moved["scrollLeft"] and at_end["controls"][1]["disabled"], at_end
+                assert evaluate("document.activeElement === document.querySelector('.lens-scroll-next')")
+                _key(command, "Enter", "Enter", 13)
+                assert snapshot(evaluate)["scrollLeft"] == at_end["scrollLeft"]
                 evaluate("document.querySelector('.lens-scroll-prev').click()")
                 evaluate("document.querySelector('#lenses [aria-current=page]').focus()")
                 assert snapshot(evaluate)["activeVisible"]
+                evaluate("document.querySelector('.lens-scroll-prev').focus()")
+                for _ in range(10):
+                    if snapshot(evaluate)["controls"][0]["disabled"]:
+                        break
+                    _key(command, "Enter", "Enter", 13)
+                else:
+                    pytest.fail("Previous views did not reach the first edge")
+                at_start = snapshot(evaluate)
+                assert evaluate("document.activeElement === document.querySelector('.lens-scroll-prev')")
+                _key(command, "Enter", "Enter", 13)
+                assert snapshot(evaluate)["scrollLeft"] == at_start["scrollLeft"]
                 assert evaluate(f"location.hash === '#/sample/{ID12}/methods'")
                 assert evaluate("document.querySelector('#main h1')?.textContent === 'Methods'")
             else:
@@ -307,6 +322,23 @@ def test_lens_navigation_labels_controls_and_history(width, tmp_path) -> None:
                 pytest.fail("browser Back did not restore Methods")
             assert evaluate("document.activeElement === document.querySelector('#main h1')")
             assert snapshot(evaluate)["activeVisible"]
+            if width == 375:
+                evaluate("location.hash = '#/'")
+                for _ in range(40):
+                    if evaluate("document.querySelector('#main h1')?.textContent.startsWith('Traceback Lab')"):
+                        break
+                    time.sleep(0.05)
+                else:
+                    pytest.fail("landing route did not render")
+                assert evaluate("document.querySelector('.lens-navigation').hidden")
+                evaluate(f"location.hash = '#/sample/{ID12}/methods'")
+                for _ in range(40):
+                    if evaluate("document.querySelector('#main h1')?.textContent === 'Methods'"):
+                        break
+                    time.sleep(0.05)
+                else:
+                    pytest.fail("landing-to-lens route did not render")
+                assert snapshot(evaluate)["activeVisible"]
 
         _dom_cdp(
             [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
@@ -533,6 +565,37 @@ def _key(command, key: str, code: str, virtual: int) -> None:
     command("Input.dispatchKeyEvent", {"type": "keyUp", **args})
 
 
+def _walk_live_tab_order(command, evaluate, selector: str, label: str) -> list[int]:
+    """Prove each Tab reaches the next control enabled at that keypress."""
+
+    expression = f"""(() => {{
+      const all = [...document.querySelectorAll({json.dumps(selector)})];
+      const current = all.indexOf(document.activeElement);
+      const eligible = (el) =>
+        (el.tabIndex >= 0 || (el.matches('.table-wrap') && el.scrollWidth > el.clientWidth + 1))
+        && !el.disabled && el.getClientRects().length
+        && getComputedStyle(el).visibility !== 'hidden';
+      const next = all.findIndex((el, index) => index > current && eligible(el));
+      const active = document.activeElement;
+      return {{current, next, count: all.length,
+        html: active?.outerHTML.slice(0, 180),
+        visible: active?.matches(':focus-visible'),
+        outline: active ? getComputedStyle(active).outlineWidth : '0px'}};
+    }})()"""
+    visited = []
+    maximum = evaluate(expression)["count"] + 10
+    for _ in range(maximum):
+        before = evaluate(expression)
+        if before["next"] < 0:
+            return visited
+        _key(command, "Tab", "Tab", 9)
+        after = evaluate(expression)
+        assert after["current"] == before["next"] and after["visible"], (label, before, after)
+        assert float(after["outline"].removesuffix("px")) >= 3, (label, after)
+        visited.append(after["current"])
+    pytest.fail(f"{label}: Tab order did not reach its final control")
+
+
 @needs_chrome
 def test_keyboard_focus_order_disclosures_dialog_and_route_focus(tmp_path) -> None:
     sample = _sample()
@@ -545,23 +608,9 @@ def test_keyboard_focus_order_disclosures_dialog_and_route_focus(tmp_path) -> No
             command("Page.bringToFront")
             assert evaluate("document.activeElement?.tagName") == "H1"
             evaluate("document.querySelector('.skip-link').focus()")
-            expected = evaluate("""(() => [...document.querySelectorAll('a[href], button, select, summary, input')]
-              .flatMap((el, index) => el.tabIndex >= 0 && !el.disabled && el.getClientRects().length
-                && getComputedStyle(el).visibility !== 'hidden' ? [index] : []))()""")
-            assert len(expected) >= 8
-            indices = []
-            for next_index in expected[1:]:
-                _key(command, "Tab", "Tab", 9)
-                state = evaluate("""(() => {
-                  const active = document.activeElement;
-                  const order = [...document.querySelectorAll('a[href], button, select, summary, input')];
-                  return {index: order.indexOf(active), tag: active.tagName, id: active.id,
-                    focusVisible: active.matches(':focus-visible'), outline: getComputedStyle(active).outlineWidth};
-                })()""")
-                assert state["index"] == next_index and state["focusVisible"], f"focus={state['tag']}#{state['id']} {state}"
-                assert float(state["outline"].removesuffix("px")) >= 3
-                indices.append(state["index"])
-            assert indices == expected[1:]
+            visited = _walk_live_tab_order(command, evaluate,
+                "a[href], button, select, summary, input", "findings")
+            assert len(visited) >= 7
 
             evaluate("document.querySelector('.finding-group summary').focus()")
             assert evaluate("document.activeElement?.tagName") == "SUMMARY"
@@ -1210,17 +1259,9 @@ def test_keyboard_traversal_and_revealed_controls_on_every_sample_route(tmp_path
                 assert evaluate("document.activeElement === document.querySelector('#main h1')"), route
                 time.sleep(0.1)
                 evaluate("document.querySelector('.skip-link').focus()")
-                expected = evaluate("""(() => [...document.querySelectorAll('a[href], button, select, summary, input, [tabindex]')]
-                  .flatMap((el, index) => el.tabIndex >= 0 && !el.disabled && el.getClientRects().length
-                    && getComputedStyle(el).visibility !== 'hidden' ? [index] : []))()""")
-                assert len(expected) >= 2, route
-                for next_index in expected[1:]:
-                    _key(command, "Tab", "Tab", 9)
-                    state = evaluate("""(() => { const active = document.activeElement;
-                      return {index: [...document.querySelectorAll('a[href], button, select, summary, input, [tabindex]')].indexOf(active),
-                        visible: active.matches(':focus-visible'), outline: getComputedStyle(active).outlineWidth}; })()""")
-                    assert state["index"] == next_index and state["visible"], (route, state)
-                    assert float(state["outline"].removesuffix("px")) >= 3, (route, state)
+                visited = _walk_live_tab_order(command, evaluate,
+                    "a[href], button, select, summary, input, [tabindex]", route)
+                assert visited, route
                 disclosure = evaluate("""(() => {
                   const details = [...document.querySelectorAll('#main details')]
                     .find((item) => item.querySelector('summary') && !item.open);
@@ -1285,22 +1326,10 @@ def test_keyboard_walk_reaches_every_revealed_control_and_signals_subtab(tmp_pat
 
             def walk(label: str) -> None:
                 evaluate("document.querySelector('.skip-link').focus()")
-                expected = evaluate("""(() => [...document.querySelectorAll('a[href], button, select, summary, input, [tabindex], .table-wrap')]
-                  .flatMap((el, index) => (el.tabIndex >= 0 || (el.matches('.table-wrap') && el.scrollWidth > el.clientWidth + 1))
-                    && !el.disabled && el.getClientRects().length
-                    && getComputedStyle(el).visibility !== 'hidden' ? [index] : []))()""")
-                assert len(expected) >= 2, label
-                for next_index in expected[1:]:
-                    _key(command, "Tab", "Tab", 9)
-                    state = evaluate("""(() => { const active = document.activeElement;
-                      return {index: [...document.querySelectorAll('a[href], button, select, summary, input, [tabindex], .table-wrap')].indexOf(active),
-                        tag: active.tagName, id: active.id, html: active.outerHTML.slice(0, 180),
-                        visible: active.matches(':focus-visible'), outline: getComputedStyle(active).outlineWidth}; })()""")
-                    if state["index"] != next_index or not state["visible"]:
-                        skipped = evaluate(f"""document.querySelectorAll('a[href], button, select, summary, input, [tabindex], .table-wrap')[{next_index}].outerHTML.slice(0, 180)""")
-                        pytest.fail(f"{label}: expected {next_index} {skipped}; got {state}")
-                    assert float(state["outline"].removesuffix("px")) >= 3, (label, state)
-                walked.append((label, len(expected)))
+                visited = _walk_live_tab_order(command, evaluate,
+                    "a[href], button, select, summary, input, [tabindex], .table-wrap", label)
+                assert visited, label
+                walked.append((label, len(visited) + 1))
 
             for route, heading in routes.items():
                 path = "/" if route == "home" else f"/sample/{ID12}/{route}"

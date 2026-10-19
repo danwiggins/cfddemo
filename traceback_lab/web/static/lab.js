@@ -222,7 +222,8 @@
       const frame = nav.getBoundingClientRect();
       const link = event.target.getBoundingClientRect();
       // Keep focus clear of the 1.25rem edge fade as keyboard travel scrolls.
-      if (link.left < frame.left + 24 || link.right > frame.right - 24) {
+      const fadeWidth = parseFloat(getComputedStyle(document.documentElement).fontSize) * 1.25;
+      if (link.left < frame.left + fadeWidth || link.right > frame.right - fadeWidth) {
         nav.scrollLeft += link.left - frame.left - (nav.clientWidth - link.width) / 2;
       }
       updateNavFade();
@@ -231,6 +232,9 @@
 
   function revealCurrentNav() {
     const nav = document.getElementById("lenses");
+    // The previous loading/home render hid the wrapper. Give it its final
+    // visible width and control slots before measuring the active link.
+    updateNavFade();
     const active = nav.querySelector('[aria-current="page"]');
     if (active && getComputedStyle(nav).flexWrap === "nowrap") {
       const navRect = nav.getBoundingClientRect();
@@ -260,6 +264,7 @@
       if (lens.count) label += lens.count(sample);
       nav.append(h("a", { href: `#/sample/${sample.id12}/${lens.id}`, "aria-current": lens.id === current ? "page" : null }, label));
     }
+    updateNavFade();
   }
 
   function render() {
