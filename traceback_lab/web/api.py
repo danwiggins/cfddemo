@@ -1245,6 +1245,7 @@ class LabApi:
                 rows.append({
                     "algorithm_id": algorithm_id, "metric_id": metric_id,
                     "label": entry["label"] if entry is not None else metric_id,
+                    "value_kind": entry.get("value_kind") if entry is not None else None,
                     "unit": metric_a.unit, "value_a": metric_a.value, "value_b": metric_b.value,
                     "delta_b_minus_a": metric_b.value - metric_a.value,
                     "parameters_sha256_a": result_a.parameters_sha256,
@@ -1465,6 +1466,7 @@ def _metric_payload(row: Any, entry: Any, band: str | None) -> dict[str, Any]:
         payload["entry"] = {
             key: entry.get(key)
             for key in (
+                "value_kind",
                 "origin_tier",
                 "origin_platform",
                 "min_depth_x",
