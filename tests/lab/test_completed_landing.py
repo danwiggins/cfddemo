@@ -498,7 +498,7 @@ def test_recovery_home_keeps_clia_disclosures_with_sample_overview(tmp_path, sta
         assert content.index('<section class="clia-panel"') == content.index("<section")
     assert content.count('<section class="clia-panel"') == 1
     if route_kind == "explicit" and state == "no_completed":
-        assert f"Sample {source[:12]}" in dom and "No completed Lab run yet" in dom
+        assert f"Sample {source[:12]}" in dom and "No completed run in this ROOT yet" in dom
     assert "What CLIA means for this demo" in content
     assert 'aria-expanded="false"' in content
     assert 'aria-controls="clia-full"' in content

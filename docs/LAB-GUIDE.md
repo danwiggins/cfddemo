@@ -797,8 +797,11 @@ serve as a history of every interrupted run.
 ## What the page shows
 
 - **Landing (`#/`)**: a selected-sample overview names the ID, built-in
-  synthetic-example status, latest recorded activity, approximate depth,
-  recorded method states and result-selection problems. One-link actions open
+  synthetic-example status, recorded UTC date, approximate depth,
+  visible method states, hidden intermediate failures and result-selection
+  problems. The date is the completed run's terminal date when recorded, or
+  the latest input-use date otherwise; live work is reported in the header.
+  One-link actions open
   Signals, Trust/QC, and Methods. The selected-sample status stays outside the
   switcher across lenses; the header separately reports live run status. The
   overview is followed by one computed headline sentence and the **defended
