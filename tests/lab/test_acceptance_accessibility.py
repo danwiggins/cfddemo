@@ -1093,6 +1093,58 @@ def test_disconnected_page_blocks_fetch_controls_until_reconnected(tmp_path) -> 
 
 
 @needs_chrome
+def test_missing_pinned_run_log_retains_guidance_and_discards_obsolete_401(tmp_path) -> None:
+    """A bounded-search miss is explained; an old response cannot expire a new route."""
+
+    with _server(tmp_path, _sample()) as server:
+        def inspect(_command, evaluate) -> None:
+            evaluate("""(() => {
+              const original = window.fetch;
+              window.runLogMode = 'missing';
+              window.fetch = (...args) => String(args[0]).includes('/run-log/')
+                ? window.runLogMode === 'held'
+                  ? new Promise(resolve => { window.releaseRunLog = resolve; })
+                  : Promise.resolve(new Response(JSON.stringify({found:false}), {status:404}))
+                : original.apply(window, args);
+            })()""")
+            button = 'document.querySelector(\'button[aria-label="Run log line for bam-qc"]\')'
+            line = f"{button}.closest('tr').querySelector('[data-run-log-line]')"
+            evaluate(f"{button}.click()")
+            for _ in range(40):
+                if evaluate(f"{line}.textContent.includes('Only 64 recent, bounded logs are searched')"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("404 run-log response lost its bounded-search guidance")
+            evaluate(f"window.runLogMode = 'held'; {button}.click()")
+            for _ in range(40):
+                if evaluate("typeof window.releaseRunLog === 'function'"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("held run-log request did not start")
+            evaluate(f"location.hash = '#/sample/{ID12}/findings'")
+            for _ in range(40):
+                if evaluate("document.querySelector('#main h1')?.textContent === 'Findings'"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("Findings route did not render")
+            evaluate("window.releaseRunLog(new Response('{}', {status:401}))")
+            time.sleep(0.1)
+            assert evaluate("window.TracebackLab.state.sessionExpired === false")
+            assert evaluate(f"location.hash === '#/sample/{ID12}/findings'")
+
+        profile = tmp_path / "browser-profile"
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/trust-qc"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'Run log line for bam-qc' in dom,
+            interact=inspect, timeout=90,
+        )
+
+
+@needs_chrome
 def test_disconnected_navigation_keeps_url_and_view_in_sync(tmp_path) -> None:
     """AC21: Enter on a focused lens link cannot queue a hidden route change."""
 
@@ -1541,6 +1593,89 @@ def test_failed_other_sample_keeps_confirmed_sample_and_switcher_available(tmp_p
                 pytest.fail("sample C could not be opened after B failed")
             assert evaluate(f"location.hash === '#/?sample={next_id}'")
             assert evaluate("window.TracebackLab.state.loadFailure === null")
+
+        profile = tmp_path / "browser-profile"
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/findings"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'aria-current="page">Findings' in dom,
+            interact=inspect, timeout=90,
+        )
+
+
+@needs_chrome
+def test_connection_loss_prioritizes_retry_without_discarding_failed_selection(tmp_path) -> None:
+    """Disconnect recovery leads while a failed B selection remains retryable."""
+
+    failed = "aaaaaaaaaaaa"
+    sample = _sample()
+    selected = copy.deepcopy(sample)
+    selected["id12"] = failed
+    selected["source_id"] = failed + "c" * 52
+    for algorithm in selected["algorithms"]:
+        algorithm["provenance"]["source_id"] = selected["source_id"]
+    phase = {"down": False}
+    with _server(tmp_path, sample) as server:
+        kind, source = server.app.assets["/assets/lab.js"]
+        server.app.assets["/assets/lab.js"] = (
+            kind, source.replace(b"const POLL_MS = 15000;", b"const POLL_MS = 500;"),
+        )
+        original_status = server.app.api.status
+        original_sample = server.app.api.sample
+        server.app.api.status = lambda: (_ for _ in ()).throw(OSError("synthetic disconnect")) if phase["down"] else original_status()
+        server.app.api.sample = lambda id12: copy.deepcopy(selected) if id12 == failed else original_sample(id12)
+
+        def inspect(_command, evaluate) -> None:
+            evaluate("""(() => {
+              const original = window.fetch;
+              window.failB = true;
+              window.aRefreshes = 0;
+              window.fetch = (...args) => {
+                const path = String(args[0]);
+                if (path === '/api/samples/3f9a1c2b7e04') window.aRefreshes += 1;
+                return window.failB && path === '/api/samples/aaaaaaaaaaaa'
+                  ? Promise.resolve(new Response('{}', {status:503})) : original.apply(window, args);
+              };
+              location.hash = '#/sample/aaaaaaaaaaaa/findings';
+            })()""")
+            for _ in range(40):
+                if evaluate("window.TracebackLab.state.loadFailure?.id12 === 'aaaaaaaaaaaa'"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("failed B request did not show recovery")
+            assert evaluate("document.querySelector('#recovery-action button')?.textContent === 'Retry loading this selection'")
+            phase["down"] = True
+            for _ in range(40):
+                if evaluate("window.TracebackLab.state.connectionLost"):
+                    break
+                time.sleep(0.2)
+            else:
+                pytest.fail("status did not reach disconnected state")
+            assert evaluate("document.getElementById('status').textContent.includes('Lab server not responding')")
+            assert evaluate("document.querySelector('#recovery-action button')?.textContent === 'Retry connection'")
+            assert evaluate("window.TracebackLab.state.loadFailure?.id12 === 'aaaaaaaaaaaa'")
+            assert evaluate(f"location.hash === '#/sample/{ID12}/findings'")
+
+            phase["down"] = False
+            for _ in range(40):
+                if evaluate("window.aRefreshes >= 1 && !window.TracebackLab.state.connectionLost && !window.TracebackLab.state.resultStale && !window.TracebackLab.state.selectedRefresh"):
+                    break
+                time.sleep(0.2)
+            else:
+                pytest.fail("A did not refresh after status recovered")
+            assert evaluate(f"window.TracebackLab.state.sample?.id12 === '{ID12}'")
+            assert evaluate("window.TracebackLab.state.loadFailure?.id12 === 'aaaaaaaaaaaa'")
+            assert evaluate("document.querySelector('#recovery-action button')?.textContent === 'Retry loading this selection'")
+            evaluate("window.failB = false; document.querySelector('#recovery-action button').click()")
+            for _ in range(40):
+                if evaluate("window.TracebackLab.state.sample?.id12 === 'aaaaaaaaaaaa'"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("retry did not resolve B after recovery")
+            assert evaluate("window.TracebackLab.state.loadFailure === null")
+            assert evaluate("location.hash === '#/sample/aaaaaaaaaaaa/findings'")
 
         profile = tmp_path / "browser-profile"
         _dom_cdp(

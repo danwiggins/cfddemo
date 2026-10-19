@@ -268,6 +268,22 @@ def test_compare_recovery_problem_scrubs_local_paths() -> None:
     assert "/Users/" not in str(projected) and "/tmp/" not in str(projected)
 
 
+def test_missing_pointer_recovery_keeps_safe_rebuild_command(tmp_path) -> None:
+    root = tmp_path / "private root"
+    store = LabStore(root)
+    (store.lab / "cohorts" / "healthy" / "generations" / "1").mkdir(parents=True)
+
+    payload = web_api.LabApi(store).cohorts()
+
+    assert payload["cohorts"] == []
+    assert len(payload["unavailable"]) == 1
+    problem = payload["unavailable"][0]["problem"]
+    assert problem["code"] == "TBX-LAB-022"
+    assert "traceback lab cohort build --cohort <COHORT> --root <ROOT>" in problem["fix"]
+    assert "same Lab root" in problem["fix"] and "known-good backup" in problem["fix"]
+    assert str(root) not in json.dumps(payload)
+
+
 def test_compare_target_unavailable_has_no_metrics(tmp_path, monkeypatch) -> None:
     generation = CohortGeneration(cohort_id="healthy", version=7, members=())
     monkeypatch.setattr(web_api, "read_current", lambda store, cohort_id: generation)
