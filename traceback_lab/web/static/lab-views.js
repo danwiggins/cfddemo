@@ -883,7 +883,8 @@
         const requirements = row.requirements || [];
         const recorded = row.status === "ok" ? "ran" : row.status;
         const provenance = provenanceAlgorithms.has(row.algorithm_id)
-          ? h("button", { type: "button", class: "control" }, "Go to recorded provenance") : null;
+          ? h("button", { type: "button", class: "control",
+            "aria-label": `Go to recorded provenance for ${row.label} (${row.algorithm_id})` }, "Go to recorded provenance") : null;
         if (provenance) provenance.addEventListener("click", () => {
           const target = document.getElementById("method-provenance");
           target?.scrollIntoView();
@@ -901,11 +902,12 @@
               row.requires_mm_tags ? " MM tags required." : ""),
             requirements.length ? h("ul", {}, ...requirements.map((item) => h("li", {}, item)))
               : h("p", {}, "No additional registered asset is listed in the method explanation; a run can still have input-specific gates."),
-            row.min_depth_x ? h("p", {}, `Literature depth minimum: ${row.min_depth_x}x; this is not a readiness verdict.`) : "",
+            row.min_depth_x ? h("p", {}, `Headline metric literature depth minimum: ${row.min_depth_x}x; other metrics may differ. This is not a readiness verdict.`) : "",
             h("p", {}, `Evidence note: ${row.footnote || "none published"}`,
               row.footnote_source ? ` (${row.footnote_source})` : "",
               row.has_library_entry && !row.citation_checked ? " · UNVERIFIED citation" : ""),
-            h("p", {}, h("a", { href: `#/sample/${sample.id12}/evidence` }, "Evidence, citations and licenses"),
+            h("p", {}, h("a", { href: `#/sample/${sample.id12}/evidence`,
+              "aria-label": `Evidence, citations and licenses for ${row.label} (${row.algorithm_id})` }, "Evidence, citations and licenses"),
               provenance ? [" · ", provenance] : "")));
       }));
     };
@@ -953,7 +955,7 @@
     out.push(h("section", { class: "panel", "aria-labelledby": "method-catalog-title" },
       h("h2", { id: "method-catalog-title" }, "Method catalog"),
       h("p", {}, `${counts.visible_methods ?? catalog.length} visible methods from ${counts.registered_steps ?? catalog.length} registered steps. `,
-        `${hidden.length} processing steps (${hidden.join(", ") || "none"}) are hidden because they are shared intermediates, not biological results.`),
+        `${hidden.length} processing ${hidden.length === 1 ? "step" : "steps"} (${hidden.join(", ") || "none"}) ${hidden.length === 1 ? "is" : "are"} hidden because ${hidden.length === 1 ? "it is a shared intermediate" : "they are shared intermediates"}, not biological results.`),
       h("p", { class: "help" }, "Recorded result availability is input-specific. Current environment readiness is unknown until an explicit check; a past result does not prove tools or assets are still available."),
       h("label", { for: "method-search" }, "Search methods"), search,
       h("label", { for: "method-status" }, "Recorded result"), status,

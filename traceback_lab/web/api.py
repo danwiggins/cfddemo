@@ -1419,11 +1419,15 @@ def _catalog(
             continue
         entry = library.headline(algorithm_id)
         licenses: list[str] = []
+        citations: list[str] = []
         for (alg, _), item in library.entries.items():
             if alg == algorithm_id:
                 for license_id in item.get("license_ids") or []:
                     if license_id not in licenses:
                         licenses.append(license_id)
+                for citation in item.get("citations") or []:
+                    if citation not in citations:
+                        citations.append(citation)
         performance = entry.get("performance") if entry else None
         method = library.method_catalog.get(algorithm_id)
         declared = registered.get(algorithm_id)
@@ -1462,7 +1466,7 @@ def _catalog(
                 "question": method["question"] if method else None,
                 "limitations": method["limitations"] if method else None,
                 "requirements": list(method["requirements"]) if method else [],
-                "citations": list(entry.get("citations") or []) if entry else [],
+                "citations": citations,
                 "environment_readiness": "unknown",
                 "readiness_checked_at": None,
             }

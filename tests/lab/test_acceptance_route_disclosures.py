@@ -57,6 +57,20 @@ def test_method_explanations_cover_exactly_the_visible_registry() -> None:
     assert LIBRARY.hidden_algorithms == {"read-summary", "meth-calls"}
 
 
+def test_catalog_numeric_prerequisites_match_algorithm_gates() -> None:
+    from traceback_lab.adapters.griffin_run import MIN_ELIGIBLE_AUTOSOMAL_PAIRS
+    from traceback_lab.algorithms.aligned_end_structure import MIN_DEPTH_X as END_DEPTH
+    from traceback_lab.algorithms.lionheart import RESOURCE_VERSION
+    from traceback_lab.algorithms.wps import MIN_DEPTH_X as WPS_DEPTH
+
+    methods = LIBRARY.method_catalog
+    assert f"At least {END_DEPTH:g}x observed eligible depth" in methods["aligned-end-structure"]["requirements"]
+    assert f"At least {WPS_DEPTH:g}x approximate autosomal depth" in methods["wps"]["requirements"]
+    assert MIN_ELIGIBLE_AUTOSOMAL_PAIRS == 5_000_000
+    assert "At least five million eligible autosomal pairs" in methods["griffin"]["requirements"]
+    assert any(RESOURCE_VERSION in text for text in methods["lionheart"]["requirements"])
+
+
 @needs_chrome
 def test_methods_search_and_filters_keep_provenance_available(tmp_path) -> None:
     sample = _sample()
@@ -77,6 +91,7 @@ def test_methods_search_and_filters_keep_provenance_available(tmp_path) -> None:
               return [...document.querySelectorAll('#method-catalog-results article')]
                 .map((row) => row.id); })()""") == ["method-epi-clock"]
             assert not evaluate("document.querySelector('#method-epi-clock button')")
+            assert evaluate("document.querySelector('#method-epi-clock a[href$=\"/evidence\"]').getAttribute('aria-label').includes('Weidner')")
             assert evaluate("""(() => { const input = document.getElementById('method-search');
               input.value = ''; input.dispatchEvent(new Event('input', {bubbles: true}));
               const select = document.getElementById('method-status'); select.value = 'skipped';
@@ -87,6 +102,7 @@ def test_methods_search_and_filters_keep_provenance_available(tmp_path) -> None:
               article.querySelector('details').open = true;
               article.querySelector('button').click();
               return document.activeElement?.id === 'method-provenance'; })()""")
+            assert evaluate("document.querySelector('#method-bam-qc button').getAttribute('aria-label').includes('Mapped share')")
             assert evaluate("""(() => { const select = document.getElementById('method-family');
               select.value = 'methylation'; select.dispatchEvent(new Event('change', {bubbles: true}));
               return document.querySelector('#method-catalog-results').textContent.includes('No methods match'); })()""")
@@ -436,10 +452,11 @@ def test_catalog_keeps_nonheadline_metric_licenses_when_result_exists() -> None:
         {
             ("cell-origin", "headline"): Entry(
                 "cell-origin", "headline", {"headline": True, "label": "Cell origin", "tier": "NEWER",
-                                            "license_ids": ["headline-rights"]},
+                                            "license_ids": ["headline-rights"], "citations": ["doi:headline"]},
             ),
             ("cell-origin", "secondary"): Entry(
-                "cell-origin", "secondary", {"headline": False, "license_ids": ["secondary-rights"]},
+                "cell-origin", "secondary", {"headline": False, "license_ids": ["secondary-rights"],
+                                              "citations": ["doi:secondary", "doi:headline"]},
             ),
         },
         {"headline-rights": {}, "secondary-rights": {}, "modkit-ont-public": {}},
@@ -452,6 +469,7 @@ def test_catalog_keeps_nonheadline_metric_licenses_when_result_exists() -> None:
               "status": "ok", "skip_reason": None}],
         )
         assert set(catalog[0]["license_ids"]) == expected
+        assert catalog[0]["citations"] == ["doi:headline", "doi:secondary"]
 
 
 @pytest.mark.parametrize("route,subtab", [(route, None) for route in ROUTES] + [
