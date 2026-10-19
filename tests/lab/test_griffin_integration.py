@@ -5,11 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import sys
+import time
 from argparse import Namespace
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -332,12 +335,36 @@ def test_ready_griffin_preflight_leaves_full_bam_scan_to_worker(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="worker timeouts use POSIX process groups")
-def test_slow_griffin_bam_gate_obeys_worker_process_timeout(tmp_path: Path) -> None:
-    from traceback_lab.pipeline import Stage, run_pipeline
+def test_slow_griffin_bam_gate_obeys_worker_process_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import traceback_lab.pipeline as pipeline
 
     marker = tmp_path / "scan-started"
+    real_monotonic = time.monotonic
+    started = real_monotonic()
+    scan_started: float | None = None
+    startup_expired = False
+
+    def scan_clock() -> float:
+        nonlocal scan_started, startup_expired
+        now = real_monotonic()
+        # The worker's interpreter and imports are outside this gate check.
+        # After 30 seconds, advance the clock so the pipeline's own timeout
+        # and process-group cleanup still run if startup never reaches the gate.
+        startup_overrun = max(0.0, now - started - 30.0)
+        if scan_started is None and startup_overrun:
+            startup_expired = True
+        if marker.is_file() and not startup_expired:
+            if scan_started is None:
+                scan_started = now
+            return started + now - scan_started
+        return started + startup_overrun
+
+    monkeypatch.setattr(pipeline, "time", SimpleNamespace(monotonic=scan_clock, sleep=time.sleep))
     script = (
         "import time\n"
+        "time.sleep(3)\n"  # deterministically exceed the gate's timeout before import
         "from pathlib import Path\n"
         "import traceback_lab.algorithms.griffin as griffin\n"
         "def slow_scan(_):\n"
@@ -346,10 +373,14 @@ def test_slow_griffin_bam_gate_obeys_worker_process_timeout(tmp_path: Path) -> N
         "griffin._require_paired_input = slow_scan\n"
         "griffin._bam_gate(Path('unused.bam'), derived=False)\n"
     )
-    outcome = run_pipeline([Stage("griffin-gate", [sys.executable, "-c", script])],
-                           timeout_s=2, cwd=tmp_path)
-    assert marker.is_file()
+    outcome = pipeline.run_pipeline([pipeline.Stage("griffin-gate", [sys.executable, "-c", script])],
+                                    timeout_s=2, cwd=tmp_path)
+    assert marker.is_file() and not startup_expired, (
+        "Griffin worker did not begin the BAM scan within 30 seconds",
+        outcome.timed_out, outcome.stages[0].returncode, outcome.stages[0].stderr.raw_lines(),
+    )
     assert outcome.timed_out and not outcome.ok
+    assert outcome.stages[0].returncode in (-signal.SIGTERM, -signal.SIGKILL)
 
 
 @pytest.mark.parametrize("error", [OSError, ValueError])
