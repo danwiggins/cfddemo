@@ -916,14 +916,19 @@
       const matches = (run) => run && run.step === a.algorithm_id && run.source_id === sample.source_id && run.input_id === a.provenance?.input_id;
       const runNote = matches(active) ? "latest run in progress" : matches(interrupted) ? interruptedLabel : null;
       const duration = fmt(a.duration_s, "s");
+      const durationText = runNote === "latest run in progress" && Number.isFinite(a.duration_s)
+        ? `${duration} (selected result)` : duration;
+      const durationNode = Number.isFinite(a.duration_s)
+        ? rawCell(durationText, a.duration_s, "s", `${a.algorithm_id}, selected result duration`)
+        : h("span", { class: "display-value" }, durationText);
+      durationNode.querySelector(".display-value")?.setAttribute("data-run-duration-display", "");
       const cells = [h("th", { scope: "row" }, a.algorithm_id + (a.hidden ? " (intermediate)" : "")),
         h("td", { class: a.status === "failed" ? "problem" : null,
           "data-run-algorithm": a.algorithm_id, "data-run-input": a.provenance?.input_id || "" }, status, " ",
           h("span", { class: "state-chip run-note", "data-run-note": "", hidden: !runNote }, runNote || "")),
         h("td", { class: "num", "data-run-duration": duration,
           "data-run-duration-available": Number.isFinite(a.duration_s) ? "1" : "0" },
-          runNote === "latest run in progress" && Number.isFinite(a.duration_s)
-          ? `${duration} (selected result)` : duration)];
+          durationNode)];
       const pin = a.provenance;
       const canPin = pin && /^[0-9a-f]{64}$/.test(pin.input_id) && /^[0-9a-f]{64}$/.test(pin.parameters_sha256) &&
         /^a-\d{8}T\d{12}-[0-9a-f]{8}$/.test(pin.attempt_id);
@@ -1112,7 +1117,8 @@
       chip.hidden = !note;
       const duration = cell.nextElementSibling;
       const base = duration.dataset.runDuration;
-      duration.textContent = note === "latest run in progress" && duration.dataset.runDurationAvailable === "1"
+      const display = duration.querySelector("[data-run-duration-display]");
+      if (display) display.textContent = note === "latest run in progress" && duration.dataset.runDurationAvailable === "1"
         ? `${base} (selected result)` : base;
     }
     const unavailable = new Set([...(sample.unreadable_results || []), ...(sample.ambiguous_results || [])]);

@@ -186,6 +186,8 @@
     const root = h("section", { id: "lab-report-print", "aria-label": "Captured research report" },
       h("div", { class: "report-print-marks" }, "RESEARCH USE ONLY · NOT CLIA VALIDATED · NOT A DIAGNOSIS",
         report.example ? " · SYNTHETIC EXAMPLE" : ""),
+      h("div", { class: "report-print-limits" },
+        "Visible registered scalar metrics only; hidden steps, arrays, artifacts and taxon detail omitted. Values may differ from the earlier page."),
       h("h1", {}, "Traceback Lab research report"),
       field("Captured UTC", report.generated_at), field("Sample", report.sample_id),
       field("Input", report.full_input_id), field("Source", report.source_id),

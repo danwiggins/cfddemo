@@ -322,8 +322,8 @@
     const rep = h("div", { class: "control-block" }, h("span", { class: "control-badge" }, "REPEATABILITY"), " sampling noise, not a known answer");
     if (sample.repeatability) {
       const r = sample.repeatability;
-      rep.append(h("p", {}, `Median split-half |A−B|: ${fmt(r.median_relative_abs_diff * 100, "%")} across ${fmtCount(r.metrics)} comparable metrics; ${fmtCount(r.incomparable_metrics || 0)} metric comparison${r.incomparable_metrics === 1 ? "" : "s"} unavailable; ${fmtCount(r.unstable)} outside tolerance among ${fmtCount(r.verdict_metrics)} with a validated verdict; ${fmtCount(r.no_verdict_metrics)} without a validated verdict.`),
-        h("ul", {}, ...r.worst.map((w) => h("li", {}, `${w.label}: ${fmt(w.relative_abs_diff * 100, "%")}${w.stable === false ? " (unstable)" : w.stable === null ? " (no validated verdict)" : ""}`))),
+      rep.append(h("p", {}, `Median split-half |A−B|: ${fmt(r.median_relative_abs_diff == null ? null : r.median_relative_abs_diff * 100, "%")} across ${fmtCount(r.metrics)} comparable metrics; ${fmtCount(r.incomparable_metrics || 0)} metric comparison${r.incomparable_metrics === 1 ? "" : "s"} unavailable; ${fmtCount(r.unstable)} outside tolerance among ${fmtCount(r.verdict_metrics)} with a validated verdict; ${fmtCount(r.no_verdict_metrics)} without a validated verdict.`),
+        h("ul", {}, ...r.worst.map((w) => h("li", {}, `${w.label}: ${fmt(w.relative_abs_diff == null ? null : w.relative_abs_diff * 100, "%")}${w.stable === false ? " (unstable)" : w.stable === null ? " (no validated verdict)" : ""}`))),
         h("a", { href: `#/sample/${sample.id12}/stability` }, "→ Stability"));
     } else {
       const unavailable = (sample.stability || []).filter((panel) => !panel.split &&
@@ -608,15 +608,15 @@
       ...(m.entry && m.entry.license_ids || []).map((id) => seen.has(id) ? licenseRef(sample, id) : (seen.add(id), licenseRef(sample, id)))), unverifiedBadge(m.entry)];
     out.push(collapsed(`Not interpretable (${groups.not_interpretable.length})`, reasons(groups.not_interpretable), ["Metric", "Value", "Reason", "Needs", ""],
       groups.not_interpretable.map((m) => [m.label,
-        rawCell(fmtMetric(m), m.value, m.unit, `${m.label}, Not interpretable`),
+        rawCell(fmtMetric(m, { reason: null }), m.value, m.unit, `${m.label}, Not interpretable`),
         (m.reason || "").replace(/_/g, " "), m.entry && m.entry.min_depth_x ? `${m.entry.min_depth_x}x` : "—", extras(m)])));
     out.push(collapsed(`No reference (${groups.no_reference.length})`, reasons(groups.no_reference), ["Metric", "Value", "Reason", "Reference shown", ""],
       groups.no_reference.map((m) => [m.label,
-        rawCell(fmtMetric(m), m.value, m.unit, `${m.label}, No reference`),
+        rawCell(fmtMetric(m, { reason: null }), m.value, m.unit, `${m.label}, No reference`),
         (m.reason || "").replace(/_/g, " "), m.caption || "—", extras(m)])));
     out.push(collapsed(`In range (${groups.in_range.length})`, "", ["Metric", "Value", "Reference", ""],
       groups.in_range.map((m) => [m.label,
-        rawCell(fmtMetric(m), m.value, m.unit, `${m.label}, In range`), strip(m), extras(m)])));
+        rawCell(fmtMetric(m, { reason: null }), m.value, m.unit, `${m.label}, In range`), strip(m), extras(m)])));
     // Full callouts for licenses first used in the grouped rows (callout-once per route).
     const pending = (sample.licenses || []).filter((lic) => !document.getElementById(`license-${lic.license_id}`) && [...seen].includes(lic.license_id));
     const cardIds = new Set(out.flatMap((node) => node instanceof Element ? [...node.querySelectorAll(".license-callout")].map((c) => c.id) : []));
@@ -742,8 +742,8 @@
       const deviationValue = (value) => unit === "percent" ? fmt(value, "%")
         : unit === "unit" ? metricValue(value, { role: "difference" }) : "unavailable";
       const measuredCell = (value) => rawCell(metricValue(value), value, metric?.unit);
-      const deviationCell = (value) => rawCell(deviationValue(value), value,
-        unit === "percent" ? "%" : unit === "unit" ? metric?.unit : "scale not validated");
+      const deviationCell = (value) => unit === "none" ? h("span", {}, "scale not validated") :
+        rawCell(deviationValue(value), value, unit === "percent" ? "%" : metric?.unit);
       const halfStatus = (half) => {
         const part = panel.split_status && panel.split_status[half];
         if (!part) return "status unavailable";
@@ -757,7 +757,7 @@
       const splitVerdict = panel.split?.stable === true ? "stable" : panel.split?.stable === false ? "unstable" : "no split-half stability verdict";
       const absoluteDiff = panel.split ? panel.split.absolute_diff ?? Math.abs(panel.split.a - panel.split.b) : null;
       const splitDiffText = Number.isFinite(absoluteDiff)
-        ? `|A−B| = ${metricValue(absoluteDiff, { role: "difference" })}; relative difference ${fmt(panel.split.relative_abs_diff * 100, "%")}`
+        ? `|A−B| = ${metricValue(absoluteDiff, { role: "difference" })}; relative difference ${fmt(panel.split.relative_abs_diff == null ? null : panel.split.relative_abs_diff * 100, "%")}`
         : "";
       for (const f of fracs) marks.push(svg("text", { x: x(f), y: hgt - 18, "text-anchor": "middle", class: "axis" }, `${f * 100}%`));
       const scaleLabel = unit === "none" ? "no validated stability deviation scale" : unit === "unit" ? "the metric's unit" : "%";
@@ -1360,7 +1360,12 @@
       slot.replaceWith(h("div", {},
         h("p", { class: "help" }, `Pinned catalogue: ${data.source_label}; centers: ${data.centers_source}; end sites: ${data.preferred_source}; terms: ${data.terms}. These operator labels identify the declared source, not independent assembly or tissue validation.`),
         h("p", {}, `Observed eligible depth: ${fmt(data.observed_depth_x, "x")}; valid molecules: ${fmtCount(data.valid_molecules)}; eligible centers: ${fmtCount(data.eligible_centers)} of ${fmtCount(data.catalogue_centers)}; eligible pinned sites: ${fmtCount(data.eligible_preferred_sites)} of ${fmtCount(data.catalogue_preferred_sites)}.`),
-        h("p", {}, `OCF-like left/right contributions: ${fmt(data.ocf_like_left, "end-count difference", { unitDisplay: false })} / ${fmt(data.ocf_like_right, "end-count difference", { unitDisplay: false })} end-count differences from ${fmtCount(data.ocf_like_left_ends)} / ${fmtCount(data.ocf_like_right_ends)} ends in the two measurement windows. The score is unavailable if either window has no ends. Exact preferred-site U/D hits: ${fmtCount(data.preferred_u_hits)} / ${fmtCount(data.preferred_d_hits)} of ${fmtCount(data.valid_ends)} valid ends.`),
+        h("p", {}, "OCF-like left/right contributions: ",
+          rawCell(fmt(data.ocf_like_left, "end-count difference", { unitDisplay: false }), data.ocf_like_left,
+            "end-count difference", "OCF left contribution"), " / ",
+          rawCell(fmt(data.ocf_like_right, "end-count difference", { unitDisplay: false }), data.ocf_like_right,
+            "end-count difference", "OCF right contribution"),
+          ` end-count differences from ${fmtCount(data.ocf_like_left_ends)} / ${fmtCount(data.ocf_like_right_ends)} ends in the two measurement windows. The score is unavailable if either window has no ends. Exact preferred-site U/D hits: ${fmtCount(data.preferred_u_hits)} / ${fmtCount(data.preferred_d_hits)} of ${fmtCount(data.valid_ends)} valid ends.`),
         spanRows ? dataTable("Aligned spans by length (bp)", ["Aligned span (bp)", "Molecules"], spanRows)
           : h("p", { class: "help" }, "Aligned-span length diagnostic was not recorded."),
         h("p", { class: "help" }, `Left D peak offset: ${fmt(data.left_d_peak_offset_bp, "bp")}; right U peak offset: ${fmt(data.right_u_peak_offset_bp, "bp")}. These observed endpoint peaks do not measure soft clipping or validate physical cleavage.`),

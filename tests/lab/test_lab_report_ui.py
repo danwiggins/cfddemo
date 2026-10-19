@@ -60,6 +60,7 @@ def test_report_capture_download_print_and_selection_invalidation(tmp_path) -> N
                 const root = document.querySelector('#lab-report-print');
                 window.reportPrint = {
                   marks: root.querySelector('.report-print-marks').textContent,
+                  limits: root.querySelector('.report-print-limits').textContent,
                   input: root.textContent.includes(window.TracebackLab.state.sample.full_input_id),
                   definition: root.textContent.includes('most frequent aligned reference span'),
                   count: root.querySelectorAll('.report-print-metric').length,
@@ -121,6 +122,7 @@ def test_report_capture_download_print_and_selection_invalidation(tmp_path) -> N
     assert observed["print"]["count"] > 0
     assert not observed["print"]["privateData"]
     assert "RESEARCH USE ONLY" in observed["print"]["marks"]
+    assert "artifacts and taxon detail omitted" in observed["print"]["limits"]
     assert observed["after_session"] == {"blobs": 2, "printCalls": 1}
     assert observed["cleared"]
 
