@@ -954,13 +954,17 @@ or select an available sample and try again.
 
 After inspecting the preview, **Download JSON**, **Download CSV**, and **Print
 captured report** use that same captured model. They do not fetch another
-sample or artifact. Changing samples clears the capture. The JSON v2 download
+sample or artifact. Changing samples or leaving sample routes clears the
+capture. The JSON v2 download
 keeps raw scalar values and declared raw units alongside formatted display
 values, method status, interpretation state and validated provenance. Each
 metric also includes `recorded_support_n`, the recorded nonnegative support
 count or `null` when unavailable. This count is not necessarily a denominator;
 read the method's measurement and filter definition before interpreting it.
-The 28-column CSV places this field immediately after `raw_unit`. CSV
+The report's `recorded_utc` is the recorded completion time when present,
+otherwise the latest input-use time; a date alone is not proof of a completed
+run. Per-metric `computed_at` retains that result's own timestamp.
+The 28-column CSV places the support field immediately after `raw_unit`. CSV
 repeats report identity and limitations for each row and quotes textual cells
 with spreadsheet-formula protection. Spreadsheet software may still interpret
 types on import; use JSON for authoritative scalar types. Filenames begin

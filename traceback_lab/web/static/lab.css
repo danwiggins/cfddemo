@@ -191,7 +191,9 @@ pre.stderr { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; 
   body.lab:has(> #lab-report-print) > :not(#lab-report-print) { display: none !important; }
   #lab-report-print { display: block !important; page: labReport; color: #111; font: 10pt/1.4 sans-serif; }
   #lab-report-print[data-example="true"] { page: labReportSynthetic; }
-  #lab-report-print .report-print-marks, #lab-report-print .report-print-limits { display: none; }
+  /* Keep an in-flow notice when a print engine or margin setting omits margin boxes. */
+  #lab-report-print .report-print-marks { display: block; font-weight: bold; }
+  #lab-report-print .report-print-limits { display: block; font-size: 8pt; margin: .5rem 0; }
   #lab-report-print .report-print-method { break-before: page; }
   #lab-report-print .report-print-metric { break-inside: avoid; border-top: 1px solid #999; padding: .3rem 0; }
   #lab-report-print h1, #lab-report-print h2, #lab-report-print h3 { break-after: avoid; }
