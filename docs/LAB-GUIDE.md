@@ -954,9 +954,13 @@ or select an available sample and try again.
 
 After inspecting the preview, **Download JSON**, **Download CSV**, and **Print
 captured report** use that same captured model. They do not fetch another
-sample or artifact. Changing samples clears the capture. The JSON v1 download
+sample or artifact. Changing samples clears the capture. The JSON v2 download
 keeps raw scalar values and declared raw units alongside formatted display
-values, method status, interpretation state and validated provenance. CSV
+values, method status, interpretation state and validated provenance. Each
+metric also includes `recorded_support_n`, the recorded nonnegative support
+count or `null` when unavailable. This count is not necessarily a denominator;
+read the method's measurement and filter definition before interpreting it.
+The 28-column CSV places this field immediately after `raw_unit`. CSV
 repeats report identity and limitations for each row and quotes textual cells
 with spreadsheet-formula protection. Spreadsheet software may still interpret
 types on import; use JSON for authoritative scalar types. Filenames begin
@@ -966,8 +970,11 @@ dispatched; check the browser for the saved file.
 
 Only visible registered scalar metrics enter these downloads. Hidden
 processing steps, vector values, unsupplied artifacts and taxon detail are
-excluded; skipped or failed methods appear in limitations rather than as
-invented numeric rows. A report with no eligible scalar rows is refused.
+excluded; skipped, failed, unreadable, ambiguous or not-run methods appear in
+limitations rather than as invented numeric rows. Reports preserve a
+provisional-input warning when truncated chunks were excluded, and disclose
+malformed or unavailable selection details without copying private filenames
+or error diagnostics. A report with no eligible scalar rows is refused.
 Exports are limited to 5,000 rows and 5 MiB per file; an over-limit report is
 refused without a partial download. The print view adds recorded method
 questions, requirements, support counts, references and signal definitions

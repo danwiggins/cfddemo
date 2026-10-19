@@ -1,4 +1,4 @@
-// Explicit, fresh report capture for local ResearchReportV1 export and print.
+// Explicit, fresh report capture for local ResearchReportV2 export and print.
 "use strict";
 
 (() => {
@@ -81,7 +81,7 @@
         ? [metadataList(entry.next_steps.analytical), metadataList(entry.next_steps.clinical_setting)]
           .filter(Boolean).join("; ") || null : null;
       metric[`${row.algorithm_id}/${row.metric_id}`] = {
-        support: Number.isSafeInteger(source.n) && source.n >= 0 ? source.n : null,
+        support: row.recorded_support_n,
         reference: referenceText,
         confounders: metadataList(entry.confounders), nextSteps,
         guide: guide ? {
@@ -282,7 +282,7 @@
   globalThis.TracebackLabReportUI = {
     mount,
     selectionChanged: (id12) => {
-      if (captured && captured.report.sample_id !== id12) invalidate();
+      if (captured && captured.report.sample_id !== id12 && captured.report.source_id !== id12) invalidate();
       if (pending) invalidate();
     },
     invalidate,

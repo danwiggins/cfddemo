@@ -90,6 +90,14 @@ def test_report_capture_download_print_and_selection_invalidation(tmp_path) -> N
             observed["files"] = evaluate("window.reportFiles")
             observed["print"] = evaluate("window.reportPrint")
             observed["calls_after_actions"] = len(calls) - before
+            full_source_route = f"#/sample/{sample['source_id']}/methods"
+            evaluate(f"location.hash = {json.dumps(full_source_route)}")
+            for _ in range(100):
+                if evaluate("window.TracebackLab.state.renderedHash") == full_source_route:
+                    break
+                time.sleep(0.05)
+            assert evaluate("window.TracebackLab.state.renderedHash") == full_source_route
+            assert evaluate("document.querySelector('.report-preview')?.textContent") == observed["preview"]
             evaluate("""(() => {
               window.TracebackLab.state.sessionExpired = true;
               const buttons = [...document.querySelectorAll('.report-actions button')];
@@ -118,7 +126,7 @@ def test_report_capture_download_print_and_selection_invalidation(tmp_path) -> N
     assert sample["full_input_id"] in observed["preview"]
     assert len(observed["files"]) == len(observed["blobs"]) == 2
     assert observed["files"][0].endswith(".json") and observed["files"][1].endswith(".csv")
-    assert '"schema_version": "1"' in observed["blobs"][0]
+    assert '"schema_version": "2"' in observed["blobs"][0]
     assert observed["blobs"][1].startswith("schema_version,generated_at,")
     assert observed["print"]["input"] and observed["print"]["definition"]
     assert observed["print"]["count"] > 0
@@ -167,6 +175,10 @@ def test_report_download_writes_json_and_csv_from_one_capture(tmp_path) -> None:
     assert len(json_files) == len(csv_files) == 1
     model = json.loads(json_files[0].read_text(encoding="utf-8"))
     csv = csv_files[0].read_bytes()
+    assert model["schema_version"] == "2"
+    assert all("recorded_support_n" in row for row in model["metrics"])
+    columns = csv.split(b"\r\n", 1)[0].split(b",")
+    assert len(columns) == 28 and columns[columns.index(b"raw_unit") + 1] == b"recorded_support_n"
     assert model["sample_id"] == ID12 and model["metrics"]
     assert b"\r\n" in csv and csv.startswith(b"schema_version,generated_at,")
     assert model["generated_at"].split(".", 1)[0].replace("-", "").replace(":", "") in json_files[0].name
