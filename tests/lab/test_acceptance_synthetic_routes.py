@@ -209,15 +209,23 @@ def test_guided_signals_use_recorded_values_and_show_unavailable_reasons(tmp_pat
                             if algorithm["algorithm_id"] != "global-5mc"]
     mapped = next(algorithm for algorithm in sample["algorithms"] if algorithm["algorithm_id"] == "bam-qc")
     next(metric for metric in mapped["metrics"] if metric["metric_id"] == "mapped_fraction").update(
-        value=None, reason="no_primary_reads")
+        value=None, state="not_interpretable", reason="depth")
     sample["unreadable_results"] = ["global-5mc"]
     with _server(tmp_path / "unavailable", sample) as server:
         dom = _dom(server, tmp_path / "unavailable-dom", route=f"/sample/{ID12}/signals",
                    want=lambda page: "Unavailable guided signals (2)" in page)
+        methods_dom = _dom(server, tmp_path / "unavailable-methods-dom", route=f"/sample/{ID12}/methods",
+                           want=lambda page: 'id="method-provenance"' in page)
     assert dom.index('data-guide-signal="fragment-size/mode_bp"') < dom.index("Unavailable guided signals (2)")
     assert dom.index("Unavailable guided signals (2)") < dom.index('data-guide-signal="global-5mc/cpg_5mc_fraction"')
     assert "unavailable (selected result unreadable)" in dom
-    assert "unavailable (no primary reads)" in dom
+    assert "unavailable (measurement unavailable)" in dom
+    assert "not interpretable (depth)" in dom
+    assert "unavailable (depth)" not in dom
+    method_row = methods_dom.split('data-algorithm-id="bam-qc" data-metric-id="mapped_fraction"', 1)[1].split("</tr>", 1)[0]
+    assert '<span class="display-value">unavailable</span>' in method_row
+    assert "not interpretable (depth)" in method_row
+    assert "unavailable (depth)" not in method_row
 
 
 @needs_chrome

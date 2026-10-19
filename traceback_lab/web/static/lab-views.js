@@ -984,6 +984,7 @@
         rows.push(h("tr", { "data-algorithm-id": a.algorithm_id, "data-metric-id": m.metric_id },
           h("th", { scope: "row" }, m.label), h("td", {}, rawCell(fmtMetric(m, { algorithmId: a.algorithm_id }), m.value, m.unit,
             `${a.algorithm_id}/${m.metric_id}`)),
+          h("td", {}, stateChip(m)),
           h("td", {}, a.provenance.tool, " ", a.provenance.tool_version),
           h("td", { class: "mono" }, h("details", {}, h("summary", {}, a.provenance.parameters_sha256.slice(0, 12)), provenance(sample, a.algorithm_id))),
           h("td", { class: "mono" }, a.provenance.input_id.slice(0, 12)),
@@ -997,7 +998,7 @@
     out.push(h("div", { class: "table-wrap", id: "method-provenance", tabindex: "0", role: "region",
       "aria-label": "Every number with its provenance" }, h("table", { class: "data-table" },
       h("caption", {}, "Every number with its provenance"),
-      h("thead", {}, h("tr", {}, ...["Metric", "Value", "Tool", "Provenance stamp (parameters sha256)", "Input", "Reference", "Computed (UTC)", "License", "Citation", "Range source"].map((t) => h("th", { scope: "col" }, t)))),
+      h("thead", {}, h("tr", {}, ...["Metric", "Value", "Interpretation state", "Tool", "Provenance stamp (parameters sha256)", "Input", "Reference", "Computed (UTC)", "License", "Citation", "Range source"].map((t) => h("th", { scope: "col" }, t)))),
       h("tbody", {}, ...rows))));
     if (focusContext) {
       const revision = L.state.navigationRevision;
@@ -1211,7 +1212,7 @@
         : ambiguous ? "result selection ambiguous"
           : !algorithm ? "method not computed for this sample"
             : algorithm.status !== "ok" ? `${algorithm.status}${algorithm.skip_reason ? ` (${algorithm.skip_reason.replace(/_/g, " ")})` : ""}`
-              : metric ? (metric.reason || "measurement unavailable").replace(/_/g, " ") : "metric not recorded";
+              : metric ? "measurement unavailable" : "metric not recorded";
       const stabilityPanel = (sample.stability || []).find((panel) =>
         panel.algorithm_id === guide.algorithm && panel.metric_id === guide.metric);
       const denominator = available && Number.isSafeInteger(metric.n)
@@ -1225,7 +1226,7 @@
         h("h3", {}, guide.title),
         h("p", { class: "signal-guide-value" }, "Observed: ", h("strong", {}, available
           ? fmtMetric(metric, { algorithmId: guide.algorithm }) : `unavailable (${reason})`)),
-        available ? h("p", { class: "help" }, "Interpretation state: ", stateChip(metric)) : "",
+        metric ? h("p", { class: "help" }, "Interpretation state: ", stateChip(metric)) : "",
         h("p", {}, h("strong", {}, "Measurement: "), guide.definition),
         h("p", {}, h("strong", {}, "Denominator / filter: "), denominator),
         h("p", { class: "help" }, qc, " ", stabilityText, " ",
@@ -1487,9 +1488,11 @@
         panel.append(absent(other, id, hasChart ? sample : null), ...(other ? context(sample, id, seen) : []));
       } else {
         panel.append(...context(sample, id, seen), h("table", { class: "data-table" },
+          h("thead", {}, h("tr", {}, ...["Metric", "Value", "Interpretation state"].map((label) => h("th", { scope: "col" }, label)))),
           h("tbody", {}, ...other.metrics.filter((m) => m.value === null || typeof m.value !== "object")
             .map((m) => h("tr", {}, h("th", { scope: "row" }, m.label), h("td", {},
-              rawCell(fmtMetric(m, { algorithmId: id }), m.value, m.unit, `${id}/${m.metric_id}`)))))));
+              rawCell(fmtMetric(m, { algorithmId: id }), m.value, m.unit, `${id}/${m.metric_id}`)),
+              h("td", {}, stateChip(m)))))));
         if (id === "end-motifs") {
           const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading end-motif frequencies…"));
           panel.append(h("p", { class: "help" }, "Aligned-reference 4-mers at both fragment ends; all 256 motifs are in the data table."), slot);
@@ -1622,6 +1625,7 @@
     const flags = ratio && ratio.entry ? ratio.entry.flags || [] : [];
     section.append(h("p", { class: "help" }, "GENCODE v46 protein-coding gene TSSs; 50 bp strand-oriented bins across ±1 kb, plotted at bin centres. Central −150 to +50 bp coverage divided by outer-flank coverage. Descriptive gene-set profile only; no expression call or clinical cutoff."),
       h("p", {}, `Central/flank ratio: ${ratio ? fmtMetric(ratio, { algorithmId: "tss-profile" }) : "—"}. ${ratio ? ratio.caption || "" : ""}`),
+      ratio ? h("p", { class: "help" }, "Interpretation state: ", stateChip(ratio)) : "",
       ...flags.map((flag) => flagPill(flag)),
       ...context(sample, "tss-profile", seen));
     const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading TSS coverage…"));

@@ -32,8 +32,7 @@
   function selected(id12, revision) {
     return state.sample?.found === true && state.sample.id12 === id12 &&
       state.navigationRevision === revision &&
-      !state.completedInputUnavailable && !state.completionHistoryUnavailable &&
-      !["completed_input_unavailable", "completion_history_unavailable"].includes(state.sample.state) &&
+      !state.sample.state &&
       document.body.dataset.disconnected !== "1" && state.sessionExpired !== true;
   }
 
@@ -250,12 +249,14 @@
   function renderPanel() {
     if (!panel?.isConnected) return;
     const capture = currentCapture();
-    const previous = panel.querySelector("[data-report-status]")?.textContent || "";
+    // Retain the live region so its error style and announcement survive a rerender.
+    const status = panel.querySelector("[data-report-status]") ||
+      h("p", { "data-report-status": "", role: "status", "aria-live": "polite" });
     panel.replaceChildren(h("h2", {}, "Export / print"),
       h("p", {}, "Capture a fresh selected result for a research report. This request may show values different from the page above."),
       h("button", { type: "button", class: "control", "data-requires-server": "", disabled: !!pending,
         onclick: prepare }, pending ? "Preparing report…" : "Prepare Export / Print"),
-      h("p", { "data-report-status": "", role: "status", "aria-live": "polite" }, previous),
+      status,
       capture ? h("div", { class: "report-preview" },
         h("h3", {}, "Captured report preview"),
         field("Captured UTC", capture.report.generated_at),

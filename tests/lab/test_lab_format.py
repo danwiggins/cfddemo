@@ -51,10 +51,12 @@ def test_metric_display_units_roles_and_precision() -> None:
         metric_id: "short_fragment_hypomethylation_delta"});
       const residual = formatResultMetric({...source, algorithm_id: "meth-tf", metric_id: "fit_rms", value: 0.023});
       const missingWithOwnReason = formatResultMetric({...source, value: null, reason: "below_min_depth"});
+      const missingWithMeasurementReason = formatResultMetric({...source, value: null,
+        reason: "below_min_depth"}, {reason: "no_primary_reads"});
       const substitutedMissing = formatResultMetric({...missingWithOwnReason, value: null,
         algorithm_id: "probe", metric_id: "interval_low", unit: "bp", reason: "below_min_depth"}, {reason: null});
       process.stdout.write(JSON.stringify({outputs, delta, fragmentDelta,
-        residual, missingWithOwnReason, substitutedMissing,
+        residual, missingWithOwnReason, missingWithMeasurementReason, substitutedMissing,
         undeclared: formatResultMetric(undeclared),
         categoricalFalse: formatResultMetric(categorical),
         categoricalText: formatResultMetric({...categorical, metric_id: "pon_policy", value: "none"}),
@@ -79,7 +81,8 @@ def test_metric_display_units_roles_and_precision() -> None:
     assert payload["delta"]["text"] == "-4.5 percentage points"
     assert payload["fragmentDelta"]["text"] == "-4.5 percentage points"
     assert payload["residual"]["text"] == "2.3 percentage points"
-    assert payload["missingWithOwnReason"]["text"] == "unavailable (below min depth)"
+    assert payload["missingWithOwnReason"]["text"] == "unavailable"
+    assert payload["missingWithMeasurementReason"]["text"] == "unavailable (no primary reads)"
     assert payload["substitutedMissing"]["text"] == "unavailable"
     assert payload["undeclared"]["text"] == "0.5 (unit not declared)"
     assert payload["categoricalFalse"]["text"] == "false"
