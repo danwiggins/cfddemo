@@ -16,7 +16,7 @@ protocol, or makes a record fit for clinical use. Every output keeps its
 
 The golden path works end to end on one real BAM: `reference register`,
 `preflight`, `run`, `verify`, `catalog import` and `serve` (operator review,
-2026-10-04: 47 s `run`, 0.8 s import). Four reviews of `e76e9d0` (local
+2026-10-04; input-specific timings omitted here). Four reviews of `e76e9d0` (local
 notes named `run-files.md`, `algo.md`, `ui.md`, `code.md` and
 `test-quality.md`, plus screenshots, dated 2026-10-04; none are in this
 repository) found that the
@@ -157,7 +157,7 @@ Wave 1 gets batch 2 running and viewable; wave 2 is the rest. Whether wave 2 is 
 
 #### A0. Read-only triage of the pending zip (day 0)
 
-Added by the autoplan CEO review (both voices). Before A1, A5 or A6 is built, inspect the pending zip without running anything that writes under a ROOT: list its tree (barcode directories, `bam_pass`/`bam_fail`, POD5, FASTQ), count and size files, and for one BAM per barcode record the `@SQ` count, `@RG DS` (`basecall_model=`, `modbase_models=`), the `@PG` chain, MM/ML/MN presence on 100 reads, and whether it is coordinate-sorted. Forecast disk: zip size x 3 (unzipped, aligned copy, sealed copy). Write the result as a table (no paths, no read names, no sample identifiers) in the A1 PR description, and adjust A1/A5/A6 if the zip differs from the 28-file `bam_pass` set reviewed. Effort 0.5 d. No code.
+Added by the autoplan CEO review (both voices). Before A1, A5 or A6 is built, inspect the pending zip without running anything that writes under a ROOT: list its tree (barcode directories, `bam_pass`/`bam_fail`, POD5, FASTQ), count and size files, and for one BAM per barcode record the `@SQ` count, `@RG DS` (`basecall_model=`, `modbase_models=`), the `@PG` chain, MM/ML/MN presence on 100 reads, and whether it is coordinate-sorted. Forecast disk: zip size x 3 (unzipped, aligned copy, sealed copy). Keep the input inventory and header observations private; the A1 PR reports only whether A1/A5/A6 need revision. Effort 0.5 d. No code.
 
 #### A1. Unaligned BAM detection and an alignment guide
 
@@ -182,7 +182,7 @@ Change:
 - `doctor` reports a missing `minimap2` as WARN with `brew install minimap2`; the guide's prerequisites list it.
 - `docs/OPERATOR-GUIDE.md`: new section "Aligning MinKNOW output" with the
   command, how to merge one sample's `bam_pass` chunks (`samtools cat -o SAMPLE.bam bam_pass/barcodeNN/*.bam`; never merge across barcode directories, which mixes samples),
-  expected time per GB measured once on the operator's workstation (the PR records the Mac model, chip, macOS version and the `time` output), and a serial batch
+  expected time per GB measured once on the operator's workstation and stored in the private performance receipt (the PR records pass/fail only), and a serial batch
   block: per barcode directory, merge, align, index, then `traceback run "$f" --reference ID --label "$(basename "$f" .sorted.bam)" --import --root R || echo "FAILED $f"`, ending with `traceback jobs --root R`. `tests/test_operator_guide.py` executes this block on generated fixtures (with `minimap2` stubbed when absent). `doctor`
   reports `minimap2` presence as WARN when absent (never blocks).
 
@@ -419,7 +419,7 @@ Change (D5):
 - New `traceback_runner/web/records.py`: `LocalRecordView` (Pydantic, not persisted, not digested): `record_id`, `result_id`, `label | None`, `reference_id`, `policy: {id, builtin: bool, min_mapq, bins}`, `method_version`, `records_scanned`, `eligible_alignments`, `exclusions: [{reason, count}]`, `histogram: [{lower, upper | None, count}]`, `measurement_sha256`, `preflight: {outcome, checks: [{code, outcome, summary}]}`, `states: [{axis, token, label, meaning}]` (C3), `derived` (B3).
 - Built per request through the catalog's authority-bound reader (the path the live explorer reader uses, which replays the current capability and rejects stale authority, `result_catalog.py:3604`), not `verify_reference` alone (`result_catalog.py:2904`, bytes and signature only).
 - Route `GET /api/v1/records/{record_id}`, operator session only (reader sessions get 403 like the explorer routes). The server maps `record_id` to `result_id` through the catalog. The route joins the hardened dispatch table and integrity pins (`_INSTALLED_EXPLORER_HTTP_DEPENDENCIES` `server.py:675`, `assert_intact` `server.py:634-672`, route table `server.py:1296+`). Every string passes `validate_public_text` (`server.py:669-671`).
-- `app.js`: the record view per C0. An SVG histogram drawn with the `svg()` helper moved from `longitudinal.js:256-387` into `static/chart.js`. Variable-width bars, area = share of eligible (y = share / bin width in bp). The open `1000+` bin is hatched and drawn from 1,000 to 1,200 bp with height share / 200 as a display convention; a visible footnote and its table row say "open bin, width not defined; share is exact". X ticks at bin edges, axis titles "Aligned reference span (bp)" and "Share of eligible alignments per bp", each bar labelled `n` and `%` (desktop only), the bin with the largest count annotated "most common bin" (by count, not by height). Caption: "n = 3,435,813 eligible alignments; policy built-in (MAPQ >= 20)". An HTML table with the same rows follows the chart. For policies with more than 50 bins: a line over per-bp densities, no per-bar labels, and the table grouped into 10-bp rows with a "show every bin" toggle.
+- `app.js`: the record view per C0. An SVG histogram drawn with the `svg()` helper moved from `longitudinal.js:256-387` into `static/chart.js`. Variable-width bars, area = share of eligible (y = share / bin width in bp). The open `1000+` bin is hatched and drawn from 1,000 to 1,200 bp with height share / 200 as a display convention; a visible footnote and its table row say "open bin, width not defined; share is exact". X ticks at bin edges, axis titles "Aligned reference span (bp)" and "Share of eligible alignments per bp", each bar labelled `n` and `%` (desktop only), the bin with the largest count annotated "most common bin" (by count, not by height). Caption: "n = <eligible_count> eligible alignments; policy built-in (MAPQ >= 20)", with the count filled from the signed record. An HTML table with the same rows follows the chart. For policies with more than 50 bins: a line over per-bp densities, no per-bar labels, and the table grouped into 10-bp rows with a "show every bin" toggle.
 - Tokens in `styles.css` `:root`: `--chart-a`, `--chart-b`, `--chart-hatch`, `--neutral`, `--focus` (one focus colour), each checked at 4.5:1. SVG has `role="img"`, `<title>`/`<desc>` via `aria-labelledby`, `aria-describedby` to the table.
 
 Acceptance:
@@ -444,9 +444,9 @@ Acceptance: a test enumerates every member of the enums used in `LocalRecordView
 
 #### C4. Denominator strip
 
-Change (cut from four tiles to two values by the design review): the strip's header carries "Eligible of scanned" (`3,435,813 of 5,822,296 (59.0%)`) and "Share over 1 kb"; "Share 150-200 bp" only when the policy has edges at 150 and 200; "most common bin" lives on the chart only. No colour encodes good or bad. Strip: scanned → each exclusion reason with count and % of scanned → eligible, as one horizontal bar plus a list. Numbers use thousands separators and one-decimal percentages.
+Change (cut from four tiles to two values by the design review): the strip's header carries "Eligible of scanned" (`<eligible_count> of <records_scanned> (<eligible_share>%)`, filled from the signed record) and "Share over 1 kb"; "Share 150-200 bp" only when the policy has edges at 150 and 200; "most common bin" lives on the chart only. No colour encodes good or bad. Strip: scanned → each exclusion reason with count and % of scanned → eligible, as one horizontal bar plus a list. Numbers use thousands separators and one-decimal percentages.
 
-Acceptance: the strip values and the strip reconcile (exclusions + eligible = scanned) in a DOM test; the 150-200 share on the real BAM is reported in the PR as manual evidence. +2 tests. Rollback: revert.
+Acceptance: the strip values and the strip reconcile (exclusions + eligible = scanned) in a DOM test; the real-input 150-200 share is checked against a private operator receipt, with only pass/fail reported in the PR. +2 tests. Rollback: revert.
 
 #### C5. Catalog record table, labels, checkbox compare; jobs disclosure
 
@@ -558,7 +558,7 @@ Sequencing: B1 first because it silently returns wrong records. A0 before A1/A5/
 8. `traceback jobs` lists every job with the failed one showing TBX-RUN-005; `traceback status <failed JOB_ID>` prints its cause and fix.
 9. No `--json` output from steps 1-8 contains a label or an absolute path (grep).
 
-Manual evidence (in the DoD PRs, as hand-written tables, no paths or identifiers):
+Manual evidence (kept in private operator receipts; PRs report only pass/fail):
 - The operator processes the real zip unaided from the guide and logs every intervention (where they had to read code, ask, or guess). Target for DoD-1: zero code reading.
 - Alignment wall time per GB, `run` times, eligible counts, screenshots at 1280 and 390 px.
 - The histogram of one real BAM cross-checked against an independent count (for example `samtools view -F 0xF04 -q 20` piped to an awk span count over the same contigs): bin counts equal.
@@ -571,7 +571,7 @@ Manual evidence (in the DoD PRs, as hand-written tables, no paths or identifiers
 | `run --batch DIR` / `traceback intake` over a zip | A0 shows more than 10 BAMs, or the guide loop is used twice in one week |
 | `traceback align` wrapping a pinned, administrator-issued alignment release | Premise P5 answered "alignment must be in the product", or a second batch needs alignment |
 | N-record overlay view | A0 and the batch-2 question show more than 3 records per comparison |
-| De-duplicating preflight inside `run` (21 s per run) | Batches above 10 BAMs, or preflight above 60 s on one BAM |
+| De-duplicating preflight inside `run` | Batches above 10 BAMs, or preflight above 60 s on one BAM |
 | Retiring the Streamlit app | C1-C7 merged and the operator site used for one external walkthrough |
 | Migration of built-in constants across ROOTs | A change to the built-in policy is required (not a research policy) |
 | Folding the ~10 BAM re-hashes per run into one verify | `run` above 5 min on one BAM |
@@ -1275,7 +1275,7 @@ Parallel lanes: wave 1 runs W1-cli, W1-intake and W1-site at once (shared file: 
 
 ### Developer empathy narrative
 
-I unzip the run and find 28 small BAMs per barcode. The guide's first section is a synthetic demo, so I scroll to "Real local BAM". I register the FASTA in 12 s, which is quicker than the guide says. Preflight on one chunk tells me the BAM is "unreadable, truncated, or structurally invalid". It isn't; it's unaligned, but nothing says that and nothing mentions minimap2. Once someone tells me to align it, `run` works, but I have to `ls` the records folder to find the ID, import it by path, and restart `serve` to see it. The site shows tokens and JSON, no histogram. My second sample's row looks identical to the first because there are no names. After this plan: preflight tells me to align and prints the command; `run --label --import` names and catalogs the record in one step; the site shows the histogram. I still type `--root` on every command, and I still have to work out the per-barcode merge myself unless the guide spells it out (it now does).
+I unzip the run and find multiple BAM chunks per barcode. The guide's first section is a synthetic demo, so I scroll to "Real local BAM". I register the FASTA. Preflight on one chunk tells me the BAM is "unreadable, truncated, or structurally invalid". It isn't; it's unaligned, but nothing says that and nothing mentions minimap2. Once someone tells me to align it, `run` works, but I have to `ls` the records folder to find the ID, import it by path, and restart `serve` to see it. The site shows tokens and JSON, no histogram. My second sample's row looks identical to the first because there are no names. After this plan: preflight tells me to align and prints the command; `run --label --import` names and catalogs the record in one step; the site shows the histogram. I still type `--root` on every command, and I still have to work out the per-barcode merge myself unless the guide spells it out (it now does).
 
 ### Competitive DX benchmark
 
@@ -1284,8 +1284,8 @@ I unzip the run and find 28 small BAMs per barcode. The guide's first section is
 | `samtools stats` + plot script | 2-5 min | No provenance, no labels, plots by hand |
 | EPI2ME (ONT) workflows | 10-30 min first time (install), then one command | Hosted/managed; fragmentomics coverage varies |
 | Notebook with pysam | 10-20 min | Flexible; nothing signed or comparable |
-| traceback today | not reachable unaided from an unaligned zip; about 4 min from an aligned BAM with the guide | Signed, honest labels; no histogram on the site |
-| traceback after wave 1 | about 3-4 min from an aligned BAM (register, run --label --import, serve) | Signed record + histogram + catalog |
+| traceback today | not reachable unaided from an unaligned zip; aligned-input timing stays private | Signed, honest labels; no histogram on the site |
+| traceback after wave 1 | target under 5 min from an aligned BAM (register, run --label --import, serve) | Signed record + histogram + catalog |
 
 Target tier: Competitive (2-5 min) from an aligned BAM, measured excluding alignment compute. Alignment itself is outside the tool (premise P5).
 
@@ -1359,7 +1359,7 @@ DX DUAL VOICES — CONSENSUS TABLE:
 | 7 Community | n/a 3 | 3 | Private prototype; no change; not in scope |
 | 8 Measurement | 1 | 5 | DoD-1 logs every intervention on the real zip; repeat at DoD-2 |
 
-TTHW: today, unreachable unaided from an unaligned zip; about 4 min from an aligned BAM. After the plan: first diagnosis under 1 min; first viewable record from an aligned BAM about 3-4 min; from the zip, alignment compute plus about 5 min.
+TTHW: today, unreachable unaided from an unaligned zip; measured aligned-input timing stays private. After the plan: first diagnosis under 1 min; target first viewable record from an aligned BAM under 5 min; from the zip, alignment compute plus the same record-view target.
 
 ### DX scorecard
 
@@ -1378,7 +1378,7 @@ TTHW: today, unreachable unaided from an unaligned zip; about 4 min from an alig
 | Community            |  3/10  |  3/10  |   0    |
 | DX Measurement       |  5/10  |  1/10  |  +4 ↑  |
 +--------------------------------------------------------------------+
-| TTHW                 | ~4 min (aligned) | unreachable (zip) | ↑ |
+| TTHW                 | private aligned-input measurement | unreachable (zip) | ↑ |
 | Competitive Rank     | Competitive (aligned BAM); Needs Work (zip) |
 | Magical Moment       | designed via run --label --import + C1      |
 | Product Type         | CLI tool + local web viewer                 |
@@ -1456,7 +1456,7 @@ Nothing below is decided. The spec body reflects your stated direction plus mech
 
 | # | Premise | Recommendation | Status |
 |---|---|---|---|
-| P1 | The pending zip holds unaligned MinKNOW/Dorado BAMs like the 28 reviewed `bam_pass` files | Do A0 (read-only triage, 0.5 d) before building A1/A5/A6; re-plan if it differs | UNDECIDED |
+| P1 | The pending zip holds unaligned MinKNOW/Dorado BAMs like the privately reviewed `bam_pass` set | Do A0 (read-only triage, 0.5 d) before building A1/A5/A6; re-plan if it differs | UNDECIDED |
 | P2 | "Change the analysis" means changing MAPQ and bin edges | Ask the scientist what they would change first; if bins, see UC2; if a new analysis family, B2 is the wrong investment | UNDECIDED |
 | P3 | Two local records under one exact method are comparable enough to show a delta | Show it as "same analysis settings; differences are descriptive" (T4), never as a sample comparison | UNDECIDED |
 | P4 | The site's audience is you now and outside readers in demand interviews later | Accept; C7 and outside-reader polish wait until P7 is settled | UNDECIDED |
@@ -1606,7 +1606,7 @@ Tasks are the spec's child items; the reviews changed these (P1 blocks wave 1, P
 | Codex Review | `/codex` (spec quality gate) | Independent 2nd opinion | 1 | clean | 7/10 on the first dispatch; 12 ambiguities folded into the spec |
 | Eng Review | `/plan-eng-review` (via /autoplan) | Architecture & tests (required) | 1 | issues_open | 35 issues (4 false spec claims), 0 critical gaps after revisions |
 | Design Review | `/plan-design-review` (via /autoplan) | UI/UX gaps | 1 | issues_open | score: 4/10 → 8/10 (IA), states 2 → 8; 2 taste decisions |
-| DX Review | `/plan-devex-review` (via /autoplan) | Developer experience gaps | 1 | issues_open | score: 3/10 → 6/10, TTHW: unreachable from the zip → about 4 min from an aligned BAM |
+| DX Review | `/plan-devex-review` (via /autoplan) | Developer experience gaps | 1 | issues_open | score: 3/10 → 6/10, TTHW: unreachable from the zip → target under 5 min from an aligned BAM |
 
 - **CODEX:** quality gate 7/10 (one dispatch); CEO 15, Design 12, Eng 13, DX 19 concerns, all folded in or raised as gates.
 - **CROSS-MODEL:** Claude and Codex agreed on 14 of 25 consensus dimensions; every disagreement was one of degree (Codex harsher). Both independently found: open the zip first, B1's false reuse claim, C6's E07 blockers, labels vs DESIGN.md privacy, and the checkout-based canary risk.

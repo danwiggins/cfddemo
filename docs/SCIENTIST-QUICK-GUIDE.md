@@ -68,12 +68,12 @@ samtools index barcode01.sorted.bam
 
 # Measure, sign, and add to the catalog in one step
 uv run traceback run barcode01.sorted.bam --reference hg38 --root "$R" \
-  --label "barcode01 plasma draw 1" --import
+  --label "barcode01" --import
 ```
 
-Timings on an M-series Mac: aligning a 3 GB run takes about 9 minutes with
-`-t 16`, mostly building the index if you skip the `.mmi` step. `run` takes
-about 1 minute for a 2 GB BAM.
+Alignment and `run` times depend on input size, reference-index reuse and the
+operator's workstation. Record measured times privately when
+planning a batch.
 
 The operator guide has a ready-made loop for all barcodes
 ([Aligning MinKNOW output](OPERATOR-GUIDE.md#aligning-minknow-output)).
@@ -108,9 +108,9 @@ How to read a record page:
 | **Development signature verified** | Signed and verified with this machine's development key. Proves the record wasn't altered; it is not a quality claim. |
 | **Preflight: warn / partial** | Technical caveats about the input. For example, "basecall model not declared in the header" doesn't affect fragment length. |
 
-As a reference point from the first real run: 3,435,813 of 5,822,296 records
-were eligible (59%), and 63% of eligible fragments were 150–199 bp. That
-describes that file only. It is not a reference range.
+The eligible and scanned counts, and the share in each fragment-size bin, come
+from the selected record. They describe that file only and are not a reference
+range. Real-input values remain in the local record rather than this guide.
 
 ## Other useful commands
 

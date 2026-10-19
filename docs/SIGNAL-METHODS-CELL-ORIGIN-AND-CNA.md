@@ -151,8 +151,8 @@ content_sha256)`, `method_registry.py:165-168`), and both enter the hash.
 
 | Piece | Location | Notes |
 |---|---|---|
-| Pipeline and CLI | `evidence_inspector/cell_origin_pipeline.py` (1,935 lines); entry `scripts/regenerate_cell_origin.py` | Inputs: an aligned modBAM or a normalized extract TSV (`cell_origin_pipeline.py:1803-1860`). Output: `data/local/cell-origin/result.json` |
-| modkit call | `cell_origin_pipeline.py:1462-1506` | `modkit extract calls --reference <hard-coded data/local/reference/hg38.primary.fa> --cpg --include-bed <regions> --mapped-only`. **The reference path is hard-coded (`:1477`)**. The version is probed but not pinned (`:1527-1535`). No explicit `--filter-threshold` |
+| Pipeline and CLI | `evidence_inspector/cell_origin_pipeline.py` (1,935 lines); entry `scripts/regenerate_cell_origin.py` | Inputs: an aligned modBAM or a normalized extract TSV (`cell_origin_pipeline.py:1803-1860`). Output: a private operator-local result file |
+| modkit call | `cell_origin_pipeline.py:1462-1506` | `modkit extract calls --reference <operator-local-reference> --cpg --include-bed <regions> --mapped-only`. **The reference path is hard-coded (`:1477`)**. The version is probed but not pinned (`:1527-1535`). No explicit `--filter-threshold` |
 | Pinned modkit 0.6.4 adapter (`extract full`, digest-bound) | `evidence_inspector/modkit_adapter.py:39`, `:164`; `scripts/adapt_modkit_064.py` | Separate research path; not used by `run_pipeline` |
 | UXM classification | `cell_origin_models.py:67-69`, `:224-236` | Fragment-level: ≥4 CpGs; U if methylation < 0.251, M if ≥ 0.75, otherwise X |
 | NNLS | `deconvolution.py:117` (active-set, `traceback.active-set-nnls.v1`, `:45`), `deconvolve_uxm_v2` `:340` | **The pipeline uses `NnlsRowScale.SQRT_COUNT` (`cell_origin_pipeline.py:1565`).** The enum's own docstring says `REFERENCE_COUNT` is the one that reproduces the reference implementation (`cell_origin_models.py:124-135`) |
@@ -178,7 +178,7 @@ content_sha256)`, `method_registry.py:165-168`), and both enter the hash.
 - **2026-10-04 re-run.** `scripts/regenerate_cell_origin.py --aligned-modbam`
   was run twice on the local aligned BAM, in fresh scratch directories with
   different salts:
-  - each run took about 5-7 minutes;
+  - exact per-run timings are omitted here;
   - the two outputs are **byte-identical to each other and to the 2026-10-01
     output**;
   - the 229 tests in the seven cell-origin test files pass.
@@ -191,9 +191,11 @@ The numbers stay out of the repo.
   executable digest (`modkit_adapter.py:40-41`), so that adapter would reject
   the binary on this Mac.
 - **`samtools` and `minimap2`** are in `/opt/homebrew/bin`.
-- **Tags.** The aligned BAM carries MM/ML/MN.
-- **Basecall model.** It is declared only in the *unaligned* BAM's `@RG`, and
-  there the modbase field is a placeholder. Alignment drops `@RG`.
+- **Tags.** Cell-origin inputs need MM/ML (and may carry MN); the reviewed
+  input's tag inventory is omitted here.
+- **Basecall model.** Alignment can omit `@RG` declarations, and a placeholder
+  modbase field does not prove the model. The operator-declaration path below
+  covers an aligned input without a usable declaration.
 
 **Conclusion:** the code exists, it is deterministic, and it reproduces. It is
 fit to promote. Four defects must be fixed in the promotion:
@@ -878,11 +880,10 @@ note, or states "G1 not yet cleared".
    - **Default:** accept `run --modbase-model ID`, labelled
      "operator-declared". The guide tells the operator to copy the model from
      the *unaligned* BAM's `@RG`.
-   - On the local BAM, that `@RG` names the basecall model, but its modbase
-     field is a placeholder. So even the header is not proof of the modbase
-     model.
-   - Alternative: require the operator to re-insert `@RG` (stricter; every
-     aligned BAM fails today).
+   - An `@RG` can name a basecall model while its modbase field is a
+     placeholder. The header alone is then not proof of the modbase model.
+   - Alternative: require the operator to re-insert `@RG` (stricter; aligned
+     BAMs without that declaration would fail).
 8. **Q8. Unassigned share.**
    - **Default:** show `residual_l2` and the denominators. Do not show an
      "unassigned" bar.
