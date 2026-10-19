@@ -165,8 +165,11 @@
       h("p", { class: "landing-identity" }, `Sample ${sample.id12} · `,
         h("span", { class: "sample-context-kind" }, sample.example ? "EXAMPLE (synthetic)" : "Not marked as the built-in synthetic example")),
       h("dl", { class: "landing-summary" },
-        h("div", {}, h("dt", {}, "Recorded date (UTC)"), h("dd", {}, sample.run_utc ? sample.run_utc.slice(0, 10) : "Unavailable",
-          h("p", { class: "help" }, "Completion date when recorded; otherwise latest input-use date. Active and interrupted work is reported in the header."))),
+        h("div", {}, h("dt", {}, sample.completed_utc ? "Recorded completion (UTC)" : "Latest input use (UTC)"),
+          h("dd", {}, sample.run_utc ? sample.run_utc.slice(0, 10) : "Unavailable",
+            h("p", { class: "help" }, sample.completed_utc
+              ? "Completion recorded for this selected sample. Active and interrupted work is reported in the header."
+              : "No completion recorded for this selected sample. This date is input use, not a completed run."))),
         h("div", {}, h("dt", {}, "Approximate depth"), h("dd", {}, sample.depth?.approx_depth_x == null ? "Unavailable" : `${sample.depth.approx_depth_x.toPrecision(3)}x`,
           h("span", { class: "help" }, "Aligned-base depth; eligible reads."))),
         h("div", {}, h("dt", {}, "Recorded method states"), h("dd", {}, rows.length
