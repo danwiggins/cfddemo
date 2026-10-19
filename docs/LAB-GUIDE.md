@@ -32,6 +32,13 @@ M-series Mac. Copy-number is skipped (`example_reference`): it needs
 hg38-scale assets. The sample carries an **EXAMPLE (synthetic)** pill.
 `lab serve --open` prints the one-use link and opens it.
 
+If an already-open Lab page says there are no runs, use the ROOT printed by
+the serving process for `lab doctor --root R` and `lab run --example --root R`.
+Reload the page after the example completes. Its landing starts with an
+overview; choose **Explore signals** for the result lenses and **Check
+reliability** before interpreting a result. The example is synthetic and
+does not establish scientific or clinical qualification.
+
 Measured time to the page on a clean Mac by a teammate: not yet measured
 (target ≤ 5 minutes).
 
@@ -44,6 +51,12 @@ Measured time to the page on a clean Mac by a teammate: not yet measured
 4. `traceback lab doctor --root R` shows setup checks and recovery commands;
    inspect readiness for the methods you intend to run. Other methods have
    additional optional tools, assets, or input-scoped calibrations below.
+
+Before running a real chunk directory, confirm the platform, basecall and
+modification channels, depth, and method-specific assets required for your
+intended methods. Use the same ROOT for reference registration, the run, and
+the local page. An environment check does not make a result available or
+validate its interpretation.
 
 ## Duration and disk for a real run
 

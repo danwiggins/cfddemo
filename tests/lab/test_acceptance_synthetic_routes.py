@@ -677,8 +677,19 @@ def test_empty_copy_and_complete_example_commands(tmp_path) -> None:
     assert "Loading…" not in short.group(1) and "Loading…" not in full.group(1)
     assert "What CLIA means for this demo" in dom
     assert "No Lab runs under this server's ROOT" in dom
-    assert "traceback lab doctor" in dom and "traceback lab run --example" in dom
-    assert "traceback lab run &lt;chunk dir&gt;" in dom
+    assert dom.index("Start with a synthetic example") < dom.index("Prepare a real input") < dom.index("What CLIA means for this demo")
+    assert "uv run traceback lab doctor --root ROOT_PATH" in dom
+    assert "uv run traceback lab run --example --root ROOT_PATH" in dom
+    assert "uv run traceback lab serve --open --root ROOT_PATH" in dom
+    assert "uv run traceback reference register --fasta HG38_FASTA --id hg38 --root ROOT_PATH" in dom
+    assert "uv run traceback lab run CHUNK_DIR --reference hg38 --root ROOT_PATH" in dom
+    assert dom.count(">Copy command</button>") == 6
+    assert 'aria-label="Copy command: uv sync"' in dom
+    assert "Check reliability before interpreting a result" in dom
+    assert "Completing setup does not establish scientific or clinical qualification" in dom
+    assert "Doctor checks the environment" in dom
+    assert re.search(r'href="https://github.com/danwiggins/cfddemo/blob/main/docs/LAB-GUIDE.md#first-five-minutes" target="_blank" rel="noreferrer noopener"', dom)
+    assert re.search(r'href="https://github.com/danwiggins/cfddemo/blob/main/docs/LAB-GUIDE.md#one-time-setup-for-real-kits" target="_blank" rel="noreferrer noopener"', dom)
     assert f"No Lab sample matches {ID12}" in unknown and "No Lab runs under" not in unknown
     assert "What CLIA is." in about and "42 CFR 493.3(b)(2)" in about
     assert "No Lab runs under" not in about
