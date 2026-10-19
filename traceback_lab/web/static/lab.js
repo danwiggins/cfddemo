@@ -36,7 +36,7 @@
     runLogLines: new Map(),
     staleRunLogCleared: false,
   };
-  window.TracebackLab = { state, LENSES, h, render, chart, dataTable, fmt, fmtMetric, fmtMetricValue, fmtCount,
+  window.TracebackLab = { state, LENSES, h, render, chart, dataTable, rawCell, fmt, fmtMetric, fmtMetricValue, fmtCount,
     formatMetric: window.TracebackLabFormat.formatMetric,
     formatResultMetric: window.TracebackLabFormat.formatResultMetric };
 
@@ -94,7 +94,7 @@
     return window.TracebackLabFormat.formatResultMetric(metric, options).text;
   }
   function fmtMetricValue(metric, value, options = {}) {
-    return fmtMetric({ ...metric, value }, options);
+    return fmtMetric({ ...metric, value }, { reason: null, ...options });
   }
   function fmtCount(value) {
     return window.TracebackLabFormat.formatMetric(value, null, {
@@ -345,7 +345,15 @@
   }
 
   // -- charts ---------------------------------------------------------------------------
-  const chartCell = (value) => typeof value === "number" && Number.isFinite(value) ? String(value) : fmt(value);
+  function rawCell(display, raw, unit) {
+    const exact = raw === null || raw === undefined ? "null" : String(raw);
+    return h("div", { class: "value-with-raw" }, h("span", { class: "display-value" }, display), " ",
+      h("details", { class: "raw-value" }, h("summary", {}, "Raw value"), h("code", {}, `${exact} ${unit || "unit not declared"}`)));
+  }
+  function chartCell(value) {
+    if (value instanceof Node) return value;
+    return typeof value === "number" && Number.isFinite(value) ? String(value) : fmt(value);
+  }
   function dataTable(caption, headers, rows) {
     const table = h("table", { class: "data-table" },
       h("caption", {}, caption),
@@ -466,7 +474,9 @@
         h("td", { class: a.status === "failed" ? "problem" : null,
           "data-run-algorithm": a.algorithm_id, "data-run-input": a.provenance?.input_id || "" }, status, " ",
           h("span", { class: "state-chip run-note", "data-run-note": "", hidden: !runNote }, runNote || "")),
-        h("td", { class: "num", "data-run-duration": duration }, runNote === "latest run in progress" && duration !== "—"
+        h("td", { class: "num", "data-run-duration": duration,
+          "data-run-duration-available": Number.isFinite(a.duration_s) ? "1" : "0" },
+          runNote === "latest run in progress" && Number.isFinite(a.duration_s)
           ? `${duration} (selected result)` : duration)];
       const pin = a.provenance;
       const canPin = pin && /^[0-9a-f]{64}$/.test(pin.input_id) && /^[0-9a-f]{64}$/.test(pin.parameters_sha256) &&
@@ -655,7 +665,7 @@
       chip.hidden = !note;
       const duration = cell.nextElementSibling;
       const base = duration.dataset.runDuration;
-      duration.textContent = note === "latest run in progress" && base !== "—"
+      duration.textContent = note === "latest run in progress" && duration.dataset.runDurationAvailable === "1"
         ? `${base} (selected result)` : base;
     }
     const unavailable = new Set([...(sample.unreadable_results || []), ...(sample.ambiguous_results || [])]);

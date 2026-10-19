@@ -5,7 +5,7 @@
 
 (function () {
   const L = window.TracebackLab;
-  const { h, fmt, fmtMetric, fmtMetricValue, fmtCount, dataTable, chart } = L;
+  const { h, fmt, fmtMetric, fmtMetricValue, fmtCount, rawCell, dataTable, chart } = L;
   const SVG = "http://www.w3.org/2000/svg";
   const STATE = {
     in_range: ["●", "in range"],
@@ -414,8 +414,9 @@
         v < lo ? svg("text", { x: (x(lo) + x(v)) / 2, y: 22, class: "strip-break", "text-anchor": "middle" }, "⫽") : "",
         svg("text", { x: x(v), y: 22, class: "strip-mark", "text-anchor": "middle" }, "◆")),
         dataTable(`${metric.label}: published reference strip`, ["Mark", "Value"],
-          [["Reference low", fmtMetricValue(metric, lo)], ["Reference high", fmtMetricValue(metric, hi)],
-            ["This sample", fmtMetric(metric)]]),
+          [["Reference low", rawCell(fmtMetricValue(metric, lo), lo, metric.unit)],
+            ["Reference high", rawCell(fmtMetricValue(metric, hi), hi, metric.unit)],
+            ["This sample", rawCell(fmtMetric(metric), metric.value, metric.unit)]]),
         h("figcaption", {}, metric.caption));
     }
     if (metric.exploratory_n && metric.interval) {
@@ -431,9 +432,11 @@
         ...(metric.cohort_values || []).map((value) => svg("circle", { cx: x(value), cy: 17, r: 2.5, class: "strip-member" })),
         svg("text", { x: x(v), y: 22, class: "strip-mark", "text-anchor": "middle" }, "◆")),
         dataTable(`${metric.label}: exploratory cohort strip`, ["Mark", "Value"],
-          [["Cohort minimum", fmtMetricValue(metric, lo)], ["Cohort maximum", fmtMetricValue(metric, hi)],
-            ...(metric.cohort_values || []).map((value, index) => [`Cohort member ${index + 1}`, fmtMetricValue(metric, value)]),
-            ["This sample", fmtMetric(metric)]]),
+          [["Cohort minimum", rawCell(fmtMetricValue(metric, lo), lo, metric.unit)],
+            ["Cohort maximum", rawCell(fmtMetricValue(metric, hi), hi, metric.unit)],
+            ...(metric.cohort_values || []).map((value, index) =>
+              [`Cohort member ${index + 1}`, rawCell(fmtMetricValue(metric, value), value, metric.unit)]),
+            ["This sample", rawCell(fmtMetric(metric), metric.value, metric.unit)]]),
         h("figcaption", {}, metric.caption));
     }
     if (metric.percentile !== null && metric.percentile !== undefined) {
@@ -465,9 +468,9 @@
           svg("text", { x: sampleOffScale === "left" ? 110 : sampleOffScale === "right" ? 310 : valueX(sampleValue), y: 43, "text-anchor": "middle", class: "strip-mark" },
             sampleOffScale === "left" ? "◀" : sampleOffScale === "right" ? "▶" : "◆")) : "",
         interval ? dataTable(`${metric.label}: 95th-percentile cutoff`, ["Mark", "Value", "Display"],
-          [["Cutoff interval low", fmtMetricValue(metric, interval[0]), "On scale"],
-            ["Cutoff interval high", fmtMetricValue(metric, interval[1]), "On scale"],
-            ["This sample", fmtMetric(metric), sampleOffScale ? `Off scale ${sampleOffScale}` : "On scale"]]) : "",
+          [["Cutoff interval low", rawCell(fmtMetricValue(metric, interval[0]), interval[0], metric.unit), "On scale"],
+            ["Cutoff interval high", rawCell(fmtMetricValue(metric, interval[1]), interval[1], metric.unit), "On scale"],
+            ["This sample", rawCell(fmtMetric(metric), metric.value, metric.unit), sampleOffScale ? `Off scale ${sampleOffScale}` : "On scale"]]) : "",
         h("figcaption", {}, metric.caption, interval
           ? ` Cutoff CI: ${fmtMetricValue(metric, interval[0])}–${fmtMetricValue(metric, interval[1])} on a separate value scale.${sampleOffScale ? ` This sample is outside the cutoff CI scale (${sampleOffScale}).` : ""}` : ""));
     }
@@ -612,13 +615,16 @@
           return out;
         });
         const chartSvg = svg("svg", { viewBox: `0 0 ${w} ${hgt}`, role: "img", "aria-label": label, class: "composition-svg" }, svg("title", {}, label), ...marks);
+        const compositionRow = (c) => [c.contributor_id,
+          rawCell(fmt(c.fraction, "fraction"), c.fraction, "fraction"),
+          rawCell(fmt(c.interval ? c.interval[0] : null, "fraction"), c.interval ? c.interval[0] : null, "fraction"),
+          rawCell(fmt(c.interval ? c.interval[1] : null, "fraction"), c.interval ? c.interval[1] : null, "fraction"),
+          c.interval_state];
         slot.replaceWith(h("div", {}, chartSvg,
           dataTable(`Plotted cell-type composition (${Math.round(data.confidence_level * 100)}% bootstrap interval)`, ["Cell type", "Share", "Interval low", "Interval high", "Interval"],
-            rows.map((c) => [c.contributor_id, fmt(c.fraction, "fraction"),
-              fmt(c.interval ? c.interval[0] : null, "fraction"), fmt(c.interval ? c.interval[1] : null, "fraction"), c.interval_state])),
+            rows.map(compositionRow)),
           dataTable("All cell-type contributions, including zero-share rows", ["Cell type", "Share", "Interval low", "Interval high", "Interval"],
-            data.contributors.map((c) => [c.contributor_id, fmt(c.fraction, "fraction"),
-              fmt(c.interval ? c.interval[0] : null, "fraction"), fmt(c.interval ? c.interval[1] : null, "fraction"), c.interval_state]))));
+            data.contributors.map(compositionRow))));
       })
       .catch((error) => slot.replaceWith(h("div", { class: "problem" }, `Chart could not be drawn (${error.message}).`)));
     return section;
@@ -684,6 +690,9 @@
         : fmt(value, null, options);
       const deviationValue = (value) => unit === "percent" ? fmt(value, "%")
         : unit === "unit" ? metricValue(value, { role: "difference" }) : "unavailable";
+      const measuredCell = (value) => rawCell(metricValue(value), value, metric?.unit);
+      const deviationCell = (value) => rawCell(deviationValue(value), value,
+        unit === "percent" ? "%" : unit === "unit" ? metric?.unit : "scale not validated");
       const halfStatus = (half) => {
         const part = panel.split_status && panel.split_status[half];
         if (!part) return "status unavailable";
@@ -702,14 +711,14 @@
       for (const f of fracs) marks.push(svg("text", { x: x(f), y: hgt - 18, "text-anchor": "middle", class: "axis" }, `${f * 100}%`));
       const scaleLabel = unit === "none" ? "no validated stability deviation scale" : unit === "unit" ? "the metric's unit" : "%";
       const label = `${panel.label}: ${panel.verdict}. Deviation from full depth: ${scaleLabel}${hasSplitHalf ? `; ${splitSummary}; ${splitVerdict}` : ""}.`;
-      const pointRows = panel.points.map((p) => ["Measured fraction", p.fraction * 100, metricValue(p.value), deviationValue(p.deviation),
-        p.band && Number.isFinite(p.band.lo) && Number.isFinite(p.band.hi) ? deviationValue(p.band.lo) : "unavailable",
-        p.band && Number.isFinite(p.band.lo) && Number.isFinite(p.band.hi) ? deviationValue(p.band.hi) : "unavailable",
+      const pointRows = panel.points.map((p) => ["Measured fraction", p.fraction * 100, measuredCell(p.value), deviationCell(p.deviation),
+        p.band && Number.isFinite(p.band.lo) && Number.isFinite(p.band.hi) ? deviationCell(p.band.lo) : "unavailable",
+        p.band && Number.isFinite(p.band.lo) && Number.isFinite(p.band.hi) ? deviationCell(p.band.hi) : "unavailable",
         stateReason(p.state, p.reason, p.state || "—")]);
       if (unit !== "none") for (const half of ["A", "B"]) {
         const part = panel.split_status?.[half];
         if (Number.isFinite(part?.deviation))
-          pointRows.push([`Split ${half}`, 50, metricValue(part.value), deviationValue(part.deviation), "unavailable", "unavailable",
+          pointRows.push([`Split ${half}`, 50, measuredCell(part.value), deviationCell(part.deviation), "unavailable", "unavailable",
             stateReason(part.state, part.reason, part.state || "—")]);
       }
       grid.append(h("figure", { class: "multiple" }, h("figcaption", {}, h("strong", {}, panel.label), ` — ${panel.verdict}`),
@@ -717,20 +726,25 @@
         dataTable(`${panel.label}: plotted stability points`, ["Mark", "Input fraction (%)", "Value",
           unit === "percent" ? "Deviation (%)" : "Deviation", unit === "percent" ? "Band low (%)" : "Band low",
           unit === "percent" ? "Band high (%)" : "Band high", "State"], pointRows),
-        h("p", { class: "help" }, unit === "none" ? "No validated stability deviation scale; numeric values are in the table." : unit === "unit" ? "y: difference from full depth (metric's unit)" : "y: relative deviation from full depth, % (clipped ±50%)"),
+        h("p", { class: "help" }, unit === "none" ? "No validated stability deviation scale; measured values remain in the table." : unit === "unit" ? "y: difference from full depth (metric's unit)" : "y: relative deviation from full depth, % (clipped ±50%)"),
         hasSplitHalf ? h("p", { class: "help" }, `Split halves: ${splitSummary}. `,
           splitDiffText ? `${splitDiffText}. ` : "",
           splitVerdict === "no split-half stability verdict" ? "No split-half stability verdict." : `Split-half verdict: ${splitVerdict}.`) : ""));
-      for (const p of panel.points) tableRows.push([panel.label, `${p.fraction * 100}%`, metricValue(p.value), deviationValue(p.deviation),
+      for (const p of panel.points) tableRows.push([panel.label, `${p.fraction * 100}%`, measuredCell(p.value), deviationCell(p.deviation),
         stateReason(p.state, p.reason, p.state || "—")]);
-      if (panel.split) tableRows.push([panel.label, "split A / B", `${metricValue(panel.split.a)} / ${metricValue(panel.split.b)}`, splitDiffText,
+      if (panel.split) tableRows.push([panel.label, "split A / B",
+        rawCell(`${metricValue(panel.split.a)} / ${metricValue(panel.split.b)}`,
+          `${panel.split.a} / ${panel.split.b}`, metric?.unit),
+        rawCell(splitDiffText, absoluteDiff, metric?.unit),
         panel.split_warning ? `${splitVerdict}; ${panel.split_warning}` : splitVerdict]);
       else if (hasSplitHalf) {
         const halfDeviation = (half) => {
           const value = panel.split_status?.[half]?.deviation;
           return Number.isFinite(value) ? deviationValue(value) : "unavailable";
         };
-        tableRows.push([panel.label, "split A / B", `${metricValue(panel.split_status?.A?.value)} / ${metricValue(panel.split_status?.B?.value)}`,
+        tableRows.push([panel.label, "split A / B",
+          rawCell(`${metricValue(panel.split_status?.A?.value)} / ${metricValue(panel.split_status?.B?.value)}`,
+            `${panel.split_status?.A?.value ?? "null"} / ${panel.split_status?.B?.value ?? "null"}`, metric?.unit),
           `${halfDeviation("A")} / ${halfDeviation("B")} (each vs full)`, splitSummary]);
       }
     }
@@ -795,7 +809,7 @@
         const e = m.entry || {};
         const ref = e.reference || {};
         rows.push(h("tr", {},
-          h("th", { scope: "row" }, m.label), h("td", {}, fmt(m.value, m.unit)),
+          h("th", { scope: "row" }, m.label), h("td", {}, rawCell(fmtMetric(m, { algorithmId: a.algorithm_id }), m.value, m.unit)),
           h("td", {}, a.provenance.tool, " ", a.provenance.tool_version),
           h("td", { class: "mono" }, h("details", {}, h("summary", {}, a.provenance.parameters_sha256.slice(0, 12)), provenance(sample, a.algorithm_id))),
           h("td", { class: "mono" }, a.provenance.input_id.slice(0, 12)),
@@ -1165,7 +1179,7 @@
     const ratio = a.metrics.find((m) => m.metric_id === "central_flank_ratio");
     const flags = ratio && ratio.entry ? ratio.entry.flags || [] : [];
     section.append(h("p", { class: "help" }, "GENCODE v46 protein-coding gene TSSs; 50 bp strand-oriented bins across ±1 kb, plotted at bin centres. Central −150 to +50 bp coverage divided by outer-flank coverage. Descriptive gene-set profile only; no expression call or clinical cutoff."),
-      h("p", {}, `Central/flank ratio: ${ratio ? fmt(ratio.value, ratio.unit) : "—"}. ${ratio ? ratio.caption || "" : ""}`),
+      h("p", {}, `Central/flank ratio: ${ratio ? fmtMetric(ratio, { algorithmId: "tss-profile" }) : "—"}. ${ratio ? ratio.caption || "" : ""}`),
       ...flags.map((flag) => flagPill(flag)),
       ...context(sample, "tss-profile", seen));
     const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading TSS coverage…"));
@@ -1320,10 +1334,12 @@
         svg("svg", { viewBox: `0 0 ${w} ${hgt}`, role: "img", "aria-label": label, class: "composition-svg" }, svg("title", {}, label), ...marks,
           svg("line", { x1: left, x2: w - 20, y1: axisY, y2: axisY, class: "ci" }), ...ticks),
         dataTable(`${name} (${intervalName})`, ["Cell type", "Share", "Interval low", "Interval high", "Cohort mean", "Reference low", "Reference high", "Reference interval meaning", "Eligible n", "State"],
-          members.map((m) => { const cohort = cohortSummary(m); return [m.contributor, fmtMetric(m),
-            fmtMetricValue(m, m.ci ? m.ci[0] : null), fmtMetricValue(m, m.ci ? m.ci[1] : null),
-            fmtMetricValue(m, cohort ? cohort.mean : null), fmtMetricValue(m, cohort ? cohort.low : null),
-            fmtMetricValue(m, cohort ? cohort.high : null),
+          members.map((m) => { const cohort = cohortSummary(m);
+            const cell = (value) => rawCell(fmtMetricValue(m, value), value, m.unit);
+            return [m.contributor, rawCell(fmtMetric(m), m.value, m.unit),
+            cell(m.ci ? m.ci[0] : null), cell(m.ci ? m.ci[1] : null),
+            cell(cohort ? cohort.mean : null), cell(cohort ? cohort.low : null),
+            cell(cohort ? cohort.high : null),
             cohort ? (m.exploratory_n ? "Observed min–max" : "90% bootstrap interval of the 95th-percentile cutoff") : "—", fmtCount(m.eligible_n),
             (STATE[m.state] || ["", m.state])[1] + (m.reason ? ` (${m.reason})` : "")]; }))));
     }
@@ -1361,8 +1377,10 @@
             { type: "scatter", name: "This sample", symbolSize: 12, data: [[xValue, yValue]], itemStyle: { color: "#8a4b08" } },
           ],
         }, dataTable(`${title}; ${cohortText}`, ["Sample", xLabel, yLabel],
-          [[`${cohort?.target_display_id || sample.id12} (this sample)`, fmt(xValue, xUnit), fmt(yValue, yUnit)],
-            ...points.map((p) => [p.display_id || p.source_id, fmt(p.x, xUnit), fmt(p.y, yUnit)])])));
+          [[`${cohort?.target_display_id || sample.id12} (this sample)`,
+            rawCell(fmt(xValue, xUnit), xValue, xUnit), rawCell(fmt(yValue, yUnit), yValue, yUnit)],
+            ...points.map((p) => [p.display_id || p.source_id,
+              rawCell(fmt(p.x, xUnit), p.x, xUnit), rawCell(fmt(p.y, yUnit), p.y, yUnit)])])));
       }
       out.push(section);
     }
@@ -1382,7 +1400,7 @@
         const support = methPair.support;
         const residual = support.fit_rms === null
           ? "Fit residual unavailable."
-          : `Unnormalized weight-fit residual RMS ${fmt(support.fit_rms, "fraction")}.`;
+          : `Unnormalized weight-fit residual RMS ${fmt(support.fit_rms, "fraction", { role: "difference" })}.`;
         const exactFitCaveat = support.markers_covered === 2
           ? " With two covered markers, an interior fit is exactly determined; zero residual does not establish fit quality." : "";
         section.append(h("p", { class: "help" },
@@ -1398,7 +1416,8 @@
           grid: { left: 60, right: 20, top: 20, bottom: 40 }, xAxis: { type: "value", name: methPair.x_label, scale: true }, yAxis: { type: "value", name: methPair.y_label, min: 0 },
           series: [{ type: "scatter", symbolSize: 12, data: [[methPair.x, methPair.y]], itemStyle: { color: "#8a4b08" } }],
         }, dataTable(methPair.label, ["Sample", methPair.x_label, methPair.y_label],
-          [[sample.id12, fmt(methPair.x, "fraction"), fmt(methPair.y, "fraction")]])));
+          [[sample.id12, rawCell(fmt(methPair.x, "fraction"), methPair.x, "fraction"),
+            rawCell(fmt(methPair.y, "fraction"), methPair.y, "fraction")]])));
       }
       out.push(section);
     }
@@ -1558,8 +1577,10 @@
         svg("circle", { cx: x(a), cy: 15, r: 5, class: "sample-a" }),
         svg("path", { d: `M${x(b)},9 l6,6 -6,6 -6,-6 z`, class: "sample-b" })),
       dataTable(`${metric.label}: sample A and B overlay`, ["Mark", "Value"],
-        [["Sample A", fmtMetricValue(metric, a)], ["Sample B", fmtMetricValue(metric, b)],
-          ["B−A", fmtMetricValue(metric, metric.delta_b_minus_a, { role: "difference" })]]),
+        [["Sample A", rawCell(fmtMetricValue(metric, a), a, metric.unit)],
+          ["Sample B", rawCell(fmtMetricValue(metric, b), b, metric.unit)],
+          ["B−A", rawCell(fmtMetricValue(metric, metric.delta_b_minus_a, { role: "difference" }),
+            metric.delta_b_minus_a, metric.unit)]]),
       h("figcaption", {}, "A ● · B ◆; local display scale"));
   }
 

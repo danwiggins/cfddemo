@@ -105,6 +105,7 @@ pre.stderr { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; 
 .example-pill { font-size: .8rem; margin-left: .35rem; }
 .findings-head { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: center; }
 .finding-card { margin: .75rem 0; padding: .75rem 1rem; background: #ffffff; border: 1px solid var(--rule); border-radius: .5rem; }
+.raw-value { display: inline-block; margin-left: .3rem; font-size: .8rem; }
 .card-details { overflow-wrap: anywhere; }
 .card-head { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
 .card-value { font-size: 1.25rem; margin: .25rem 0; }

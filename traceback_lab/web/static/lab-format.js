@@ -9,6 +9,7 @@
   const FRACTION_DIFFERENCES = new Set([
     "pmd-score/pmd_delta",
     "frag-x-meth/short_fragment_hypomethylation_delta",
+    "meth-tf/fit_rms",
   ]);
   const numberFormat = new Intl.NumberFormat("en-US", { maximumSignificantDigits: 3 });
   const integerFormat = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
@@ -65,7 +66,8 @@
     const nonnumericCategory = valueKind === "categorical" &&
       (typeof metric.value === "boolean" || typeof metric.value === "string");
     return formatMetric(metric.value, metric.unit, {
-      ...options, role, reason: options.reason ?? metric.reason,
+      ...options, role, reason: Object.prototype.hasOwnProperty.call(options, "reason")
+        ? options.reason : metric.reason,
       valueKind, missingUnit: options.missingUnit ?? !nonnumericCategory,
     });
   }
