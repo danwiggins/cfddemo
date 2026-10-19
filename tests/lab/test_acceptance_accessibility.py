@@ -1130,6 +1130,7 @@ def test_disconnected_navigation_keeps_url_and_view_in_sync(tmp_path) -> None:
                 time.sleep(0.2)
             else:
                 pytest.fail("the page did not reconnect")
+            assert evaluate("document.activeElement?.getAttribute('href') === window.stabilityLink.getAttribute('href')")
             _key(command, "Enter", "Enter", 13)
             for _ in range(40):
                 if evaluate("document.querySelector('#main h1')?.textContent === 'Stability'"):
@@ -1711,15 +1712,16 @@ def test_late_compare_picker_is_disabled_until_status_recovers(tmp_path) -> None
         def inspect(_command, evaluate) -> None:
             evaluate(f"""(() => {{
               const original = window.fetch;
+              window.releaseCohorts = [];
               window.fetch = (...args) => String(args[0]) === '/api/cohorts'
-                ? new Promise((resolve) => {{ window.releaseCohorts = () => resolve(new Response(
+                ? new Promise((resolve) => {{ window.releaseCohorts.push(() => resolve(new Response(
                     JSON.stringify({{cohorts: [{{cohort_id: 'synthetic', cohort_version: 'synthetic:1', member_n: 10}}], unavailable: []}}),
-                    {{status: 200, headers: {{'Content-Type': 'application/json'}}}})); }})
+                    {{status: 200, headers: {{'Content-Type': 'application/json'}}}}))); }})
                 : original.apply(window, args);
               location.hash = '#/sample/{ID12}/compare';
             }})()""")
             for _ in range(20):
-                if evaluate("typeof window.releaseCohorts === 'function'"):
+                if evaluate("window.releaseCohorts.length === 1"):
                     break
                 time.sleep(0.05)
             else:
@@ -1731,7 +1733,7 @@ def test_late_compare_picker_is_disabled_until_status_recovers(tmp_path) -> None
                 time.sleep(0.2)
             else:
                 pytest.fail("the page did not disconnect")
-            evaluate("window.releaseCohorts()")
+            evaluate("window.releaseCohorts[0]()")
             for _ in range(20):
                 if evaluate("!!document.querySelector('select[aria-label=\"Cohort generation\"]')"):
                     break
@@ -1747,6 +1749,19 @@ def test_late_compare_picker_is_disabled_until_status_recovers(tmp_path) -> None
                 time.sleep(0.2)
             else:
                 pytest.fail("the page did not reconnect")
+            for _ in range(40):
+                if evaluate("window.releaseCohorts.length >= 2"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("refreshed Compare view did not request its cohort listing")
+            evaluate("window.releaseCohorts[1]()")
+            for _ in range(40):
+                if evaluate(f"!!{picker}"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail("refreshed Compare picker did not render")
             assert evaluate(f"!{picker}.disabled && !{picker}.hasAttribute('aria-disabled')")
 
         profile = tmp_path / "browser-profile"

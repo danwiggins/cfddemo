@@ -105,7 +105,7 @@
       }
     }
     if (tag === "a" && typeof attrs?.href === "string" && attrs.href.startsWith("#/") &&
-        document.body.dataset.disconnected === "1") setLinkEnabled(el, false);
+        document.body.dataset.disconnected === "1" && !isLocalRecordedRoute(attrs.href)) setLinkEnabled(el, false);
     return el;
   }
 
@@ -366,7 +366,22 @@
         state.refreshFailureKind = null;
         state.readinessRefresh = { ...state.readinessRefresh,
           [`${current.id12}:${current.full_input_id || "unknown"}`]: { checkedAt: checkedAt.toISOString(), stale: false } };
+        const focused = document.activeElement;
+        const focusedId = focused?.id;
+        const focusedHref = focused instanceof HTMLAnchorElement ? focused.getAttribute("href") : null;
+        const focusedHeading = focused?.matches("#main h1");
+        if (state.route.name === "lens" && state.route.lens === "methods") {
+          state.methodContextApplied = `${revision}:${hash}`;
+        }
         render();
+        const replacement = focusedHref
+          ? [...document.querySelectorAll("a[href]")].find((link) => link.getAttribute("href") === focusedHref)
+          : focusedId ? document.getElementById(focusedId)
+            : focusedHeading ? document.querySelector("#main h1") : null;
+        if (replacement) {
+          if (focusedHeading) replacement.tabIndex = -1;
+          replacement.focus({ preventScroll: true });
+        }
         setControlsEnabled(true);
         renderRecoveryState();
         return { kind: "ok", sample: current };
@@ -1222,7 +1237,14 @@
     }
   }
 
-  // Disconnected: the page stays readable but every control that would fetch is off.
+  function isLocalRecordedRoute(hash) {
+    if (state.connectionLost || state.sessionExpired || !state.sample?.found || typeof hash !== "string") return false;
+    const match = hash.match(/^#\/sample\/([0-9a-f]{12,64})\/([a-z-]+)(?:\?.*)?$/);
+    return !!match && (match[1] === state.sample.id12 || match[1] === state.sample.source_id) &&
+      LENSES.some((lens) => lens.id === match[2]);
+  }
+
+  // Keep the recorded view readable while blocking requests for new results.
   function setControlsEnabled(enabled) {
     setFetchControlEnabled(document.getElementById("sample-switcher"), enabled);
     for (const control of document.querySelectorAll("button[data-requires-server], select[data-requires-server]")) {
@@ -1233,7 +1255,9 @@
       }
       setFetchControlEnabled(control, enabled);
     }
-    for (const link of document.querySelectorAll("a[href^='#/']")) setLinkEnabled(link, enabled);
+    for (const link of document.querySelectorAll("a[href^='#/']")) {
+      setLinkEnabled(link, enabled || isLocalRecordedRoute(link.getAttribute("href")));
+    }
     document.body.dataset.disconnected = enabled ? "0" : "1";
   }
   function restoreRenderedRoute() {
@@ -1247,6 +1271,8 @@
     if (document.body.dataset.disconnected !== "1" || !(event.target instanceof Element) ||
         !event.target.closest("a[href^='#/'], [data-requires-server], #sample-switcher")) return;
     if (event.target.closest("#readiness-refresh") && !state.connectionLost && !state.sessionExpired) return;
+    const link = event.target.closest("a[href^='#/']");
+    if (link && isLocalRecordedRoute(link.getAttribute("href"))) return;
     event.preventDefault();
     event.stopImmediatePropagation();
   }, true);
@@ -1269,6 +1295,7 @@
   }
   window.addEventListener("hashchange", (event) => {
     if (document.body.dataset.disconnected !== "1") return;
+    if (isLocalRecordedRoute(location.hash)) return;
     event.stopImmediatePropagation();
     restoreRenderedRoute();
   }, true);
