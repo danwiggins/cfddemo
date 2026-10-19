@@ -10,9 +10,10 @@ from pathlib import Path
 
 import pytest
 
-from tests.lab.test_landing import _body, needs_chrome
+from tests.lab.test_landing import _body, _dom, needs_chrome
 from traceback_lab.doctor import lab_checks
 from traceback_lab.store import LabStore
+from traceback_lab.web.server import RunningLabServer
 from traceback_runner import cli as signed_cli
 
 REPO = Path(__file__).resolve().parents[2]
@@ -157,6 +158,30 @@ def test_example_step_runs_within_budget_and_prints_the_summary(journey_root) ->
     assert re.search(r"skipped \(example_reference: [a-z-, ]*copy-number", out)
     record = json.loads(next((journey_root["root"] / "lab" / "sources").glob("*.json")).read_text())
     assert record["example"] is True
+
+
+@needs_chrome
+def test_example_guides_three_recorded_signals(journey_root, tmp_path) -> None:
+    from traceback_lab.web.api import LabApi
+
+    store = LabStore(journey_root["root"])
+    api = LabApi(store)
+    id12 = api.samples()["samples"][0]["id12"]
+    sample = api.sample(id12)
+    assert sample["example"] is True
+    selected = (("fragment-size", "mode_bp"), ("global-5mc", "cpg_5mc_fraction"),
+                ("bam-qc", "mapped_fraction"))
+    for algorithm_id, metric_id in selected:
+        algorithm = next(row for row in sample["algorithms"] if row["algorithm_id"] == algorithm_id)
+        metric = next(row for row in algorithm["metrics"] if row["metric_id"] == metric_id)
+        assert algorithm["status"] == "ok" and isinstance(metric["value"], (int, float))
+    with RunningLabServer(store) as server:
+        dom = _dom(server, tmp_path, route=f"/sample/{id12}/signals",
+                   want=lambda page: 'data-guide-signal="bam-qc/mapped_fraction"' in page)
+    cards = re.findall(r'<article class="signal-guide-card" data-guide-signal="([^"]+)">(.*?)</article>', dom, re.S)
+    assert [key for key, _ in cards] == [f"{algorithm_id}/{metric_id}" for algorithm_id, metric_id in selected]
+    assert all("Observed: <strong>unavailable" not in card for _, card in cards)
+    assert "seeded synthetic example" in dom and "no biological finding" in dom
 
 
 def test_example_rerun_reuses_everything(journey_root, capsys, monkeypatch) -> None:

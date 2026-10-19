@@ -29,6 +29,7 @@
     const text = (CELL[state] || ["", state || fallback])[1];
     return reason ? `${text} (${reason})` : text;
   };
+  const chartPercent = (fraction) => Number((100 * fraction).toPrecision(3));
   const FLAG_TEXT = {
     CLIA: "FLAG: CLIA — health-assessment labels on an individual sample",
     FDA: "FLAG: FDA — cancer-detection claim if marketed.",
@@ -286,24 +287,27 @@
     if (!rows.length) {
       syn.append(h("p", { class: "empty" }, sample.example ? "Not in the synthetic example: copy-number needs hg38 assets." : `No synthetic control yet. Run traceback lab run ${sample.id12}.`));
     } else {
-      const points = rows.map((r) => [r.tf_expected, r.tf_recovered === null ? null : r.tf_recovered]);
+      const points = rows.map((r) => [chartPercent(r.tf_expected),
+        r.tf_recovered === null ? null : chartPercent(r.tf_recovered)]);
       const recovered = rows.filter((r) => r.recovered).map((r) => fmt(r.tf_expected, "fraction"));
       const missed = rows.filter((r) => !r.recovered && r.tf_expected >= 0.1).map((r) => fmt(r.tf_expected, "fraction"));
       const tolerance = fmt(0.05, "fraction", { role: "difference" });
       const caption = recovered.length && !missed.length
         ? `Recovered within ±${tolerance} at ${recovered.join(" and ")}`
         : `Recovered within ±${tolerance} at ${recovered.length ? recovered.join(" and ") : "none"}; not recovered at ${missed.join(" and ") || "—"} (this depth: ${fmt(sample.depth?.approx_depth_x, "x")})`;
-      syn.append(chart(`Synthetic CNA spike: expected against recovered tumour fraction. ${caption}.`, {
+      syn.append(chart(`Synthetic CNA spike: expected against recovered tumour fraction, both in %. ${caption}.`, {
         grid: { left: 50, right: 16, top: 16, bottom: 40 },
-        xAxis: { type: "value", name: "expected TF", min: 0, max: 0.35 },
-        yAxis: { type: "value", name: "recovered TF", min: 0, max: 0.35 },
+        xAxis: { type: "value", name: "expected TF (%)", min: 0, max: 35 },
+        yAxis: { type: "value", name: "recovered TF (%)", min: 0, max: 35 },
+        tooltip: { trigger: "item", renderMode: "richText", formatter: (point) =>
+          `Expected: ${fmt(point.value[0], "%")}\nRecovered: ${fmt(point.value[1], "%")}` },
         series: [
-          { type: "line", data: [[0, 0.05], [0.3, 0.35]], lineStyle: { type: "dashed", color: "#4b5563" }, showSymbol: false, silent: true },
-          { type: "line", data: [[0.05, 0], [0.35, 0.3]], lineStyle: { type: "dashed", color: "#4b5563" }, showSymbol: false, silent: true },
-          { type: "line", data: [[0, 0], [0.35, 0.35]], lineStyle: { color: "#4b5563" }, showSymbol: false, silent: true },
+          { type: "line", data: [[0, 5], [30, 35]], lineStyle: { type: "dashed", color: "#4b5563" }, showSymbol: false, silent: true },
+          { type: "line", data: [[5, 0], [35, 30]], lineStyle: { type: "dashed", color: "#4b5563" }, showSymbol: false, silent: true },
+          { type: "line", data: [[0, 0], [35, 35]], lineStyle: { color: "#4b5563" }, showSymbol: false, silent: true },
           { type: "scatter", data: points.filter((p) => p[1] !== null), symbolSize: 10, itemStyle: { color: "#1f5f8b" } },
         ],
-      }, dataTable("Synthetic CNA spike", ["Expected TF", "Recovered TF", `Recovered (±${tolerance})`, "Status"],
+      }, dataTable("Synthetic CNA spike", ["Expected TF (%)", "Recovered TF (%)", `Recovered (±${tolerance})`, "Status"],
         rows.map((r) => [fmt(r.tf_expected, "fraction"), fmt(r.tf_recovered, "fraction"), r.recovered, r.status]))), h("p", { class: "help" }, caption));
     }
     // REPEATABILITY
@@ -877,9 +881,78 @@
     return h("p", { class: "empty" }, !a ? `${what}: not computed for this sample.` : `${what}: ${a.status}${a.skip_reason ? ` (${a.skip_reason.replace(/_/g, " ")})` : ""}.`);
   }
 
-  // -- Signals: one sub-tab per family with results --------------------------------------------
+  // -- Signals: a measured starting path, followed by the full signal families -----------------
+  const GUIDE_SIGNALS = [
+    {
+      algorithm: "fragment-size", metric: "mode_bp", title: "Fragment length",
+      definition: "The most frequent aligned reference span (reference end minus reference start) from 100–250 bp.",
+      denominator: "Eligible aligned spans from 100–250 bp",
+      limitation: "An aligned span is not a directly observed physical fragment length. Library size bias and sample handling can shift the mode; it does not identify a tissue or disease.",
+    },
+    {
+      algorithm: "global-5mc", metric: "cpg_5mc_fraction", title: "Genome-wide 5mC fraction",
+      definition: "CpG C+m site calls assigned to 5mC by the largest modification probability, divided by all CpG C+m site calls on eligible reads, both strands.",
+      denominator: "Eligible CpG C+m site calls",
+      limitation: "This is exploratory and depends on the basecaller modification model, call quality, and cell mixture. No validated ONT cfDNA reference or biological conclusion follows from this value alone.",
+    },
+    {
+      algorithm: "bam-qc", metric: "mapped_fraction", title: "Mapped-read share",
+      definition: "Mapped primary read rows divided by all primary read rows in the read summary.",
+      denominator: "Primary read rows",
+      limitation: "This describes alignment and input quality, not the origin of cfDNA. Unmapped reads can reflect adapters, short inserts, contamination, or a reference mismatch.",
+    },
+  ];
+
+  function guidedSignals(sample) {
+    const cards = GUIDE_SIGNALS.map((guide) => {
+      const algorithm = algo(sample, guide.algorithm);
+      const metric = algorithm?.status === "ok" ? algorithm.metrics.find((m) => m.metric_id === guide.metric) : null;
+      const available = metric && typeof metric.value === "number" && Number.isFinite(metric.value);
+      const unreadable = unreadableArtifact(sample, guide.algorithm);
+      const ambiguous = (sample.ambiguous_results || []).includes(guide.algorithm);
+      const reason = available ? null : unreadable ? "selected result unreadable"
+        : ambiguous ? "result selection ambiguous"
+          : !algorithm ? "method not computed for this sample"
+            : algorithm.status !== "ok" ? `${algorithm.status}${algorithm.skip_reason ? ` (${algorithm.skip_reason.replace(/_/g, " ")})` : ""}`
+              : metric ? (metric.reason || "measurement unavailable").replace(/_/g, " ") : "metric not recorded";
+      const stabilityPanel = (sample.stability || []).find((panel) =>
+        panel.algorithm_id === guide.algorithm && panel.metric_id === guide.metric);
+      const denominator = available && Number.isSafeInteger(metric.n)
+        ? `${guide.denominator}: ${fmtCount(metric.n)}` : `${guide.denominator}: count unavailable`;
+      const qc = available && metric.qc_band
+        ? `QC band: ${metric.qc_band} (provisional team default).` : "QC band: none recorded for this metric.";
+      const stabilityText = stabilityPanel ? `Stability: ${stabilityPanel.verdict}.` : "Stability: no metric-level panel recorded.";
+      const card = h("article", { class: `signal-guide-card${available ? "" : " signal-guide-unavailable"}`,
+        "data-guide-signal": `${guide.algorithm}/${guide.metric}` },
+        h("h3", {}, guide.title),
+        h("p", { class: "signal-guide-value" }, "Observed: ", h("strong", {}, available
+          ? fmtMetric(metric, { algorithmId: guide.algorithm }) : `unavailable (${reason})`)),
+        h("p", {}, h("strong", {}, "Measurement: "), guide.definition),
+        h("p", {}, h("strong", {}, "Denominator / filter: "), denominator),
+        h("p", { class: "help" }, qc, " ", stabilityText, " ",
+          h("a", { href: `#/sample/${sample.id12}/trust-qc` }, "Trust/QC"), " · ",
+          h("a", { href: `#/sample/${sample.id12}/stability` }, "Stability")),
+        h("p", { class: "help" }, h("strong", {}, "Interpretation limit: "), guide.limitation),
+        h("p", { class: "help" }, `Source result: ${guide.algorithm}/${guide.metric}. `,
+          h("a", { href: `#/sample/${sample.id12}/methods` }, "Method and source →")));
+      if (algorithm) card.append(h("details", {}, h("summary", {}, "Result provenance"), provenance(sample, guide.algorithm)));
+      return { card, available };
+    });
+    const available = cards.filter((row) => row.available).map((row) => row.card);
+    const unavailable = cards.filter((row) => !row.available).map((row) => row.card);
+    return h("section", { class: "panel signal-guide", "aria-labelledby": "signal-guide-title" },
+      h("h2", { id: "signal-guide-title" }, "Start with three measured signals"),
+      h("p", { class: "help" }, sample.example
+        ? "This is a seeded synthetic example. Its planted fragment-length and modification-call inputs illustrate the workflow; observed values below are computed from this run and imply no biological finding."
+        : "These values come from this sample's recorded results. Read each measurement with its denominator, quality, and stability."),
+      h("div", { class: "signal-guide-grid" }, ...available),
+      unavailable.length ? h("div", { class: "signal-guide-missing" },
+        h("h3", {}, `Unavailable guided signals (${unavailable.length})`),
+        h("div", { class: "signal-guide-grid" }, ...unavailable)) : "");
+  }
+
   function signals(sample) {
-    const out = [h("p", { class: "breadcrumb" }, `Lab › ${sample.id12} › Signals`), h("h1", { class: "view-title" }, "Signals")];
+    const out = [h("p", { class: "breadcrumb" }, `Lab › ${sample.id12} › Signals`), h("h1", { class: "view-title" }, "Signals"), guidedSignals(sample)];
     const families = [
       ["fragmentomics", "Fragmentomics", fragmentSignals],
       ["copy-number", "Copy number", copyNumberSignals],
@@ -1022,29 +1095,41 @@
         const denominator = data.count.slice(49).reduce((total, count) => total + count, 0);
         if (!Number.isSafeInteger(denominator) || denominator === 0) throw new Error("no eligible 50–1000 bp molecules");
         const spans = data.span_bp.slice(49, 700);
-        const sampleDensity = data.count.slice(49, 700).map((count) => count / denominator);
+        const sampleDensity = data.count.slice(49, 700).map((count) => chartPercent(count / denominator));
         const ready = band.state === "ready" && Array.isArray(band.span_bp) &&
           band.span_bp.length === spans.length && band.span_bp.every((bp, i) => bp === spans[i]) &&
           Array.isArray(band.low) && Array.isArray(band.high) &&
           band.low.length === spans.length && band.high.length === spans.length &&
           band.low.every((v, i) => Number.isFinite(v) && v >= 0 && Number.isFinite(band.high[i]) && band.high[i] >= v);
         if (band.state === "ready" && !ready) throw new Error("cohort density band invalid");
+        const bandLow = ready ? band.low.map(chartPercent) : null;
+        const bandHigh = ready ? band.high.map(chartPercent) : null;
         const series = ready ? [
-          { type: "line", name: "Observed minimum", stack: "band", showSymbol: false, data: band.low,
+          { type: "line", name: "Observed minimum", stack: "band", showSymbol: false, data: bandLow,
             lineStyle: { opacity: 0 }, areaStyle: { opacity: 0 } },
           { type: "line", name: "Observed min–max", stack: "band", showSymbol: false,
-            data: band.high.map((high, i) => high - band.low[i]),
+            data: bandHigh.map((high, i) => Number((high - bandLow[i]).toPrecision(3))),
             lineStyle: { opacity: 0 }, areaStyle: { color: "#9eb9c9", opacity: 0.55 } },
         ] : [];
         series.push({ type: "line", name: "This sample", showSymbol: false, data: sampleDensity,
           lineStyle: { color: "#1f5f8b" }, markLine: { symbol: "none", data: [{ xAxis: "167", label: { formatter: "167 bp" } }] } });
-        slot.replaceWith(chart(`Aligned-span density, 50 to 700 bp; ${bandStatus} 167 bp marked.`, {
+        slot.replaceWith(chart(`Aligned-span density, 50 to 700 bp. X axis: aligned span in bp. Y axis: percent of 50–1000 bp molecules. ${bandStatus} 167 bp marked.`, {
           grid: { left: 60, right: 20, top: 20, bottom: 40 },
-          xAxis: { type: "category", name: "bp", data: spans.map(String), axisLabel: { interval: 99 } },
-          yAxis: { type: "value", name: "fraction" }, series,
-        }, dataTable("Normalized aligned-span density (fraction of 50–1000 bp molecules)",
-          ["Span (bp)", "This sample", "Cohort observed min", "Cohort observed max"],
-          spans.map((bp, i) => [bp, sampleDensity[i], ready ? band.low[i] : null, ready ? band.high[i] : null]))));
+          xAxis: { type: "category", name: "span (bp)", data: spans.map(String), axisLabel: { interval: 99 } },
+          yAxis: { type: "value", name: "% of 50–1000 bp molecules" },
+          tooltip: { trigger: "axis", renderMode: "richText", formatter: (points) => {
+            const index = points[0]?.dataIndex;
+            if (!Number.isInteger(index)) return "";
+            const lines = [`${spans[index]} bp`, `This sample: ${fmt(sampleDensity[index], "%")}`];
+            if (ready) lines.push(`Cohort observed min: ${fmt(bandLow[index], "%")}`,
+              `Cohort observed max: ${fmt(bandHigh[index], "%")}`);
+            return lines.join("\n");
+          } },
+          series,
+        }, dataTable("Normalized aligned-span density (% of 50–1000 bp molecules)",
+          ["Span (bp)", "This sample (%)", "Cohort observed min (%)", "Cohort observed max (%)"],
+          spans.map((bp, i) => [bp, fmt(sampleDensity[i], "%"), ready ? fmt(bandLow[i], "%") : "unavailable",
+            ready ? fmt(bandHigh[i], "%") : "unavailable"]))));
       }).catch((e) => slot.replaceWith(h("div", { class: "problem" }, `Chart could not be drawn (${e.message}).`)));
     }
     const more = [];
@@ -1380,13 +1465,19 @@
       if (xValue === null || yValue === null) {
         section.append(h("p", { class: "empty" }, `Needs both signals at full depth (${xValue === null ? xLabel : yLabel} missing). ${cohortText}`));
       } else {
+        const plotX = (v) => xUnit === "fraction" ? chartPercent(v) : v;
+        const plotY = (v) => yUnit === "fraction" ? chartPercent(v) : v;
+        const xAxisLabel = xUnit === "fraction" ? `${xLabel} (%)` : xLabel;
+        const yAxisLabel = yUnit === "fraction" ? `${yLabel} (%)` : yLabel;
         section.append(h("p", { class: "help" }, cohortText), chart(`${title}: this sample at ${fmt(xValue, xUnit)} and ${fmt(yValue, yUnit)}; ${cohortText}`, {
-          grid: { left: 60, right: 20, top: 20, bottom: 40 }, xAxis: { type: "value", name: xLabel, scale: true }, yAxis: { type: "value", name: yLabel, min: 0 },
+          grid: { left: 60, right: 20, top: 20, bottom: 40 }, xAxis: { type: "value", name: xAxisLabel, scale: true }, yAxis: { type: "value", name: yAxisLabel, min: 0 },
+          tooltip: { trigger: "item", renderMode: "richText", formatter: (point) =>
+            `${xLabel}: ${fmt(point.value[0], xUnit === "fraction" ? "%" : xUnit)}\n${yLabel}: ${fmt(point.value[1], yUnit === "fraction" ? "%" : yUnit)}` },
           series: [
-            { type: "scatter", name: "Paired cohort", symbolSize: 6, data: points.map((p) => [p.x, p.y]), itemStyle: { color: "#7892a1" } },
-            { type: "scatter", name: "This sample", symbolSize: 12, data: [[xValue, yValue]], itemStyle: { color: "#8a4b08" } },
+            { type: "scatter", name: "Paired cohort", symbolSize: 6, data: points.map((p) => [plotX(p.x), plotY(p.y)]), itemStyle: { color: "#7892a1" } },
+            { type: "scatter", name: "This sample", symbolSize: 12, data: [[plotX(xValue), plotY(yValue)]], itemStyle: { color: "#8a4b08" } },
           ],
-        }, dataTable(`${title}; ${cohortText}`, ["Sample", xLabel, yLabel],
+        }, dataTable(`${title}; ${cohortText}`, ["Sample", xAxisLabel, yAxisLabel],
           [[`${cohort?.target_display_id || sample.id12} (this sample)`, fmt(xValue, xUnit), fmt(yValue, yUnit)],
             ...points.map((p) => [p.display_id || p.source_id, fmt(p.x, xUnit), fmt(p.y, yUnit)])])));
       }
@@ -1421,9 +1512,11 @@
         section.append(h("p", { class: "empty" }, unavailable.map(reason => reasons[reason] || "This pair is unavailable.").join(" ")));
       } else {
         section.append(chart(`${methPair.label}: this sample at ${fmt(methPair.x, "fraction")} and ${fmt(methPair.y, "fraction")}.`, {
-          grid: { left: 60, right: 20, top: 20, bottom: 40 }, xAxis: { type: "value", name: methPair.x_label, scale: true }, yAxis: { type: "value", name: methPair.y_label, min: 0 },
-          series: [{ type: "scatter", symbolSize: 12, data: [[methPair.x, methPair.y]], itemStyle: { color: "#8a4b08" } }],
-        }, dataTable(methPair.label, ["Sample", methPair.x_label, methPair.y_label],
+          grid: { left: 60, right: 20, top: 20, bottom: 40 }, xAxis: { type: "value", name: `${methPair.x_label} (%)`, scale: true }, yAxis: { type: "value", name: `${methPair.y_label} (%)`, min: 0 },
+          tooltip: { trigger: "item", renderMode: "richText", formatter: (point) =>
+            `${methPair.x_label}: ${fmt(point.value[0], "%")}\n${methPair.y_label}: ${fmt(point.value[1], "%")}` },
+          series: [{ type: "scatter", symbolSize: 12, data: [[chartPercent(methPair.x), chartPercent(methPair.y)]], itemStyle: { color: "#8a4b08" } }],
+        }, dataTable(methPair.label, ["Sample", `${methPair.x_label} (%)`, `${methPair.y_label} (%)`],
           [[sample.id12, fmt(methPair.x, "fraction"), fmt(methPair.y, "fraction")]])));
       }
       out.push(section);

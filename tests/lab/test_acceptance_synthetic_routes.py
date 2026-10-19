@@ -172,6 +172,53 @@ def _server(tmp_path, sample):
 
 
 @needs_chrome
+def test_guided_signals_use_recorded_values_and_show_unavailable_reasons(tmp_path) -> None:
+    sample = _sample()
+    sample["example"] = True
+    guide = {
+        ("fragment-size", "mode_bp"): (167, "bp", 24),
+        ("global-5mc", "cpg_5mc_fraction"): (0.83, "fraction", 120),
+        ("bam-qc", "mapped_fraction"): (0.92, "fraction", 200),
+    }
+    for algorithm in sample["algorithms"]:
+        for metric in algorithm["metrics"]:
+            key = (algorithm["algorithm_id"], metric["metric_id"])
+            if key in guide:
+                metric["value"], metric["unit"], metric["n"] = guide[key]
+    sample["stability"] = [{"algorithm_id": "fragment-size", "metric_id": "mode_bp",
+                            "verdict": "usable to 0.5"}]
+    with _server(tmp_path / "available", sample) as server:
+        dom = _dom(server, tmp_path / "available-dom", route=f"/sample/{ID12}/signals",
+                   want=lambda page: 'data-guide-signal="bam-qc/mapped_fraction"' in page)
+    cards = re.findall(r'<article class="signal-guide-card" data-guide-signal="([^"]+)">(.*?)</article>', dom, re.S)
+    assert [key for key, _ in cards] == list(guide)
+    for (key, value), (_, card) in zip(guide.items(), cards, strict=True):
+        observed, unit, count = value
+        expected = f"{observed} bp" if unit == "bp" else f"{observed * 100:g}%"
+        assert f"Observed: <strong>{expected}</strong>" in card, key
+        assert f"{count}</p>" in card, key
+        assert "Method and source" in card and "Result provenance" in card
+        assert "Interpretation limit:" in card and "Stability" in card and "Trust/QC" in card
+    assert "seeded synthetic example" in dom and "no biological finding" in dom
+    assert "Stability: usable to 0.5" in cards[0][1]
+    assert "Unavailable guided signals" not in dom
+
+    sample["algorithms"] = [algorithm for algorithm in sample["algorithms"]
+                            if algorithm["algorithm_id"] != "global-5mc"]
+    mapped = next(algorithm for algorithm in sample["algorithms"] if algorithm["algorithm_id"] == "bam-qc")
+    next(metric for metric in mapped["metrics"] if metric["metric_id"] == "mapped_fraction").update(
+        value=None, reason="no_primary_reads")
+    sample["unreadable_results"] = ["global-5mc"]
+    with _server(tmp_path / "unavailable", sample) as server:
+        dom = _dom(server, tmp_path / "unavailable-dom", route=f"/sample/{ID12}/signals",
+                   want=lambda page: "Unavailable guided signals (2)" in page)
+    assert dom.index('data-guide-signal="fragment-size/mode_bp"') < dom.index("Unavailable guided signals (2)")
+    assert dom.index("Unavailable guided signals (2)") < dom.index('data-guide-signal="global-5mc/cpg_5mc_fraction"')
+    assert "unavailable (selected result unreadable)" in dom
+    assert "unavailable (no primary reads)" in dom
+
+
+@needs_chrome
 def test_landing_defaults_to_completed_run_with_newer_active_sample(tmp_path) -> None:
     """The active sample stays selectable without displacing a completed run."""
 
