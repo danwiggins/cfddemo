@@ -447,6 +447,13 @@ def test_evidence_lists_every_algorithm_by_tier_with_exclusions(page_root, tmp_p
 def test_methods_shows_provenance_for_every_number(page_root, tmp_path) -> None:
     with RunningLabServer(LabStore(page_root)) as server:
         dom = _dom(server, tmp_path, route=f"/sample/{_id12(page_root)}/methods")
+    from traceback_lab.interpretation.engine import load_library
+    from traceback_lab.registry import load_registry
+
+    registered = load_registry()
+    hidden = load_library().hidden_algorithms
+    assert f"{len(registered) - len(hidden)} visible methods from {len(registered)} registered steps" in dom
+    assert "Current environment readiness is unknown" in dom
     assert "Every number with its provenance" in dom
     assert "Interpretation library v" in dom and "provenance stamp only" in dom
     assert "FLAG: PII" in dom

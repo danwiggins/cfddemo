@@ -7,6 +7,7 @@ import json
 import pytest
 
 from tests.lab.test_acceptance_synthetic_routes import ID12, LICENSE_IDS, _license_nodes, _sample, _server
+from tests.lab.test_lab_server import _chrome, _dom_cdp
 from tests.lab.test_landing import _dom, _id12, needs_chrome, page_root as _landing_page_root
 from traceback_lab.interpretation.engine import Entry, Library, load_library
 from traceback_lab.registry import load_registry
@@ -43,6 +44,50 @@ def test_every_registered_algorithm_has_catalog_disclosures(algorithm_id: str) -
     }
     assert set(row["license_ids"]) == expected
     assert expected <= LIBRARY.licenses.keys()
+    assert row["description"] and row["question"] and row["limitations"]
+    assert row["family"] and row["platforms"]
+    assert row["environment_readiness"] == "unknown" and row["readiness_checked_at"] is None
+
+
+def test_method_explanations_cover_exactly_the_visible_registry() -> None:
+    assert set(LIBRARY.method_catalog) == set(REGISTRY)
+    assert LIBRARY.hidden_algorithms == {"read-summary", "meth-calls"}
+
+
+@needs_chrome
+def test_methods_search_and_filters_keep_provenance_available(tmp_path) -> None:
+    sample = _sample()
+    sample["catalog"][0]["status"] = "skipped"
+    sample["catalog"][0]["skip_reason"] = "missing_asset"
+    with _server(tmp_path, sample) as server:
+        profile = tmp_path / "browser-profile"
+
+        def interact(_command, evaluate) -> None:
+            assert evaluate("document.querySelectorAll('#method-catalog-results article').length") == len(REGISTRY)
+            assert evaluate("document.getElementById('method-provenance') !== null")
+            assert evaluate("document.querySelector('#main').textContent.includes('Current environment readiness is unknown')")
+            assert evaluate("""(() => { const input = document.getElementById('method-search');
+              input.value = 'Weidner'; input.dispatchEvent(new Event('input', {bubbles: true}));
+              return [...document.querySelectorAll('#method-catalog-results article')]
+                .map((row) => row.id); })()""") == ["method-epi-clock"]
+            assert evaluate("""(() => { const input = document.getElementById('method-search');
+              input.value = ''; input.dispatchEvent(new Event('input', {bubbles: true}));
+              const select = document.getElementById('method-status'); select.value = 'skipped';
+              select.dispatchEvent(new Event('change', {bubbles: true}));
+              return [...document.querySelectorAll('#method-catalog-results article')]
+                .map((row) => row.id); })()""") == ["method-bam-qc"]
+            assert evaluate("""(() => { const select = document.getElementById('method-family');
+              select.value = 'methylation'; select.dispatchEvent(new Event('change', {bubbles: true}));
+              return document.querySelector('#method-catalog-results').textContent.includes('No methods match'); })()""")
+            assert evaluate("document.getElementById('method-provenance').textContent.includes('Every number with its provenance')")
+
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", "--window-size=1280,800",
+             server.issue_link() + f"&route=/sample/{ID12}/methods"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'id="method-catalog-results"' in dom,
+            interact=interact,
+        )
 
 
 def test_stored_modkit_result_keeps_its_license_without_labeling_new_decoder() -> None:
