@@ -308,7 +308,8 @@
           { type: "scatter", data: points.filter((p) => p[1] !== null), symbolSize: 10, itemStyle: { color: "#1f5f8b" } },
         ],
       }, dataTable("Synthetic CNA spike", ["Expected TF (%)", "Recovered TF (%)", `Recovered (±${tolerance})`, "Status"],
-        rows.map((r) => [fmt(r.tf_expected, "fraction"), fmt(r.tf_recovered, "fraction"), r.recovered, r.status]))), h("p", { class: "help" }, caption));
+        rows.map((r) => [rawCell(fmt(r.tf_expected, "fraction"), r.tf_expected, "fraction"),
+          rawCell(fmt(r.tf_recovered, "fraction"), r.tf_recovered, "fraction"), r.recovered, r.status]))), h("p", { class: "help" }, caption));
     }
     // REPEATABILITY
     const rep = h("div", { class: "control-block" }, h("span", { class: "control-badge" }, "REPEATABILITY"), " sampling noise, not a known answer");
@@ -917,6 +918,12 @@
       limitation: "This describes alignment and input quality, not the origin of cfDNA. Unmapped reads can reflect adapters, short inserts, contamination, or a reference mismatch.",
     },
   ];
+  const SIGNAL_FAMILY_IDS = {
+    fragmentomics: ["fragment-size", "end-motifs", "delfi-ratio", "finaletoolkit-xcheck", "tss-profile",
+      "long-tail", "mtdna", "breakpoint-motifs", "griffin", "aligned-end-structure", "lionheart"],
+    "copy-number": ["copy-number"],
+    methylation: ["global-5mc", "global-5hmc", "pmd-score", "hypometh-reads", "modbase-qc", "frag-x-meth"],
+  };
 
   function guidedSignals(sample) {
     const cards = GUIDE_SIGNALS.map((guide) => {
@@ -938,10 +945,12 @@
         ? `QC band: ${metric.qc_band} (provisional team default).` : "QC band: none recorded for this metric.";
       const stabilityText = stabilityPanel ? `Stability: ${stabilityPanel.verdict}.` : "Stability: no metric-level panel recorded.";
       const card = h("article", { class: `signal-guide-card${available ? "" : " signal-guide-unavailable"}`,
+        tabindex: "-1",
         "data-guide-signal": `${guide.algorithm}/${guide.metric}` },
         h("h3", {}, guide.title),
         h("p", { class: "signal-guide-value" }, "Observed: ", h("strong", {}, available
           ? fmtMetric(metric, { algorithmId: guide.algorithm }) : `unavailable (${reason})`)),
+        available ? h("p", { class: "help" }, "Interpretation state: ", stateChip(metric)) : "",
         h("p", {}, h("strong", {}, "Measurement: "), guide.definition),
         h("p", {}, h("strong", {}, "Denominator / filter: "), denominator),
         h("p", { class: "help" }, qc, " ", stabilityText, " ",
@@ -967,7 +976,8 @@
   }
 
   function signals(sample) {
-    const out = [h("p", { class: "breadcrumb" }, `Lab › ${sample.id12} › Signals`), h("h1", { class: "view-title" }, "Signals"), guidedSignals(sample)];
+    const guidePanel = guidedSignals(sample);
+    const out = [h("p", { class: "breadcrumb" }, `Lab › ${sample.id12} › Signals`), h("h1", { class: "view-title" }, "Signals"), guidePanel];
     const families = [
       ["fragmentomics", "Fragmentomics", fragmentSignals],
       ["copy-number", "Copy number", copyNumberSignals],
@@ -981,9 +991,46 @@
     };
     families.forEach(([, label], i) => tabs.append(h("button", { type: "button", class: "control subtab", "data-requires-server": "", "aria-pressed": "false", onclick: () => show(i) }, label)));
     out.push(tabs, body);
-    const initial = ["fragment-size", "end-motifs", "delfi-ratio", "finaletoolkit-xcheck", "tss-profile", "long-tail", "mtdna", "breakpoint-motifs", "griffin", "aligned-end-structure", "lionheart"].some((id) => algo(sample, id) || (id !== "long-tail" && id !== "mtdna" && unreadableArtifact(sample, id)))
+    let initial = SIGNAL_FAMILY_IDS.fragmentomics.some((id) => algo(sample, id) || unreadableArtifact(sample, id))
       ? 0 : algo(sample, "copy-number") || unreadableArtifact(sample, "copy-number") ? 1 : 2;
+    const route = L.state.route;
+    const requested = route?.context;
+    let contextIssue = route?.contextInvalid ? route.contextError : null;
+    let focusTarget = null;
+    if (!contextIssue && requested && (requested.algorithm || requested.metric || requested.family)) {
+      const familyIndex = requested.family ? families.findIndex(([id]) => id === requested.family) : -1;
+      const registered = requested.algorithm && ((sample.catalog || []).some((row) => row.algorithm_id === requested.algorithm)
+        || algo(sample, requested.algorithm) || unreadableArtifact(sample, requested.algorithm));
+      const guided = GUIDE_SIGNALS.find((row) => row.algorithm === requested.algorithm &&
+        (!requested.metric || row.metric === requested.metric));
+      const actual = requested.algorithm ? algo(sample, requested.algorithm) : null;
+      const metricKnown = !requested.metric || (actual?.metrics || []).some((row) => row.metric_id === requested.metric)
+        || Boolean(guided && guided.metric === requested.metric);
+      const algorithmFamily = requested.algorithm
+        ? Object.entries(SIGNAL_FAMILY_IDS).find(([, ids]) => ids.includes(requested.algorithm))?.[0] : null;
+      if ((requested.family && familyIndex < 0) || (requested.algorithm && !registered) ||
+          (requested.algorithm && !algorithmFamily && !guided) || !metricKnown ||
+          (requested.family && requested.algorithm && requested.family !== algorithmFamily)) {
+        contextIssue = "Signal link does not match this sample; showing the available signals.";
+      } else {
+        initial = familyIndex >= 0 ? familyIndex
+          : algorithmFamily ? families.findIndex(([id]) => id === algorithmFamily) : initial;
+        focusTarget = guided
+          ? [...guidePanel.querySelectorAll("[data-guide-signal]")].find((card) =>
+            card.getAttribute("data-guide-signal") === `${guided.algorithm}/${guided.metric}`)
+          : tabs.children[initial];
+      }
+    }
+    if (contextIssue) out.splice(2, 0, h("p", { class: "problem", role: "status" }, contextIssue));
     show(initial);
+    if (focusTarget) {
+      const requestedHash = location.hash;
+      requestAnimationFrame(() => {
+        if (location.hash !== requestedHash || L.state.route !== route || !focusTarget.isConnected) return;
+        focusTarget.focus({ preventScroll: true });
+        focusTarget.scrollIntoView({ block: "center" });
+      });
+    }
     return out;
   }
 
@@ -1143,8 +1190,10 @@
           series,
         }, dataTable("Normalized aligned-span density (% of 50–1000 bp molecules)",
           ["Span (bp)", "This sample (%)", "Cohort observed min (%)", "Cohort observed max (%)"],
-          spans.map((bp, i) => [bp, fmt(sampleDensity[i], "%"), ready ? fmt(bandLow[i], "%") : "unavailable",
-            ready ? fmt(bandHigh[i], "%") : "unavailable"]))));
+          spans.map((bp, i) => [bp,
+            rawCell(fmt(sampleDensity[i], "%"), data.count[bp - 1] / denominator, "fraction"),
+            ready ? rawCell(fmt(bandLow[i], "%"), band.low[i], "fraction") : "unavailable",
+            ready ? rawCell(fmt(bandHigh[i], "%"), band.high[i], "fraction") : "unavailable"]))));
       }).catch((e) => slot.replaceWith(h("div", { class: "problem" }, `Chart could not be drawn (${e.message}).`)));
     }
     const more = [];
@@ -1767,6 +1816,11 @@
 
   window.TracebackLabViews = {
     signals,
+    signalDefinition: (algorithmId, metricId) => {
+      const row = GUIDE_SIGNALS.find((item) => item.algorithm === algorithmId && item.metric === metricId);
+      return row ? { title: row.title, definition: row.definition,
+        denominator: row.denominator, limitation: row.limitation } : null;
+    },
     compare,
     "body-map": bodyMap,
     agreement,

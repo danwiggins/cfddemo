@@ -8,6 +8,7 @@ import re
 import time
 from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
@@ -190,7 +191,7 @@ def test_guided_signals_use_recorded_values_and_show_unavailable_reasons(tmp_pat
     with _server(tmp_path / "available", sample) as server:
         dom = _dom(server, tmp_path / "available-dom", route=f"/sample/{ID12}/signals",
                    want=lambda page: 'data-guide-signal="bam-qc/mapped_fraction"' in page)
-    cards = re.findall(r'<article class="signal-guide-card" data-guide-signal="([^"]+)">(.*?)</article>', dom, re.S)
+    cards = re.findall(r'<article class="signal-guide-card"[^>]*data-guide-signal="([^"]+)">(.*?)</article>', dom, re.S)
     assert [key for key, _ in cards] == [f"{algorithm}/{metric}" for algorithm, metric in guide]
     for (key, value), (_, card) in zip(guide.items(), cards, strict=True):
         observed, unit, count = value
@@ -216,6 +217,67 @@ def test_guided_signals_use_recorded_values_and_show_unavailable_reasons(tmp_pat
     assert dom.index("Unavailable guided signals (2)") < dom.index('data-guide-signal="global-5mc/cpg_5mc_fraction"')
     assert "unavailable (selected result unreadable)" in dom
     assert "unavailable (no primary reads)" in dom
+
+
+@needs_chrome
+def test_signal_context_hash_validates_and_focuses_without_losing_the_route(tmp_path) -> None:
+    sample = _sample()
+    cases = [
+        ("algorithm=global-5mc&metric=cpg_5mc_fraction&family=methylation",
+         False, "global-5mc/cpg_5mc_fraction", "Methylation"),
+        ("algorithm=fragment-size&other=ignored", False, "fragment-size/mode_bp", "Fragmentomics"),
+        ("algorithm=fragment-size&algorithm=bam-qc", True, None, "Fragmentomics"),
+        ("algorithm=fragment-size&family=methylation", False, None, "Fragmentomics"),
+    ]
+    for index, (query, parser_invalid, focused, selected_family) in enumerate(cases):
+        observed = {}
+        with _server(tmp_path / str(index), sample) as server:
+            profile = tmp_path / f"context-profile-{index}"
+            target = f"#/sample/{ID12}/signals?{query}"
+
+            def inspect(_command, evaluate) -> None:
+                observed["route"] = evaluate("window.TracebackLab.state.route")
+                for _ in range(20):
+                    observed["focused"] = evaluate("document.activeElement?.getAttribute('data-guide-signal')")
+                    if observed["focused"] == focused or focused is None:
+                        break
+                    time.sleep(0.05)
+                observed["selected"] = evaluate("[...document.querySelectorAll('#main .subtab')].find((button) => button.getAttribute('aria-pressed') === 'true')?.textContent")
+                observed["hash"] = evaluate("location.hash")
+
+            dom = _dom_cdp(
+                [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+                 f"--user-data-dir={profile}", server.issue_link()], profile,
+                action=f"(() => {{ location.hash = {json.dumps(target)}; return true; }})()",
+                ok=lambda page: 'data-ready="1"' in page and "Start with three measured signals" in page
+                and (("Context link is invalid" if index == 2 else "does not match this sample") in page
+                     if index >= 2 else 'aria-pressed="true"' in page),
+                interact=inspect,
+            )
+        assert observed["route"]["contextInvalid"] is parser_invalid
+        assert observed["hash"] == target
+        assert observed["selected"] == selected_family
+        if focused:
+            assert observed["focused"] == focused
+        if index == 2:
+            assert "Context link is invalid" in dom
+        if index == 3:
+            assert "does not match this sample" in dom
+
+
+@needs_chrome
+def test_bootstrap_accepts_a_bounded_multi_key_signal_context(tmp_path) -> None:
+    with _server(tmp_path, _sample()) as server:
+        profile = tmp_path / "context-bootstrap-profile"
+        route = f"/sample/{ID12}/signals?algorithm=global-5mc&metric=cpg_5mc_fraction&family=methylation"
+        link = server.issue_link() + "&route=" + quote(route, safe="")
+        dom = _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", link], profile,
+            ok=lambda page: 'data-ready="1"' in page and 'data-guide-signal="global-5mc/cpg_5mc_fraction"' in page,
+        )
+    assert "Start with three measured signals" in dom
+    assert "Context link is invalid" not in dom
 
 
 @needs_chrome
