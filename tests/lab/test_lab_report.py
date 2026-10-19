@@ -412,6 +412,69 @@ def test_restrictions_omit_untrusted_metadata_and_roundtrip_fixed_warnings() -> 
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js unavailable")
+def test_stored_cell_origin_v1_adds_modkit_restriction_but_v2_does_not() -> None:
+    from traceback_lab.interpretation.engine import load_library
+
+    library = load_library()
+    liver = library.entry("cell-origin", "fraction_liver_hep")
+    sex = library.entry("sex-check", "chry_chrx_ratio")
+    fixture = {
+        "licenses": {key: {"license_id": key, **library.licenses[key]}
+                     for key in [*liver["license_ids"], "modkit-ont-public"]},
+        "liver": {"flags": liver["flags"], "license_ids": liver["license_ids"]},
+        "sex": {"flags": sex["flags"], "license_ids": sex.get("license_ids") or []},
+    }
+    script = r"""
+      require(process.argv[1]);
+      const report = globalThis.TracebackLabReport;
+      const fixture = __FIXTURE__;
+      const source = 'a'.repeat(64), input = 'b'.repeat(64);
+      const provenance = {tool: 'lab', tool_version: '1', parameters_sha256: 'c'.repeat(64),
+        input_id: input, source_id: source, reference_id: 'ref',
+        timestamp_utc: '2026-10-19T12:00:00Z'};
+      const output = {};
+      for (const [name, version] of [['empty', ''], ['1', '1'], ['2', '2'], ['3', '3'], ['missing', '1']]) {
+        const legacy = version === '' || version === '1';
+        const sample = {found: true, id12: source.slice(0, 12), source_id: source,
+          full_input_id: input, example: false, run_utc: '2026-10-19T11:00:00Z',
+          completed_utc: null, interpretation_version: 'v1', cohort_version: null,
+          catalog: [{algorithm_id: 'cell-origin'}, {algorithm_id: 'sex-check'}],
+          licenses: [fixture.licenses['yissum-uxm'], fixture.licenses['loyfer-atlas-terms-unknown'],
+            ...(legacy && name !== 'missing' ? [fixture.licenses['modkit-ont-public']] : [])],
+          algorithms: [
+            {algorithm_id: 'cell-origin', algorithm_version: version, status: 'ok', provenance,
+              metrics: [{metric_id: 'fraction_liver_hep', value: 0.2, unit: 'fraction',
+                entry: {...fixture.liver, license_ids: [...fixture.liver.license_ids,
+                  ...(legacy ? ['modkit-ont-public'] : [])]}}]},
+            {algorithm_id: 'sex-check', algorithm_version: '2', status: 'ok', provenance,
+              metrics: [{metric_id: 'chry_chrx_ratio', value: 0.5, unit: 'ratio', entry: fixture.sex}]},
+          ]};
+        const model = report.project(sample, '2026-10-19T16:00:00Z',
+          (metric) => ({displayValue: String(metric.value), displayUnit: metric.unit}));
+        output[name] = {limitations: model.limitations,
+          csv: report.csv(model), licenseIds: report.restrictionsForMetric('cell-origin',
+            'fraction_liver_hep', version).licenseIds};
+      }
+      process.stdout.write(JSON.stringify(output));
+    """.replace("__FIXTURE__", json.dumps(fixture))
+    result = _node(script)
+    for version in ("empty", "1", "2", "3"):
+        data = result[version]
+        has_modkit = version in {"empty", "1"}
+        assert ("modkit-ont-public" in data["licenseIds"]) is has_modkit
+        assert (any("License modkit-ont-public:" in item for item in data["limitations"])) is has_modkit
+        assert not any("Some restriction metadata was absent" in item for item in data["limitations"])
+        rows = list(csv.DictReader(io.StringIO(data["csv"])))
+        cell = next(row for row in rows if row["algorithm_id"] == "cell-origin")
+        sex_row = next(row for row in rows if row["algorithm_id"] == "sex-check")
+        assert ("License modkit-ont-public:" in cell["limitations"]) is has_modkit
+        assert "License modkit-ont-public:" not in sex_row["limitations"]
+    missing = result["missing"]
+    assert any("License modkit-ont-public:" in item for item in missing["limitations"])
+    assert any("Some restriction metadata was absent" in item for item in missing["limitations"])
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js unavailable")
 def test_report_rejects_identity_empty_model_and_row_or_byte_limits() -> None:
     data = _node(r"""
       require(process.argv[1]);

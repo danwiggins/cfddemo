@@ -993,6 +993,9 @@ incomplete without copying untrusted API text or paths. Print places fixed
 license callouts beside the method and flags beside the displayed value.
 Analytical and clinical-setting next steps are separate, each accompanied by
 the clinical-advice warning.
+Successful stored cell-origin results with algorithm version `1` or an empty
+version also retain the modkit research-only license disclosure; version 2 and
+later results use the Lab decoder and do not carry that legacy callout.
 
 Only visible registered scalar metrics enter these downloads. Hidden
 processing steps, vector values, unsupplied artifacts and taxon detail are
