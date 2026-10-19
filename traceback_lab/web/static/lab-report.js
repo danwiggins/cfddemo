@@ -304,9 +304,12 @@
     "missing_input", "input_kind", "reference", "upstream", "unqualified_support",
     "missing_gpu", "model_not_ready",
   ]);
-  const columns = [
+  const reportIdentityFields = [
     "schema_version", "generated_at", "research_use_only", "example", "sample_id", "source_id",
     "full_input_id", "recorded_utc", "recorded_utc_kind", "interpretation_version", "cohort_version", "limitations",
+  ];
+  const columns = [
+    ...reportIdentityFields,
     "algorithm_id", "metric_id", "label", "raw_value", "raw_unit", "recorded_support_n", "display_value",
     "display_unit", "status", "skip_reason", "interpretation_state", "interpretation_reason", "tool", "tool_version",
     "parameters_sha256", "attempt_id", "reference_id", "computed_at",
@@ -557,10 +560,12 @@
       if (/^[\t\r\n]/.test(result) || /^[\s]*[=+\-@]/.test(result)) result = `'${result}`;
       return `"${result.replace(/"/g, '""')}"`;
     };
-    const identity = Object.fromEntries(columns.slice(0, 10).map((key) => [key, report[key]]));
+    const identity = Object.fromEntries(reportIdentityFields.map((key) => [
+      key, key === "limitations" ? report.limitations.join(" | ") : report[key],
+    ]));
     const lines = [columns.join(",")];
     for (const row of report.metrics) {
-      const values = { ...identity, limitations: report.limitations.join(" | "), ...row };
+      const values = { ...identity, ...row };
       lines.push(columns.map((key) => text(values[key])).join(","));
     }
     return sizeCheck(`${lines.join("\r\n")}\r\n`);

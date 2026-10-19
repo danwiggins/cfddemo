@@ -193,7 +193,7 @@ def test_report_date_kind_and_interpretation_reason_roundtrip() -> None:
       const sample = {found: true, id12: source.slice(0, 12), source_id: source,
         full_input_id: input, example: false, run_utc: '2026-10-19T11:00:00Z',
         completed_utc: '2026-10-19T11:00:00Z', interpretation_version: 'v1',
-        cohort_version: null, catalog: [{algorithm_id: 'copy-number'}],
+        cohort_version: 'cohort-v7', catalog: [{algorithm_id: 'copy-number'}],
         algorithms: [{algorithm_id: 'copy-number', status: 'ok', metrics,
           provenance: {tool: 'lab', tool_version: '1', parameters_sha256: 'c'.repeat(64),
             input_id: input, source_id: source, reference_id: 'ref',
@@ -219,6 +219,7 @@ def test_report_date_kind_and_interpretation_reason_roundtrip() -> None:
     model = data["model"]
     assert model["recorded_utc"] == "2026-10-19T11:00:00Z"
     assert model["recorded_utc_kind"] == "completion"
+    assert model["cohort_version"] == "cohort-v7"
     assert data["inputUse"]["recorded_utc_kind"] == "input_use"
     assert data["unknownMissing"]["recorded_utc_kind"] == "unknown"
     assert "Completion metadata was absent" in " ".join(data["unknownMissing"]["limitations"])
@@ -235,6 +236,14 @@ def test_report_date_kind_and_interpretation_reason_roundtrip() -> None:
     csv_rows = list(csv.DictReader(io.StringIO(data["csv"])))
     assert len(csv_rows[0]) == 30
     assert all(row["recorded_utc_kind"] == "completion" for row in csv_rows)
+    for row in csv_rows:
+        for key, value in model.items():
+            if key == "metrics":
+                continue
+            expected = " | ".join(value) if key == "limitations" else (
+                "" if value is None else str(value).lower() if isinstance(value, bool) else str(value)
+            )
+            assert row[key] == expected, key
     assert [row["interpretation_reason"] for row in csv_rows] == [
         "no_pon", "cohort_too_small", "", "", "",
     ]
