@@ -661,7 +661,7 @@ Date note (raised by both CEO voices): the local review notes are dated 2026-10-
 
 | # | Premise | Stated or assumed | Assessment |
 |---|---|---|---|
-| P1 | The pending zip holds unaligned MinKNOW/Dorado BAMs like the 28 `bam_pass` files reviewed | Assumed | Nobody has opened it. It may hold barcoded subdirectories (one merge would mix samples), POD5, FASTQ or BAMs aligned to another reference. A1/A5/A6 priorities depend on it |
+| P1 | The pending zip holds unaligned MinKNOW/Dorado BAMs like the privately reviewed `bam_pass` set | Assumed | Nobody has opened it. It may hold barcoded subdirectories (one merge would mix samples), POD5, FASTQ or BAMs aligned to another reference. A1/A5/A6 priorities depend on it |
 | P2 | "Change the analysis" means changing MAPQ and bin edges | Assumed (from `algo.md`) | Could mean end motifs, methylation or cell-origin. Bins alone can be handled by measuring once at 1 bp and binning at view time |
 | P3 | Two local records under one exact method are comparable enough to show a delta | Assumed (D18) | Method identity does not establish comparability across samples, kits or pre-analytics; `EPICS.md` E12 waits for repeatability evidence |
 | P4 | The site is for Dan now, and later for outside readers in demand interviews | Stated (Dan only reader) | Copy and report polish (C3, C7) serve outside readers who do not exist yet; they do serve PRODUCT-PLAN's demand interviews once P7 is settled |
