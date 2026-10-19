@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 
@@ -106,7 +107,8 @@ def test_report_capture_download_print_and_selection_invalidation(tmp_path) -> N
         _dom_cdp(
             [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
              f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/methods"],
-            profile, ok=lambda dom: 'data-ready="1"' in dom and 'class="report-export-panel"' in dom,
+            profile, ok=lambda dom: 'data-ready="1"' in dom and
+            re.search(r'<section[^>]*class="[^"]*\breport-export-panel\b', dom) is not None,
             interact=inspect, timeout=120,
         )
 
@@ -155,7 +157,8 @@ def test_report_download_writes_json_and_csv_from_one_capture(tmp_path) -> None:
         _dom_cdp(
             [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
              f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/methods"],
-            profile, ok=lambda dom: 'data-ready="1"' in dom and 'class="report-export-panel"' in dom,
+            profile, ok=lambda dom: 'data-ready="1"' in dom and
+            re.search(r'<section[^>]*class="[^"]*\breport-export-panel\b', dom) is not None,
             interact=inspect, timeout=120,
         )
 
