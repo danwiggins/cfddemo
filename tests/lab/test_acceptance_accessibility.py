@@ -189,6 +189,101 @@ def test_mobile_lens_deep_link_and_route_changes_reveal_current_tab(tmp_path) ->
 
 
 @needs_chrome
+def test_mobile_edge_lens_pointer_click_reaches_route(tmp_path) -> None:
+    """A pointer-focused edge link must stay under the pointer until mouseup."""
+
+    with _server(tmp_path, _sample()) as server:
+        profile = tmp_path / "browser-profile"
+
+        def inspect(command, evaluate) -> None:
+            command("Page.bringToFront")
+            before = evaluate("""(() => {
+              const nav = document.getElementById('lenses');
+              nav.scrollLeft = 0;
+              const link = nav.querySelector('a[href$="/stability"]');
+              const frame = nav.getBoundingClientRect();
+              const rect = link.getBoundingClientRect();
+              const x = frame.right - 4;
+              const y = (rect.top + rect.bottom) / 2;
+              window.edgePointerPoint = {x, y};
+              window.edgePointerEvents = [];
+              for (const name of ['pointerdown', 'mousedown', 'focusin', 'pointerup', 'mouseup', 'click']) {
+                document.addEventListener(name, (event) => window.edgePointerEvents.push({
+                  name, target: event.target.closest?.('a')?.getAttribute('href') || event.target.tagName,
+                  scrollLeft: nav.scrollLeft
+                }), true);
+              }
+              return { x, y, href: link.getAttribute('href'),
+                partlyVisible: rect.left < frame.right && rect.right > frame.right,
+                hit: document.elementFromPoint(x, y)?.closest('a')?.getAttribute('href'),
+                scrollLeft: nav.scrollLeft };
+            })()""")
+            assert before["partlyVisible"] and before["hit"] == before["href"], before
+            click = {"x": before["x"], "y": before["y"], "button": "left", "clickCount": 1}
+            command("Input.dispatchMouseEvent", {"type": "mousePressed", **click})
+            down = evaluate("""(() => ({
+              focused: document.activeElement?.getAttribute('href'),
+              hit: document.elementFromPoint(window.edgePointerPoint.x, window.edgePointerPoint.y)
+                ?.closest('a')?.getAttribute('href'),
+              scrollLeft: document.getElementById('lenses').scrollLeft
+            }))()""")
+            assert down["focused"] == before["href"], (before, down)
+            assert down["hit"] == before["href"], (before, down)
+            command("Input.dispatchMouseEvent", {"type": "mouseReleased", **click})
+            for _ in range(40):
+                if evaluate(f"location.hash === '#/sample/{ID12}/stability' && document.querySelector('#main h1')?.textContent === 'Stability'"):
+                    break
+                time.sleep(0.05)
+            else:
+                pytest.fail(f"Edge lens click did not navigate: {before}, {down}, {evaluate('window.edgePointerEvents')}")
+            events = evaluate("window.edgePointerEvents")
+            assert any(row["name"] == "click" and row["target"] == before["href"] for row in events), events
+
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", "--window-size=375,800",
+             server.issue_link() + f"&route=/sample/{ID12}/findings"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'aria-current="page">Findings' in dom,
+            interact=inspect, viewport=(375, 800),
+        )
+
+
+@needs_chrome
+def test_mobile_lens_keyboard_focus_is_visible(tmp_path) -> None:
+    """Tabbing to an edge lens keeps its label and focus outline in view."""
+
+    with _server(tmp_path, _sample()) as server:
+        profile = tmp_path / "browser-profile"
+
+        def inspect(command, evaluate) -> None:
+            command("Page.bringToFront")
+            evaluate("document.getElementById('lenses').scrollLeft = 0")
+            evaluate("document.querySelector('#lenses a[href$=\"/findings\"]').focus()")
+            _key(command, "Tab", "Tab", 9)
+            _key(command, "Tab", "Tab", 9)
+            focused = evaluate("""(() => {
+              const nav = document.getElementById('lenses');
+              const link = document.activeElement;
+              const frame = nav.getBoundingClientRect();
+              const rect = link.getBoundingClientRect();
+              return { href: link.getAttribute('href'), visible: link.matches(':focus-visible'),
+                outline: getComputedStyle(link).outlineWidth,
+                inView: rect.left >= frame.left + 19 && rect.right <= frame.right - 19 };
+            })()""")
+            assert focused["href"] == f"#/sample/{ID12}/stability", focused
+            assert focused["visible"] and float(focused["outline"].removesuffix("px")) >= 3, focused
+            assert focused["inView"], focused
+
+        _dom_cdp(
+            [_chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+             f"--user-data-dir={profile}", "--window-size=375,800",
+             server.issue_link() + f"&route=/sample/{ID12}/findings"],
+            profile, ok=lambda dom: 'data-ready="1"' in dom and 'aria-current="page">Findings' in dom,
+            interact=inspect, viewport=(375, 800),
+        )
+
+
+@needs_chrome
 def test_mobile_nav_uses_final_width_after_lens_content_renders(tmp_path) -> None:
     """A classic page scrollbar may narrow the nav after its links are added."""
 
@@ -198,9 +293,9 @@ def test_mobile_nav_uses_final_width_after_lens_content_renders(tmp_path) -> Non
         server.app.assets["/assets/lab-views.js"] = (kind, source + b"""
           const originalMethods = window.TracebackLabViews.methods;
           window.TracebackLabViews.methods = (sample) => {
-            const nav = document.getElementById('lenses');
-            nav.style.width = 'calc(100% - 47px)';
-            nav.dispatchEvent(new Event('scroll'));
+            const wrapper = document.querySelector('.lens-navigation');
+            wrapper.style.width = 'calc(100% - 47px)';
+            document.getElementById('lenses').dispatchEvent(new Event('scroll'));
             return originalMethods(sample);
           };
         """)
@@ -209,10 +304,11 @@ def test_mobile_nav_uses_final_width_after_lens_content_renders(tmp_path) -> Non
         def inspect(_command, evaluate) -> None:
             observed.update(evaluate("""(() => {
               const nav = document.querySelector('#lenses');
+              const wrapper = nav.closest('.lens-navigation');
               const tab = nav.querySelector('[aria-current="page"]').getBoundingClientRect();
               const box = nav.getBoundingClientRect();
               return {
-                width: innerWidth, navWidth: nav.clientWidth,
+                width: innerWidth, wrapperWidth: wrapper.clientWidth, navWidth: nav.clientWidth,
                 scroll: nav.scrollLeft, maxScroll: nav.scrollWidth - nav.clientWidth,
                 visible: tab.left >= box.left && tab.right <= box.right,
                 leftFade: nav.classList.contains('more-left'),
@@ -228,7 +324,8 @@ def test_mobile_nav_uses_final_width_after_lens_content_renders(tmp_path) -> Non
             interact=inspect, viewport=(360, 740),
         )
 
-    assert observed["width"] == 360 and observed["navWidth"] < 328, observed
+    assert observed["width"] == 360 and observed["wrapperWidth"] < 328, observed
+    assert observed["navWidth"] < observed["wrapperWidth"], observed
     assert observed["visible"] and observed["leftFade"] and not observed["rightFade"], observed
     assert observed["scroll"] >= observed["maxScroll"] - 1, observed
 

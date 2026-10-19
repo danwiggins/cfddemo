@@ -218,7 +218,10 @@
     nav.before(wrapper);
     wrapper.append(previous, nav, next);
     nav.addEventListener("focusin", (event) => {
-      if (!(event.target instanceof HTMLAnchorElement) || getComputedStyle(nav).flexWrap !== "nowrap") return;
+      // Pointer focus can happen between mouse down and up. Moving the link
+      // then sends the click to the nav instead of activating its route.
+      if (!(event.target instanceof HTMLAnchorElement) || !event.target.matches(":focus-visible") ||
+          getComputedStyle(nav).flexWrap !== "nowrap") return;
       const frame = nav.getBoundingClientRect();
       const link = event.target.getBoundingClientRect();
       // Keep focus clear of the 1.25rem edge fade as keyboard travel scrolls.
