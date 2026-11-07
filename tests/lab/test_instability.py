@@ -286,7 +286,7 @@ def test_failed_algorithm_records_sampled_tree_memory(
 def test_disk_sampling_only_walks_the_current_step_scratch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from traceback_lab import pipeline
+    from traceback_runner import contained_process as pipeline
 
     store = LabStore(tmp_path / "store")
     store.ensure()

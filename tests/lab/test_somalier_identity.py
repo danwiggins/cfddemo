@@ -24,9 +24,9 @@ from traceback_lab.identity_pair import (
     pairs_for_sample,
 )
 from traceback_lab.identity_sites import IdentitySitesError, inspect_sites, register_sites
-from traceback_lab.pipeline import PipelineResult, StageOutcome
 from traceback_lab.registry import InputContext, Skip
 from traceback_lab.store import LabStore
+from traceback_runner.contained_process import PipelineResult, StageOutcome
 
 
 def test_sites_are_pinned_and_reject_changed_bytes(tmp_path) -> None:
