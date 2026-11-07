@@ -9,7 +9,8 @@ Layout (D11, D19, D22, D35)::
     ROOT/lab/generation           integer bumped by every publish
     ROOT/lab/runs/<run_id>.jsonl  one line per step event; hashes, never paths
     ROOT/lab/sources/<source_id>.json
-    ROOT/lab/inputs/index.json    hash cache (realpath, size, mtime_ns) -> digest
+    ROOT/lab/inputs/index.json    hash cache; chunk keys are (realpath, inode,
+                                  size, mtime_ns, ctime_ns) -> digest (schema v2)
     ROOT/lab/inputs/<input_id>/   aligned or derived input (published as a unit)
     ROOT/lab/results/<input_id>/<algorithm_id>/<parameters_sha256>/
         attempts/<attempt_id>/{result.json, artifacts/, artifacts.json,
@@ -53,6 +54,8 @@ from .file_access import directory_no_follow, open_regular_no_follow, write_atom
 from .identity import ALGORITHM_ID_PATTERN, SHA256_PATTERN
 from .problems import LabProblem
 
+HASH_CACHE_SCHEMA = "traceback.lab.hash-cache.v2"
+HASH_CACHE_SCHEMA_V1 = "traceback.lab.hash-cache.v1"  # unprefixed chunk keys without inode/ctime
 HEARTBEAT_INTERVAL_S = 10.0
 HEARTBEAT_FRESH_S = 30.0
 KEEP_FAILED_ATTEMPTS = 3
@@ -1466,27 +1469,80 @@ class LabStore:
         return selected[1] if selected is not None else None
 
     # -- hash cache (D11) ---------------------------------------------------
+    legacy_hash_cache_entries_dropped: int = 0
+    """How many v1 chunk entries the last ``load_hash_cache`` dropped."""
+    hash_cache_notice: str | None = None
+    """One line for the operator when the last ``load_hash_cache`` ignored the file."""
+
     def load_hash_cache(self) -> dict[str, dict[str, Any]]:
+        """Read the cache, branching on its ``schema``.
+
+        v2 (current): every entry is kept. v1 (or no schema field): chunk
+        entries were keyed on ``realpath\\0size\\0mtime_ns`` with no prefix
+        and can never match a ``chunk-v2`` key, so they are dropped (counted
+        in ``legacy_hash_cache_entries_dropped`` so the caller can say why
+        every chunk is hashed once); index proofs and reference proofs carry
+        their own prefixes and are kept. Any other schema is unknown to this
+        checkout: the file is treated as empty, ``hash_cache_notice`` says
+        so, and the next save rewrites it as v2.
+        """
+
+        self.legacy_hash_cache_entries_dropped = 0
+        self.hash_cache_notice = None
         try:
             data = json.loads(self.hash_cache_file.read_bytes())
         except (FileNotFoundError, ValueError):
             return {}
-        entries = data.get("entries", {}) if isinstance(data, dict) else {}
-        return {str(key): value for key, value in entries.items() if isinstance(value, dict)}
+        if not isinstance(data, dict):
+            return {}
+        schema = data.get("schema")
+        entries = data.get("entries", {})
+        if not isinstance(entries, dict):
+            return {}
+        if schema == HASH_CACHE_SCHEMA:
+            return {str(key): value for key, value in entries.items() if isinstance(value, dict)}
+        if schema is None or schema == HASH_CACHE_SCHEMA_V1:
+            kept: dict[str, dict[str, Any]] = {}
+            for key, value in entries.items():
+                if not isinstance(value, dict):
+                    continue
+                if str(key).startswith("/"):
+                    self.legacy_hash_cache_entries_dropped += 1
+                    continue
+                kept[str(key)] = value
+            return kept
+        shown = str(schema)[:60]
+        self.hash_cache_notice = (
+            f"hash cache schema {shown!r} is unknown to this checkout: ignored, every digest is recomputed once"
+        )
+        return {}
 
     def save_hash_cache(self, entries: Mapping[str, Mapping[str, Any]]) -> None:
         """Rewrite the cache (callers hold the writer lock)."""
 
         write_atomic(
             self.hash_cache_file,
-            canonical_json_bytes({"schema": "traceback.lab.hash-cache.v1", "entries": dict(entries)}),
+            canonical_json_bytes({"schema": HASH_CACHE_SCHEMA, "entries": dict(entries)}),
         )
 
     @staticmethod
     def hash_cache_key(path: Path) -> str:
+        """Chunk cache key: realpath, inode, size, mtime and ctime.
+
+        A file replaced by another of the same size with a restored mtime
+        lives on a new inode (or, where the inode number is recycled, carries
+        a new ctime); an in-place rewrite that keeps the inode and restores
+        the mtime still bumps ctime, which no unprivileged tool can restore
+        (Linux before 6.13 stamps ctime at tick granularity, about 4 ms, so a
+        rewrite inside the tick of the previous change is the one blind spot).
+        Both miss the cache and are rehashed. The device number is left out
+        on purpose: it changes across remounts of external and network
+        volumes and would rehash an unchanged kit after every remount.
+        """
+
         real = os.path.realpath(path)
         info = os.stat(real)
-        return f"{real}\0{info.st_size}\0{info.st_mtime_ns}"
+        return f"chunk-v2\0{real}\0{info.st_ino}\0{info.st_size}\0{info.st_mtime_ns}\0{info.st_ctime_ns}"
 
     @staticmethod
     def strong_hash_cache_key(path: Path) -> str:
