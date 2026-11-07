@@ -21,11 +21,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from traceback_runner.contained_process import Stage, run_contained_pipeline as run_pipeline
 from traceback_runner.serialization import canonical_json_bytes
 
 from .envelope import Depth, Failure, ResultEnvelope, provenance
 from .ingest import resolve_reference
-from .pipeline import Stage, run_pipeline
 from .problems import LabProblem
 from .reference_integrity import verify_reference_source
 from .registry import (
