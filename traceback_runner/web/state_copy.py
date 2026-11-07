@@ -387,7 +387,7 @@ ENUM_SOURCES: Final = MappingProxyType(
         "analysis": ANALYSES,
         "method_version": (CURRENT_METHOD_VERSION, EARLIER_METHOD_VERSION),
         "job_problem": tuple(_JOB_PROBLEM),
-        # Pinned against the cell-origin models by tests/test_cell_origin_view.py.
+        # Pinned against the cell-origin models by tests/web/test_cell_origin_view.py.
         "cell_origin": ("ready", "low_coverage", "not_converged"),
         "modbase": ("operator_declared", "header"),
         "interval": ("available", "insufficient_information"),

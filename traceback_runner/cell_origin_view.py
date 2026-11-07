@@ -39,7 +39,7 @@ KEY_COUNT_UNIT = "classified marker fragments"
 HEADING = "Estimated cell-type mixture (Loyfer atlas)"
 AXIS_LABEL = "Estimated fraction among registered atlas contributors"
 SUM_NOTE = (
-    "Fractions are forced to add up to 100%. This method has no 'unassigned' share."
+    "The underlying fractions are forced to add up to 100% (displayed one-decimal values may not). This method has no 'unassigned' share."
 )
 RESIDUAL_NO_THRESHOLD = "It has no threshold; no value here is a judgement."
 
@@ -173,7 +173,7 @@ def _row(rank: int, item: Any) -> ContributorRow:
         fraction=item.fraction,
         fraction_text=percent_text(item.fraction),
         interval=interval,
-        interval_state=item.interval_state,
+        interval_state="available" if available else "insufficient_information",
         interval_label=_copy("interval", "available" if available else "insufficient_information")[0],
     )
 
@@ -185,7 +185,7 @@ def build_body(measurement: Any) -> CellOriginViewBody:
     ranked = sorted(measurement.estimates, key=lambda item: (-item.fraction, item.contributor_id))
     rows = tuple(_row(rank, item) for rank, item in enumerate(ranked, start=1))
     top, rest = rows[:TOP_ROWS], rows[TOP_ROWS:]
-    rest_fraction = min(1.0, max(0.0, sum(item.fraction for item in rest)))
+    rest_fraction = sum(item.fraction for item in rest)  # the model's le=1.0 bound refuses an inconsistent record
     at_zero = sum(item.fraction == 0 for item in rest)
     other = OtherRow(
         contributors=len(rest),

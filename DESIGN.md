@@ -61,6 +61,11 @@ or pilot qualification.
 
 The presentation model groups jobs into needs attention, processing, queued,
 completed records, and inactive. It never groups or sorts by biological value.
+The one recorded exception is the cell-origin record view, whose ranked
+contributor bar and combined "other" row are specified in
+`docs/SIGNAL-METHODS-CELL-ORIGIN-AND-CNA.md` ("Record views and catalog",
+items 14, 15 and 17); that override applies to that view only, never to the
+operator job list.
 After three missed 15-second observations, the view reports `Runner status is
 stale`, separately from job failure, and directs the operator to refresh before
 another action.
