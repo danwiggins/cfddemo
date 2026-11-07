@@ -349,10 +349,34 @@
     return section;
   }
 
+  // Kit provenance from the stored input manifest's BAM header (@RG PM/DS, @PG PN/VN).
+  // Each field is a list of distinct values (null = a chunk that recorded none);
+  // kit.distinct counts them before the stored list was capped.
+  function kitText(kit, field) {
+    const list = kit && Array.isArray(kit[field]) ? kit[field] : [];
+    if (!list.length || (list.length === 1 && list[0] === null)) return null;
+    const count = Math.max(list.length, Number.isInteger(kit.distinct?.[field]) ? kit.distinct[field] : 0);
+    if (count > 1) return `mixed (${count} values)`;
+    return field === "modbase_models" ? list[0].split(",").join(", ") : list[0];
+  }
+  function softwareText(kit) {
+    const byProgram = new Map();
+    for (const entry of (kit && Array.isArray(kit.software)) ? kit.software : []) {
+      if (!byProgram.has(entry.program)) byProgram.set(entry.program, []);
+      byProgram.get(entry.program).push(entry.version);
+    }
+    const text = [...byProgram].map(([program, versions]) => versions.length > 1 ? `${program} mixed (${versions.length} values)`
+      : versions[0] ? `${program} ${versions[0]}` : program).join("; ");
+    return text ? text + (kit.truncated && kit.distinct?.software > kit.software.length ? "; more not shown" : "") : null;
+  }
+  function kitCell(value) {
+    return value ? h("td", { class: "kit-cell" }, value) : h("td", { class: "kit-cell not-recorded" }, "not recorded");
+  }
+
   function samplesTable() {
     const rows = L.state.samples;
     const table = h("table", {}, h("caption", {}, "All samples (by run date, newest first)"),
-      h("thead", {}, h("tr", {}, ...["ID", "Run date", "Approx depth", "OK / skipped / failed", "Outside a reference", "Controls", ""].map((t) => h("th", { scope: "col" }, t)))),
+      h("thead", {}, h("tr", {}, ...["ID", "Run date", "Approx depth", "Instrument", "Basecall model", "Modified-base models", "Software", "OK / skipped / failed", "Outside a reference", "Controls", ""].map((t) => h("th", { scope: "col" }, t)))),
       h("tbody", {}, ...rows.map((row) => h("tr", {},
         h("th", { scope: "row" }, h("a", { href: `#/sample/${row.id12}/findings` }, row.id12), row.example ? h("span", { class: "flag-pill example-pill" }, " EXAMPLE (synthetic)") : "",
           row.state === "completed_input_unavailable" ? h("span", { class: "problem" }, " completed input unavailable") : "",
@@ -362,6 +386,8 @@
           row.malformed_result_selections ? h("span", { class: "problem" }, ` malformed result selection (sample ${row.id12})`) : ""),
         h("td", {}, row.run_utc ? row.run_utc.slice(0, 10) : "—"),
         h("td", { class: "num" }, row.depth_x !== null ? `${row.depth_x.toPrecision(3)}x` : "—"),
+        kitCell(kitText(row.kit, "instrument")), kitCell(kitText(row.kit, "basecall_model")), kitCell(kitText(row.kit, "modbase_models")),
+        kitCell(softwareText(row.kit)),
         h("td", {}, `${row.counts.ok} / ${row.counts.skipped} / ${row.counts.failed}`),
         h("td", { class: "num" }, String(row.outside_reference),
           ["cohort_unavailable", "target_unavailable", "stale_target"].includes(row.cohort_state)
