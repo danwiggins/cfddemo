@@ -9,8 +9,8 @@ Layout (D11, D19, D22, D35)::
     ROOT/lab/generation           integer bumped by every publish
     ROOT/lab/runs/<run_id>.jsonl  one line per step event; hashes, never paths
     ROOT/lab/sources/<source_id>.json
-    ROOT/lab/inputs/index.json    hash cache; chunk keys are (realpath, device,
-                                  inode, size, mtime_ns) -> digest (schema v2)
+    ROOT/lab/inputs/index.json    hash cache; chunk keys are (realpath, inode,
+                                  size, mtime_ns, ctime_ns) -> digest (schema v2)
     ROOT/lab/inputs/<input_id>/   aligned or derived input (published as a unit)
     ROOT/lab/results/<input_id>/<algorithm_id>/<parameters_sha256>/
         attempts/<attempt_id>/{result.json, artifacts/, artifacts.json,
@@ -54,7 +54,7 @@ from .file_access import directory_no_follow, open_regular_no_follow, write_atom
 from .identity import ALGORITHM_ID_PATTERN, SHA256_PATTERN
 from .problems import LabProblem
 
-HASH_CACHE_SCHEMA = "traceback.lab.hash-cache.v2"  # v1: unprefixed chunk keys without device/inode
+HASH_CACHE_SCHEMA = "traceback.lab.hash-cache.v2"  # v1: unprefixed chunk keys without inode/ctime
 HEARTBEAT_INTERVAL_S = 10.0
 HEARTBEAT_FRESH_S = 30.0
 KEEP_FAILED_ATTEMPTS = 3
@@ -1468,16 +1468,22 @@ class LabStore:
         return selected[1] if selected is not None else None
 
     # -- hash cache (D11) ---------------------------------------------------
+    legacy_hash_cache_entries_dropped: int = 0
+    """How many v1 chunk entries the last ``load_hash_cache`` dropped."""
+
     def load_hash_cache(self) -> dict[str, dict[str, Any]]:
         """Read the cache; a file written by older code loads as misses.
 
         Schema v1 keyed chunks on ``realpath\\0size\\0mtime_ns`` with no
         prefix. Every v2 chunk key carries the ``chunk-v2`` prefix, so a v1
-        chunk entry can never match and is dropped here; the next save
-        rewrites the file as v2. Index proofs and reference proofs carry their
-        own prefixes and survive the bump unchanged.
+        chunk entry can never match and is dropped here (counted in
+        ``legacy_hash_cache_entries_dropped`` so the caller can say why every
+        chunk is hashed once); the next save rewrites the file as v2. Index
+        proofs and reference proofs carry their own prefixes and survive the
+        bump unchanged.
         """
 
+        self.legacy_hash_cache_entries_dropped = 0
         try:
             data = json.loads(self.hash_cache_file.read_bytes())
         except (FileNotFoundError, ValueError):
@@ -1485,10 +1491,15 @@ class LabStore:
         entries = data.get("entries", {}) if isinstance(data, dict) else {}
         if not isinstance(entries, dict):
             return {}
-        return {
-            str(key): value for key, value in entries.items()
-            if isinstance(value, dict) and not str(key).startswith("/")
-        }
+        kept: dict[str, dict[str, Any]] = {}
+        for key, value in entries.items():
+            if not isinstance(value, dict):
+                continue
+            if str(key).startswith("/"):
+                self.legacy_hash_cache_entries_dropped += 1
+                continue
+            kept[str(key)] = value
+        return kept
 
     def save_hash_cache(self, entries: Mapping[str, Mapping[str, Any]]) -> None:
         """Rewrite the cache (callers hold the writer lock)."""
@@ -1500,17 +1511,20 @@ class LabStore:
 
     @staticmethod
     def hash_cache_key(path: Path) -> str:
-        """Chunk cache key: realpath, device, inode, size and mtime.
+        """Chunk cache key: realpath, inode, size, mtime and ctime.
 
         A file replaced by another of the same size with a restored mtime
-        lives on a new inode, so it misses the cache and is rehashed. An
-        in-place rewrite that keeps the inode and restores the mtime still
-        hits; ``lab run --rehash`` covers that case.
+        lives on a new inode (or, where the inode number is recycled, carries
+        a new ctime); an in-place rewrite that keeps the inode and restores
+        the mtime still bumps ctime, which no unprivileged tool can restore.
+        Both miss the cache and are rehashed. The device number is left out
+        on purpose: it changes across remounts of external and network
+        volumes and would rehash an unchanged kit after every remount.
         """
 
         real = os.path.realpath(path)
         info = os.stat(real)
-        return f"chunk-v2\0{real}\0{info.st_dev}\0{info.st_ino}\0{info.st_size}\0{info.st_mtime_ns}"
+        return f"chunk-v2\0{real}\0{info.st_ino}\0{info.st_size}\0{info.st_mtime_ns}\0{info.st_ctime_ns}"
 
     @staticmethod
     def strong_hash_cache_key(path: Path) -> str:

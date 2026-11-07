@@ -970,12 +970,17 @@ def test_hash_cache_key_changes_when_a_same_size_same_mtime_replacement_has_a_ne
     assert (new.st_size, new.st_mtime_ns) == (old.st_size, old.st_mtime_ns)
     replaced_key = store.hash_cache_key(chunk)
     assert replaced_key != key
-    # An in-place rewrite that keeps the inode and restores the mtime still hits:
-    # that is what `lab run --rehash` is for.
+    # An in-place rewrite (cp -p onto an existing file) keeps the inode and can
+    # restore the mtime, but bumps ctime: the key changes too.
     chunk.write_bytes(b"cccc")
     os.utime(chunk, ns=(old.st_atime_ns, old.st_mtime_ns))
-    assert chunk.stat().st_ino == new.st_ino
-    assert store.hash_cache_key(chunk) == replaced_key
+    rewritten = chunk.stat()
+    assert rewritten.st_ino == new.st_ino
+    assert (rewritten.st_size, rewritten.st_mtime_ns) == (old.st_size, old.st_mtime_ns)
+    assert store.hash_cache_key(chunk) != replaced_key
+    # Unchanged since: the key is stable (no device number, no access time).
+    assert store.hash_cache_key(chunk) == store.hash_cache_key(chunk)
+    assert str(rewritten.st_dev) not in store.hash_cache_key(chunk).split("\0")
 
 
 def test_hash_cache_written_by_v1_code_loads_as_misses_and_is_rewritten_as_v2(tmp_path: Path) -> None:

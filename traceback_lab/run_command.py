@@ -197,7 +197,8 @@ def _flags(args: argparse.Namespace) -> dict[str, Any]:
         "cohort": args.cohort,
         "skip_bad_chunks": args.skip_bad_chunks,
         "force": args.force,
-        "rehash": args.rehash,
+        # Requested and applicable: a stored sample (<id12>, latest) has no chunks to rehash.
+        "rehash": args.rehash and not (len(args.inputs) == 1 and _is_stored(args.inputs[0])),
         "timeout_s": args.timeout_s,
         "threads": args.threads,
         "sort_mem": args.sort_mem,
@@ -418,7 +419,7 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
         for item in items
     ]
     memory_warning = _memory_warning()
-    data: dict[str, Any] = {"root": str(store.root), "dry_run": True, "rehash": args.rehash, "plan": plan_rows,
+    data: dict[str, Any] = {"root": str(store.root), "dry_run": True, "rehash": False, "plan": plan_rows,
                             "warnings": [memory_warning] if memory_warning else []}
     lines = [f"ROOT      {store.root}"]
     if memory_warning:
@@ -534,6 +535,7 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
         chunkset = inspect_chunks(
             paths, store, skip_bad_chunks=args.skip_bad_chunks, write_cache=False, rehash=args.rehash,
         )
+        data["rehash"] = args.rehash
         input_platform = _declared_platform(chunkset)
         platform = input_platform if chunkset.aligned else "ont"
         data["sample"] = {"source_id": chunkset.source_id,
@@ -837,6 +839,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                         records=chunkset.total_records,
                         excluded=chunkset.excluded_indexes,
                         source_id=chunkset.source_id,
+                        rehash=args.rehash,
                     )
                     lock.set_step("align")
                     log.append("step_start", step="align")
@@ -964,7 +967,8 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                 code, payload = _summary(
                     store, run_id, aligned, id12, chunkset, results, warnings, time.monotonic() - started,
                     depth=target.depth.model_dump() if target.depth is not None else None,
-                    controls=controls["summary"], platform=target.platform, rehash=args.rehash,
+                    controls=controls["summary"], platform=target.platform,
+                    rehash=args.rehash and chunkset is not None,
                 )
                 log.append("run_end", status=payload["status"], exit_code=code)
             except KeyboardInterrupt:

@@ -94,11 +94,11 @@ def test_same_size_restored_mtime_fasta_edit_fails_registered_digest(tmp_path) -
     reference = resolve_reference(store.root, "hg38")
     verify_reference_source(store, reference, write_cache=True)
     old = fasta.stat()
-    old_key = store.hash_cache_key(fasta)
     fasta.write_text(fasta.read_text().replace("ACGT", "TCGT", 1))
     os.utime(fasta, ns=(old.st_atime_ns, old.st_mtime_ns))
-    assert store.hash_cache_key(fasta) == old_key
-    assert fasta.stat().st_ctime_ns != old.st_ctime_ns
+    edited = fasta.stat()
+    assert (edited.st_ino, edited.st_size, edited.st_mtime_ns) == (old.st_ino, old.st_size, old.st_mtime_ns)
+    assert edited.st_ctime_ns != old.st_ctime_ns
     with pytest.raises(LabProblem, match="No usable registered reference") as error:
         verify_reference_source(store, reference, write_cache=True)
     assert error.value.code == "TBX-LAB-004"
@@ -139,12 +139,12 @@ def test_fai_offset_edit_fails_indexed_m5_even_when_names_and_lengths_match(tmp_
     verify_reference_source(store, reference, write_cache=True)
     fai = Path(f"{fasta}.fai")
     old = fai.stat()
-    old_weak_key = store.hash_cache_key(fai)
     fields = fai.read_text().strip().split("\t")
     fields[2] = str(int(fields[2]) + 1)
     fai.write_text("\t".join(fields) + "\n")
     os.utime(fai, ns=(old.st_atime_ns, old.st_mtime_ns))
-    assert store.hash_cache_key(fai) == old_weak_key
+    edited = fai.stat()
+    assert (edited.st_ino, edited.st_size, edited.st_mtime_ns) == (old.st_ino, old.st_size, old.st_mtime_ns)
     with pytest.raises(LabProblem) as error:
         verify_reference_source(store, reference, write_cache=True)
     assert error.value.code == "TBX-LAB-004"
@@ -252,17 +252,21 @@ def test_mmi_cache_rehashes_same_size_restored_mtime_replacement(tmp_path) -> No
     mmi.write_bytes(b"aaaa")
     first = cached_sha256(store, mmi)
     old = mmi.stat()
-    old_weak_key = store.hash_cache_key(mmi)
+    strong_key = store.strong_hash_cache_key(mmi)
+    # In-place rewrite with the mtime restored: same inode, size and mtime; only ctime moves.
     mmi.write_bytes(b"bbbb")
     os.utime(mmi, ns=(old.st_atime_ns, old.st_mtime_ns))
-    assert store.hash_cache_key(mmi) == old_weak_key
+    rewritten = mmi.stat()
+    assert (rewritten.st_ino, rewritten.st_size, rewritten.st_mtime_ns) == (old.st_ino, old.st_size, old.st_mtime_ns)
+    assert rewritten.st_ctime_ns != old.st_ctime_ns
+    assert store.strong_hash_cache_key(mmi) != strong_key
     assert cached_sha256(store, mmi) == hashlib.sha256(b"bbbb").hexdigest() != first
+    # Replacement by another file of the same size with the mtime restored: new inode.
     replacement = tmp_path / "replacement.mmi"
     replacement.write_bytes(b"cccc")
     os.utime(replacement, ns=(old.st_atime_ns, old.st_mtime_ns))
     os.replace(replacement, mmi)
-    # The v2 chunk key sees the new inode too; the strong key also sees ctime.
-    assert store.hash_cache_key(mmi) != old_weak_key
+    assert store.strong_hash_cache_key(mmi) != strong_key
     assert cached_sha256(store, mmi) == hashlib.sha256(b"cccc").hexdigest()
 
 

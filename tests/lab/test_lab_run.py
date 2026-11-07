@@ -1380,11 +1380,30 @@ def test_rehash_flag_ignores_the_chunk_cache_and_is_recorded(lab_world, capsys, 
     )
     assert first_start["flags"]["rehash"] is False
 
+    ingest_end = next(
+        event for event in store.run_log(third["data"]["run_id"]).events()
+        if event["event"] == "step_end" and event["step"] == "ingest"
+    )
+    assert ingest_end["rehash"] is True
+
     code, dry = _json(capsys, *argv, "--rehash", "--dry-run")
     assert code == 0, dry
     assert dry["data"]["dry_run"] and dry["data"]["rehash"] is True
     assert hashed.count(bam) == 3
     assert store.hash_cache_file.read_bytes() == cached_file
+
+    # A stored sample has no chunks to rehash: the flag is recorded as not applied.
+    code, stored = _json(capsys, "run", "latest", "--root", str(lab_world["root"]), "--rehash")
+    assert code == 0, stored
+    assert stored["data"]["rehash"] is False
+    assert hashed.count(bam) == 3
+    stored_start = next(
+        event for event in store.run_log(stored["data"]["run_id"]).events() if event["event"] == "run_start"
+    )
+    assert stored_start["flags"]["rehash"] is False and stored_start["flags"]["stored_sample"] is True
+    code, stored_dry = _json(capsys, "run", "latest", "--root", str(lab_world["root"]), "--rehash", "--dry-run")
+    assert code == 0, stored_dry
+    assert stored_dry["data"]["rehash"] is False
 
 
 def test_prealigned_middle_capacity_does_not_hash_and_count_twice(lab_world, capsys, monkeypatch) -> None:

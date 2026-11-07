@@ -285,6 +285,11 @@ def inspect_chunks(
             data={"chunk_indexes": [chunk.index for chunk in bad]},
         )
     cache = store.load_hash_cache()
+    if store.legacy_hash_cache_entries_dropped and progress is not None:
+        progress(
+            f"ingest  hash cache written by an older version "
+            f"({store.legacy_hash_cache_entries_dropped} chunk entries dropped): every chunk is hashed once"
+        )
     changed = False
     for number, chunk in enumerate(chunks, start=1):
         key = store.hash_cache_key(chunk.path)

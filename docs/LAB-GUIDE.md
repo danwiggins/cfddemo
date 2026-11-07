@@ -204,7 +204,7 @@ of MinKNOW chunks (`*.bam`, not recursive). It:
 1. refuses symlinks, non-regular and unreadable files, truncated chunks
    (`samtools quickcheck -u`), duplicate chunks and mixed basecall models;
 2. orders chunks by the `_<n>.bam` index, hashes them (cached by path,
-   device, inode, size and mtime) and derives the sample identity (`id12`,
+   inode, size, mtime and ctime) and derives the sample identity (`id12`,
    the first 12+ hex of the chunk-set digest);
 3. checks free space against the disk budget (about 2.2x the chunk bytes,
    plus the minimap2 index the first time, plus 2 GB);
@@ -240,20 +240,29 @@ sample without the chunk paths. `--force` recomputes every result.
 intermediates they need, labelled "(upstream)".
 
 **Input hash cache.** `ROOT/lab/inputs/index.json` remembers each chunk's
-SHA-256 and record count under a key of its real path, device number, inode
-number, byte size and mtime (nanoseconds). A chunk whose key matches is not
-read again, so a rerun with unchanged inputs finishes in seconds. A file
-replaced by another file of the same size with a restored mtime (a restore
-from backup, `cp -p`, `rsync -a`) lands on a new inode and is hashed again.
-The one case the key cannot see is a rewrite in place that keeps the inode
-and restores the mtime; after any restore or copy you do not fully trust, run
-once with `--rehash`, which ignores the cache for that run, hashes and counts
-every chunk, and writes the fresh entries. The run log's `run_start` flags and
-the `--json` output carry `rehash: true` for that run. The cache file is
-schema `traceback.lab.hash-cache.v2`; a file written before the device and
-inode joined the key (v1) still loads, its chunk entries are misses, and the
-next write stores it as v2. Under a tight disk budget `--rehash` also hashes
-the chunks in the read-only preflight, so they are read twice in that run.
+SHA-256 and record count under a key of its real path, inode number, byte
+size, mtime and ctime (nanoseconds). A chunk whose key matches is not read
+again, so a rerun with unchanged inputs finishes in seconds. A file replaced
+by another of the same size with a restored mtime (a restore from backup,
+`rsync -a` into a fresh directory) lands on a new inode; a copy onto the
+existing file (`cp -p`, `rsync -a` over the old chunk) keeps the inode and
+restores the mtime but moves ctime, which no unprivileged tool can restore.
+Both miss the cache and are hashed again. The device number is not part of
+the key, so an unchanged kit on an external or network volume stays cached
+across remounts. `--rehash` ignores the cache for one run, hashes and counts
+every chunk, and overwrites the entries; use it when you do not trust the
+cache itself, for example after restoring `ROOT/lab` from a backup, moving
+a store between hosts, or any restore or copy of the inputs whose timestamps
+you cannot account for. The ingest `step_end` event and `--json`
+(`data.rehash`) record whether chunks were actually rehashed; the `run_start`
+flags record `rehash: true` when the flag was given for an input that has
+chunks (a stored sample, `latest` or `<id12>`, has none, so both read
+`false`). The cache file is schema `traceback.lab.hash-cache.v2`; a file
+written before inode and ctime joined the key (v1) still loads, its chunk
+entries are dropped as misses, the run prints one line saying so, every
+chunk is hashed once, and the next write stores the file as v2. Under a
+tight disk budget `--rehash` also hashes the chunks in the read-only
+preflight, so they are read twice in that run.
 
 A result is reused only when its selected attempt matches the input, algorithm,
 and execution identity. Dependents also record the exact upstream attempts
@@ -1378,7 +1387,7 @@ the loopback interface is up and retry. `--json` carries the requested `port`
 ## Changes
 
 - 2026-11-06: `lab serve --port N` binds a fixed loopback port; TBX-LAB-026.
-- 2026-11-06: the input hash cache keys on device and inode as well as path,
+- 2026-11-06: the input hash cache keys on inode and ctime as well as path,
   size and mtime (schema v2; v1 files load as misses); `lab run --rehash`
   ignores the cache for one run and is recorded in the run log and `--json`.
 - 2026-10-17: documented the expanded registered catalog, platform-specific
