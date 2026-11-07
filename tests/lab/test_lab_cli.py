@@ -31,6 +31,69 @@ def test_root_precedence(tmp_path: Path, monkeypatch) -> None:
     assert lab_cli.resolve_root(Path("flag-root")) == tmp_path / "flag-root"
 
 
+def test_signed_cli_resolves_root_with_the_lab_resolver() -> None:
+    from traceback_runner.filesystem import resolve_root
+
+    assert lab_cli.resolve_root is resolve_root
+
+
+def _signed(capsys, argv):
+    code = signed_cli.main(argv)
+    return code, capsys.readouterr().out
+
+
+def test_signed_and_lab_share_env_root_across_cwds(tmp_path: Path, capsys, monkeypatch) -> None:
+    """With TRACEBACK_ROOT set, a signed command and a Lab command started from
+    different directories use the same store and both print it."""
+
+    shared = tmp_path / "shared"
+    monkeypatch.setenv("TRACEBACK_ROOT", str(shared))
+    (tmp_path / "signed-cwd").mkdir()
+    (tmp_path / "lab-cwd").mkdir()
+
+    monkeypatch.chdir(tmp_path / "signed-cwd")
+    code, out = _signed(capsys, ["jobs"])
+    assert code == 0
+    assert out.splitlines()[1] == f"ROOT  {shared}"
+    code, out = _signed(capsys, ["doctor", "--json"])
+    assert json.loads(out)["data"]["root"] == str(shared)
+    assert not (tmp_path / "signed-cwd" / ".traceback").exists()
+
+    monkeypatch.chdir(tmp_path / "lab-cwd")
+    code, out = _run(capsys, ["runs"])
+    assert code == 0
+    assert out.splitlines()[0] == f"ROOT  {shared}"
+    code, out = _run(capsys, ["runs", "--json"])
+    assert json.loads(out)["data"]["root"] == str(shared)
+    assert not (tmp_path / "lab-cwd" / ".traceback").exists()
+
+
+def test_signed_explicit_root_overrides_env(tmp_path: Path, capsys, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TRACEBACK_ROOT", str(tmp_path / "env-root"))
+    code, out = _signed(capsys, ["jobs", "--root", "flag-root"])
+    assert code == 0
+    assert out.splitlines()[1] == f"ROOT  {tmp_path / 'flag-root'}"
+    code, out = _signed(capsys, ["doctor", "--json", "--root", "flag-root"])
+    assert json.loads(out)["data"]["root"] == str(tmp_path / "flag-root")
+    code, out = _run(capsys, ["runs", "--root", "flag-root"])
+    assert out.splitlines()[0] == f"ROOT  {tmp_path / 'flag-root'}"
+
+
+def test_signed_unset_env_falls_back_to_dot_traceback(tmp_path: Path, capsys, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("TRACEBACK_ROOT", raising=False)
+    code, out = _signed(capsys, ["jobs"])
+    assert code == 0
+    assert out.splitlines()[1] == f"ROOT  {tmp_path / '.traceback'}"
+    code, out = _signed(capsys, ["doctor", "--json"])
+    assert json.loads(out)["data"]["root"] == str(tmp_path / ".traceback")
+    code, out = _signed(capsys, ["jobs", "--json"])
+    assert "root" not in json.loads(out)["data"]  # signed --json bytes are unchanged
+    code, out = _run(capsys, ["runs"])
+    assert out.splitlines()[0] == f"ROOT  {tmp_path / '.traceback'}"
+
+
 def test_first_human_line_is_root(tmp_path: Path, capsys, monkeypatch) -> None:
     monkeypatch.setenv("TRACEBACK_ROOT", str(tmp_path / "shared"))
     for command in (["algorithms"], ["runs"]):

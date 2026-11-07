@@ -129,6 +129,21 @@ real-data execution. `run` without `--reference` refuses (TBX-RUN-003);
 (unqualified)"). File-selection arguments may be local paths; JSON output,
 support bundles, and exported record content do not include them.
 
+## ROOT
+
+ROOT is where a command reads and writes local data. Every command that
+takes `--root` resolves it the same way, on both surfaces (signed CLI and
+[Lab](LAB-GUIDE.md#root)): `--root R` wins; without it `$TRACEBACK_ROOT`;
+without that `.traceback` in the current directory. The result is an absolute
+path. Human output prints it as `ROOT  /…` on the line after the status
+line; `doctor --json` carries it as `data.root`. `--json` output of the other
+commands is unchanged. `serve` prints only its link. Set `TRACEBACK_ROOT`
+once so commands started in different directories share one ROOT.
+
+`verify --root` is not a data root default: it selects ROOT's trust store as
+the trust source (against `--trust-store` and `--trust-registry`) and must
+be given explicitly.
+
 ## Offline synthetic assets
 
 `assets install` accepts one bounded, uncompressed synthetic package and never

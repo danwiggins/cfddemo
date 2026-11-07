@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from .contracts import JobState
-from .filesystem import rename_directory_exclusive_at
+from .filesystem import DEFAULT_ROOT, ROOT_ENV, rename_directory_exclusive_at, resolve_root
 from .operator import build_job_view, support_payload
 from .protocol import render_protocol, synthetic_protocol_manifest
 from .references import DOCS_ANCHOR, ReferenceProblem, validate_reference_id
@@ -62,11 +62,14 @@ class AssetEvidenceInputError(ValueError):
 
 
 def _root_argument(parser: argparse.ArgumentParser) -> None:
+    """``--root``; ``main`` resolves it (``--root``, else ``$TRACEBACK_ROOT``,
+    else ``.traceback``) exactly as the Lab does."""
+
     parser.add_argument(
         "--root",
         type=Path,
-        default=Path(".traceback"),
-        help="local runner data root (default: .traceback)",
+        default=None,
+        help=f"local runner data root (default: ${ROOT_ENV}, else {DEFAULT_ROOT})",
     )
 
 
@@ -497,9 +500,15 @@ def _docs_anchor(code: str) -> str:
 _HUMAN = "_human"
 
 
-def _emit(payload: dict[str, Any], *, as_json: bool) -> None:
+def _emit(payload: dict[str, Any], *, as_json: bool, root: Path | None = None) -> None:
     """Print one result.  ``_human`` lines (tables, operator labels) are for
-    human output only and never reach ``--json``."""
+    human output only and never reach ``--json``.
+
+    ``root`` is the resolved ROOT of a command that took ``--root``: human
+    output prints it as ``ROOT  /absolute/path`` right after the status line
+    (a ``data.root`` value, as ``doctor`` carries, is that same line and is
+    not printed twice).  ``--json`` bytes do not change.
+    """
 
     human = payload.get(_HUMAN)
     if as_json:
@@ -508,11 +517,15 @@ def _emit(payload: dict[str, Any], *, as_json: bool) -> None:
         return
     label = "PASS" if payload["status"] == "ok" else payload["status"].upper()
     print(f"{label}  {payload['summary']}")
+    if root is not None:
+        print(f"ROOT  {root}")
     if human is not None and human.get("replace_data"):
         for line in human["lines"]:
             print(line)
         return
     for key, value in payload.get("data", {}).items():
+        if key == "root" and root is not None:
+            continue
         rendered = (
             json.dumps(value, sort_keys=True, separators=(",", ":"))
             if isinstance(value, (dict, list))
@@ -5161,6 +5174,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return lab_main(raw[1:])
     parser = _parser()
     args = parser.parse_args(argv)
+    # Commands that take --root resolve it as the Lab does: --root, else
+    # $TRACEBACK_ROOT, else .traceback, made absolute (verify's --root is a
+    # trust-source choice and keeps its own meaning).
+    if "root" in args:
+        args.root = resolve_root(args.root)
     _require_trust_registry_identity(parser, args)
     _require_analysis_settings(parser, args)
     if args.command == "serve":  # long-running; its first stdout line is the link
@@ -5331,7 +5349,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         payload["data"]["job_id"] = failed_job_id
     if _concerns_local_data(args):
         payload = _local_envelope(payload)
-    _emit(payload, as_json=as_json)
+    _emit(payload, as_json=as_json, root=getattr(args, "root", None))
     return int(code)
 
 
