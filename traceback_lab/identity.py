@@ -74,21 +74,33 @@ def aligned_input_id(
     minimap2_version: str,
     samtools_version: str,
     aligner_argv: Sequence[str],
+    tool_pins: Mapping[str, str] | None = None,
 ) -> str:
-    """The identity of an input the Lab aligned itself."""
+    """The identity of an input the Lab aligned itself.
+
+    ``tool_pins`` (``{tool: release tarball sha256}``) is given only when both
+    aligners come from the verified pinned store: the identity then names the
+    pinned bytes, never an install path, so every machine with that store
+    agrees.  Unpinned (``PATH``) tools add no key, so an input aligned before
+    pinning existed keeps its ``input_id`` while the same versions are on
+    ``PATH``.
+    """
 
     if not minimap2_version or not samtools_version:
         raise ValueError("aligner tool versions are required")
-    return canonical_sha256(
-        {
-            "source_id": _sha(source_id, "source_id"),
-            "reference_sha256": _sha(reference_sha256, "reference_sha256"),
-            "mmi_sha256": _sha(mmi_sha256, "mmi_sha256"),
-            "minimap2_version": minimap2_version,
-            "samtools_version": samtools_version,
-            "aligner_argv": [str(part) for part in aligner_argv],
-        }
-    )
+    identity: dict[str, Any] = {
+        "source_id": _sha(source_id, "source_id"),
+        "reference_sha256": _sha(reference_sha256, "reference_sha256"),
+        "mmi_sha256": _sha(mmi_sha256, "mmi_sha256"),
+        "minimap2_version": minimap2_version,
+        "samtools_version": samtools_version,
+        "aligner_argv": [str(part) for part in aligner_argv],
+    }
+    if tool_pins is not None:
+        if set(tool_pins) != {"samtools", "minimap2"}:
+            raise ValueError("tool_pins names exactly samtools and minimap2")
+        identity["tool_pins"] = {tool: _sha(digest, f"tool_pins.{tool}") for tool, digest in sorted(tool_pins.items())}
+    return canonical_sha256(identity)
 
 
 def prealigned_input_id(*, source_id: str, reference_sha256: str, platform: str = "unknown") -> str:

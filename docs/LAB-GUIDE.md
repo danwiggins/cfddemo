@@ -144,6 +144,8 @@ before interpreting any exploratory pattern.
 ## One-time setup for real kits
 
 1. `brew install samtools minimap2` (samtools ≥ 1.20, minimap2 ≥ 2.28).
+   On Linux x86-64, `uv run traceback toolchain install aligners --yes` pins
+   them instead (see [Pinned aligners](#pinned-aligners)).
 2. Register hg38: `uv run traceback reference register --fasta hg38.fa --id hg38 --root R`.
 3. For copy-number: `uv run traceback toolchain install ichor`, then
    `uv run traceback method-asset register --from-toolchain copy-number --root R`.
@@ -399,6 +401,79 @@ minimap2`). The minimap2 index of the reference is built once under
 `ROOT/lab/refs/` (hg38: about 20–40 minutes and 8 GB); `--mmi PATH` reuses one
 you already have. Measure alignment speed on the operator's workstation and
 keep input-specific results private.
+
+### Pinned aligners
+
+`traceback toolchain install aligners` (a dry run; add `--yes` to install)
+downloads samtools 1.21 and minimap2 2.28 from the same upstream release
+URLs, with the same sha256 digests, as CI, verifies each tarball before use,
+builds samtools from source (needs a C compiler, make and the zlib, bzip2,
+xz and curl headers) and places both under the per-user toolchain cache
+(`~/.cache/traceback/toolchains/aligners-<pin set sha256>/`, shared by every
+ROOT). Only this command uses the network.
+
+`lab run` (and `--dry-run`) resolves the aligners in this order:
+
+| Store | Tools used | Provenance |
+|---|---|---|
+| installed and verified | the store's binaries | `pinned` |
+| not installed, or no pin for this platform | `samtools` / `minimap2` on `PATH` | `unpinned` |
+| present but fails verification | none: refused | TBX-LAB-033 |
+
+Before using a store, the Lab checks exactly this, and refuses with
+TBX-LAB-033 (never falling back to `PATH`) if any check fails:
+
+1. The cache directory, the store directory, its `bin/` directory, the
+   install receipt and both binaries are not symlinks, are owned by you, and
+   are not writable by group or other. (The receipt alone only proves the
+   store is self-consistent; this proves only you could have written it.)
+2. The receipt parses and names exactly this pin set: tools, versions, URLs
+   and tarball digests.
+3. Each binary exists, is executable, and its sha256 equals the receipt's.
+4. minimap2's sha256 also equals the pinned release binary digest. samtools
+   is built locally, so its binary has no fixed digest; check 1 covers it.
+5. `lab doctor` only: each binary's `--version` runs and reports the
+   receipt's version (catches a missing shared library).
+
+Nothing is downloaded. Binaries are verified when the Lab resolves them, not
+again while they run. The install tightens a cache directory you own to
+0700 (a symlink or another user's directory is refused), writes the receipt
+mode 0600, runs check
+1 on the staged store before publishing it, and swaps it in under
+`<TOOLCHAIN_CACHE>/aligners.lock`; resolution waits on that lock, so a
+concurrent `lab run` never sees the moment between stores. The samtools
+build runs with only `PATH=/usr/bin:/bin LC_ALL=C` (no `CC`, `CFLAGS`,
+`LDFLAGS`, `LD_LIBRARY_PATH` or `MAKEFLAGS` from your shell), recorded as
+`build_env` in the receipt. `<TOOLCHAIN_CACHE>` is the per-user toolchain
+cache (`~/.cache/traceback/toolchains`): `--json` output carries the token,
+the terminal shows the real directory.
+
+The run log records an `aligner_tools` event and the input's
+`manifest.json` records `tool_pins` (the identity term below; `null` when
+unpinned) and `tool_provenance` (provenance, version, pinned tarball digest
+and installed binary sha256 per tool; never a path).
+`--dry-run` prints a `TOOLS` line. `lab doctor` shows one
+`lab_aligner_provenance` check: pass when pinned, a warning with the install
+command when unpinned on a pinned platform, blocked on TBX-LAB-033.
+
+Identity rule: an unpinned alignment's `input_id` is computed exactly as
+before pinning existed (versions reported by the `PATH` tools, no path), so
+an input aligned earlier keeps its `input_id` while the same versions are on
+`PATH`; a Homebrew upgrade still changes it (TBX-LAB-019). A pinned
+alignment's `input_id` adds the two release tarball digests (`tool_pins`):
+it names the pinned release *sources*, not the built binaries, so every
+machine with the store computes the same `input_id` regardless of where the
+cache lives or how its compiler built samtools. The installed binary sha256
+is recorded in `tool_provenance` only, outside the identity. Pinned and
+unpinned alignments of the same versions are different inputs (and a
+cohort keeps them apart by aligner): switching to
+the store realigns once, without a TBX-LAB-019 warning when the versions
+match (that warning compares versions only).
+
+Only Linux x86-64 is pinned. Neither tool publishes an upstream macOS
+release artefact (minimap2 ships a Linux x86-64 binary; Homebrew bottles are
+rebuilt by Homebrew), so on macOS the install command says so and changes
+nothing, and the Lab keeps `PATH` tools recorded as `unpinned`.
 
 The reference is the one registered under ROOT (`traceback reference
 register`); with several, pass `--reference ID`.
@@ -1704,7 +1779,7 @@ checkout (`git pull && uv sync`). The store is never downgraded.
 
 ### TBX-LAB-019
 
-A warning (exit 0): the samtools or minimap2 version changed since this sample was last aligned, so it is realigned under a new input identity (results from the old alignment are never reused). `--dry-run` shows it first. Pin the tools to avoid it.
+A warning (exit 0): the samtools or minimap2 version changed since this sample was last aligned, so it is realigned under a new input identity (results from the old alignment are never reused). `--dry-run` shows it first. Pin the tools to avoid it ([Pinned aligners](#pinned-aligners); Linux x86-64).
 
 ### TBX-LAB-020
 
@@ -1847,6 +1922,24 @@ toolchain install needs the network and micromamba; the index build needs
 minimap2 and free disk), then rerun `traceback lab setup --root <ROOT>`:
 steps doctor now passes are not listed again, so nothing that ended `ok` is
 rerun.
+### TBX-LAB-033
+
+The pinned aligner store exists under the per-user toolchain cache but does
+not verify (exit 3); the checks are listed under
+[Pinned aligners](#pinned-aligners). The Lab refuses rather than silently
+aligning with `PATH` tools under a different identity. The CAUSE names the
+failed check and the FIX is specific to it (`<TOOLCHAIN_CACHE>` is the real
+directory in terminal output):
+
+| Cause | FIX |
+|---|---|
+| the cache directory is a symlink | replace it with a real directory you own (mode 0700), then install |
+| the cache directory is owned by another user | `sudo chown "$USER" <TOOLCHAIN_CACHE> && chmod 0700 <TOOLCHAIN_CACHE>` |
+| the cache directory is writable by group or other | `chmod go-w <TOOLCHAIN_CACHE>`, or run the install, which tightens a cache directory you own to 0700 |
+| a store path is owned by another user | `sudo chown -R "$USER" <TOOLCHAIN_CACHE>/aligners-*` |
+| a store path is writable by group or other | `chmod -R go-w <TOOLCHAIN_CACHE>/aligners-*` |
+| a store path cannot be inspected | check access with `ls -ld`, fix ownership or permissions, rerun |
+| receipt missing, malformed or another pin set; a store path is a symlink; a binary missing, not executable, changed, not the pinned minimap2 release binary, or (doctor) not running | `traceback toolchain install aligners --yes` (builds a new store in staging and swaps it in; a failed install leaves the old one in place), or remove `<TOOLCHAIN_CACHE>/aligners-*` to go back to `PATH` (`unpinned`) |
 
 ## Adding an algorithm
 
@@ -1868,6 +1961,9 @@ rerun.
 - 2026-11-07: `lab setup` runs the steps `lab doctor` lists (per-step
   confirmation before downloads, templates for operator-supplied paths,
   `--only`, `--yes`); TBX-LAB-032.
+- 2026-11-07: `traceback toolchain install aligners` pins samtools 1.21 and
+  minimap2 2.28 (Linux x86-64); `lab run` records aligner provenance;
+  TBX-LAB-033.
 - 2026-11-07: `lab run --keep-staging` keeps a failed alignment's staging
   directory for inspection; `lab gc --staging-only` removes it. New:
   `LabStore.publish_directory(keep_staging=)`, `ingest.publish_input` and

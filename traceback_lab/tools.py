@@ -3,6 +3,10 @@
 Aligning an unaligned input needs samtools >= 1.20 and minimap2 >= 2.28
 (TBX-LAB-003, exit 3).  An already-aligned input needs neither for ingest.
 Versions are recorded in the aligned input's identity (D31).
+
+``resolve_aligner_tools`` prefers the pinned aligner store
+(``traceback toolchain install aligners``; see ``aligner_toolchain``) and
+falls back to ``PATH``.  A ``PATH`` tool has provenance ``unpinned``.
 """
 
 from __future__ import annotations
@@ -14,6 +18,8 @@ from dataclasses import dataclass
 
 MIN_SAMTOOLS = (1, 20)
 MIN_MINIMAP2 = (2, 28)
+PINNED = "pinned"
+UNPINNED = "unpinned"
 _VERSION = re.compile(r"(\d+)\.(\d+)")
 
 
@@ -22,6 +28,12 @@ class Tool:
     name: str
     path: str | None
     version: str | None
+    # ``pinned``: from the verified aligner store; ``pin_sha256`` is its
+    # release tarball digest.  ``unpinned``: whatever ``PATH`` resolved.
+    provenance: str = UNPINNED
+    pin_sha256: str | None = None
+    # The installed binary's sha256 (pinned only): provenance, not identity.
+    binary_sha256: str | None = None
 
     @property
     def numeric(self) -> tuple[int, int] | None:
@@ -54,6 +66,51 @@ def find_minimap2() -> Tool:
     return Tool("minimap2", path, version)
 
 
+def resolve_aligner_tools(*, probe: bool = False) -> tuple[Tool, Tool]:
+    """samtools and minimap2 from the verified pinned store, else ``PATH``.
+
+    A store that is present but does not verify is TBX-LAB-033.  Reads the
+    cache and hashes files only: never the network.  ``probe`` (doctor) also
+    runs the pinned binaries' ``--version``.
+    """
+
+    from .aligner_toolchain import resolve_aligners
+
+    return resolve_aligners(probe=probe)
+
+
+def provenance_of(samtools: Tool, minimap2: Tool) -> str:
+    """``pinned`` only when both aligners come from the verified store."""
+
+    pinned = all(getattr(tool, "provenance", UNPINNED) == PINNED for tool in (samtools, minimap2))
+    return PINNED if pinned else UNPINNED
+
+
+def pins_of(samtools: Tool, minimap2: Tool) -> dict[str, str] | None:
+    """The ``tool_pins`` identity term: both tarball digests when pinned, else ``None``."""
+
+    if provenance_of(samtools, minimap2) != PINNED:
+        return None
+    return {"samtools": str(samtools.pin_sha256), "minimap2": str(minimap2.pin_sha256)}
+
+
+def aligner_provenance(samtools: Tool, minimap2: Tool) -> dict[str, object]:
+    """Path-free provenance for the run log and the input manifest."""
+
+    return {
+        "provenance": provenance_of(samtools, minimap2),
+        **{
+            tool.name: {
+                "version": tool.version,
+                "provenance": getattr(tool, "provenance", UNPINNED),
+                "pin_sha256": getattr(tool, "pin_sha256", None),
+                "installed_binary_sha256": getattr(tool, "binary_sha256", None),
+            }
+            for tool in (samtools, minimap2)
+        },
+    }
+
+
 def _ok(tool: Tool, minimum: tuple[int, int]) -> bool:
     return tool.path is not None and tool.numeric is not None and tool.numeric >= minimum
 
@@ -61,8 +118,10 @@ def _ok(tool: Tool, minimum: tuple[int, int]) -> bool:
 def require_aligner_tools(samtools: Tool | None = None, minimap2: Tool | None = None) -> tuple[Tool, Tool]:
     """Both tools at their minimums, or TBX-LAB-003."""
 
-    samtools = samtools or find_samtools()
-    minimap2 = minimap2 or find_minimap2()
+    if samtools is None or minimap2 is None:
+        resolved_samtools, resolved_minimap2 = resolve_aligner_tools()
+        samtools = samtools or resolved_samtools
+        minimap2 = minimap2 or resolved_minimap2
     problems = []
     for tool, minimum in ((samtools, MIN_SAMTOOLS), (minimap2, MIN_MINIMAP2)):
         if not _ok(tool, minimum):
@@ -89,10 +148,16 @@ def require_aligner_tools(samtools: Tool | None = None, minimap2: Tool | None = 
 
 
 __all__ = [
+    "aligner_provenance",
+    "pins_of",
+    "provenance_of",
     "MIN_MINIMAP2",
     "MIN_SAMTOOLS",
+    "PINNED",
+    "UNPINNED",
     "Tool",
     "find_minimap2",
     "find_samtools",
     "require_aligner_tools",
+    "resolve_aligner_tools",
 ]

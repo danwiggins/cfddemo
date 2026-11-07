@@ -31,7 +31,7 @@ from .assets import AssetError, inspect_asset
 from .ingest import BUDGET_FACTOR, GIB, MARGIN_BYTES, MMI_FACTOR, mmi_path, resolve_reference
 from .problems import EXIT_BLOCKED, EXIT_OK, LabProblem
 from .store import LabStore
-from .tools import MIN_MINIMAP2, MIN_SAMTOOLS, find_minimap2, find_samtools
+from .tools import MIN_MINIMAP2, MIN_SAMTOOLS, PINNED, provenance_of, resolve_aligner_tools
 
 FULL_RUN_BYTES = 44 * 10**9  # budget for a ~400-chunk full run (D30)
 MIN_RAM = 16 * GIB
@@ -52,6 +52,43 @@ def _tool(tool: Any, minimum: tuple[int, int]) -> dict[str, Any]:
     if tool.numeric is None or tool.numeric < minimum:
         return _check(f"lab_{tool.name}", "blocked", f"{tool.name} {tool.version or '?'} is below {need}", f"brew upgrade {tool.name}", blocks_example=True)
     return _check(f"lab_{tool.name}", "pass", f"{tool.name} {tool.version}")
+
+
+def _aligner_checks() -> list[dict[str, Any]]:
+    """samtools, minimap2 and where they come from: the pinned store or PATH."""
+
+    from .aligner_toolchain import pins_for
+
+    install = "traceback toolchain install aligners --yes"
+    try:
+        samtools, minimap2 = resolve_aligner_tools(probe=True)
+    except LabProblem as problem:
+        return [
+            _check(
+                "lab_aligner_provenance", "blocked", f"{problem.code}: {problem.cause}", problem.fix,
+                blocks_example=True,
+            )
+        ]
+    checks = [_tool(samtools, MIN_SAMTOOLS), _tool(minimap2, MIN_MINIMAP2)]
+    versions = f"samtools {samtools.version or '?'}, minimap2 {minimap2.version or '?'}"
+    if provenance_of(samtools, minimap2) == PINNED:
+        checks.append(_check(
+            "lab_aligner_provenance", "pass",
+            f"pinned: {versions} from the verified aligner store (input_id names the release digests)",
+        ))
+    elif pins_for() is None:
+        checks.append(_check(
+            "lab_aligner_provenance", "pass",
+            f"unpinned: {versions} from PATH; no pinned release artefact exists for this platform, "
+            "so input_id follows the PATH versions",
+        ))
+    else:
+        checks.append(_check(
+            "lab_aligner_provenance", "warn",
+            f"unpinned: {versions} from PATH; a tool upgrade changes input_id and realigns",
+            install,
+        ))
+    return checks
 
 
 def _ram() -> int | None:
@@ -116,8 +153,7 @@ def lab_checks(store: LabStore) -> list[dict[str, Any]]:
     root = store.root
     checks: list[dict[str, Any]] = [
         _check("python", "pass" if sys.version_info[:2] == (3, 11) else "blocked", f"Python {sys.version_info[0]}.{sys.version_info[1]}", "uv sync (Python 3.11)", blocks_example=True),
-        _tool(find_samtools(), MIN_SAMTOOLS),
-        _tool(find_minimap2(), MIN_MINIMAP2),
+        *_aligner_checks(),
     ]
     signed_root = _doctor_root(root)
     if not _writable(root):
@@ -213,15 +249,24 @@ def doctor_command(args: Any, store: LabStore) -> tuple[int, dict[str, Any]]:
     )
     real = str(store.root)
     quoted_root = shlex.quote(real)
+    from traceback_runner.toolchain import toolchain_cache_root
+
+    from .aligner_toolchain import TOOLCHAIN_CACHE_TOKEN
+
+    cache = shlex.quote(str(toolchain_cache_root()))
+
+    def _human(text: str) -> str:
+        return text.replace("<ROOT>", quoted_root).replace(TOOLCHAIN_CACHE_TOKEN, cache)
+
     lines = [f"ROOT  {real}"]
     for check in checks:
         label = {"pass": "PASS", "warn": "WARN", "blocked": "BLOCKED"}.get(check["status"], check["status"].upper())
         lines.append(f"{label:<8} {check['name']:<16} {check['detail']}")
         if check["status"] != "pass":
-            lines.append(f"{'':<8} {'':<16} fix: {check['fix'].replace('<ROOT>', quoted_root)}")
+            lines.append(f"{'':<8} {'':<16} fix: {_human(check['fix'])}")
     if steps:
         lines.append("Missing setup steps, in order:")
-        lines.extend(f"  {number}. {step.replace('<ROOT>', quoted_root)}" for number, step in enumerate(steps, start=1))
+        lines.extend(f"  {number}. {_human(step)}" for number, step in enumerate(steps, start=1))
     return (EXIT_BLOCKED if blocked else EXIT_OK), _with_human(payload, lines, replace_data=True)
 
 
