@@ -1,6 +1,6 @@
 """One algorithm in its own process (and process group): ``python -m traceback_lab.worker``.
 
-The runner starts this module through ``pipeline.run_pipeline``, so a timeout
+The runner starts this module through ``contained_process.run_contained_pipeline``, so a timeout
 or an interrupt kills the worker and anything it started (D20).  The worker
 loads the algorithm from its registry entry, runs it on the input context and
 writes ``output.json`` (metrics and panels) plus ``artifacts/`` into the

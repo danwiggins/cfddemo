@@ -61,6 +61,13 @@ or pilot qualification.
 
 The presentation model groups jobs into needs attention, processing, queued,
 completed records, and inactive. It never groups or sorts by biological value.
+That rule governs this signed operator surface, not the Lab's Findings lens;
+[ADR 0002](docs/adr/0002-e10-reference-labels-lab-only.md) records the split.
+The one recorded exception is the cell-origin record view, whose ranked
+contributor bar and combined "other" row are specified in
+`docs/SIGNAL-METHODS-CELL-ORIGIN-AND-CNA.md` ("Record views and catalog",
+items 14, 15 and 17); that override applies to that view only, never to the
+operator job list.
 After three missed 15-second observations, the view reports `Runner status is
 stale`, separately from job failure, and directs the operator to refresh before
 another action.

@@ -1,4 +1,4 @@
-"""pipeline.py: one process group, failure propagation, no orphans."""
+"""contained_process.run_contained_pipeline as the Lab uses it: one process group, failure propagation, no orphans."""
 
 from __future__ import annotations
 
@@ -13,7 +13,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from traceback_lab.pipeline import PipelineResult, Stage, StageOutcome, run_pipeline
+from traceback_runner.contained_process import (
+    PipelineResult,
+    Stage,
+    StageOutcome,
+    run_contained_pipeline as run_pipeline,
+)
 from traceback_lab.scrub import Scrubber
 
 PY = sys.executable
@@ -129,7 +134,7 @@ def test_disk_sampler_failure_does_not_discard_successful_step(error_type: type[
 
 
 def test_rss_sampler_failure_preserves_worker_result(monkeypatch: pytest.MonkeyPatch) -> None:
-    import traceback_lab.pipeline as pipeline
+    import traceback_runner.contained_process as pipeline
 
     def unavailable(_pid: int) -> int:
         raise ValueError("process enumeration unavailable")
@@ -165,7 +170,7 @@ def test_sampler_thread_start_failure_preserves_worker_result(monkeypatch: pytes
 
 
 def test_final_disk_thread_start_failure_keeps_earlier_sample(monkeypatch: pytest.MonkeyPatch) -> None:
-    import traceback_lab.pipeline as pipeline
+    import traceback_runner.contained_process as pipeline
 
     monkeypatch.setattr(pipeline, "DISK_SAMPLE_S", 1000.0)
     original_start = threading.Thread.start
@@ -190,7 +195,7 @@ def test_final_disk_thread_start_failure_keeps_earlier_sample(monkeypatch: pytes
 
 
 def test_slow_rss_sampler_does_not_delay_worker_polling(monkeypatch: pytest.MonkeyPatch) -> None:
-    import traceback_lab.pipeline as pipeline
+    import traceback_runner.contained_process as pipeline
 
     release = threading.Event()
     finished = threading.Event()
@@ -233,7 +238,7 @@ def test_slow_disk_sampler_does_not_delay_worker_polling() -> None:
 
 
 def test_incomplete_final_disk_scan_keeps_earlier_observation(monkeypatch: pytest.MonkeyPatch) -> None:
-    import traceback_lab.pipeline as pipeline
+    import traceback_runner.contained_process as pipeline
 
     monkeypatch.setattr(pipeline, "DISK_SAMPLE_S", 1000.0)
     release = threading.Event()
@@ -261,7 +266,7 @@ def test_incomplete_final_disk_scan_keeps_earlier_observation(monkeypatch: pytes
 
 
 def test_final_disk_scan_starts_after_worker_exit(monkeypatch: pytest.MonkeyPatch) -> None:
-    import traceback_lab.pipeline as pipeline
+    import traceback_runner.contained_process as pipeline
 
     monkeypatch.setattr(pipeline, "DISK_SAMPLE_S", 1000.0)
     calls = 0
@@ -285,7 +290,7 @@ def test_final_disk_scan_starts_after_worker_exit(monkeypatch: pytest.MonkeyPatc
 
 
 def test_final_disk_reporting_wait_is_not_worker_duration(monkeypatch: pytest.MonkeyPatch) -> None:
-    import traceback_lab.pipeline as pipeline
+    import traceback_runner.contained_process as pipeline
 
     monkeypatch.setattr(pipeline, "DISK_SAMPLE_S", 1000.0)
     release = threading.Event()
@@ -314,7 +319,7 @@ def test_final_disk_reporting_wait_is_not_worker_duration(monkeypatch: pytest.Mo
 
 
 def test_ps_sampler_does_not_report_zero_for_unmeasured_tree(monkeypatch: pytest.MonkeyPatch) -> None:
-    import traceback_lab.pipeline as pipeline
+    import traceback_runner.contained_process as pipeline
 
     monkeypatch.setattr(pipeline.subprocess, "run", lambda *_, **__: SimpleNamespace(returncode=0, stdout=""))
     assert pipeline._ps_tree_rss_bytes(12345) is None
@@ -346,7 +351,7 @@ def test_direct_and_sampled_tree_memory_remain_distinct() -> None:
 
 
 def test_process_group_seed_includes_orphan_descendants() -> None:
-    from traceback_lab.pipeline import _tree_members
+    from traceback_runner.contained_process import _tree_members
 
     # The intermediate process was reparented, but still has the worker's
     # process group. Its own child must also be counted.
@@ -354,7 +359,7 @@ def test_process_group_seed_includes_orphan_descendants() -> None:
 
 
 def test_process_group_seed_excludes_unrelated_pid() -> None:
-    from traceback_lab.pipeline import _tree_members
+    from traceback_runner.contained_process import _tree_members
 
     assert _tree_members(1, {1: (0, 9), 2: (0, 1), 3: (1, 9)}) == {2}
 
@@ -370,7 +375,7 @@ def test_simulate_commands_accept_verbose() -> None:
 @pytest.mark.parametrize("force_ps", [False, True])
 def test_tree_rss_includes_new_session_child(monkeypatch: pytest.MonkeyPatch, force_ps: bool) -> None:
     if force_ps:
-        from traceback_lab import pipeline
+        from traceback_runner import contained_process as pipeline
 
         def no_proc(_pid: int) -> int:
             raise OSError("/proc unavailable")
@@ -390,7 +395,7 @@ def test_tree_rss_includes_new_session_child(monkeypatch: pytest.MonkeyPatch, fo
 
 
 def test_proc_enumeration_failure_uses_ps(monkeypatch: pytest.MonkeyPatch) -> None:
-    from traceback_lab.pipeline import _process_tree_rss_bytes
+    from traceback_runner.contained_process import _process_tree_rss_bytes
 
     original = Path.iterdir
 
@@ -409,7 +414,7 @@ def test_proc_enumeration_failure_uses_ps(monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_empty_proc_sample_does_not_spawn_ps(monkeypatch: pytest.MonkeyPatch) -> None:
-    from traceback_lab import pipeline
+    from traceback_runner import contained_process as pipeline
 
     monkeypatch.setattr(pipeline, "_proc_tree_rss_bytes", lambda _pid: None)
 
