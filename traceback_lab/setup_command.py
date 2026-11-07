@@ -15,7 +15,8 @@ step ends in exactly one state:
 - ``refused``: a step that downloads or installs a licence-bearing asset was
   not confirmed.  Its FLAG line (the guide's "Setup in one command" table) is
   printed first; a TTY gets a per-step ``y`` prompt, a non-interactive run
-  refuses unless ``--yes`` is given.
+  refuses unless ``--yes`` is given; ``--json`` never prompts (it refuses the
+  same way, with the FLAG line on stderr).
 - ``failed``: the step ran and did not succeed; TBX-LAB-032 carries the
   scrubbed tail of its stderr.  Later steps are still attempted.
 
@@ -52,6 +53,9 @@ STATUSES = (OK, SKIPPED, NEEDS_INPUT, REFUSED, FAILED)
 LOCAL, DOWNLOAD, INPUT, MANUAL = "local", "download", "needs_input", "manual"
 TAIL_LINES = 20
 MMI_TIMEOUT_S = 48 * 3600.0  # the same ceiling ``lab run`` gives the index build
+CHILD_TIMEOUT_S = 5 * 60.0  # a signed child that registers local files
+TOOLCHAIN_TIMEOUT_S = 30 * 60.0  # ``toolchain install ichor --yes`` (network, ~3 GB)
+NO_TTY_JSON = "confirmation requires a TTY without --json; pass --yes"
 
 # The FLAG line printed before a licence-bearing step.  docs/LAB-GUIDE.md's
 # "Setup in one command" table repeats each line verbatim (a test keeps them in step).
@@ -98,6 +102,7 @@ class SetupContext:
     yes: bool
     interactive: bool
     echo_child: bool
+    as_json: bool = False
 
 
 @dataclass(frozen=True)
@@ -109,6 +114,7 @@ class StepSpec:
     command: Callable[[SetupContext, dict[str, Any]], str] | None = None
     placeholder: str | None = None
     after: tuple[str, ...] = ()
+    expects: tuple[str, ...] = ()  # doctor's fix must contain one of these, else the step is manual
 
 
 @dataclass
@@ -154,11 +160,13 @@ def _pump(stream: IO[str], keep: BoundedStderr, echo: Callable[[str], None] | No
             echo(line.rstrip("\n"))
 
 
-def run_signed(context: SetupContext, argv: Sequence[str]) -> str:
+def run_signed(context: SetupContext, argv: Sequence[str], *, timeout_s: float = CHILD_TIMEOUT_S) -> str:
     """Run one signed ``traceback`` command as a child; a non-zero exit is a failed step.
 
     Raw child output is only echoed to the operator's own terminal (human mode);
-    the bounded tails persisted with TBX-LAB-032 pass through the scrubber.
+    the bounded tails persisted with TBX-LAB-032 pass through the scrubber.  A
+    child still running after ``timeout_s`` is killed and the step fails, so a
+    stalled download never holds ``ROOT/lab/.lock``.
     """
 
     stdout_keep = BoundedStderr(head=0, tail=TAIL_LINES)
@@ -180,7 +188,15 @@ def run_signed(context: SetupContext, argv: Sequence[str]) -> str:
     ]
     for thread in threads:
         thread.start()
-    code = process.wait()
+    try:
+        code = process.wait(timeout=timeout_s)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+        for thread in threads:
+            thread.join()
+        tail = stderr_keep.scrubbed(context.scrubber) or stdout_keep.scrubbed(context.scrubber)
+        raise StepFailed(f"timed out after {timeout_s:g} s and was killed", tail=tail) from None
     for thread in threads:
         thread.join()
     if code != 0:
@@ -190,7 +206,7 @@ def run_signed(context: SetupContext, argv: Sequence[str]) -> str:
 
 
 def _run_ichor_toolchain(context: SetupContext) -> str:
-    run_signed(context, ["toolchain", "install", "ichor", "--yes"])
+    run_signed(context, ["toolchain", "install", "ichor", "--yes"], timeout_s=TOOLCHAIN_TIMEOUT_S)
     return "ichorCNA toolchain installed and verified"
 
 
@@ -247,18 +263,23 @@ def _run_staging(context: SetupContext) -> str:
 
 CATALOGUE: dict[str, StepSpec] = {
     "reference": StepSpec(INPUT, placeholder="hg38.fa"),
-    "mmi": StepSpec(LOCAL, run=_run_mmi, command=_mmi_command),
+    "mmi": StepSpec(LOCAL, run=_run_mmi, command=_mmi_command, expects=("builds it once",)),
     "ichor_toolchain": StepSpec(
         DOWNLOAD, run=_run_ichor_toolchain, command=lambda context, check: "traceback toolchain install ichor --yes",
+        expects=("traceback toolchain install ichor",),
     ),
     "ichor_assets": StepSpec(
         LOCAL, run=_run_ichor_assets, after=("ichor_toolchain",),
         command=lambda context, check: "traceback method-asset register --from-toolchain copy-number --root <ROOT>",
+        # Doctor names the toolchain install when the toolchain is missing; the
+        # assets still need registering once ``ichor_toolchain`` has run.
+        expects=("method-asset register --from-toolchain copy-number", "traceback toolchain install ichor"),
     ),
     "loyfer_assets": StepSpec(INPUT, placeholder="LOYFER_DIR"),
     "pmd_asset": StepSpec(INPUT, placeholder="YOUR_LOCAL_PMD_coordinates_hg38.bed.gz"),
     "staging": StepSpec(
         LOCAL, run=_run_staging, command=lambda context, check: "traceback lab gc --staging-only --apply --root <ROOT>",
+        expects=("lab gc --staging-only",),
     ),
 }
 KNOWN_STEPS = (*MANUAL_STEPS, *CATALOGUE)
@@ -267,7 +288,7 @@ KNOWN_STEPS = (*MANUAL_STEPS, *CATALOGUE)
 def step_names(text: str) -> list[str]:
     """``--only``: comma-separated doctor check names (``signed_*`` names are dynamic)."""
 
-    names = [name.strip() for name in text.split(",") if name.strip()]
+    names = list(dict.fromkeys(name.strip() for name in text.split(",") if name.strip()))
     unknown = [name for name in names if name not in KNOWN_STEPS and not (name.startswith("signed_") and _STEP_NAME.fullmatch(name))]
     if not names or unknown:
         raise argparse.ArgumentTypeError(
@@ -281,8 +302,12 @@ def spec_for(name: str, check: dict[str, Any]) -> StepSpec:
     spec = CATALOGUE.get(name)
     if spec is None:
         return StepSpec(MANUAL)
-    if spec.kind == INPUT and (spec.placeholder is None or spec.placeholder not in str(check.get("fix", ""))):
+    fix = str(check.get("fix", ""))
+    if spec.kind == INPUT and (spec.placeholder is None or spec.placeholder not in fix):
         # The fix is a restore/inspect instruction, not the registration template.
+        return StepSpec(MANUAL)
+    if spec.kind in {LOCAL, DOWNLOAD} and spec.expects and not any(expected in fix for expected in spec.expects):
+        # Doctor asks for something other than the catalogue's command: leave it to the operator.
         return StepSpec(MANUAL)
     return spec
 
@@ -321,6 +346,8 @@ def _interactive() -> bool:
 def _confirm(context: SetupContext, name: str) -> tuple[bool, str]:
     if context.yes:
         return True, "confirmed by --yes"
+    if context.as_json:
+        return False, NO_TTY_JSON
     if not context.interactive:
         return False, "downloads; not confirmed (non-interactive and no --yes)"
     context.ask(f"Run the {name} step? It downloads or installs the flagged asset. [y/N] ")
@@ -431,15 +458,16 @@ def setup_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[
     only = list(args.only) if args.only is not None else None
 
     def say(line: str) -> None:
-        if not as_json:
-            print(line, flush=True)
+        # --json keeps stdout to the one result object; progress (ROOT, FLAG,
+        # RUN, TEMPLATE, STEP) goes to stderr so a refusal is still explained.
+        print(line, file=sys.stderr if as_json else sys.stdout, flush=True)
 
     def ask(text: str) -> None:
-        print(text, end="", file=sys.stderr if as_json else sys.stdout, flush=True)
+        print(text, end="", flush=True)  # only ever on a TTY, never with --json
 
     context = SetupContext(
         store=store, scrubber=Scrubber(root=store.root), say=say, ask=ask,
-        yes=bool(args.yes), interactive=_interactive(), echo_child=not as_json,
+        yes=bool(args.yes), interactive=_interactive(), echo_child=not as_json, as_json=as_json,
     )
     run_id = new_run_id()
     results: list[StepResult] = []
@@ -447,13 +475,15 @@ def setup_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[
         log = store.run_log(run_id)
         log.append("run_start", command="setup", pid=os.getpid(), yes=bool(args.yes), only=only)
         say(f"ROOT  {store.root}")
+        # Doctor under this writer's own lock reads the same store a standalone
+        # doctor would: the ``active`` check warns only on a dead heartbeat, and
+        # ours is live; the lock's stop() unlinks it afterwards.
         before = lab_checks(store)
         passing = [check["name"] for check in before if check["status"] == "pass"]
         plan = plan_steps(before, only)
         for name in only or ():
             if name not in {step.name for step in plan}:
-                kind = CATALOGUE.get(name, StepSpec(MANUAL)).kind
-                results.append(StepResult(name, kind, SKIPPED, _not_planned(name, before), "", None))
+                results.append(StepResult(name, MANUAL, SKIPPED, _not_planned(name, before), "", None))
                 say(step_line(results[-1], store))
         for step in plan:
             lock.set_step(step.name)
@@ -510,7 +540,7 @@ def setup_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[
         if any(result.status == NEEDS_INPUT for result in incomplete):
             summary += "; supply the printed template paths"
         if any(result.status == REFUSED for result in incomplete):
-            summary += "; rerun with --yes or confirm at a TTY"
+            summary += "; rerun with --yes" + ("" if as_json else " or confirm at a TTY")
         payload = _local_envelope(_result("lab setup", "partial_failure", summary, data=data))
     else:
         payload = _local_envelope(_result("lab setup", "ok", f"setup complete: {tally}", data=data))
@@ -518,7 +548,7 @@ def setup_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[
 
 
 __all__ = [
-    "CATALOGUE", "FAILED", "FLAGS", "KNOWN_STEPS", "MANUAL_STEPS", "NEEDS_INPUT", "OK", "REFUSED", "SKIPPED",
+    "CATALOGUE", "CHILD_TIMEOUT_S", "FAILED", "FLAGS", "KNOWN_STEPS", "MANUAL_STEPS", "NEEDS_INPUT", "OK", "REFUSED", "SKIPPED",
     "STATUSES", "SetupContext", "StepFailed", "StepResult", "StepSpec", "add_setup_parser", "execute",
-    "plan_steps", "run_signed", "setup_command", "show", "step_line", "step_names",
+    "NO_TTY_JSON", "TOOLCHAIN_TIMEOUT_S", "plan_steps", "run_signed", "setup_command", "show", "step_line", "step_names",
 ]

@@ -20,6 +20,7 @@ from traceback_lab.setup_command import (
     FLAGS,
     INPUT,
     LOCAL,
+    NO_TTY_JSON,
     SetupContext,
     StepFailed,
     StepSpec,
@@ -168,6 +169,36 @@ def test_tty_prompt_per_download_step(world: FakeWorld, tmp_path: Path, capsys, 
         assert "declined at the prompt" in out
 
 
+@pytest.mark.parametrize("tty", [True, False])
+def test_json_never_prompts_and_refuses_without_yes(world: FakeWorld, tmp_path: Path, capsys, monkeypatch, tty) -> None:
+    monkeypatch.setattr(setup_command, "_interactive", lambda: tty)
+    monkeypatch.setattr("builtins.input", lambda *a: pytest.fail("prompted under --json"))
+    root = tmp_path / "root"
+    code = signed_cli.main(["lab", "setup", "--root", str(root), "--only", "ichor_toolchain,ichor_assets", "--json"])
+    captured = capsys.readouterr()
+    assert code == 8 and captured.out.count("\n") == 1
+    payload = json.loads(captured.out)
+    step = payload["data"]["steps"][0]
+    assert step["status"] == "refused" and step["reason"].startswith(NO_TTY_JSON)
+    assert step["flag"] == FLAGS["ichor_toolchain"]
+    assert payload["data"]["steps"][1]["status"] == "skipped"
+    assert payload["summary"].endswith("rerun with --yes")
+    assert world.calls == []
+    flag = captured.err.index(f"FLAG  {FLAGS['ichor_toolchain']}")
+    assert flag < captured.err.index("STEP  ichor_toolchain  refused")
+    assert "[y/N]" not in captured.err and "[y/N]" not in captured.out
+
+
+def test_json_with_yes_runs_the_download_step(world: FakeWorld, tmp_path: Path, capsys, monkeypatch) -> None:
+    monkeypatch.setattr("builtins.input", lambda *a: pytest.fail("prompted under --json"))
+    code = signed_cli.main(["lab", "setup", "--root", str(tmp_path / "root"), "--only", "ichor_toolchain", "--yes", "--json"])
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert code == 0 and world.calls == ["ichor_toolchain"]
+    assert payload["data"]["steps"][0]["status"] == "ok" and payload["data"]["steps"][0]["flag"] == FLAGS["ichor_toolchain"]
+    assert captured.err.index(f"FLAG  {FLAGS['ichor_toolchain']}") < captured.err.index("RUN   traceback toolchain install ichor")
+
+
 def test_needs_input_prints_the_template_and_never_guesses_a_path(monkeypatch, tmp_path: Path, capsys) -> None:
     world = FakeWorld(monkeypatch, tmp_path, [
         ("loyfer_assets", INPUT, "traceback method-asset register --from-dir LOYFER_DIR --root <ROOT>"),
@@ -220,6 +251,8 @@ def test_a_failing_step_is_tbx_lab_032_and_later_steps_still_run(world: FakeWorl
     signed_cli.main(["lab", "runs", "--root", str(root), "--json"])
     rows = json.loads(capsys.readouterr().out)["data"]["runs"]
     assert all(row["command"] == "setup" and row["status"] == "partial_failure" for row in rows)
+    with LabStore(root).writer("run", new_run_id(), step="ingest"):  # the failed run released the lock
+        pass
 
 
 def test_a_step_that_raises_is_failed_with_a_scrubbed_reason(world: FakeWorld, tmp_path: Path, capsys) -> None:
@@ -253,8 +286,9 @@ def test_only_filters_steps_and_reports_satisfied_ones(world: FakeWorld, tmp_pat
     assert world.calls == ["staging"]
     assert _steps(out) == [("python", "skipped"), ("staging", "ok")]
     assert "STEP  python  skipped  nothing to do: doctor passes this check" in out
-    code, payload = _json(capsys, ["--root", str(root), "--only", "mmi"])
-    assert payload["data"]["only"] == ["mmi"] and [s["name"] for s in payload["data"]["steps"]] == ["mmi"]
+    code, payload = _json(capsys, ["--root", str(root), "--only", "mmi,python,mmi,python"])
+    assert payload["data"]["only"] == ["mmi", "python"]
+    assert [(s["name"], s["kind"], s["status"]) for s in payload["data"]["steps"]] == [("python", "manual", "skipped"), ("mmi", "local", "ok")]
     # ichor_assets alone runs even though ichor_toolchain is unconfirmed: the dependency only holds inside one run.
     code, out = _run(capsys, ["--root", str(root), "--only", "ichor_assets"])
     assert code == 0 and _steps(out) == [("ichor_assets", "ok")]
@@ -375,6 +409,53 @@ def test_mmi_step_builds_the_index_locally_without_a_prompt(lab_world: dict[str,
     assert code == 0 and _steps(out) == [("mmi", "skipped")]
 
 
+def test_a_step_runs_only_when_doctor_asks_for_the_catalogue_command(monkeypatch, tmp_path: Path, capsys) -> None:
+    monkeypatch.setattr(setup_command, "_interactive", lambda: False)
+    checks = [
+        {"name": "ichor_toolchain", "status": "warn", "detail": "x", "fix": "brew install r", "blocks_example": False},
+        {"name": "staging", "status": "warn", "detail": "x", "fix": "rm -rf something", "blocks_example": False},
+        {"name": "mmi", "status": "warn", "detail": "x", "fix": "traceback lab run <chunk dir> --root <ROOT> builds it once (or pass --mmi PATH)", "blocks_example": False},
+    ]
+    monkeypatch.setattr(setup_command, "lab_checks", lambda store: checks)
+    code, payload = _json(capsys, ["--root", str(tmp_path / "root")])
+    by_name = {step["name"]: step for step in payload["data"]["steps"]}
+    assert by_name["ichor_toolchain"]["status"] == "skipped" and by_name["ichor_toolchain"]["kind"] == "manual"
+    assert by_name["ichor_toolchain"]["reason"] == "manual; run it yourself: brew install r"
+    assert by_name["staging"]["status"] == "skipped" and by_name["staging"]["reason"].endswith("rm -rf something")
+    assert by_name["mmi"]["kind"] == "local" and by_name["mmi"]["status"] == "failed"  # ran: no reference under this ROOT
+    assert code == 8
+
+
+def test_setup_doctor_summary_matches_standalone_doctor(lab_world: dict[str, Path], capsys) -> None:
+    root = lab_world["root"]
+    code, payload = _json(capsys, ["--root", str(root), "--only", "staging"])
+    assert code == 0
+    signed_cli.main(["lab", "doctor", "--root", str(root), "--json"])
+    doctor = json.loads(capsys.readouterr().out)
+    assert payload["data"]["doctor_after"]["summary"] == doctor["summary"]
+    assert payload["data"]["doctor_after"]["setup_steps"] == doctor["data"]["setup_steps"]
+    assert payload["data"]["doctor_after"]["status"] == doctor["status"]
+    assert "active" not in payload["data"]["doctor_after"]["warnings"]
+    code, out = _run(capsys, ["--root", str(root), "--only", "staging"])
+    assert f"DOCTOR  {doctor['summary']}" in out
+
+
+def test_run_signed_kills_a_stalled_child(tmp_path: Path, monkeypatch) -> None:
+    import sys
+    import time
+
+    monkeypatch.setattr(setup_command, "_child_argv", lambda argv: [sys.executable, "-c", "import time; time.sleep(60)"])
+    context = SetupContext(
+        store=LabStore(tmp_path / "root"), scrubber=Scrubber(root=tmp_path / "root"), say=lambda line: None,
+        ask=lambda text: None, yes=True, interactive=False, echo_child=False,
+    )
+    started = time.monotonic()
+    with pytest.raises(StepFailed) as failure:
+        run_signed(context, ["anything"], timeout_s=0.5)
+    assert time.monotonic() - started < 10
+    assert failure.value.reason == "timed out after 0.5 s and was killed" and failure.value.exit_code is None
+
+
 def test_run_signed_runs_a_child_and_scrubs_its_tail(tmp_path: Path, capsys) -> None:
     root = tmp_path / "root"
     said: list[str] = []
@@ -393,8 +474,8 @@ def test_run_signed_runs_a_child_and_scrubs_its_tail(tmp_path: Path, capsys) -> 
     assert str(tmp_path) not in "\n".join(failure.value.tail)
 
 
-def test_signed_children_run_under_the_setup_writer_lock(tmp_path: Path, synthetic_world: dict[str, Path]) -> None:
-    """``reference register`` / ``method-asset register`` take ROOT/.operator.lock, not ROOT/lab/.lock."""
+def test_signed_children_run_under_the_setup_writer_lock(tmp_path: Path, monkeypatch) -> None:
+    """``method-asset register`` takes ROOT/.operator.lock, not ROOT/lab/.lock: it runs under setup's lock."""
 
     from traceback_runner.cli import _operator_lock
 
@@ -405,16 +486,36 @@ def test_signed_children_run_under_the_setup_writer_lock(tmp_path: Path, synthet
         store=store, scrubber=Scrubber(root=root), say=said.append, ask=said.append,
         yes=True, interactive=False, echo_child=False,
     )
-    argv = ["reference", "register", "--fasta", str(synthetic_world["fasta"]), "--id", "under-lock", "--root", str(root)]
+    busy = "local action or unexpired worker lease is active"
+    argv = ["method-asset", "register", "--from-toolchain", "copy-number", "--root", str(root)]
     with store.writer("setup", new_run_id(), step="ichor_assets"):
-        assert run_signed(context, argv) == "command exited 0"
-        assert resolve_reference(root, "under-lock").reference_id == "under-lock"
+        try:
+            from traceback_runner.toolchain import resolve_copy_number_toolchain
+
+            resolve_copy_number_toolchain()
+            installed = True
+        except Exception:  # noqa: BLE001 - any toolchain problem means "not installed here"
+            installed = False
+        if installed:
+            assert setup_command._run_ichor_assets(context) == "ichorCNA method assets registered"
+        else:
+            with pytest.raises(StepFailed) as failure:
+                setup_command._run_ichor_assets(context)
+            assert any("TBX-TOOL-002" in line for line in failure.value.tail), failure.value.tail
+            assert not any(busy in line for line in failure.value.tail)
+        # With no toolchain in HOME the child gets past the Lab lock and fails on the toolchain, not on a lock.
+        monkeypatch.setenv("HOME", str(tmp_path / "empty-home"))
+        with pytest.raises(StepFailed) as failure:
+            run_signed(context, argv)
+        assert any("TBX-TOOL-002" in line for line in failure.value.tail), failure.value.tail
+        assert not any(busy in line for line in failure.value.tail)
     # The same child is refused while the signed operator lock is held: the two locks are distinct.
     with _operator_lock(root), pytest.raises(StepFailed) as failure:
-        run_signed(context, [*argv[:-4], "--id", "second", "--root", str(root)])
+        run_signed(context, argv)
     assert failure.value.exit_code not in (0, None)
-    assert any("local action or unexpired worker lease is active" in line for line in failure.value.tail), failure.value.tail
+    assert any(busy in line for line in failure.value.tail), failure.value.tail
     assert str(root) not in "\n".join(failure.value.tail)
+    assert "TBX-TOOL-002" not in "\n".join(failure.value.tail)
 
 
 # -- guide ---------------------------------------------------------------------------------

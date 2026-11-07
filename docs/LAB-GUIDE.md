@@ -58,11 +58,17 @@ because it can download things. Every step ends in one state, printed as
 
 Steps that download or install a licence-bearing asset print the FLAG line
 below first (manual and prerequisite-blocked steps print none) and need a per-step confirmation: `y` at the prompt on a TTY, or
-`--yes` for a non-interactive run (without it they are `refused`). Steps that
+`--yes` for a non-interactive run (without it they are `refused`; `--json`
+never prompts and refuses the same way, with the FLAG line on stderr). Steps that
 only compute locally run without a prompt: building the minimap2 index
 (`mmi`, hg38: ~20-40 min and ~8 GB), registering an already installed
 toolchain's assets (`ichor_assets`), removing orphaned staging (`staging`).
-`--only mmi,staging` limits the run to those doctor check names.
+`--only mmi,staging` limits the run to those doctor check names. A step runs
+only when doctor's fix is the catalogue's command for that check; any other
+fix text is `skipped` with that text. A signed child (`toolchain install`,
+`method-asset register`) that is still running after its time limit (30 min
+for the install, 5 min otherwise) is killed and the step `failed`, so a
+stalled download never keeps the writer lock.
 
 | Step (doctor check) | Kind | FLAG line printed before it |
 |---|---|---|
@@ -86,7 +92,8 @@ failed, needs input or was refused; exit 3 on the lock. `--json` carries the
 per-step list under `data.steps` (`name`, `kind`, `status`, `reason`,
 `command` with `<ROOT>` as a token, `flag`, `exit_code`, `stderr_tail`), the
 `counts` by state and `doctor_before` / `doctor_after` summaries; no host
-path beyond `data.root`.
+path beyond `data.root`. With `--json` stdout is that one object and the
+progress lines (`ROOT`, `FLAG`, `RUN`, `TEMPLATE`, `STEP`) go to stderr.
 
 If an already-open Lab page says there are no runs, use the ROOT printed by
 the serving process for `lab doctor --root R` and `lab run --example --root R`.
