@@ -73,6 +73,9 @@ PROBLEMS: dict[str, ProblemSpec] = {
     "TBX-LAB-023": ProblemSpec(EXIT_BLOCKED, "Sample sex assertion conflicts or needs restoration"),
     "TBX-LAB-024": ProblemSpec(EXIT_BLOCKED, "Input platform is unknown, unsupported, or inconsistent"),
     "TBX-LAB-025": ProblemSpec(EXIT_OK, "Physical RAM is below the alignment recommendation"),
+    "TBX-LAB-026": ProblemSpec(
+        EXIT_BLOCKED, "The requested loopback port cannot be bound", retryable=True
+    ),
 }
 
 
