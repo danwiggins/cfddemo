@@ -344,12 +344,23 @@
   }
 
   // Kit provenance from the stored input manifest's BAM header (@RG DS, @PG PN/VN).
-  function kitCell(value) {
-    return value ? h("td", { class: "kit-cell" }, value) : h("td", { class: "kit-cell not-recorded" }, "not recorded");
+  // Each field is a list of distinct values (null = a chunk that recorded none).
+  function kitText(values) {
+    const list = Array.isArray(values) ? values : [];
+    if (!list.length || (list.length === 1 && list[0] === null)) return null;
+    return list.length === 1 ? list[0] : `mixed (${list.length} values)`;
   }
   function softwareText(kit) {
-    const software = (kit && Array.isArray(kit.software)) ? kit.software : [];
-    return software.map((entry) => (entry.version ? `${entry.program} ${entry.version}` : entry.program)).join("; ");
+    const byProgram = new Map();
+    for (const entry of (kit && Array.isArray(kit.software)) ? kit.software : []) {
+      if (!byProgram.has(entry.program)) byProgram.set(entry.program, []);
+      byProgram.get(entry.program).push(entry.version);
+    }
+    return [...byProgram].map(([program, versions]) => versions.length > 1 ? `${program} mixed (${versions.length} values)`
+      : versions[0] ? `${program} ${versions[0]}` : program).join("; ") || null;
+  }
+  function kitCell(value) {
+    return value ? h("td", { class: "kit-cell" }, value) : h("td", { class: "kit-cell not-recorded" }, "not recorded");
   }
 
   function samplesTable() {
@@ -365,7 +376,8 @@
           row.malformed_result_selections ? h("span", { class: "problem" }, ` malformed result selection (sample ${row.id12})`) : ""),
         h("td", {}, row.run_utc ? row.run_utc.slice(0, 10) : "—"),
         h("td", { class: "num" }, row.depth_x !== null ? `${row.depth_x.toPrecision(3)}x` : "—"),
-        kitCell(row.kit?.flow_cell), kitCell(row.kit?.kit), kitCell(row.kit?.basecall_model), kitCell(softwareText(row.kit)),
+        kitCell(kitText(row.kit?.flow_cell)), kitCell(kitText(row.kit?.kit)), kitCell(kitText(row.kit?.basecall_model)),
+        kitCell(softwareText(row.kit)),
         h("td", {}, `${row.counts.ok} / ${row.counts.skipped} / ${row.counts.failed}`),
         h("td", { class: "num" }, String(row.outside_reference),
           ["cohort_unavailable", "target_unavailable", "stale_target"].includes(row.cohort_state)

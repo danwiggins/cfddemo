@@ -25,7 +25,7 @@ import re
 import shutil
 import stat
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -182,7 +182,7 @@ class ChunkSet:
 
     @property
     def header_provenance(self) -> dict[str, Any]:
-        return self.chunks[0].provenance or header_provenance("")
+        return merge_header_provenance([chunk.provenance for chunk in self.chunks])
 
     @property
     def rg_lines(self) -> list[str]:
@@ -219,90 +219,127 @@ def _rg_model(line: str) -> str | None:
     return match.group(1) if match else None
 
 
-# Kit provenance shown on the landing page: a bare product code, model name or
-# version only. Anything with a path separator, whitespace or a sentence shape
-# is dropped, so a header cannot smuggle a path or a free-text name through.
-_PROVENANCE_VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@+-]{0,63}")
-_FLOW_CELL_KEYS = frozenset({"flow_cell_product_code", "flowcell_product_code", "flow_cell_type", "flowcell_type"})
-_KIT_KEYS = frozenset({"sequencing_kit", "kit", "library_kit"})
-_MAX_SOFTWARE = 8
+# Kit provenance shown on the landing page. Each field has a shape pattern for
+# what the product code, model name or version looks like; anything else
+# (a flow-cell ID, a person's name, an e-mail, a path) is dropped as "not
+# recorded", so a header cannot smuggle an identifier through. Every distinct
+# value across chunks and read groups is kept; ``None`` in a list means at
+# least one chunk/read group did not record that field.
+_FIELD_PATTERNS = {
+    "flow_cell": re.compile(r"FLO-[A-Z0-9]+"),
+    "kit": re.compile(r"(?:SQK|EXP|SKI)-[A-Z0-9-]+"),
+    # Basecall models are the one value with "@": only the dorado "@v<version>" form.
+    "basecall_model": re.compile(r"(?:dna|rna)[a-z0-9_.]*@v[0-9]+(?:\.[0-9]+)*"),
+}
+_PROGRAM = re.compile(r"[A-Za-z][A-Za-z0-9._-]{0,31}")
+_VERSION = re.compile(r"[0-9][A-Za-z0-9._+-]{0,31}")
+_DS_KEYS = {
+    "flow_cell_product_code": "flow_cell", "flowcell_product_code": "flow_cell",
+    "flow_cell_type": "flow_cell", "flowcell_type": "flow_cell",
+    "sequencing_kit": "kit", "library_kit": "kit",
+    "basecall_model": "basecall_model",
+}
 _PROVENANCE_FIELDS = ("flow_cell", "kit", "basecall_model")
+_MAX_VALUES = 16
 
 
-def _provenance_value(value: Any) -> str | None:
-    if not isinstance(value, str) or not _PROVENANCE_VALUE.fullmatch(value):
-        return None
-    return value
+def _shaped(pattern: re.Pattern[str], value: Any) -> str | None:
+    return value if isinstance(value, str) and pattern.fullmatch(value) else None
+
+
+def _sorted_values(values: Iterable[str | None]) -> list[str | None]:
+    distinct = set(values)
+    return [*sorted(value for value in distinct if value is not None), *([None] if None in distinct else [])]
+
+
+def _software_entries(entries: Iterable[Mapping[str, Any]]) -> list[dict[str, str | None]]:
+    distinct = {(entry["program"], entry["version"]) for entry in entries}
+    return [{"program": program, "version": version}
+            for program, version in sorted(distinct, key=lambda pair: (pair[0], pair[1] or ""))]
 
 
 def header_provenance(header_text: str) -> dict[str, Any]:
-    """Kit provenance a BAM header declares: ``@RG DS`` key=value pairs and ``@PG`` PN/VN.
+    """Kit provenance one BAM header declares: ``@RG DS`` key=value pairs and ``@PG`` PN/VN.
 
     Identifiers never enter the result: read-group ID, PU (flow-cell ID), PM
     (device), SM/LB (sample names), DT, ``runid`` and ``@PG CL`` are skipped.
-    Absent fields are ``None``; the landing page shows them as "not recorded".
+    Each field is the list of distinct shaped values over the header's read
+    groups, with ``None`` for a read group (or a header) that recorded none.
     """
 
-    found: dict[str, str | None] = dict.fromkeys(_PROVENANCE_FIELDS)
+    per_field: dict[str, list[str | None]] = {name: [] for name in _PROVENANCE_FIELDS}
     software: list[dict[str, str | None]] = []
+    read_groups = 0
     for line in header_text.splitlines():
         fields = line.split("\t")
         if fields[0] == "@RG":
+            read_groups += 1
+            found: dict[str, str | None] = dict.fromkeys(_PROVENANCE_FIELDS)
             for part in fields[1:]:
                 if not part.startswith("DS:"):
                     continue
                 for token in part[3:].split():
                     key, separator, value = token.partition("=")
-                    if not separator:
-                        continue
-                    if key == "basecall_model":
-                        target = "basecall_model"
-                    elif key in _FLOW_CELL_KEYS:
-                        target = "flow_cell"
-                    elif key in _KIT_KEYS:
-                        target = "kit"
-                    else:
-                        continue
-                    if found[target] is None:
-                        found[target] = _provenance_value(value)
-        elif fields[0] == "@PG" and len(software) < _MAX_SOFTWARE:
+                    target = _DS_KEYS.get(key) if separator else None
+                    if target is not None and found[target] is None:
+                        found[target] = _shaped(_FIELD_PATTERNS[target], value)
+            for name in _PROVENANCE_FIELDS:
+                per_field[name].append(found[name])
+        elif fields[0] == "@PG":
             tags = {part[:2]: part[3:] for part in fields[1:] if len(part) > 3 and part[2] == ":"}
-            program = _provenance_value(tags.get("PN"))
-            if program is None:
-                continue
-            entry = {"program": program, "version": _provenance_value(tags.get("VN"))}
-            if entry not in software:
-                software.append(entry)
-    return {**found, "software": software}
+            program = _shaped(_PROGRAM, tags.get("PN"))
+            if program is not None:
+                software.append({"program": program, "version": _shaped(_VERSION, tags.get("VN"))})
+    if not read_groups:
+        for name in _PROVENANCE_FIELDS:
+            per_field[name].append(None)
+    return {**{name: _sorted_values(values)[:_MAX_VALUES] for name, values in per_field.items()},
+            "software": _software_entries(software)[:_MAX_VALUES]}
+
+
+def merge_header_provenance(parts: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """All distinct values over a chunk set's headers (``None`` kept when a chunk lacks a field)."""
+
+    if not parts:
+        return header_provenance("")
+    return {
+        **{name: _sorted_values(value for part in parts for value in part.get(name, [None]))[:_MAX_VALUES]
+           for name in _PROVENANCE_FIELDS},
+        "software": _software_entries(entry for part in parts for entry in part.get("software", []))[:_MAX_VALUES],
+    }
 
 
 def stored_header_provenance(manifest: Any) -> dict[str, Any] | None:
     """Re-validate a stored input manifest's header provenance before it is shown.
 
-    Manifests written before this field existed show every field as absent
-    (``None``) except the basecall model; a hand-edited value is filtered
-    through the same value rule as ingest.
+    A manifest written before this field existed shows every field as not
+    recorded, except the basecall model from its legacy ``basecall_model``
+    (``a|b`` when read groups differed). A hand-edited value is filtered
+    through the same shape rules as ingest.
     """
 
     if not isinstance(manifest, Mapping):
         return None
     value = manifest.get("header_provenance")
-    value = value if isinstance(value, Mapping) else {}
-    software: list[dict[str, str | None]] = []
+    if not isinstance(value, Mapping):
+        models = manifest.get("basecall_model")
+        parts = models.split("|") if isinstance(models, str) and models else []
+        shaped = [_shaped(_FIELD_PATTERNS["basecall_model"], part) for part in parts]
+        return {"flow_cell": [None], "kit": [None],
+                "basecall_model": _sorted_values(shaped or [None])[:_MAX_VALUES], "software": []}
+    result: dict[str, Any] = {}
+    for name in _PROVENANCE_FIELDS:
+        raw = value.get(name)
+        items = raw if isinstance(raw, list) and raw else [None]
+        result[name] = _sorted_values(_shaped(_FIELD_PATTERNS[name], item) for item in items[:_MAX_VALUES])
     entries = value.get("software")
-    for entry in (entries if isinstance(entries, list) else [])[:_MAX_SOFTWARE]:
-        program = _provenance_value(entry.get("program")) if isinstance(entry, Mapping) else None
+    software = []
+    for entry in (entries if isinstance(entries, list) else [])[:_MAX_VALUES]:
+        program = _shaped(_PROGRAM, entry.get("program")) if isinstance(entry, Mapping) else None
         if program is not None:
-            software.append({"program": program, "version": _provenance_value(entry.get("version"))})
-    result = {**{key: _provenance_value(value.get(key)) for key in _PROVENANCE_FIELDS}, "software": software}
-    # The manifest's own basecall_model ("a|b" when read groups differ) predates
-    # this field, so older inputs still show their model.
-    models = manifest.get("basecall_model")
-    parts = models.split("|") if isinstance(models, str) else []
-    if parts and all(_provenance_value(part) for part in parts):
-        result["basecall_model"] = " | ".join(parts)
+            software.append({"program": program, "version": _shaped(_VERSION, entry.get("version"))})
+    result["software"] = _software_entries(software)
     return result
-
 
 BGZF_EOF = bytes.fromhex("1f8b08040000000000ff0600424302001b0003000000000000000000")
 

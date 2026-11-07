@@ -972,15 +972,19 @@ the scroll controls are hidden.
   type, library kit, basecall model and the sequencer/basecaller software
   versions. They come from the BAM header provenance recorded in the input
   manifest at ingest (`@RG DS` `flow_cell_product_code`/`flow_cell_type`,
-  `sequencing_kit`/`library_kit`/`kit` and `basecall_model` keys; `@PG` program
-  name and version), never from re-reading the BAM when the page loads. Only
-  bare product codes, model names and versions are kept: read-group IDs,
-  flow-cell IDs (`PU`), device (`PM`), sample and library names (`SM`, `LB`),
-  run IDs, dates and `@PG` command lines are not stored or shown. A field the
-  header did not carry, or an input ingested before this was recorded, reads
-  "not recorded" (older inputs still show the manifest's basecall model). Rows
-  keep the run-date order; nothing is sorted by these values. A full Kit lens
-  is a follow-up.
+  `sequencing_kit`/`library_kit` and `basecall_model` keys; `@PG` program
+  name and version), never from re-reading the BAM when the page loads, and
+  they are not part of the input ID. Only values shaped like a product code
+  (`FLO-…`; `SQK-…`, `EXP-…`, `SKI-…`), a dorado model name (`dna…@vN`) or a
+  version are kept: read-group IDs, flow-cell IDs (`PU`), device (`PM`), sample
+  and library names (`SM`, `LB`), run IDs, dates and `@PG` command lines are
+  not stored or shown. When chunks or read groups disagree, the column reads
+  "mixed (N values)" (a chunk that did not record the field counts as one
+  value) and the manifest keeps every distinct value. A field no header
+  carried, or any other value, reads "not recorded"; an input ingested before
+  this was recorded shows only the manifest's basecall model. Rows keep the
+  run-date order; nothing is sorted by these values. A full Kit lens is a
+  follow-up.
 - **Findings**: only above/below-reference results are cards (sorted by tier,
   then severity); not-interpretable, no-reference and in-range metrics are
   counted, collapsible rows. Before the kit cohort exists (n < 10) most
