@@ -483,7 +483,7 @@ may reveal, including epigenetic age, read the
 | id | What it reports |
 |---|---|
 | `read-summary` | intermediate: one pass over the aligned BAM into memmapped columns (no read names); every pysam algorithm and every downsample or split-half view reads it |
-| `bam-qc` | primaries, mapped and MAPQ ≥ 20 shares, supplementary share, mean read Q, share of sampled genome covered ≥ 1x, GC-bias slope, duplicate share (only when marked); supplementary share as a chimera proxy and mean read Q interpretation are ONT-specific |
+| `bam-qc` | primaries, mapped and MAPQ ≥ 20 shares, supplementary share, mean read Q, share of sampled genome covered ≥ 1x, GC-bias slope, duplicate share (only when marked), and (v2) the count and share of primary reads whose read name repeats: content-identical chunks are refused at ingest, but the same reads re-basecalled into a differently named chunk pass that check and would double-count, so any non-zero share carries a `FLAG: duplicate read names` pill in Trust/QC (names are compared as 64-bit hashes; about 3e-6 false pairs are expected at 10 M reads; paired-end mates are compared within one mate class); supplementary share as a chimera proxy and mean read Q interpretation are ONT-specific |
 | `depth` | eligible reads (primary, MAPQ ≥ 20, chr1–22/X/Y), mean aligned span per eligible read, approximate aligned-base depth; the index count is shown only as an upper bound, and Illumina aligned span is not template length (`abs(TLEN)`) |
 | `fragment-size` | 1-bp aligned-span histogram, mode, short (< 150 bp) share, mono/di peaks, 10 bp periodicity |
 | `lionheart` | opt-in upstream LIONHEART v2.2.0 extraction of 898 raw sample-standardized chromatin-accessibility correlation scores from the selected hg38 BAM; needs ≥5M eligible reads, the modified mosdepth and Zenodo v003 resources; ONT single-end mode is experimental, and no cancer prediction is run |
@@ -1606,6 +1606,11 @@ symlink or a plain file is TBX-LAB-005 instead.
 
 ## Changes
 
+- 2026-11-06: `bam-qc` method version 2 adds `duplicate_read_name_count` and
+  `duplicate_read_name_share` (repeated read names among primary reads, from
+  the read summary's 64-bit name hashes); a non-zero share shows a FLAG pill
+  for a possible re-basecalled chunk. Stored v1 results stay valid under their
+  own identity; the next run computes v2.
 - 2026-11-06: `lab inventory DIR` checks a chunk set before alignment; TBX-LAB-031.
 - 2026-11-06: `lab serve --port N` binds a fixed loopback port; TBX-LAB-026.
 - 2026-11-06: `lab gc` (dry-run by default; `--apply` deletes stale failed

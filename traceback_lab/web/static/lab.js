@@ -1058,12 +1058,12 @@
     const banded = [];
     for (const a of sample.algorithms) for (const m of a.metrics) if (m.qc_band)
       banded.push([m.label, rawCell(fmtMetric(m, { algorithmId: a.algorithm_id }), m.value, m.unit,
-        `${a.algorithm_id}/${m.metric_id}, QC band`), m.qc_band]);
+        `${a.algorithm_id}/${m.metric_id}, QC band`), m.qc_band, window.TracebackLab.valueFlag ? window.TracebackLab.valueFlag(m) : ""]);
     const glyph = { pass: "✓ pass", warn: "! warn", fail: "✕ fail" };
     out.push(h("section", { class: "panel" }, h("h2", {}, "QC bands"),
       h("p", { class: "help" }, "provisional (not from literature)"),
       h("div", { class: "table-wrap" }, h("table", {}, h("thead", {}, h("tr", {}, h("th", {}, "Metric"), h("th", {}, "Value"), h("th", {}, "Band"))),
-        h("tbody", {}, ...banded.map(([label, value, band]) => h("tr", {}, h("th", { scope: "row" }, label), h("td", {}, value), h("td", {}, h("span", { class: "qc-band" }, glyph[band])))))))));
+        h("tbody", {}, ...banded.map(([label, value, band, flag]) => h("tr", {}, h("th", { scope: "row" }, label), h("td", {}, value), h("td", {}, h("span", { class: "qc-band" }, glyph[band]), flag ? " " : "", flag))))))));
     const sex = sample.preanalytic_sex;
     let sexMessage;
     if (sex && sex.reason === "malformed_metadata") {

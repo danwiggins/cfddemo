@@ -177,6 +177,13 @@ def _validate_entry(raw: Mapping[str, Any], licenses: Mapping[str, Any]) -> Entr
     if band is not None:
         _require(band.get("direction") in ("higher_is_better", "lower_is_better"), where, "qc_band direction")
         _require(isinstance(band.get("pass"), (int, float)) and isinstance(band.get("warn"), (int, float)), where, "qc_band pass/warn")
+    nonzero_flag = raw.get("nonzero_flag")
+    if nonzero_flag is not None:
+        # Rendered as a FLAG pill only when the metric's value is non-zero (a
+        # data-quality flag, unlike the regulatory ``flags`` ids).
+        _require(isinstance(nonzero_flag, str) and nonzero_flag.startswith("FLAG: ") and len(nonzero_flag) > 6,
+                 where, "nonzero_flag must be text starting with 'FLAG: '")
+        _require(raw["value_kind"] in ("count", "proportion", "positive"), where, "nonzero_flag needs a numeric value_kind")
     data = dict(raw)
     data["stability"] = stability
     return Entry(str(raw["algorithm_id"]), str(raw["metric_id"]), data)
