@@ -216,13 +216,38 @@ def _rg_model(line: str) -> str | None:
     return match.group(1) if match else None
 
 
-def _read_header(chunk: Chunk) -> None:
-    with pysam.AlignmentFile(str(chunk.path), "rb", check_sq=False) as bam:
+BGZF_EOF = bytes.fromhex("1f8b08040000000000ff0600424302001b0003000000000000000000")
+
+
+def has_bgzf_eof(path: Path) -> bool:
+    """True when the file ends with the 28-byte BGZF EOF block (what quickcheck tests)."""
+
+    try:
+        with path.open("rb") as stream:
+            stream.seek(0, os.SEEK_END)
+            if stream.tell() < len(BGZF_EOF):
+                return False
+            stream.seek(-len(BGZF_EOF), os.SEEK_END)
+            return stream.read(len(BGZF_EOF)) == BGZF_EOF
+    except OSError:
+        return False
+
+
+def read_header_lines(path: Path) -> tuple[tuple[str, ...], tuple[str, ...], tuple[tuple[str, int], ...]]:
+    """One chunk's ``@RG`` lines, ``@PG`` lines and ``@SQ`` (name, length) pairs."""
+
+    with pysam.AlignmentFile(str(path), "rb", check_sq=False) as bam:
         header = bam.header
-        text = str(header)
-        chunk.rg_lines = tuple(line for line in text.splitlines() if line.startswith("@RG\t"))
-        chunk.sq = tuple((name, int(length)) for name, length in zip(header.references, header.lengths))
-        chunk.aligned = bool(chunk.sq)
+        lines = str(header).splitlines()
+        sq = tuple((name, int(length)) for name, length in zip(header.references, header.lengths))
+    rg = tuple(line for line in lines if line.startswith("@RG\t"))
+    pg = tuple(line for line in lines if line.startswith("@PG\t"))
+    return rg, pg, sq
+
+
+def _read_header(chunk: Chunk) -> None:
+    chunk.rg_lines, _, chunk.sq = read_header_lines(chunk.path)
+    chunk.aligned = bool(chunk.sq)
     models = sorted({model for line in chunk.rg_lines if (model := _rg_model(line))})
     chunk.basecall_model = "|".join(models) if models else None
 
@@ -1157,6 +1182,7 @@ def is_sample_reference(text: str) -> bool:
 
 __all__ = [
     "AlignedInput",
+    "BGZF_EOF",
     "Budget",
     "Chunk",
     "ChunkSet",
@@ -1172,6 +1198,7 @@ __all__ = [
     "disk_budget",
     "ensure_mmi",
     "estimate_align_minutes",
+    "has_bgzf_eof",
     "id12_for",
     "ingest_prealigned",
     "input_manifest",
@@ -1179,6 +1206,7 @@ __all__ = [
     "require_unchanged",
     "is_sample_reference",
     "mmi_path",
+    "read_header_lines",
     "require_budget",
     "resolve_reference",
     "resolve_sample",
