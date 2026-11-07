@@ -148,6 +148,47 @@ root. A green run here is never a substitute for the hosted
 `ci (ubuntu-latest)` job; it is a reproduction aid, and the required check
 remains the gate.
 
+### Headless Chrome harness budgets
+
+The Lab browser tests drive Chrome through `_dom_cdp` in
+`tests/lab/test_lab_server.py` (`_dom` in `tests/lab/test_landing.py` wraps it).
+Chrome always starts with `--remote-debugging-port=0` in the test's own
+profile; the harness deletes any old `DevToolsActivePort` before launch, reads
+the ephemeral port from the new one, and checks that `/json/version` on that
+port is the browser that wrote the file. No test uses a fixed DevTools port.
+
+Waits grow with the host's one-minute load average per CPU
+(`os.getloadavg()[0] / os.cpu_count()`): factor 1.0 at or below one runnable
+process per CPU, rising linearly to a cap of 2.0. An idle host keeps the
+historical timings.
+
+| Wait | Base | Cap |
+|---|---|---|
+| DevTools page-target discovery (polls `/json/list`, 50 ms rising to 500 ms) | 15 s | 30 s |
+| One CDP command response | 15 s | 30 s |
+| Whole DOM wait (the test's `timeout`, default 90 s) | `timeout` | `2 x timeout`, at most 300 s |
+
+Retries, each once only and inside the same overall budget: if Chrome never
+writes a usable `DevToolsActivePort` (or exits first), it is killed and
+launched once more; if the page WebSocket attach fails with a socket error or
+timeout, the harness re-discovers the target and attaches again; if one DOM
+poll times out on the socket, it re-attaches to the same page target and keeps
+polling. A second failure of the same kind fails the test. The predicate the
+test passes is never relaxed.
+
+A discovery failure reads
+`Chrome did not expose its Lab page through DevTools: phase=<phase> (<detail>); waited <s> of <budget>`,
+where `phase` is `chrome-not-started` (no complete `DevToolsActivePort`; the
+detail carries Chrome's return code), `devtools-unreachable` (port file present,
+HTTP endpoint refused or not that browser), `no-page-target` (browser up, no
+page listed) or `page-target-not-ours` (pages listed, none at the launch
+origin). Every harness failure ends with
+`budget=<s> (base <s>, discovery <s>, command <s>, load1=<load>, cpus=<n>), elapsed=<s>, launches=<n>`
+plus the last observed DOM state, console tail and Chrome stderr tail, so a
+loaded-runner stall reads differently from a page that never met its predicate.
+A browser test that passes alone and fails in the tier with a high `load1`
+is host contention; one that fails alone is a real defect.
+
 `.github/workflows/slow.yml` runs `uv sync --frozen` followed by
 `uv run pytest -p no:cacheprovider --timeout 600 -m slow --durations=10`
 nightly, on demand, and on
