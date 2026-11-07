@@ -79,7 +79,8 @@ def resolve_aligner_tools() -> tuple[Tool, Tool]:
 def provenance_of(samtools: Tool, minimap2: Tool) -> str:
     """``pinned`` only when both aligners come from the verified store."""
 
-    return PINNED if samtools.provenance == PINNED and minimap2.provenance == PINNED else UNPINNED
+    pinned = all(getattr(tool, "provenance", UNPINNED) == PINNED for tool in (samtools, minimap2))
+    return PINNED if pinned else UNPINNED
 
 
 def pins_of(samtools: Tool, minimap2: Tool) -> dict[str, str] | None:
