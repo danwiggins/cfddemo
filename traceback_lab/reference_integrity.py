@@ -128,14 +128,15 @@ def _check_indexed_contigs(reference: Reference, fasta: Path) -> None:
 
 def verify_reference_source(
     store: LabStore, reference: Reference, *, write_cache: bool,
-    expected_proof: str | None = None,
+    expected_proof: str | None = None, rehash: bool = False,
 ) -> str:
     """Verify current bytes and return a token binding registration and file stamps.
 
     Dry-run calls with ``write_cache=False`` and never creates or rewrites a
     cache, FASTA or index. A consumer passes its pre-use token back at the
     publication boundary; an edit then restore must not pass as unchanged.
-    Actual calls occur under the Lab writer lock.
+    Actual calls occur under the Lab writer lock. ``rehash`` ignores a cached
+    proof and reads the FASTA bytes again (``lab run --rehash``).
     """
 
     fasta = reference.fasta
@@ -146,7 +147,7 @@ def verify_reference_source(
     if expected_proof is not None and key != expected_proof:
         raise _problem("registered FASTA or index changed during consumption")
     cache = store.load_hash_cache()
-    proof = cache.get(key)
+    proof = None if rehash else cache.get(key)
     if (isinstance(proof, dict) and proof.get("sha256") == reference.sha256
             and proof.get("indexed_m5_verified") is True):
         if _stamps(fasta) != before:
