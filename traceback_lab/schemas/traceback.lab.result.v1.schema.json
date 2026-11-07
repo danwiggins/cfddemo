@@ -68,6 +68,19 @@
           "title": "First Line",
           "type": "string"
         },
+        "reason": {
+          "anyOf": [
+            {
+              "const": "memory",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Reason"
+        },
         "stderr_tail": {
           "items": {
             "maxLength": 300,

@@ -1,6 +1,6 @@
 """One algorithm in its own process (and process group): ``python -m traceback_lab.worker``.
 
-The runner starts this module through ``pipeline.run_pipeline``, so a timeout
+The runner starts this module through ``contained_process.run_contained_pipeline``, so a timeout
 or an interrupt kills the worker and anything it started (D20).  The worker
 loads the algorithm from its registry entry, runs it on the input context and
 writes ``output.json`` (metrics and panels) plus ``artifacts/`` into the
@@ -19,6 +19,7 @@ from pathlib import Path
 
 from traceback_runner.serialization import canonical_json_bytes
 
+from .memory_cap import WORKER_MEMORY_EXIT
 from .registry import AlgorithmOutput, Skip, context_from_json, load_entry
 
 
@@ -77,7 +78,12 @@ def main(argv: list[str]) -> int:
     out = Path(request["out_dir"])
     artifacts = out / "artifacts"
     artifacts.mkdir(parents=True, exist_ok=True)
-    output = algorithm.run(context, artifacts)
+    try:
+        output = algorithm.run(context, artifacts)
+    except MemoryError:
+        # The per-algorithm memory cap (rlimit) refused an allocation.
+        print(f"{algorithm.id}: MemoryError: allocation refused by the memory cap", file=sys.stderr)
+        return WORKER_MEMORY_EXIT
     if isinstance(output, Skip):
         (out / "output.json").write_bytes(canonical_json_bytes({
             "skip": {"reason_code": output.reason_code, "message": output.message},

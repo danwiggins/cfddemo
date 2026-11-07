@@ -1,12 +1,14 @@
 """Per-input algorithm execution: preflight, run or skip, publish (D19, D20, D22, D35).
 
 Each algorithm runs in a worker process in its own process group with a
-timeout, so a failure is isolated and nothing it started outlives it.  A
-failure is written as ``status: failed`` with the last 50 scrubbed stderr
-lines; there is no automatic retry. A rerun recomputes missing or failed
-results and dependents whose selected upstream attempt changed, even when
-the D19 execution identity is unchanged. ``force`` recomputes all results;
-skipped results are preflighted again every time, because depth can change.
+timeout and a per-algorithm memory cap (``memory_cap.MemoryCapPolicy``), so
+a failure is isolated and nothing it started outlives it.  A failure is
+written as ``status: failed`` with the last 50 scrubbed stderr lines (reason
+``memory`` when the cap killed it); there is no automatic retry. A rerun
+recomputes missing or failed results and dependents whose selected upstream
+attempt changed, even when the D19 execution identity is unchanged.
+``force`` recomputes all results; skipped results are preflighted again every
+time, because depth can change.
 """
 
 from __future__ import annotations
@@ -15,17 +17,30 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from traceback_runner.contained_process import Stage, run_contained_pipeline as run_pipeline
 from traceback_runner.serialization import canonical_json_bytes
 
 from .envelope import Depth, Failure, ResultEnvelope, provenance
 from .ingest import resolve_reference
-from .pipeline import Stage, run_pipeline
+from .memory_cap import (
+    MemoryCap,
+    MemoryCapError,
+    MemoryCapPolicy,
+    address_space_limit,
+    blas_threads,
+    failure_reason,
+    format_bytes,
+    pin_blas_threads,
+    pipeline_options,
+    start_failure,
+)
 from .problems import LabProblem
 from .reference_integrity import verify_reference_source
 from .registry import (
@@ -120,6 +135,8 @@ class StepResult:
     artifacts_dir: str | None = None
     input_id: str | None = None
     attempt_id: str | None = None
+    failure_reason: str | None = None  # "memory" when the cap killed the step
+    memory_cap_bytes: int | None = None
 
     def public(self) -> dict[str, Any]:
         return {
@@ -128,6 +145,7 @@ class StepResult:
             "upstream_only": self.upstream_only,
             "skip_reason": self.skip_reason,
             "first_line": self.first_line,
+            "failure_reason": self.failure_reason,
             "duration_s": self.duration_s,
             "peak_rss_bytes": self.peak_rss_bytes,
             "peak_tree_rss_bytes": self.peak_tree_rss_bytes,
@@ -173,11 +191,15 @@ class RunTarget:
         )
 
 
-def _worker_env() -> dict[str, str]:
+def _worker_env(threads: int | None = None) -> dict[str, str]:
+    """The worker's environment; ``threads`` pins the BLAS thread count (memory cap)."""
+
     env = dict(os.environ)
     paths = [entry for entry in sys.path if entry and os.path.isdir(entry)]
     env["PYTHONPATH"] = os.pathsep.join(paths)
     env.setdefault("PYTHONDONTWRITEBYTECODE", "1")
+    if threads is not None:
+        pin_blas_threads(env, threads)
     return env
 
 
@@ -252,8 +274,13 @@ def run_plan(
     progress: Callable[[str], None] | None = None,
     echo: Callable[[str], None] | None = None,
     upstream_results: dict[str, StepResult] | None = None,
+    memory_cap: MemoryCapPolicy | None = None,
 ) -> list[StepResult]:
-    """Run ``items`` (registry order) against ``target``; returns one result each."""
+    """Run ``items`` (registry order) against ``target``; returns one result each.
+
+    ``memory_cap`` (``lab run``) caps each worker; without it no cap applies
+    and the run log carries no cap fields.
+    """
 
     results: list[StepResult] = []
     done: dict[str, StepResult] = dict(upstream_results or {})
@@ -274,7 +301,12 @@ def run_plan(
         scoped_assets_of = getattr(algorithm, "asset_sha256s_for_input", None)
         identity_parameters = getattr(algorithm, "identity_parameters", None)
         identity_tools = getattr(algorithm, "identity_tools", None)
-        worker_env = _worker_env()
+        cap: MemoryCap | None = memory_cap.for_algorithm(algorithm.id) if memory_cap is not None else None
+        threads = blas_threads(algorithm) if cap is not None and cap.bytes is not None else None
+        worker_env = _worker_env(threads)
+        effective_threads = pin_blas_threads(dict(worker_env), threads) if threads is not None else None
+        rlimit_bytes = (address_space_limit(cap.bytes, effective_threads)
+                        if cap is not None and cap.bytes is not None and effective_threads is not None else None)
         # A platform skip consumes no live toolchain.  Dynamic tool probes may
         # launch processes or hash binaries, so use an explicit static skip pin
         # when an algorithm declares one.  Static algorithms keep their prior
@@ -434,7 +466,12 @@ def run_plan(
         # Ready: run it in a worker process group.
         if lock is not None:
             lock.set_step(step)
-        log.append("step_start", step=step, parameters_sha256=identity)
+        log.append(
+            "step_start", step=step, parameters_sha256=identity,
+            **(cap.log_fields() if cap is not None else {}),
+            **({"memory_rlimit_bytes": rlimit_bytes, "blas_threads": effective_threads}
+               if cap is not None and cap.bytes is not None else {}),
+        )
         if progress:
             progress(f"{step:<24} running{' (upstream)' if item.upstream_only else ''}")
         scratch = scratch_root / f"{algorithm.id}-{target.label}"
@@ -446,16 +483,35 @@ def run_plan(
                 {"entry": entries[algorithm.id], "context": context_to_json(ctx), "out_dir": str(scratch)}
             )
         )
+        outcome = None
+        cap_options = pipeline_options(cap.bytes if cap is not None else None, rlimit_bytes)
         try:
-            outcome = run_pipeline(
-                [Stage("worker", [sys.executable, "-m", "traceback_lab.worker", str(request)])],
-                timeout_s=timeout_s,
-                env=worker_env,
-                cwd=scratch,
-                echo=echo,
-                disk_path=scratch,
-            )
-            if outcome.ok:
+            try:
+                try:
+                    outcome = run_pipeline(
+                        [Stage("worker", [sys.executable, "-m", "traceback_lab.worker", str(request)])],
+                        timeout_s=timeout_s,
+                        env=worker_env,
+                        cwd=scratch,
+                        echo=echo,
+                        disk_path=scratch,
+                        **cap_options,
+                    )
+                except (OSError, subprocess.SubprocessError) as exc:
+                    failure = start_failure(exc, cap_options)
+                    if failure is None:
+                        raise
+                    raise failure from exc
+            except MemoryCapError as exc:
+                # The child never ran: no dangling step, the step fails under its cap.
+                assert cap is not None and cap.bytes is not None
+                result = _publish_failure(
+                    store, algorithm, target, identity, item, log, step,
+                    first_line=scrubber.line(f"memory cap could not be applied ({format_bytes(cap.bytes)}): {exc}"),
+                    tail=[], exit_code=None, timed_out=False, duration_s=0.0,
+                    peak_rss=None, peak_disk=None, reason="memory", memory_cap_bytes=cap.bytes,
+                )
+            if outcome is not None and outcome.ok:
                 try:
                     produced = json.loads((scratch / "output.json").read_bytes())
                     if not isinstance(produced, dict):
@@ -543,11 +599,23 @@ def run_plan(
                     )
                     if run_skip is None:
                         _after_ok(store, target, algorithm, identity, result, envelope)
-            else:
+            elif outcome is not None:
                 stage = outcome.stages[0]
                 tail = stage.stderr.scrubbed(scrubber, last=50)
                 lines = [line for line in tail if line.strip()]
-                first = "timed out" if outcome.timed_out else (lines[-1] if lines else f"exited {stage.returncode}")
+                reason = failure_reason(
+                    capped=cap is not None and cap.bytes is not None,
+                    memory_exceeded=outcome.aborted, timed_out=outcome.timed_out,
+                    exit_code=stage.returncode, stderr_tail=tail,
+                )
+                memory_killed = reason == "memory"
+                if outcome.timed_out:
+                    first = "timed out"
+                elif memory_killed:
+                    assert cap is not None and cap.bytes is not None
+                    first = f"memory cap exceeded ({format_bytes(cap.bytes)})"
+                else:
+                    first = lines[-1] if lines else f"exited {stage.returncode}"
                 result = _publish_failure(
                     store, algorithm, target, identity, item, log, step,
                     first_line=scrubber.line(first), tail=tail, exit_code=stage.returncode,
@@ -555,6 +623,8 @@ def run_plan(
                     peak_rss=outcome.peak_rss_bytes,
                     peak_tree_rss=outcome.sampled_tree_peak_rss_bytes,
                     peak_disk=outcome.peak_disk_bytes,
+                    reason=reason,
+                    memory_cap_bytes=cap.bytes if memory_killed and cap is not None else None,
                 )
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
@@ -619,12 +689,15 @@ def _publish_failure(
     peak_rss: int | None,
     peak_disk: int | None,
     peak_tree_rss: int | None = None,
+    reason: str | None = None,
+    memory_cap_bytes: int | None = None,
 ) -> StepResult:
     failure = Failure(
         first_line=first_line[:300] or "failed",
         stderr_tail=[line[:300] for line in tail[-50:]],
         exit_code=exit_code,
         timed_out=timed_out,
+        reason=reason,
     )
     attempt_id = store.publish_result(
         _envelope(algorithm, target, identity, status="failed", failure=failure, duration_s=duration_s),
@@ -640,6 +713,8 @@ def _publish_failure(
         peak_tree_rss_bytes=peak_tree_rss,
         peak_disk_bytes=peak_disk,
         timed_out=timed_out,
+        failure_reason=reason,
+        memory_cap_bytes=memory_cap_bytes,
         parameters_sha256=identity,
         input_id=target.input_id,
         attempt_id=attempt_id,
@@ -657,6 +732,8 @@ def _publish_failure(
         input_label=target.label,
         input_id=target.input_id,
         attempt_id=attempt_id,
+        failure_reason=reason,
+        memory_cap_bytes=memory_cap_bytes,
     )
 
 
