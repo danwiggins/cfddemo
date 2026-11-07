@@ -25,6 +25,7 @@ from .derived import (
     record_derived,
     split,
 )
+from .memory_cap import MemoryCapPolicy
 from .read_summary import ReadSummary, depth_stamp, derived_mask
 from .registry import PlanItem, intermediate_ids
 from .runner import RunTarget, StepResult, run_plan
@@ -99,6 +100,7 @@ def run_derived(
     progress: Callable[[str], None] | None = None,
     echo: Callable[[str], None] | None = None,
     parent_upstream: Mapping[str, StepResult] | None = None,
+    memory_cap: MemoryCapPolicy | None = None,
 ) -> list[DerivedRun]:
     if not specs:
         return []
@@ -212,6 +214,7 @@ def run_derived(
             progress=progress,
             echo=echo,
             upstream_results=upstream,
+            memory_cap=memory_cap,
         )
         runs.append(DerivedRun(item, results))
     return runs
