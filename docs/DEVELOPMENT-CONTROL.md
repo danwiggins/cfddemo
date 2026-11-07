@@ -168,13 +168,26 @@ historical timings.
 | One CDP command response | 15 s | 30 s |
 | Whole DOM wait (the test's `timeout`, default 90 s) | `timeout` | `2 x timeout`, at most 300 s |
 
-Retries, each once only and inside the same overall budget: if Chrome never
-writes a usable `DevToolsActivePort` (or exits first), it is killed and
-launched once more; if the page WebSocket attach fails with a socket error or
-timeout, the harness re-discovers the target and attaches again; if one DOM
-poll times out on the socket, it re-attaches to the same page target and keeps
-polling. A second failure of the same kind fails the test. The predicate the
-test passes is never relaxed.
+Retries, each once only and inside the same overall budget:
+
+- If Chrome never writes a usable `DevToolsActivePort` (or exits first), its
+  whole process group (recorded at launch) is killed, the profile's
+  `SingletonLock`/`SingletonSocket`/`SingletonCookie` are removed, and Chrome
+  is launched once more.
+- If the first page WebSocket attach (before any emulation or navigation)
+  fails with a socket error or timeout, the harness re-discovers the target and
+  attaches again.
+- If one DOM poll loses the socket (connection closed or reset), the harness
+  re-attaches to the same page target and keeps polling, with replayed
+  `Log.enable` entries recorded once. This never happens in viewport mode:
+  `Emulation.setDeviceMetricsOverride` belongs to the CDP session, so a new
+  socket would see the page at Chrome's own width; a viewport test fails
+  instead.
+
+A command that runs past its deadline (a stalled renderer) is never retried and
+fails the test. A one-time page `action` whose reply never arrives fails the
+test and is never re-sent. A second failure of the same kind fails the test.
+The predicate the test passes is never relaxed.
 
 A discovery failure reads
 `Chrome did not expose its Lab page through DevTools: phase=<phase> (<detail>); waited <s> of <budget>`,

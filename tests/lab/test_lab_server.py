@@ -530,6 +530,13 @@ _COMMAND_BUDGET = (15.0, 30.0)  # one CDP response: base seconds, cap seconds
 _DISCOVERY_PHASES = ("chrome-not-started", "devtools-unreachable", "no-page-target", "page-target-not-ours")
 
 
+# Socket-level loss of the DevTools connection. A command that merely ran past
+# its deadline (TimeoutError from _cdp_command, or the socket read timeout
+# websocket-client raises at that same deadline) is a stalled renderer and
+# must fail the test, so neither is in this tuple.
+_TRANSPORT_ERRORS = (websocket.WebSocketConnectionClosedException, ConnectionError)
+
+
 def _host_load() -> tuple[float | None, int]:
     """One-minute load average (None where the platform has none) and CPU count."""
 
@@ -556,8 +563,9 @@ def _wait_for_dom(read_state, *, timeout: float, clock=None, pause=None, load: f
     The failure names the last observed state, the budget it used and the
     host load average so a loaded-runner stall reads differently from a page
     that never satisfied the predicate. When ``recover`` is given, ONE poll
-    that times out on the DevTools socket re-attaches through it and the wait
-    continues inside the same deadline; the predicate itself is never relaxed.
+    that loses the DevTools socket (a transport error, never a command
+    timeout) re-attaches through it and the wait continues inside the same
+    deadline; the predicate itself is never relaxed.
     """
 
     clock = clock or time.monotonic
@@ -569,10 +577,11 @@ def _wait_for_dom(read_state, *, timeout: float, clock=None, pause=None, load: f
     while True:
         try:
             state = read_state()
-        except (TimeoutError, websocket.WebSocketTimeoutException) as exc:
-            if recover is None or recovered is not None or deadline - clock() <= 0:
+        except (TimeoutError, websocket.WebSocketException, ConnectionError) as exc:
+            if (recover is None or recovered is not None or deadline - clock() <= 0
+                    or not isinstance(exc, _TRANSPORT_ERRORS)):
                 raise AssertionError(
-                    f"Chrome DOM poll timed out: {exc!r}; last state={state!r}; recovered={recovered!r}; "
+                    f"Chrome DOM poll failed: {exc!r}; last state={state!r}; recovered={recovered!r}; "
                     f"budget={timeout:.1f}s, elapsed={clock() - start:.1f}s, load1={load!r}"
                 ) from exc
             recovered = repr(exc)
@@ -661,11 +670,14 @@ def _attach_with_retry(attach, rediscover):
 
 
 def _cdp_command(connection, method: str, params: dict, request_id: int, deadline: float,
-                 events: deque[str], *, clock=None, cap: float = _COMMAND_BUDGET[0]) -> dict:
+                 events: deque[str], *, clock=None, cap: float = _COMMAND_BUDGET[0],
+                 seen_log: set[str] | None = None) -> dict:
     """Bound one response to ``cap`` seconds even if unrelated console events keep arriving.
 
     A reply to an earlier, timed-out request id is skipped like any other
-    unrelated message, so a later command never reads a stale result.
+    unrelated message, so a later command never reads a stale result. With
+    ``seen_log``, a ``Log.entryAdded`` already recorded (``Log.enable`` replays
+    the page's existing entries on a new session) is not recorded twice.
     """
 
     clock = clock or time.monotonic
@@ -686,6 +698,11 @@ def _cdp_command(connection, method: str, params: dict, request_id: int, deadlin
                 raise AssertionError(f"DevTools {method} failed: {message['error']!r}")
             return message.get("result", {})
         if message.get("method") in ("Runtime.consoleAPICalled", "Runtime.exceptionThrown", "Log.entryAdded"):
+            if message["method"] == "Log.entryAdded" and seen_log is not None:
+                key = json.dumps(message.get("params", {}).get("entry"), sort_keys=True)
+                if key in seen_log:
+                    continue
+                seen_log.add(key)
             events.append(json.dumps(message, ensure_ascii=False)[-500:])
 
 
@@ -708,10 +725,24 @@ def _read_debug_port(path: Path) -> str | None:
     return None if endpoint is None else endpoint[0]
 
 
-def _stop_browser(process) -> str | None:
-    """Kill one launched Chrome (whole group on POSIX); return a cleanup error or None."""
+def _stop_browser(process, *, pgid: int | None = None) -> str | None:
+    """Kill one launched Chrome (whole group on POSIX); return a cleanup error or None.
+
+    ``pgid`` is the group recorded at launch. With it, the group is killed even
+    after its leader exited, so a relaunch never shares the profile with the
+    first launch's helpers; the group id stays reserved while any member
+    lives, and a vanished group is ProcessLookupError. Without it, a reaped
+    leader's PID is never used as a group target.
+    """
 
     cleanup_error = None
+    if pgid is not None and os.name != "nt":
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        if process.poll() is not None:
+            return None
     if process.poll() is not None:
         pass  # Reaped leader PID must never be used as a process-group target.
     elif os.name == "nt":
@@ -789,6 +820,7 @@ def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90,
     connection = None
     launches: list[str] = []
     launched = 0
+    seen_log: set[str] = set()
     active_port = profile / "DevToolsActivePort"
     direct_http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     launch_argv = [*argv[:-1], "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0",
@@ -816,6 +848,8 @@ def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90,
                 process = subprocess.Popen(
                     launch_argv, stdout=stdout, stderr=stderr, start_new_session=os.name != "nt",
                 )
+                # start_new_session makes the leader's pid the group id.
+                pgid = process.pid if os.name != "nt" else None
                 try:
                     port, target_url = _discover_page_target(
                         read_port=lambda: _read_debug_port(active_port), fetch_targets=fetch_targets,
@@ -825,8 +859,13 @@ def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90,
                 except ChromeTargetUnavailable as exc:
                     launches.append(f"attempt {attempt}: {exc}")
                     if attempt == 1 and exc.phase == "chrome-not-started" and deadline - time.monotonic() > 1:
-                        cleanup_error = _stop_browser(process)
+                        cleanup_error = _stop_browser(process, pgid=pgid)
                         process = None
+                        for singleton in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
+                            try:
+                                (profile / singleton).unlink()
+                            except FileNotFoundError:
+                                pass
                         continue
                     raise AssertionError(f"{exc} [{'; '.join(launches)}]") from exc
                 break
@@ -865,7 +904,8 @@ def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90,
                 nonlocal command_id
                 command_id += 1
                 return _cdp_command(connection, method, params or {}, command_id,
-                                    deadline if until is None else until, events, cap=command_budget)
+                                    deadline if until is None else until, events, cap=command_budget,
+                                    seen_log=seen_log)
 
             def evaluate(expression: str, *, until: float | None = None):
                 result = command("Runtime.evaluate", {"expression": expression, "returnByValue": True}, until=until)
@@ -888,7 +928,13 @@ def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90,
                 nonlocal dom, action_done
                 dom = evaluate("document.documentElement?.outerHTML ?? ''")
                 if action and not action_done and 'data-ready="1"' in dom:
-                    action_done = evaluate(action) is True
+                    # Once sent, an action whose reply never arrived has an
+                    # unknown outcome: fail (never re-attach and resend or skip it).
+                    # A delivered reply other than true keeps the existing retry.
+                    try:
+                        action_done = evaluate(action) is True
+                    except (TimeoutError, websocket.WebSocketException, ConnectionError) as exc:
+                        raise AssertionError(f"one-time page action got no reply; not re-sent: {exc!r}") from exc
                     if action_done:
                         dom = evaluate("document.documentElement?.outerHTML ?? ''")
                 return {
@@ -912,7 +958,11 @@ def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90,
                 command("Runtime.enable")
                 command("Log.enable")
 
-            _wait_for_dom(read_state, timeout=max(0, deadline - time.monotonic()), load=load, recover=reattach)
+            # Emulation.setDeviceMetricsOverride belongs to the CDP session: a
+            # new socket would relayout the page at Chrome's own width, so a
+            # viewport test never re-attaches after emulation and fails instead.
+            _wait_for_dom(read_state, timeout=max(0, deadline - time.monotonic()), load=load,
+                          recover=None if viewport is not None else reattach)
             if interact is not None:
                 interact(command, evaluate)
                 dom = evaluate("document.documentElement?.outerHTML ?? ''")
@@ -1046,11 +1096,11 @@ def test_dom_wait_failure_reports_budget_elapsed_and_load() -> None:
     assert "budget=1.5s, elapsed=1.5s, load1=7.25" in message
 
 
-def test_dom_wait_reattaches_once_after_a_socket_timeout_and_keeps_the_predicate() -> None:
+def test_dom_wait_reattaches_once_after_a_lost_socket_and_keeps_the_predicate() -> None:
     now = [0.0]
     recoveries: list[float] = []
     observations = iter((
-        websocket.WebSocketTimeoutException("timed out"),
+        websocket.WebSocketConnectionClosedException("socket is already closed."),
         {"matched": False, "ready": None},
         {"matched": True, "ready": "1"},
     ))
@@ -1058,7 +1108,7 @@ def test_dom_wait_reattaches_once_after_a_socket_timeout_and_keeps_the_predicate
     def read_state() -> dict:
         item = next(observations)
         if isinstance(item, Exception):
-            now[0] += 15
+            now[0] += 2
             raise item
         return item
 
@@ -1067,15 +1117,15 @@ def test_dom_wait_reattaches_once_after_a_socket_timeout_and_keeps_the_predicate
 
     state = _wait_for_dom(read_state, timeout=30, clock=lambda: now[0], pause=pause, load=9.0,
                           recover=lambda: recoveries.append(now[0]))
-    assert state == {"matched": True, "ready": "1"} and recoveries == [15]
+    assert state == {"matched": True, "ready": "1"} and recoveries == [2]
 
 
-def test_dom_wait_reports_a_second_socket_timeout_with_the_last_state() -> None:
+def test_dom_wait_reports_a_second_lost_socket_with_the_last_state() -> None:
     now = [0.0]
     observations = iter((
-        TimeoutError("DevTools Runtime.evaluate exceeded its deadline"),
+        ConnectionResetError(54, "Connection reset by peer"),
         {"matched": False, "ready": "1", "loading": True},
-        websocket.WebSocketTimeoutException("timed out"),
+        websocket.WebSocketConnectionClosedException("socket is already closed."),
     ))
 
     def read_state() -> dict:
@@ -1091,18 +1141,178 @@ def test_dom_wait_reports_a_second_socket_timeout_with_the_last_state() -> None:
     with pytest.raises(AssertionError) as caught:
         _wait_for_dom(read_state, timeout=30, clock=lambda: now[0], pause=pause, load=4.5, recover=lambda: None)
     message = str(caught.value)
-    assert message.startswith("Chrome DOM poll timed out: WebSocketTimeoutException('timed out')")
+    assert message.startswith("Chrome DOM poll failed: WebSocketConnectionClosedException('socket is already closed.')")
     assert "last state={'matched': False, 'ready': '1', 'loading': True}" in message
-    assert "recovered=\"TimeoutError('DevTools Runtime.evaluate exceeded its deadline')\"" in message
+    assert "recovered=\"ConnectionResetError(54, 'Connection reset by peer')\"" in message
     assert "budget=30.0s, elapsed=3.2s, load1=4.5" in message
 
 
-def test_dom_wait_without_recovery_fails_on_the_first_socket_timeout() -> None:
-    def read_state() -> dict:
-        raise websocket.WebSocketTimeoutException("timed out")
+@pytest.mark.parametrize("stall", [
+    TimeoutError("DevTools Runtime.evaluate exceeded its deadline"),
+    websocket.WebSocketTimeoutException("timed out"),
+])
+def test_dom_wait_never_recovers_from_a_command_that_ran_past_its_deadline(stall) -> None:
+    recoveries: list[int] = []
 
-    with pytest.raises(AssertionError, match=r"poll timed out: .*last state=\{'observed': False\}; recovered=None"):
+    def read_state() -> dict:
+        raise stall
+
+    with pytest.raises(AssertionError, match=r"poll failed: .*last state=\{'observed': False\}; recovered=None"):
+        _wait_for_dom(read_state, timeout=5, clock=lambda: 0.0, pause=lambda seconds: None,
+                      recover=lambda: recoveries.append(1))
+    assert recoveries == []
+
+
+def test_dom_wait_without_recovery_fails_on_the_first_lost_socket() -> None:
+    def read_state() -> dict:
+        raise websocket.WebSocketConnectionClosedException("socket is already closed.")
+
+    with pytest.raises(AssertionError, match=r"poll failed: .*last state=\{'observed': False\}; recovered=None"):
         _wait_for_dom(read_state, timeout=5, clock=lambda: 0.0, pause=lambda seconds: None)
+
+
+def test_cdp_command_records_a_replayed_log_entry_once() -> None:
+    entry = {"source": "javascript", "level": "error", "text": "synthetic", "timestamp": 1.0}
+    replies = iter((
+        {"method": "Log.entryAdded", "params": {"entry": entry}},
+        {"id": 1, "result": {}},
+        {"method": "Log.entryAdded", "params": {"entry": entry}},
+        {"method": "Log.entryAdded", "params": {"entry": {**entry, "timestamp": 2.0}}},
+        {"id": 2, "result": {}},
+    ))
+
+    class ReplayingConnection:
+        def settimeout(self, seconds: float) -> None:
+            pass
+
+        def send(self, payload: str) -> None:
+            pass
+
+        def recv(self) -> str:
+            return json.dumps(next(replies))
+
+    events: deque[str] = deque(maxlen=8)
+    seen: set[str] = set()
+    _cdp_command(ReplayingConnection(), "Log.enable", {}, 1, 90, events, clock=lambda: 0.0, seen_log=seen)
+    _cdp_command(ReplayingConnection(), "Log.enable", {}, 2, 90, events, clock=lambda: 0.0, seen_log=seen)
+    assert [json.loads(event)["params"]["entry"]["timestamp"] for event in events] == [1.0, 2.0]
+
+
+class _ScriptedDevTools:
+    """A fake Chrome session: one alive browser, sockets whose replies a script decides."""
+
+    def __init__(self, monkeypatch, script) -> None:
+        self.sockets: list[str] = []
+        self.sent: list[tuple[int, str, dict]] = []
+        self.signalled: list[int] = []
+        browser = SimpleNamespace(pid=4242, poll=lambda: None, wait=lambda timeout: 0, kill=lambda: None)
+        outer = self
+
+        class Connection:
+            def __init__(self) -> None:
+                self.index = len(outer.sockets)
+                self.queue: list[str] = []
+
+            def settimeout(self, seconds: float) -> None:
+                pass
+
+            def send(self, payload: str) -> None:
+                message = json.loads(payload)
+                outer.sent.append((self.index, message["method"], message["params"]))
+                result = script(self.index, message["method"], message["params"])
+                self.queue.append("RAISE" if result == "RAISE" else json.dumps({"id": message["id"], "result": result}))
+
+            def recv(self) -> str:
+                reply = self.queue.pop(0)
+                if reply.startswith("RAISE"):
+                    raise outer.errors.pop(0)
+                return reply
+
+            def close(self) -> None:
+                pass
+
+        self.errors: list[Exception] = []
+
+        def connect(url, **kwargs):
+            outer.sockets.append(url)
+            return Connection()
+
+        module = sys.modules[__name__]
+        monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: browser)
+        monkeypatch.setattr(module, "_discover_page_target",
+                            lambda **kwargs: ("4321", "ws://127.0.0.1:4321/devtools/page/A"))
+        monkeypatch.setattr(socket, "create_connection", lambda *args, **kwargs: SimpleNamespace(close=lambda: None))
+        monkeypatch.setattr(websocket, "create_connection", connect)
+        monkeypatch.setattr(os, "killpg", lambda pgid, sig: self.signalled.append(pgid))
+
+
+def _drop_first_dom_poll(fake: _ScriptedDevTools, *, width: int | None = None):
+    polls = [0]
+
+    def script(index: int, method: str, params: dict):
+        if method != "Runtime.evaluate":
+            return {}
+        expression = params["expression"]
+        if expression == "window.innerWidth":
+            return {"result": {"value": width}}
+        if expression.startswith("document.documentElement"):
+            polls[0] += 1
+            if polls[0] == 1:
+                fake.errors.append(websocket.WebSocketConnectionClosedException("socket is already closed."))
+                return "RAISE"
+            return {"result": {"value": '<html><body data-ready="1">synthetic-ok</body></html>'}}
+        return {"result": {"value": True}}
+
+    return script
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group cleanup")
+def test_cdp_reattaches_once_to_the_same_page_without_emulation(tmp_path, monkeypatch) -> None:
+    holder: dict = {}
+    fake = _ScriptedDevTools(monkeypatch, lambda *args: holder["script"](*args))
+    holder["script"] = _drop_first_dom_poll(fake)
+    dom = _dom_cdp(["chrome", "http://127.0.0.1:8/x"], tmp_path / "profile",
+                   ok=lambda dom: "synthetic-ok" in dom, timeout=5)
+    assert "synthetic-ok" in dom
+    assert fake.sockets == ["ws://127.0.0.1:4321/devtools/page/A"] * 2
+    assert [method for index, method, _ in fake.sent if index == 1][:2] == ["Runtime.enable", "Log.enable"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group cleanup")
+def test_cdp_never_reattaches_after_viewport_emulation(tmp_path, monkeypatch) -> None:
+    holder: dict = {}
+    fake = _ScriptedDevTools(monkeypatch, lambda *args: holder["script"](*args))
+    holder["script"] = _drop_first_dom_poll(fake, width=360)
+    with pytest.raises(AssertionError) as caught:
+        _dom_cdp(["chrome", "http://127.0.0.1:8/x"], tmp_path / "profile",
+                 ok=lambda dom: "synthetic-ok" in dom, timeout=5, viewport=(360, 740))
+    message = str(caught.value)
+    assert "Chrome DOM poll failed: WebSocketConnectionClosedException" in message and "recovered=None" in message
+    assert "budget=" in message and "load1=" in message
+    assert fake.sockets == ["ws://127.0.0.1:4321/devtools/page/A"]
+    assert [method for _, method, _ in fake.sent].count("Emulation.setDeviceMetricsOverride") == 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group cleanup")
+def test_cdp_one_time_action_without_a_reply_fails_and_is_never_resent(tmp_path, monkeypatch) -> None:
+    holder: dict = {}
+    fake = _ScriptedDevTools(monkeypatch, lambda *args: holder["script"](*args))
+    action = "(() => { synthetic_click(); return true; })()"
+
+    def script(index: int, method: str, params: dict):
+        if method != "Runtime.evaluate":
+            return {}
+        if params["expression"] == action:
+            fake.errors.append(websocket.WebSocketConnectionClosedException("socket is already closed."))
+            return "RAISE"
+        return {"result": {"value": '<html><body data-ready="1">waiting</body></html>'}}
+
+    holder["script"] = script
+    with pytest.raises(AssertionError, match="one-time page action got no reply; not re-sent"):
+        _dom_cdp(["chrome", "http://127.0.0.1:8/x"], tmp_path / "profile",
+                 ok=lambda dom: "never" in dom, timeout=5, action=action)
+    assert [params.get("expression") for _, _, params in fake.sent].count(action) == 1
+    assert len(fake.sockets) == 1
 
 
 def test_cdp_command_cap_is_the_scaled_budget_not_a_fixed_fifteen_seconds() -> None:
@@ -1197,7 +1407,7 @@ def test_target_discovery_returns_our_page_once_it_appears() -> None:
         [{"type": "page", "url": "http://127.0.0.1:8/x", "webSocketDebuggerUrl": "ws://127.0.0.1:4321/devtools/page/A"}],
     ))
     assert _discover(clock, fetch_targets=lambda port: next(listings)) == ("4321", "ws://127.0.0.1:4321/devtools/page/A")
-    assert clock.pauses == pytest.approx([0.05, 0.075])
+    assert len(clock.pauses) == 2 and all(0 < seconds <= 0.5 for seconds in clock.pauses)
 
 
 def test_page_attach_retries_once_after_a_transient_socket_failure() -> None:
@@ -1234,6 +1444,8 @@ def test_cdp_relaunches_once_when_chrome_never_brings_devtools_up(tmp_path, monk
         def __init__(self, argv) -> None:
             launched.append(argv)
             assert not (profile / "DevToolsActivePort").exists(), "stale DevToolsActivePort survived into a launch"
+            if len(launched) == 2:
+                assert not os.path.lexists(profile / "SingletonLock"), "relaunch shares the first launch's profile lock"
 
         def poll(self) -> int:
             return 1
@@ -1241,12 +1453,18 @@ def test_cdp_relaunches_once_when_chrome_never_brings_devtools_up(tmp_path, monk
         def wait(self, timeout: float) -> int:
             return 1
 
+    signalled: list[int] = []
     monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: ExitedBrowser(argv))
-    monkeypatch.setattr(os, "killpg", lambda *args: pytest.fail("reaped browser PID was signalled"))
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: signalled.append(pgid))
+    (profile / "SingletonLock").symlink_to("synthetic-host-1234")
     with pytest.raises(AssertionError) as caught:
         _dom_cdp(["chrome", "http://127.0.0.1:8/x"], profile, ok=lambda dom: True, timeout=5)
     message = str(caught.value)
     assert len(launched) == 2 and launched[0] == launched[1]
+    # The first launch's group (recorded at launch) is killed although its
+    # leader exited; the final cleanup still never signals a reaped leader.
+    assert signalled == [1234]
+    assert not os.path.lexists(profile / "SingletonLock")
     assert launched[0][:2] == ["chrome", f"--user-data-dir={profile}"] and launched[0][-1] == "http://127.0.0.1:8/x"
     assert "--remote-debugging-port=0" in launched[0] and not any(flag.startswith("--remote-debugging-port=") and flag != "--remote-debugging-port=0" for flag in launched[0])
     assert "attempt 1: Chrome did not expose its Lab page through DevTools: phase=chrome-not-started" in message
