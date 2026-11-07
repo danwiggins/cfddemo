@@ -114,6 +114,40 @@ Web service and Lab tests are included. The local web service's single-instance
 lock is per state directory (golden-path item A3), so parallel workers on
 distinct temporary roots do not collide.
 
+### Reproducing an Ubuntu-only failure
+
+When a pull request fails only in `ci (ubuntu-latest)` (typically headless
+Chrome font and layout metrics, or Linux-only tool behaviour), reproduce it on
+a Mac in a Linux container built from `scripts/ci/ubuntu-container/Dockerfile`
+(Ubuntu 24.04, Google Chrome stable, the same pinned `samtools` 1.21 and
+`minimap2` 2.28 releases, uv 0.11.10 with Python 3.11). Docker must be
+installed and running. From the checkout to test:
+
+```sh
+scripts/ci/ubuntu-container/run.sh tests/lab/test_landing.py::test_landing_pixel_budget_at_1280x800 -n 0
+```
+
+The script builds the `traceback-ci-ubuntu` image when it is missing
+(`--rebuild` forces a rebuild after a Dockerfile change), mounts the checkout
+read-write at `/work`, runs `uv sync --frozen` into a throwaway environment
+(`UV_PROJECT_ENVIRONMENT=/tmp/venv`, `UV_CACHE_DIR=/tmp/uvcache`, so the host
+`.venv` is never touched), points `CHROME_BIN` at a wrapper that runs Chrome
+with `--no-sandbox --disable-gpu --disable-dev-shm-usage`, and passes the
+pytest exit code through. Without arguments it runs
+`-q -p no:cacheprovider -n 0 --timeout 600 -m "not slow"`; `--shell` opens
+bash in the synced container instead.
+`tests/test_ci_ubuntu_container_pins.py` fails when the Dockerfile and
+`ci.yml` tool pins drift.
+
+What differs from hosted CI: the image is forced to `linux/amd64`, so on
+Apple silicon it runs under emulation and is several times slower; use `-n 0`
+for browser tests so emulated Chrome instances do not compete for CPU inside
+the harness timeouts. The Chrome build is whatever Google ships as current
+stable, not the copy on the hosted runner image, and the container runs as
+root. A green run here is never a substitute for the hosted
+`ci (ubuntu-latest)` job; it is a reproduction aid, and the required check
+remains the gate.
+
 `.github/workflows/slow.yml` runs `uv sync --frozen` followed by
 `uv run pytest -p no:cacheprovider --timeout 600 -m slow --durations=10`
 nightly, on demand, and on

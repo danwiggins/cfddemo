@@ -294,6 +294,10 @@ PROBLEM_TABLE: dict[str, ProblemText] = {
         "The local web service stopped itself after a security check failed",
         "Restart traceback serve --root ROOT",
     ),
+    "TBX-SERVE-005": ProblemText(
+        "The requested loopback port (--port N) could not be bound",
+        "Pass a different --port, stop the process using it, or omit --port",
+    ),
     # Browser sessions (local web service)
     "TBX-AUTH-001": ProblemText(
         "The browser session expired, was idle too long, or was logged out",

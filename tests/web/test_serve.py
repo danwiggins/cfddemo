@@ -8,12 +8,14 @@ generated, unqualified, local and not for clinical use.
 from __future__ import annotations
 
 import argparse
+import http.client
 import io
 import json
 import os
 import queue
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -78,7 +80,9 @@ def world(base, tmp_path: Path):
 
 
 @contextmanager
-def _serving(root: Path) -> Iterator[tuple[RunningLocalWebService, io.StringIO]]:
+def _serving(
+    root: Path, *, port: int = 0, ipv6: bool = False
+) -> Iterator[tuple[RunningLocalWebService, io.StringIO]]:
     """Run ``cli._serve`` in a thread with closed (non-TTY) stdin."""
 
     stop = threading.Event()
@@ -89,7 +93,7 @@ def _serving(root: Path) -> Iterator[tuple[RunningLocalWebService, io.StringIO]]
     def target() -> None:
         try:
             result["code"] = cli._serve(
-                argparse.Namespace(root=root, ipv6=False),
+                argparse.Namespace(root=root, ipv6=ipv6, port=port),
                 out=out,
                 stdin=io.StringIO(""),
                 stop=stop,
@@ -287,3 +291,142 @@ def test_background_serve_ignores_closed_stdin_and_stops_on_sigterm(world) -> No
     assert process.returncode == 0, errors
     assert rest.rstrip().endswith("Stopped; the web lock for ROOT is released.")
     assert errors == ""
+
+
+# --- ``serve --port N``: a fixed loopback port, refused when unbindable ------
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+@pytest.fixture
+def busy_port() -> Iterator[int]:
+    """A loopback port another socket is already listening on."""
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as holder:
+        holder.bind(("127.0.0.1", 0))
+        holder.listen(1)
+        yield holder.getsockname()[1]
+
+
+def _status_with_host(service: RunningLocalWebService, host: str) -> int:
+    config = service.config
+    connection = http.client.HTTPConnection(config.bind_host, config.port, timeout=3)
+    try:
+        connection.putrequest("GET", "/", skip_host=True)
+        connection.putheader("Host", host)
+        connection.endheaders()
+        return connection.getresponse().status
+    finally:
+        connection.close()
+
+
+def test_port_parses_in_range_and_defaults_to_ephemeral() -> None:
+    parser = cli._parser()
+    assert parser.parse_args(["serve"]).port == 0
+    assert parser.parse_args(["serve", "--port", "8765"]).port == 8765
+    assert cli._port_argument("1024") == 1024 and cli._port_argument("65535") == 65535
+
+
+def test_fixed_port_is_used_in_the_link(world) -> None:
+    root, result_id, _ = world
+    port = _free_port()
+    with _serving(root, port=port) as (service, out):
+        assert service.config.port == port
+        assert service.config.bind_host == "127.0.0.1"
+        assert out.getvalue().splitlines()[0].startswith(f"http://127.0.0.1:{port}/#bootstrap=")
+        cookie, _ = _exchange(service)
+        status, page = _get(service, "/api/v1/explorer/catalog?limit=10", cookie)
+        assert status == 200
+        assert result_id in {item["ref"]["result_id"] for item in page["results"]}
+
+
+def test_default_stays_ephemeral(world) -> None:
+    root, _, _ = world
+    with _serving(root) as (service, out):
+        assert service.config.port != 0
+        first = out.getvalue().splitlines()[0]
+        assert first.startswith(f"http://127.0.0.1:{service.config.port}/#bootstrap=")
+
+
+def test_busy_port_is_refused_with_tbx_serve_005(world, busy_port: int) -> None:
+    root, _, _ = world
+    code, text = _main_text("serve", "--root", root, "--port", busy_port)
+    lines = text.splitlines()
+    assert code == cli.ExitCode.BLOCKED
+    assert "#bootstrap=" not in text and "Serving" not in text
+    assert lines[0].startswith("BLOCKED  The requested loopback port could not be bound")
+    assert "CODE  TBX-SERVE-005" in lines
+    assert any(line.startswith("CAUSE  ") and f"port {busy_port} " in line for line in lines)
+    assert any(line.startswith("FIX  ") and "--port" in line for line in lines)
+    assert "RETRYABLE  True" in lines
+    assert "DOCS  docs/OPERATOR-GUIDE.md#tbx-serve-005" in lines
+    assert f"PORT  {busy_port}" in lines and "ERRNO  EADDRINUSE" in lines
+    # The resolved ROOT is the one path signed human output prints (ROOT line,
+    # see OPERATOR-GUIDE § ROOT); the problem block itself stays path-free.
+    assert f"ROOT  {root}" in lines
+    assert str(root.parent) not in "\n".join(line for line in lines if not line.startswith("ROOT  "))
+    # The web lock was released: the same ROOT serves on a free port afterwards.
+    port = _free_port()
+    with _serving(root, port=port) as (service, _):
+        assert service.config.port == port
+
+
+def test_busy_port_problem_envelope_carries_port_and_errno(busy_port: int) -> None:
+    """The ``_problem`` envelope (the --json shape of every other command)."""
+
+    from traceback_runner.web.server import LocalListenerUnavailable
+
+    problem = cli._serve_start_problem(LocalListenerUnavailable(busy_port, "EADDRINUSE"))
+    payload = cli._local_envelope(cli._problem("serve", problem))
+    assert payload["status"] == "blocked" and payload["data_origin"] == "local_unqualified"
+    data = payload["data"]
+    assert data["code"] == "TBX-SERVE-005"
+    assert data["port"] == busy_port and data["errno"] == "EADDRINUSE"
+    assert data["retryable"] is True
+    assert data["docs"] == "docs/OPERATOR-GUIDE.md#tbx-serve-005"
+    # An ephemeral listener failure keeps its existing code.
+    ephemeral = cli._serve_start_problem(LocalListenerUnavailable(0, "EADDRNOTAVAIL"))
+    assert ephemeral.code == "TBX-SERVE-003" and ephemeral.data == {}
+    assert ephemeral.cause == "literal loopback listener is unavailable"
+
+
+@pytest.mark.parametrize("value", ["80", "0", "65536", "-1", "abc", "8080.5", "1023"])
+def test_out_of_range_or_non_integer_port_is_a_usage_error(tmp_path: Path, capsys, value) -> None:
+    with pytest.raises(SystemExit) as exit_info:
+        cli.main(["serve", "--root", str(tmp_path / "nothing"), "--port", value])
+    captured = capsys.readouterr()
+    assert exit_info.value.code == 2
+    assert captured.out == ""
+    assert "argument --port" in captured.err and "1024-65535" in captured.err
+    assert not (tmp_path / "nothing").exists()
+
+
+def test_fixed_port_binds_loopback_only_and_refuses_a_foreign_host(world) -> None:
+    root, _, _ = world
+    port = _free_port()
+    with _serving(root, port=port) as (service, _):
+        runtime = server_module._RUNTIMES[service._runtime_id]
+        assert runtime.server.socket.getsockname() == ("127.0.0.1", port)
+        assert _request(service, "GET", "/")[0] == 200
+        for host in ("evil.example:80", f"evil.example:{port}", f"localhost:{port}", "127.0.0.1"):
+            assert _status_with_host(service, host) == 403, host
+        forwarded = _request(service, "GET", "/api/v1/jobs", headers={"X-Forwarded-For": "10.0.0.1"})
+        assert forwarded[0] in (401, 403)
+
+
+def test_fixed_port_with_ipv6_binds_only_the_ipv6_loopback(world) -> None:
+    root, _, _ = world
+    with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as probe:
+        try:
+            probe.bind(("::1", 0))
+        except OSError:
+            pytest.skip("IPv6 loopback is unavailable on this host")
+        port = probe.getsockname()[1]
+    with _serving(root, port=port, ipv6=True) as (service, out):
+        assert service.config.bind_host == "::1" and service.config.port == port
+        assert out.getvalue().splitlines()[0].startswith(f"http://[::1]:{port}/#bootstrap=")
+        assert _status_with_host(service, f"127.0.0.1:{port}") == 403
