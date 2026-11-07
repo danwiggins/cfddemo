@@ -1022,11 +1022,15 @@ the scroll controls are hidden.
   versions. They come from the BAM header provenance recorded in the input
   manifest at ingest (`@RG PM`, `@RG DS` `basecall_model` and
   `modbase_models`, `@PG` program name and version), never from re-reading the
-  BAM when the page loads, and they are not part of the input ID. Only an
-  allowlisted ONT device model (MinION, GridION, PromethION, P2 Solo, Flongle
-  and their listed variants), a dorado model name (`dna…@vN`, with a fixed
-  modified-base suffix vocabulary) of at most 64 characters, or a program
-  version is kept: read-group IDs, flow-cell serials (`PU`), device serials,
+  BAM when the page loads, and they are not part of the input ID. Instrument
+  is the device type inferred from the position/serial prefix in `@RG PM`
+  (`MN` + five digits is a MinION, `P2S_…-A/B` a P2 Solo, `X1`–`X5` a GridION
+  position) or an allowlisted device model name; the serial and its digits are
+  never stored, and any other PM (including PromethION position labels) reads
+  "not recorded". Otherwise only a dorado model name (`dna…@vN`, with a fixed
+  modified-base suffix vocabulary; MinKNOW's `modbase_model_version_id`
+  placeholder is not a model) of at most 64 characters, or a program version,
+  is kept: read-group IDs, flow-cell serials (`PU`), device serials,
   sample and library names (`SM`, `LB`), run IDs, dates and `@PG` command lines
   are not stored or shown. Only included chunks count (a chunk skipped with
   `--skip-bad-chunks` does not). When chunks or read groups disagree, the

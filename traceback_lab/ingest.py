@@ -230,7 +230,7 @@ def _rg_model(line: str) -> str | None:
 # least one chunk/read group did not record that field. Flow-cell product code
 # and library kit are not in an ONT BAM header (they are in the MinKNOW report).
 _MAX_DS_VALUE = 64
-# ONT device models as an @RG PM value; device and flow-cell serials never match.
+# ONT device model names, for a header whose @RG PM carries a name rather than a position.
 _INSTRUMENTS = frozenset({
     "MinION", "MinION Mk1B", "MinION Mk1C", "MinION Mk1D", "GridION", "GridION Mk1",
     "PromethION", "PromethION 2", "PromethION 2 Solo", "PromethION 24", "PromethION 48",
@@ -252,8 +252,28 @@ def _shaped(pattern: re.Pattern[str], value: Any, limit: int = _MAX_DS_VALUE) ->
     return value if isinstance(value, str) and len(value) <= limit and pattern.fullmatch(value) else None
 
 
+# dorado writes the flow-cell position as @RG PM (dorado hts_utils/fastq_tags.cpp:
+# "PM:Z:MN12345" is the device_id). minknow_api manager.proto (FlowCellPosition.name,
+# AddSimulatedDeviceRequest.name; nanoporetech/minknow_api@fa567fbd): "For MinIONs, this
+# is the name of the MinION (eg: MN12345). For integrated positions, this is the label for
+# the position on the sequencer (eg: X1 for GridION ...)"; real P2 Solo positions are
+# "P2S_" + five digits + "-A"/"-B" ("P2S" + four digits up to MinKNOW Core 5.5).
+# Only the device type is kept: the serial and its digits never leave this function.
+# GridION/PromethION machine serials (GXB..., PCA...) are not PM values, and
+# PromethION position labels ("1-A1-D1") are too generic to map, so neither is listed.
+_POSITION_DEVICE_TYPES = (
+    (re.compile(r"MN[0-9]{5}"), "MinION"),
+    (re.compile(r"P2S(?:[_-][0-9]{5}-[AB]|[0-9]{4})"), "P2 Solo"),
+    (re.compile(r"X[1-5]"), "GridION"),
+)
+
+
 def _instrument(value: Any) -> str | None:
-    return value if isinstance(value, str) and value in _INSTRUMENTS else None
+    if not isinstance(value, str) or len(value) > _MAX_DS_VALUE:
+        return None
+    if value in _INSTRUMENTS:
+        return value
+    return next((device for pattern, device in _POSITION_DEVICE_TYPES if pattern.fullmatch(value)), None)
 
 
 def _modbase_set(value: Any) -> str | None:
@@ -288,7 +308,7 @@ def header_provenance(header_text: str) -> dict[str, Any]:
     """Kit provenance one BAM header declares: ``@RG`` PM and DS models, ``@PG`` PN/VN.
 
     Identifiers never enter the result: read-group ID, PU (flow-cell serial),
-    a PM that is not a known device model, SM/LB (sample/library names), DT,
+    the PM serial itself (only its device type), SM/LB (sample/library names), DT,
     ``runid`` and ``@PG CL`` are skipped. Each field is the full list of
     distinct shaped values over the header's read groups, with ``None`` for a
     read group (or a header) that recorded none; capping happens in
