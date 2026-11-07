@@ -45,3 +45,22 @@ def shared_mmi(tmp_path_factory: pytest.TempPathFactory, synthetic_world: dict[s
         capture_output=True,
     )
     return path
+
+
+def restore_mtime_past_ctime(path, old, *, attempts: int = 400) -> None:
+    """Restore atime/mtime from ``old`` until the file's ctime differs from ``old``'s.
+
+    Linux before 6.13 stamps ctime from a coarse clock (one tick, about 4 ms), so
+    an in-place rewrite that lands in the same tick as the previous change keeps
+    the old ctime; APFS stamps nanoseconds. Tests that rely on ctime moving must
+    not assume a single rewrite crossed a tick.
+    """
+    import os
+    import time
+
+    for _ in range(attempts):
+        os.utime(path, ns=(old.st_atime_ns, old.st_mtime_ns))
+        if os.stat(path).st_ctime_ns != old.st_ctime_ns:
+            return
+        time.sleep(0.005)
+    raise AssertionError("ctime did not advance after an in-place rewrite")

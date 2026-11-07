@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -17,7 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from traceback_lab import ingest, memory_cap, pipeline, registry
+from traceback_lab import ingest, memory_cap, registry
 from traceback_lab.memory_cap import (
     ABSOLUTE_CEILING_BYTES,
     DEFAULT_MEMORY_CAP_BYTES,
@@ -35,16 +36,18 @@ from traceback_lab.memory_cap import (
     looks_like_allocation_failure,
     parse_memory_cap,
     pin_blas_threads,
+    pipeline_options,
     rebuild_history,
     save_history,
     select_memory_limit,
+    start_failure,
     update_history,
 )
-from traceback_lab.pipeline import Stage, run_pipeline
 from traceback_lab.runner import StepResult
 from traceback_lab.scrub import Scrubber
 from traceback_lab.store import LabStore
 from traceback_runner import cli as signed_cli
+from traceback_runner.contained_process import Stage, run_contained_pipeline as run_pipeline
 
 from .test_lab_run import _json, _lab, _registry
 
@@ -400,48 +403,100 @@ HOG = (
 
 def test_rss_sampler_stops_a_worker_past_the_cap(monkeypatch) -> None:
     # Without the rlimit (macOS, or a platform without one) only the sampler stands.
-    monkeypatch.setattr(pipeline, "select_memory_limit", lambda: None)
-    result = run_pipeline([Stage("hog", [PY, "-c", HOG])], timeout_s=30, memory_cap_bytes=64 * MIB)
-    assert result.memory_exceeded and not result.ok and not result.timed_out
-    assert result.memory_limit is None and result.duration_s < 10
+    monkeypatch.setattr(memory_cap, "select_memory_limit", lambda: None)
+    options = pipeline_options(64 * MIB)
+    assert set(options) == {"on_tree_rss_sample"}
+    result = run_pipeline([Stage("hog", [PY, "-c", HOG])], timeout_s=30, **options)
+    assert result.aborted and not result.ok and not result.timed_out
+    assert result.duration_s < 10
     assert result.sampled_tree_peak_rss_bytes is not None and result.sampled_tree_peak_rss_bytes > 64 * MIB
     assert result.stages[0].returncode in (-15, -9)
-    assert result.first_line(Scrubber()) == "memory cap exceeded"
 
 
 def test_the_cap_stops_a_hog_one_way_or_the_other() -> None:
-    result = run_pipeline([Stage("hog", [PY, "-c", HOG])], timeout_s=30, memory_cap_bytes=64 * MIB)
+    options = pipeline_options(64 * MIB)
+    assert ("preexec_fn" in options) == (sys.platform != "darwin")
+    result = run_pipeline([Stage("hog", [PY, "-c", HOG])], timeout_s=30, **options)
     assert not result.ok and not result.timed_out and result.duration_s < 10
     tail = result.stages[0].stderr.scrubbed(Scrubber())
-    assert result.memory_exceeded or looks_like_allocation_failure(result.stages[0].returncode, tail)
-    assert (result.memory_limit is None) == (sys.platform == "darwin")
+    assert result.aborted or looks_like_allocation_failure(result.stages[0].returncode, tail)
 
 
 def test_a_worker_under_its_cap_is_unaffected() -> None:
-    result = run_pipeline([Stage("ok", [PY, "-c", "print('done')"])], timeout_s=30, memory_cap_bytes=4 * GIB)
-    assert result.ok and not result.memory_exceeded
+    result = run_pipeline([Stage("ok", [PY, "-c", "print('done')"])], timeout_s=30, **pipeline_options(4 * GIB))
+    assert result.ok and not result.aborted
+    assert pipeline_options(None) == {}
 
 
-def test_an_over_cap_sample_after_the_worker_exited_is_not_a_memory_kill(monkeypatch) -> None:
-    """The sampler can report a reading just as the group finishes: its own exit stands."""
+def _exited_unreaped(pid: int) -> bool:
+    """True once ``pid`` has exited but is still an unreaped zombie of this process."""
 
-    monkeypatch.setattr(pipeline, "RSS_SAMPLE_S", 0.0)
-    seen: list[float] = []
+    if hasattr(os, "waitid"):  # Linux: peek at the exit without reaping it
+        return os.waitid(os.P_PID, pid, os.WEXITED | os.WNOWAIT | os.WNOHANG) is not None
+    # macOS has no waitid; ps reports a zombie as state Z until it is reaped.
+    state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True).stdout
+    return state.strip().startswith("Z")
 
-    def huge(root_pid: int) -> int:
-        seen.append(time.monotonic())
-        return 100 * GIB
 
-    monkeypatch.setattr(pipeline, "_process_tree_rss_bytes", huge)
-    result = run_pipeline([Stage("quick", [PY, "-c", "print('done')"])], timeout_s=30, memory_cap_bytes=GIB)
-    assert result.ok and not result.memory_exceeded and result.stages[0].returncode == 0
-    failing = run_pipeline([Stage("quick", [PY, "-c", "raise SystemExit(3)"])], timeout_s=30, memory_cap_bytes=GIB)
-    assert not failing.ok and not failing.memory_exceeded and failing.stages[0].returncode == 3
+def _late_sample_run(monkeypatch, code: str):
+    """Run one worker whose over-cap sample arrives after it exited, before it is reaped.
+
+    Non-blocking reaps are held back until the over-cap sample has asked for a
+    stop, and the sampler only reports once the worker is an unreaped zombie,
+    so the stop decision always sees a group that has exited but whose exit
+    the loop has not yet collected. Only a re-reap before that decision can
+    tell the exit apart from a live group.
+    """
+
+    import traceback_runner.contained_process as contained
+
+    monkeypatch.setattr(contained, "RSS_SAMPLE_S", 0.0)
+    stop_requested: list[int] = []
+    real_reap = contained._reap
+
+    def reap(process, outcome, *, block: bool) -> bool:
+        if not block and not stop_requested:
+            return False
+        return real_reap(process, outcome, block=block)
+
+    monkeypatch.setattr(contained, "_reap", reap)
+
+    def sampler(leader_pid: int) -> int | None:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            if _exited_unreaped(leader_pid):
+                return 100 * GIB
+            time.sleep(0.005)
+        return None
+
+    options = pipeline_options(GIB)
+    over_cap = options["on_tree_rss_sample"]
+
+    def on_sample(rss: int) -> bool:
+        stop = over_cap(rss)
+        if stop:
+            stop_requested.append(rss)
+        return stop
+
+    options["on_tree_rss_sample"] = on_sample
+    result = run_pipeline([Stage("quick", [PY, "-c", code])], timeout_s=30, tree_rss_sampler=sampler, **options)
+    return result, stop_requested
+
+
+def test_an_over_cap_sample_after_the_worker_exited_is_not_a_memory_kill(tmp_path: Path, monkeypatch) -> None:
+    """A late sample must never turn a finished group's own exit into our kill."""
+
+    result, stopped = _late_sample_run(monkeypatch, "print('done')")
+    assert stopped == [100 * GIB]
+    assert result.ok and not result.aborted and result.stages[0].returncode == 0
+    failing, stopped = _late_sample_run(monkeypatch, "raise SystemExit(3)")
+    assert stopped == [100 * GIB]
+    assert not failing.ok and not failing.aborted and failing.stages[0].returncode == 3
+    monkeypatch.undo()
     # A group that is still alive when the over-cap sample lands is ours to kill.
     alive = run_pipeline([Stage("sleep", [PY, "-c", "import time; time.sleep(20)"])], timeout_s=30,
-                         memory_cap_bytes=GIB)
-    assert alive.memory_exceeded and alive.stages[0].returncode in (-15, -9) and alive.duration_s < 10
-    assert seen
+                         tree_rss_sampler=lambda pid: 100 * GIB, **pipeline_options(GIB))
+    assert alive.aborted and alive.stages[0].returncode in (-15, -9) and alive.duration_s < 10
 
 
 def test_rlimit_is_set_before_exec_only_where_the_kernel_enforces_it(tmp_path: Path) -> None:
@@ -452,24 +507,24 @@ def test_rlimit_is_set_before_exec_only_where_the_kernel_enforces_it(tmp_path: P
         f" 'inf': resource.RLIM_INFINITY}}, open({str(probe)!r}, 'w'))\n"
     )
     rlimit = CAP_BYTES + 576 * MIB
-    result = run_pipeline([Stage("probe", [PY, "-c", script])], timeout_s=30, memory_cap_bytes=CAP_BYTES,
-                          memory_rlimit_bytes=rlimit)
+    options = pipeline_options(CAP_BYTES, rlimit)
+    result = run_pipeline([Stage("probe", [PY, "-c", script])], timeout_s=30, **options)
     assert result.ok
     seen = json.loads(probe.read_text())
     if sys.platform == "darwin":
-        assert result.memory_limit is None
+        assert "preexec_fn" not in options
         # RLIM_INFINITY: macOS refuses lower values and does not enforce them.
         assert seen["as"][0] == seen["inf"] and seen["data"][0] == seen["inf"]
     else:
-        assert result.memory_limit == "RLIMIT_AS"
+        assert "preexec_fn" in options
         assert seen["as"] == [rlimit, rlimit]  # the headroom value, not the cap
 
 
 @pytest.mark.skipif(sys.platform == "darwin", reason="macOS does not enforce address-space limits")
 def test_rlimit_refuses_the_allocation_on_linux() -> None:
     script = "block = bytearray(1536 << 20)\nprint('allocated')\n"
-    result = run_pipeline([Stage("hog", [PY, "-c", script])], timeout_s=30, memory_cap_bytes=CAP_BYTES,
-                          memory_rlimit_bytes=CAP_BYTES + 576 * MIB)
+    result = run_pipeline([Stage("hog", [PY, "-c", script])], timeout_s=30,
+                          **pipeline_options(CAP_BYTES, CAP_BYTES + 576 * MIB))
     assert not result.ok
     tail = result.stages[0].stderr.scrubbed(Scrubber())
     assert looks_like_allocation_failure(result.stages[0].returncode, tail)
@@ -477,26 +532,32 @@ def test_rlimit_refuses_the_allocation_on_linux() -> None:
 
 def test_memory_cap_arguments_are_validated() -> None:
     with pytest.raises(ValueError):
-        run_pipeline([Stage("ok", [PY, "-c", "pass"])], timeout_s=30, memory_cap_bytes=0)
+        pipeline_options(0)
     with pytest.raises(ValueError):
-        run_pipeline([Stage("ok", [PY, "-c", "pass"])], timeout_s=30, memory_rlimit_bytes=GIB)
+        pipeline_options(None, GIB)
     with pytest.raises(ValueError):
-        run_pipeline([Stage("ok", [PY, "-c", "pass"])], timeout_s=30, memory_cap_bytes=GIB, memory_rlimit_bytes=GIB - 1)
+        pipeline_options(GIB, GIB - 1)
 
 
 def _failing_preexec(monkeypatch) -> None:
-    monkeypatch.setattr(pipeline, "select_memory_limit", lambda: "RLIMIT_AS")
+    monkeypatch.setattr(memory_cap, "select_memory_limit", lambda: "RLIMIT_AS")
 
     def refuse(cap_bytes: int, limit_name: str | None) -> str | None:
         raise RuntimeError("synthetic preexec failure")
 
-    monkeypatch.setattr(pipeline, "apply_memory_limit", refuse)
+    monkeypatch.setattr(memory_cap, "apply_memory_limit", refuse)
 
 
-def test_a_child_that_cannot_start_under_the_cap_raises_memory_cap_error(monkeypatch) -> None:
+def test_a_child_that_cannot_start_under_the_cap_is_a_memory_cap_error(monkeypatch) -> None:
     _failing_preexec(monkeypatch)
-    with pytest.raises(MemoryCapError, match="could not start under the memory cap"):
-        run_pipeline([Stage("ok", [PY, "-c", "pass"])], timeout_s=30, memory_cap_bytes=GIB)
+    options = pipeline_options(GIB)
+    assert "preexec_fn" in options
+    with pytest.raises((OSError, subprocess.SubprocessError)) as raised:
+        run_pipeline([Stage("ok", [PY, "-c", "pass"])], timeout_s=30, **options)
+    failure = start_failure(raised.value, options)
+    assert isinstance(failure, MemoryCapError) and "could not start under the memory cap" in str(failure)
+    assert start_failure(raised.value, {}) is None  # no cap: the start failure is the caller's
+    assert start_failure(RuntimeError("x"), options) is None
     # Without a cap there is no preexec, so nothing changes.
     assert run_pipeline([Stage("ok", [PY, "-c", "pass"])], timeout_s=30).ok
 

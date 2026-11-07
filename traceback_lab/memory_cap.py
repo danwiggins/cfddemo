@@ -36,6 +36,7 @@ import json
 import os
 import re
 import stat
+import subprocess
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -84,6 +85,48 @@ _ALLOCATION_FAILURE = re.compile(
 
 class MemoryCapError(RuntimeError):
     """The worker could not be started under its cap (``preexec_fn`` failed)."""
+
+
+def pipeline_options(cap_bytes: int | None, rlimit_bytes: int | None = None) -> dict[str, Any]:
+    """``run_contained_pipeline`` keyword arguments that apply a cap of ``cap_bytes``.
+
+    ``on_tree_rss_sample`` asks the pipeline to stop the group when a sample
+    exceeds the cap (the pipeline reaps before it kills, so a group that
+    finished meanwhile keeps its own exit codes; ``PipelineResult.aborted``
+    is the kill).  Where the kernel enforces an address-space limit,
+    ``preexec_fn`` sets it to ``rlimit_bytes`` (default: the cap) in each
+    child before exec.  No cap: no options.
+    """
+
+    if cap_bytes is None:
+        if rlimit_bytes is not None:
+            raise ValueError("memory rlimit needs a cap")
+        return {}
+    if cap_bytes <= 0:
+        raise ValueError("memory cap must be positive")
+    if rlimit_bytes is None:
+        rlimit_bytes = cap_bytes
+    elif rlimit_bytes < cap_bytes:
+        raise ValueError("memory rlimit is never below the cap")
+    options: dict[str, Any] = {"on_tree_rss_sample": lambda rss: rss > cap_bytes}
+    limit_name = select_memory_limit()
+    if limit_name is not None:
+        limit = rlimit_bytes
+
+        def limit_child() -> None:
+            # Between fork and exec: only the rlimit call, nothing that takes a lock.
+            apply_memory_limit(limit, limit_name)
+
+        options["preexec_fn"] = limit_child
+    return options
+
+
+def start_failure(exc: BaseException, options: Mapping[str, Any]) -> MemoryCapError | None:
+    """A pipeline start failure under ``pipeline_options`` with a ``preexec_fn``."""
+
+    if "preexec_fn" not in options or not isinstance(exc, (OSError, subprocess.SubprocessError)):
+        return None
+    return MemoryCapError(f"worker could not start under the memory cap: {type(exc).__name__}: {exc}")
 
 
 def parse_memory_cap(text: str) -> int:
@@ -439,8 +482,10 @@ __all__ = [
     "looks_like_allocation_failure",
     "parse_memory_cap",
     "pin_blas_threads",
+    "pipeline_options",
     "rebuild_history",
     "save_history",
     "select_memory_limit",
+    "start_failure",
     "update_history",
 ]

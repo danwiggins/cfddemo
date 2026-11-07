@@ -17,12 +17,14 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from traceback_runner.contained_process import Stage, run_contained_pipeline as run_pipeline
 from traceback_runner.serialization import canonical_json_bytes
 
 from .envelope import Depth, Failure, ResultEnvelope, provenance
@@ -36,8 +38,9 @@ from .memory_cap import (
     failure_reason,
     format_bytes,
     pin_blas_threads,
+    pipeline_options,
+    start_failure,
 )
-from .pipeline import Stage, run_pipeline
 from .problems import LabProblem
 from .reference_integrity import verify_reference_source
 from .registry import (
@@ -481,18 +484,24 @@ def run_plan(
             )
         )
         outcome = None
+        cap_options = pipeline_options(cap.bytes if cap is not None else None, rlimit_bytes)
         try:
             try:
-                outcome = run_pipeline(
-                    [Stage("worker", [sys.executable, "-m", "traceback_lab.worker", str(request)])],
-                    timeout_s=timeout_s,
-                    env=worker_env,
-                    cwd=scratch,
-                    echo=echo,
-                    disk_path=scratch,
-                    memory_cap_bytes=cap.bytes if cap is not None else None,
-                    memory_rlimit_bytes=rlimit_bytes,
-                )
+                try:
+                    outcome = run_pipeline(
+                        [Stage("worker", [sys.executable, "-m", "traceback_lab.worker", str(request)])],
+                        timeout_s=timeout_s,
+                        env=worker_env,
+                        cwd=scratch,
+                        echo=echo,
+                        disk_path=scratch,
+                        **cap_options,
+                    )
+                except (OSError, subprocess.SubprocessError) as exc:
+                    failure = start_failure(exc, cap_options)
+                    if failure is None:
+                        raise
+                    raise failure from exc
             except MemoryCapError as exc:
                 # The child never ran: no dangling step, the step fails under its cap.
                 assert cap is not None and cap.bytes is not None
@@ -596,7 +605,7 @@ def run_plan(
                 lines = [line for line in tail if line.strip()]
                 reason = failure_reason(
                     capped=cap is not None and cap.bytes is not None,
-                    memory_exceeded=outcome.memory_exceeded, timed_out=outcome.timed_out,
+                    memory_exceeded=outcome.aborted, timed_out=outcome.timed_out,
                     exit_code=stage.returncode, stderr_tail=tail,
                 )
                 memory_killed = reason == "memory"

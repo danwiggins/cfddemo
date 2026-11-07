@@ -95,6 +95,7 @@ def add_run_parser(commands: Any, common: Callable[[argparse.ArgumentParser], No
     run.add_argument("--skip-bad-chunks", action="store_true", help="exclude truncated chunks (provisional)")
     run.add_argument("--sex", choices=("M", "F"), help="operator assertion for a pre-analytic comparison; not a diagnostic sex or gender determination")
     run.add_argument("--force", action="store_true", help="recompute every result")
+    run.add_argument("--rehash", action="store_true", help="ignore the input hash cache: hash every chunk again (after a restore from backup or a timestamp-preserving copy)")
     run.add_argument("--timeout-s", type=float, default=DEFAULT_TIMEOUT_S, metavar="S")
     run.add_argument("--memory-cap", type=_memory_cap, metavar="BYTES", help="cap every algorithm at this much memory (e.g. 4GiB, 512MiB); default max(2GiB, 2x its recorded peak)")
     run.add_argument("--no-memory-cap", action="store_true", help="run algorithms without a memory cap")
@@ -206,6 +207,9 @@ def _flags(args: argparse.Namespace) -> dict[str, Any]:
         "cohort": args.cohort,
         "skip_bad_chunks": args.skip_bad_chunks,
         "force": args.force,
+        # Requested and applicable: a stored sample (<id12>, latest) has no chunks to rehash.
+        "rehash": args.rehash and not (len(args.inputs) == 1 and _is_stored(args.inputs[0])),
+        "rehash_requested": args.rehash,
         "timeout_s": args.timeout_s,
         "memory_cap_bytes": getattr(args, "memory_cap", None),
         "no_memory_cap": bool(getattr(args, "no_memory_cap", False)),
@@ -428,7 +432,8 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
         for item in items
     ]
     memory_warning = _memory_warning()
-    data: dict[str, Any] = {"root": str(store.root), "dry_run": True, "plan": plan_rows,
+    data: dict[str, Any] = {"root": str(store.root), "dry_run": True, "rehash": False,
+                            "rehash_requested": args.rehash, "plan": plan_rows,
                             "warnings": [memory_warning] if memory_warning else []}
     lines = [f"ROOT      {store.root}"]
     if memory_warning:
@@ -457,7 +462,7 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
                 cause="stored input and current reference registration have different SHA-256 values",
                 fix="Restore the original reference registration for this stored input",
             )
-        verify_reference_source(store, registered, write_cache=False)
+        verify_reference_source(store, registered, write_cache=False, rehash=args.rehash)
         with_sex_assertion(record, args.sex)
         data["sample"] = {
             "id12": id12_for(store, source_id), "input_id": aligned.input_id, "platform": platform,
@@ -541,7 +546,10 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
                 row["decision"] = "decided at run time"
     else:
         paths = collect_paths(args.inputs)
-        chunkset = inspect_chunks(paths, store, skip_bad_chunks=args.skip_bad_chunks, write_cache=False)
+        chunkset = inspect_chunks(
+            paths, store, skip_bad_chunks=args.skip_bad_chunks, write_cache=False, rehash=args.rehash,
+        )
+        data["rehash"] = args.rehash
         input_platform = _declared_platform(chunkset)
         platform = input_platform if chunkset.aligned else "ont"
         data["sample"] = {"source_id": chunkset.source_id,
@@ -549,7 +557,7 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
         mark_platform_skips(platform)
         with_sex_assertion(source_record(store, chunkset.source_id) or {}, args.sex)
         reference = resolve_reference(store.root, args.reference_id)
-        verify_reference_source(store, reference, write_cache=False)
+        verify_reference_source(store, reference, write_cache=False, rehash=args.rehash)
         data["reference_id"] = reference.reference_id
         data["chunks"] = {"count": len(chunkset.chunks), "bytes": chunkset.total_bytes, "excluded": chunkset.excluded_indexes}
         lines.append(f"REFERENCE {reference.reference_id}")
@@ -676,12 +684,12 @@ def _preflight_budget(
 
     progress("preflight  checking exact disk budget and input identity (read-only)")
     chunkset = inspect_chunks(
-        paths, store, skip_bad_chunks=args.skip_bad_chunks, write_cache=False,
+        paths, store, skip_bad_chunks=args.skip_bad_chunks, write_cache=False, rehash=args.rehash,
         progress=lambda line: progress(f"preflight  {line.removeprefix('ingest  ')}"),
     )
     input_platform = _declared_platform(chunkset)
     with_sex_assertion(source_record(store, chunkset.source_id) or {}, args.sex)
-    verify_reference_source(store, reference, write_cache=False)
+    verify_reference_source(store, reference, write_cache=False, rehash=args.rehash)
     if chunkset.aligned:
         candidate = prealigned_input_id(
             source_id=chunkset.source_id, reference_sha256=reference.sha256,
@@ -697,7 +705,7 @@ def _preflight_budget(
         candidate = aligned_input_id(
             source_id=chunkset.source_id,
             reference_sha256=reference.sha256,
-            mmi_sha256=cached_sha256(store, known_mmi, write_cache=False),
+            mmi_sha256=cached_sha256(store, known_mmi, write_cache=False, rehash=args.rehash),
             minimap2_version=str(minimap2.version),
             samtools_version=str(samtools.version),
             aligner_argv=aligner_argv_identity(chunkset.rg_lines),
@@ -814,7 +822,12 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                             cause="stored input and current reference registration have different SHA-256 values",
                             fix="Restore the original reference registration for this stored input",
                         )
-                    verify_reference_source(store, registered, write_cache=True)
+                    if args.rehash:
+                        progress(
+                            "ingest                   --rehash: a stored sample has no chunks to rehash; "
+                            "the reference digest is re-verified"
+                        )
+                    verify_reference_source(store, registered, write_cache=True, rehash=args.rehash)
                     record = record_source_sex(store, source_id, args.sex)
                     example = bool(record.get("example"))
                     scrubber = Scrubber(root=store.root)
@@ -828,13 +841,18 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                         prepare(store.root)
                     paths = collect_paths(args.inputs)
                     scrubber = Scrubber(root=store.root, chunk_stems=[p.name[:-4] for p in paths])
+                    if args.rehash:
+                        progress("ingest                   --rehash: ignoring every cached digest (chunks, index, reference)")
                     chunkset = inspect_chunks(
-                        paths, store, skip_bad_chunks=args.skip_bad_chunks, progress=progress
+                        paths, store, skip_bad_chunks=args.skip_bad_chunks, rehash=args.rehash,
+                        progress=progress,
                     )
                     input_platform = _declared_platform(chunkset)
                     with_sex_assertion(source_record(store, chunkset.source_id) or {}, args.sex)
                     reference = resolve_reference(store.root, args.reference_id, example=args.example)
-                    reference_proof = verify_reference_source(store, reference, write_cache=True)
+                    reference_proof = verify_reference_source(
+                        store, reference, write_cache=True, rehash=args.rehash,
+                    )
                     reference_id, reference_sha256 = reference.reference_id, reference.sha256
                     example = bool(args.example)
                     progress(
@@ -849,6 +867,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                         records=chunkset.total_records,
                         excluded=chunkset.excluded_indexes,
                         source_id=chunkset.source_id,
+                        rehash=args.rehash,
                     )
                     lock.set_step("align")
                     log.append("step_start", step="align")
@@ -873,7 +892,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                             candidate = aligned_input_id(
                                 source_id=chunkset.source_id,
                                 reference_sha256=reference.sha256,
-                                mmi_sha256=cached_sha256(store, known_mmi),
+                                mmi_sha256=cached_sha256(store, known_mmi, rehash=args.rehash),
                                 minimap2_version=str(minimap2.version),
                                 samtools_version=str(samtools.version),
                                 aligner_argv=aligner_argv_identity(chunkset.rg_lines),
@@ -990,6 +1009,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     depth=target.depth.model_dump() if target.depth is not None else None,
                     controls=controls["summary"], platform=target.platform,
                     memory_cap=memory_cap,
+                    rehash=args.rehash and chunkset is not None, rehash_requested=args.rehash,
                 )
                 log.append("run_end", status=payload["status"], exit_code=code)
             except KeyboardInterrupt:
@@ -1163,6 +1183,8 @@ def _summary(
     controls: dict[str, Any] | None = None,
     platform: str = "ont",
     memory_cap: MemoryCapPolicy | None = None,
+    rehash: bool = False,
+    rehash_requested: bool = False,
 ) -> tuple[int, dict[str, Any]]:
     ok = sum(result.status == "ok" for result in results)
     skipped: dict[str, int] = {}
@@ -1199,6 +1221,8 @@ def _summary(
         "steps": [result.public() for result in results],
         "controls": controls,
         "excluded_chunks": aligned.manifest.get("excluded_chunks", []),
+        "rehash": rehash,
+        "rehash_requested": rehash_requested,
         "warnings": warnings,
         "remediations": remedies,
         "memory_cap": _memory_cap_data(memory_cap, failed, run_id),
