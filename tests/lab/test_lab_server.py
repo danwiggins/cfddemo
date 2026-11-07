@@ -7,6 +7,7 @@ from traceback_lab.interpretation.engine import load_library
 import http.client
 import io
 import json
+import errno
 import os
 import types
 import re
@@ -1502,12 +1503,13 @@ def test_target_discovery_names_an_unreachable_devtools_port() -> None:
     clock = _FakeClock()
 
     def refused(port: str) -> list[dict]:
-        raise OSError(61, "Connection refused")
+        # errno numbers differ by platform (61 on macOS, 111 on Linux).
+        raise ConnectionRefusedError(errno.ECONNREFUSED, "Connection refused")
 
     with pytest.raises(ChromeTargetUnavailable) as caught:
         _discover(clock, fetch_targets=refused)
     assert caught.value.phase == "devtools-unreachable"
-    assert "port 4321: ConnectionRefusedError(61, 'Connection refused')" in str(caught.value)
+    assert f"port 4321: ConnectionRefusedError({errno.ECONNREFUSED}, 'Connection refused')" in str(caught.value)
 
 
 def test_target_discovery_names_a_browser_without_a_page_target() -> None:
@@ -1594,6 +1596,8 @@ def _synthetic_process_table(monkeypatch, profile: Path, *, dies: bool = True, r
     monkeypatch.setattr(sys.modules[__name__], "_list_processes", table.listing)
     monkeypatch.setattr(os, "kill", table.kill)
     monkeypatch.setattr(os, "killpg", lambda *args: pytest.fail("reaped browser PID was signalled"))
+    # The synthetic table models OUR launch group 1234; only launched groups are ever swept.
+    monkeypatch.setattr(sys.modules[__name__], "_LAUNCHED_GROUPS", _LAUNCHED_GROUPS | {1234})
     return table
 
 
