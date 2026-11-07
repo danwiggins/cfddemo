@@ -166,7 +166,11 @@ historical timings.
 |---|---|---|
 | DevTools page-target discovery (polls `/json/list`, 50 ms rising to 500 ms) | 15 s | 30 s |
 | One CDP command response | 15 s | 30 s |
-| Whole DOM wait (the test's `timeout`, default 90 s) | `timeout` | `2 x timeout`, at most 240 s (or `timeout` if larger), inside the 600 s pytest timeout |
+| Whole DOM wait (the test's `timeout`, default 90 s) | `timeout` | `2 x timeout`, at most 240 s (or `timeout` if larger), per `_dom_cdp` call |
+
+These bounds are per `_dom_cdp` call, which keeps one call inside the 600 s
+pytest timeout. A test that drives several pages is not bounded as a whole
+beyond that timeout.
 
 Retries, each once only and inside the same overall budget:
 
@@ -174,10 +178,11 @@ Retries, each once only and inside the same overall budget:
   killed: a running leader with its process group, while a leader that already
   exited is never used as a group target. The launch group is then swept by
   pid from `ps -ww -A -o pid=,pgid=,stat=,command=` (`-ww` because BSD ps cuts
-  command lines to about 79 columns without a tty): the group counts as this
-  test's when ANY live member carries its `--user-data-dir` (many headless
-  helpers do not carry it), and then every live member is killed; zombies are
-  ignored. Only when no member survives a 2 s settle are the profile's
+  command lines to about 79 columns without a tty). Chrome starts in its own
+  session, so the launch group id is the leader's pid, and a group id is not
+  reused while the group has members: every live member is killed, whatever
+  its command line (`chrome_crashpad_handler`, for one, carries no
+  `--user-data-dir`); zombies are ignored. Only when no member survives a 2 s settle are the profile's
   `SingletonLock`/`SingletonSocket`/`SingletonCookie` removed and Chrome
   launched once more; otherwise the relaunch is skipped and the test fails with
   `relaunch skipped: launch group <pgid> still has live members [...]`. The same
@@ -206,7 +211,8 @@ detail carries Chrome's return code), `devtools-unreachable` (port file present,
 HTTP endpoint refused or not that browser), `no-page-target` (browser up, no
 page listed) or `page-target-not-ours` (pages listed, none at the launch
 origin). Every harness failure ends with
-`budget=<s> (base <s>, discovery <s>, command <s>, load1=<load>, cpus=<n>), elapsed=<s>, launches=<n>`
+`budget=<s> (base <s>, discovery <s>, command <s>, load1=<load>, cpus=<n>), elapsed=<s>, launches=<n>, harness_notes=[...]`
+(each launch's discovery failure and any launch-group members the sweep killed)
 plus the last observed DOM state, console tail and Chrome stderr tail, so a
 loaded-runner stall reads differently from a page that never met its predicate.
 A browser test that passes alone and fails in the tier with a high `load1`
