@@ -166,22 +166,30 @@ historical timings.
 |---|---|---|
 | DevTools page-target discovery (polls `/json/list`, 50 ms rising to 500 ms) | 15 s | 30 s |
 | One CDP command response | 15 s | 30 s |
-| Whole DOM wait (the test's `timeout`, default 90 s) | `timeout` | `2 x timeout`, at most 300 s |
+| Whole DOM wait (the test's `timeout`, default 90 s) | `timeout` | `2 x timeout`, at most 240 s (or `timeout` if larger), inside the 600 s pytest timeout |
 
 Retries, each once only and inside the same overall budget:
 
 - If Chrome never writes a usable `DevToolsActivePort` (or exits first), it is
-  killed with its process group; if the leader already exited, each leftover
-  process in its launch group that runs on the same `--user-data-dir` is
-  killed by pid (a reaped leader's pid is never a group target). The profile's
-  `SingletonLock`/`SingletonSocket`/`SingletonCookie` are removed, and Chrome
-  is launched once more.
+  killed: a running leader with its process group, while a leader that already
+  exited is never used as a group target. The launch group is then swept by
+  pid from `ps -ww -A -o pid=,pgid=,stat=,command=` (`-ww` because BSD ps cuts
+  command lines to about 79 columns without a tty): the group counts as this
+  test's when ANY live member carries its `--user-data-dir` (many headless
+  helpers do not carry it), and then every live member is killed; zombies are
+  ignored. Only when no member survives a 2 s settle are the profile's
+  `SingletonLock`/`SingletonSocket`/`SingletonCookie` removed and Chrome
+  launched once more; otherwise the relaunch is skipped and the test fails with
+  `relaunch skipped: launch group <pgid> still has live members [...]`. The same
+  sweep runs after every browser is stopped; a survivor or a `ps` failure there
+  is a cleanup error.
 - If the first page WebSocket attach (before any emulation or navigation)
   fails with a socket error or timeout, the harness re-discovers the target and
   attaches again.
 - If one DOM poll loses the socket (connection closed or reset), the harness
-  re-attaches to the same page target and keeps polling, with replayed
-  `Log.enable` entries recorded once. This never happens in viewport mode:
+  re-attaches to the same page target and keeps polling; console messages and
+  log entries that `Runtime.enable`/`Log.enable` replay are recorded once.
+  This never happens in viewport mode:
   `Emulation.setDeviceMetricsOverride` belongs to the CDP session, so a new
   socket would see the page at Chrome's own width; a viewport test fails
   instead.

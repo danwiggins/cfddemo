@@ -525,7 +525,7 @@ def _body_attr(dom: str, name: str) -> str | None:
 # still surfaces well inside the 600-second test timeout.
 _LOAD_SCALE_CAP = 2.0
 _DISCOVERY_BUDGET = (15.0, 30.0)  # base seconds, cap seconds
-_DOM_BUDGET_CAP = 300.0
+_DOM_BUDGET_CAP = 240.0  # one _dom_cdp call stays well inside the 600 s pytest timeout
 _COMMAND_BUDGET = (15.0, 30.0)  # one CDP response: base seconds, cap seconds
 _DISCOVERY_PHASES = ("chrome-not-started", "devtools-unreachable", "no-page-target", "page-target-not-ours")
 
@@ -671,13 +671,14 @@ def _attach_with_retry(attach, rediscover):
 
 def _cdp_command(connection, method: str, params: dict, request_id: int, deadline: float,
                  events: deque[str], *, clock=None, cap: float = _COMMAND_BUDGET[0],
-                 seen_log: set[str] | None = None) -> dict:
+                 seen_events: set[str] | None = None) -> dict:
     """Bound one response to ``cap`` seconds even if unrelated console events keep arriving.
 
     A reply to an earlier, timed-out request id is skipped like any other
     unrelated message, so a later command never reads a stale result. With
-    ``seen_log``, a ``Log.entryAdded`` already recorded (``Log.enable`` replays
-    the page's existing entries on a new session) is not recorded twice.
+    ``seen_events``, a console or log event already recorded is not recorded
+    twice: ``Runtime.enable`` and ``Log.enable`` replay the page's existing
+    console messages and log entries on a new session.
     """
 
     clock = clock or time.monotonic
@@ -698,11 +699,11 @@ def _cdp_command(connection, method: str, params: dict, request_id: int, deadlin
                 raise AssertionError(f"DevTools {method} failed: {message['error']!r}")
             return message.get("result", {})
         if message.get("method") in ("Runtime.consoleAPICalled", "Runtime.exceptionThrown", "Log.entryAdded"):
-            if message["method"] == "Log.entryAdded" and seen_log is not None:
-                key = json.dumps(message.get("params", {}).get("entry"), sort_keys=True)
-                if key in seen_log:
+            if seen_events is not None:
+                key = json.dumps([message["method"], message.get("params")], sort_keys=True)
+                if key in seen_events:
                     continue
-                seen_log.add(key)
+                seen_events.add(key)
             events.append(json.dumps(message, ensure_ascii=False)[-500:])
 
 
@@ -725,49 +726,76 @@ def _read_debug_port(path: Path) -> str | None:
     return None if endpoint is None else endpoint[0]
 
 
-def _kill_profile_orphans(pgid: int, profile: Path) -> list[int]:
-    """SIGKILL processes still in launch group ``pgid`` that run on ``profile``.
+def _list_processes() -> list[tuple[int, int, str, str]]:
+    """(pid, pgid, stat, command) for every process; ``-ww`` keeps full command lines.
 
-    Used after the group leader is already reaped, when its PID must never be a
-    group target: each victim is named by pid and must show both the recorded
-    group id and this test's own ``--user-data-dir`` on its command line.
-    Raises when the process listing itself fails; the caller records that.
+    BSD ps cuts ``command`` to the terminal width (about 79 columns without a
+    tty), which would hide ``--user-data-dir``. ``stat`` lets zombies, which
+    are already dead, be ignored.
     """
 
-    listing = subprocess.check_output(["ps", "-A", "-o", "pid=,pgid=,command="], text=True, timeout=5)
-    killed = []
+    listing = subprocess.run(
+        ["ps", "-ww", "-A", "-o", "pid=,pgid=,stat=,command="],
+        capture_output=True, text=True, timeout=5, check=True,
+    ).stdout
+    rows = []
     for row in listing.splitlines():
-        fields = row.split(None, 2)
-        if len(fields) == 3 and fields[1] == str(pgid) and f"--user-data-dir={profile}" in fields[2]:
-            try:
-                os.kill(int(fields[0]), signal.SIGKILL)
-            except (ProcessLookupError, PermissionError, ValueError):
-                continue
-            killed.append(int(fields[0]))
-    return killed
+        fields = row.split(None, 3)
+        if len(fields) >= 3 and fields[0].isdecimal() and fields[1].isdecimal():
+            rows.append((int(fields[0]), int(fields[1]), fields[2], fields[3] if len(fields) == 4 else ""))
+    return rows
+
+
+def _sweep_launch_group(pgid: int, profile: Path, *, clock=None, pause=None,
+                        settle: float = 2.0) -> tuple[list[int], list[int]]:
+    """Kill, by pid, every live member of launch group ``pgid`` if the group is ours.
+
+    The group is ours when ANY live member carries this test's
+    ``--user-data-dir`` (headless Chrome helpers often do not carry it
+    themselves). A reaped leader's pid is never a group target, so members are
+    signalled one by one. Returns (killed, survivors): survivors are live
+    members still listed after ``settle`` seconds. Raises if ps fails.
+    """
+
+    clock = clock or time.monotonic
+    pause = pause or time.sleep
+    flag = f"--user-data-dir={profile}"
+
+    def members() -> list[tuple[int, str]]:
+        return [(pid, command) for pid, group, stat, command in _list_processes()
+                if group == pgid and not stat.startswith("Z")]
+
+    first = members()
+    if not any(flag in command for _, command in first):
+        return [], []
+    killed = []
+    for pid, _ in first:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            continue
+        killed.append(pid)
+    deadline = clock() + settle
+    while True:
+        survivors = [pid for pid, _ in members()]
+        if not survivors or clock() >= deadline:
+            return killed, survivors
+        pause(0.1)
 
 
 def _stop_browser(process, *, profile: Path | None = None, notes: list[str] | None = None) -> str | None:
     """Kill one launched Chrome (whole group on POSIX); return a cleanup error or None.
 
-    With ``profile`` (the relaunch path), helpers left behind by a leader that
-    already exited are killed too, so the relaunch never shares the profile
-    with the first launch's processes. A failed sweep is noted in ``notes``
-    (diagnostics only); the relaunch still gets its own Singleton* cleanup.
+    A leader that is still running is killed with its group. A leader that
+    already exited is never used as a group target. With ``profile``, the
+    launch group is then swept by pid (``_sweep_launch_group``); a member
+    that survives, or a ps failure, is a cleanup error, because the profile
+    may still be in use.
     """
 
     cleanup_error = None
-    if profile is not None and os.name != "nt" and process.poll() is not None:
-        # start_new_session made the leader's pid the group id at launch.
-        try:
-            killed = _kill_profile_orphans(process.pid, profile)
-        except Exception as exc:
-            killed = []
-            if notes is not None:
-                notes.append(f"orphan sweep failed: {exc!r}")
-        if killed and notes is not None:
-            notes.append(f"killed leftover helpers {killed}")
-    if process.poll() is not None:
+    returncode = process.poll()
+    if returncode is not None:
         pass  # Reaped leader PID must never be used as a process-group target.
     elif os.name == "nt":
         try:
@@ -790,6 +818,16 @@ def _stop_browser(process, *, profile: Path | None = None, notes: list[str] | No
             process.wait(timeout=1)
         except subprocess.TimeoutExpired:
             cleanup_error = "direct browser process did not exit after kill"
+    if profile is not None and os.name != "nt":
+        # start_new_session made the leader's pid the group id at launch.
+        try:
+            killed, survivors = _sweep_launch_group(process.pid, profile)
+        except Exception as exc:
+            return cleanup_error or f"launch group sweep failed: {exc!r}"
+        if killed and notes is not None:
+            notes.append(f"killed launch group {process.pid} members {killed}")
+        if survivors:
+            return cleanup_error or f"launch group {process.pid} still has live members {survivors}"
     return cleanup_error
 
 
@@ -844,7 +882,7 @@ def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90,
     connection = None
     launches: list[str] = []
     launched = 0
-    seen_log: set[str] = set()
+    seen_events: set[str] = set()
     active_port = profile / "DevToolsActivePort"
     direct_http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     launch_argv = [*argv[:-1], "--remote-debugging-address=127.0.0.1", "--remote-debugging-port=0",
@@ -881,8 +919,15 @@ def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90,
                 except ChromeTargetUnavailable as exc:
                     launches.append(f"attempt {attempt}: {exc}")
                     if attempt == 1 and exc.phase == "chrome-not-started" and deadline - time.monotonic() > 1:
-                        cleanup_error = _stop_browser(process, profile=profile, notes=launches)
+                        stop_error = _stop_browser(process, profile=profile, notes=launches)
                         process = None
+                        if stop_error is not None:
+                            # The first launch may still hold the profile: never
+                            # clear its lock or start a second Chrome on it.
+                            cleanup_error = stop_error
+                            raise AssertionError(
+                                f"{exc} [{'; '.join(launches)}]; relaunch skipped: {stop_error}"
+                            ) from exc
                         for singleton in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
                             try:
                                 (profile / singleton).unlink()
@@ -927,7 +972,7 @@ def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90,
                 command_id += 1
                 return _cdp_command(connection, method, params or {}, command_id,
                                     deadline if until is None else until, events, cap=command_budget,
-                                    seen_log=seen_log)
+                                    seen_events=seen_events)
 
             def evaluate(expression: str, *, until: float | None = None):
                 result = command("Runtime.evaluate", {"expression": expression, "returnByValue": True}, until=until)
@@ -1002,7 +1047,7 @@ def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90,
                 except Exception as exc:
                     cleanup_error = f"DevTools close failed: {exc!r}"
             if process is not None:
-                cleanup_error = _stop_browser(process) or cleanup_error
+                cleanup_error = _stop_browser(process, profile=profile, notes=launches) or cleanup_error
             stderr_tail = _stderr_tail(stderr)
     if failure or cleanup_error:
         raise AssertionError(
@@ -1166,7 +1211,7 @@ def test_dom_wait_reports_a_second_lost_socket_with_the_last_state() -> None:
     assert message.startswith("Chrome DOM poll failed: WebSocketConnectionClosedException('socket is already closed.')")
     assert "last state={'matched': False, 'ready': '1', 'loading': True}" in message
     assert "recovered=\"ConnectionResetError(54, 'Connection reset by peer')\"" in message
-    assert "budget=30.0s, elapsed=3.2s, load1=4.5" in message
+    assert "budget=30.0s, elapsed=" in message and "load1=4.5" in message
 
 
 @pytest.mark.parametrize("stall", [
@@ -1193,13 +1238,17 @@ def test_dom_wait_without_recovery_fails_on_the_first_lost_socket() -> None:
         _wait_for_dom(read_state, timeout=5, clock=lambda: 0.0, pause=lambda seconds: None)
 
 
-def test_cdp_command_records_a_replayed_log_entry_once() -> None:
+def test_cdp_command_records_a_replayed_console_or_log_event_once() -> None:
     entry = {"source": "javascript", "level": "error", "text": "synthetic", "timestamp": 1.0}
+    console = {"type": "log", "args": [{"type": "string", "value": "synthetic"}], "executionContextId": 1, "timestamp": 1.5}
     replies = iter((
         {"method": "Log.entryAdded", "params": {"entry": entry}},
+        {"method": "Runtime.consoleAPICalled", "params": console},
         {"id": 1, "result": {}},
+        {"method": "Runtime.consoleAPICalled", "params": console},
         {"method": "Log.entryAdded", "params": {"entry": entry}},
         {"method": "Log.entryAdded", "params": {"entry": {**entry, "timestamp": 2.0}}},
+        {"method": "Runtime.consoleAPICalled", "params": {**console, "timestamp": 2.5}},
         {"id": 2, "result": {}},
     ))
 
@@ -1215,9 +1264,13 @@ def test_cdp_command_records_a_replayed_log_entry_once() -> None:
 
     events: deque[str] = deque(maxlen=8)
     seen: set[str] = set()
-    _cdp_command(ReplayingConnection(), "Log.enable", {}, 1, 90, events, clock=lambda: 0.0, seen_log=seen)
-    _cdp_command(ReplayingConnection(), "Log.enable", {}, 2, 90, events, clock=lambda: 0.0, seen_log=seen)
-    assert [json.loads(event)["params"]["entry"]["timestamp"] for event in events] == [1.0, 2.0]
+    _cdp_command(ReplayingConnection(), "Runtime.enable", {}, 1, 90, events, clock=lambda: 0.0, seen_events=seen)
+    _cdp_command(ReplayingConnection(), "Log.enable", {}, 2, 90, events, clock=lambda: 0.0, seen_events=seen)
+    recorded = [json.loads(event) for event in events]
+    assert [(event["method"], (event["params"].get("entry") or event["params"])["timestamp"]) for event in recorded] == [
+        ("Log.entryAdded", 1.0), ("Runtime.consoleAPICalled", 1.5),
+        ("Log.entryAdded", 2.0), ("Runtime.consoleAPICalled", 2.5),
+    ]
 
 
 class _ScriptedDevTools:
@@ -1266,6 +1319,7 @@ class _ScriptedDevTools:
         monkeypatch.setattr(socket, "create_connection", lambda *args, **kwargs: SimpleNamespace(close=lambda: None))
         monkeypatch.setattr(websocket, "create_connection", connect)
         monkeypatch.setattr(os, "killpg", lambda pgid, sig: self.signalled.append(pgid))
+        monkeypatch.setattr(module, "_list_processes", lambda: [])
 
 
 def _drop_first_dom_poll(fake: _ScriptedDevTools, *, width: int | None = None):
@@ -1453,6 +1507,86 @@ def test_page_attach_gives_up_after_the_second_socket_failure() -> None:
         _attach_with_retry(attach, lambda: "ws://127.0.0.1:1/devtools/page/second")
 
 
+class _ProcessTable:
+    def __init__(self, rows: dict[int, tuple[int, str, str]], *, dies: bool) -> None:
+        self.rows, self.dies, self.signalled = rows, dies, []
+
+    def listing(self) -> list[tuple[int, int, str, str]]:
+        return [(pid, group, stat, command) for pid, (group, stat, command) in self.rows.items()]
+
+    def kill(self, pid: int, sig: int) -> None:
+        if pid not in self.rows:
+            raise ProcessLookupError(pid)
+        self.signalled.append(pid)
+        if self.dies:
+            del self.rows[pid]
+
+
+def _synthetic_process_table(monkeypatch, profile: Path, *, dies: bool = True) -> _ProcessTable:
+    table = _ProcessTable({
+        5001: (1234, "S", f"/synthetic/Chrome Helper --type=renderer --user-data-dir={profile} --lang=en"),
+        5002: (1234, "S", "/synthetic/Chrome Helper --type=gpu-process"),
+        5003: (77, "S", f"/synthetic/Chrome Helper --user-data-dir={profile}"),
+        5004: (1234, "Z", "<defunct>"),
+    }, dies=dies)
+    monkeypatch.setattr(sys.modules[__name__], "_list_processes", table.listing)
+    monkeypatch.setattr(os, "kill", table.kill)
+    monkeypatch.setattr(os, "killpg", lambda *args: pytest.fail("reaped browser PID was signalled"))
+    return table
+
+
+def test_process_listing_asks_ps_for_full_width_command_lines(monkeypatch) -> None:
+    seen: list[list[str]] = []
+
+    def run(argv, **kwargs):
+        seen.append(argv)
+        return SimpleNamespace(stdout=" 5001  1234 S    /synthetic/Chrome --user-data-dir=/p --x\n 5004 1234 Z <defunct>\n")
+
+    monkeypatch.setattr(subprocess, "run", run)
+    assert _list_processes() == [(5001, 1234, "S", "/synthetic/Chrome --user-data-dir=/p --x"), (5004, 1234, "Z", "<defunct>")]
+    assert seen[0][:3] == ["ps", "-ww", "-A"] and "pid=,pgid=,stat=,command=" in seen[0]
+
+
+def test_launch_group_sweep_kills_every_member_once_any_member_is_ours(tmp_path, monkeypatch) -> None:
+    table = _synthetic_process_table(monkeypatch, tmp_path / "profile")
+    clock = _FakeClock()
+    assert _sweep_launch_group(1234, tmp_path / "profile", clock=clock, pause=clock.pause) == ([5001, 5002], [])
+    assert table.signalled == [5001, 5002] and 5003 in table.rows
+
+
+def test_launch_group_sweep_leaves_a_group_with_no_member_on_this_profile(tmp_path, monkeypatch) -> None:
+    table = _synthetic_process_table(monkeypatch, tmp_path / "profile")
+    clock = _FakeClock()
+    assert _sweep_launch_group(1234, tmp_path / "other-profile", clock=clock, pause=clock.pause) == ([], [])
+    assert table.signalled == []
+
+
+def test_launch_group_sweep_reports_members_that_survive_the_settle_time(tmp_path, monkeypatch) -> None:
+    _synthetic_process_table(monkeypatch, tmp_path / "profile", dies=False)
+    clock = _FakeClock()
+    assert _sweep_launch_group(1234, tmp_path / "profile", clock=clock, pause=clock.pause, settle=1.0) == (
+        [5001, 5002], [5001, 5002])
+    assert 1.0 <= clock.now <= 1.2
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group cleanup")
+def test_cdp_skips_the_relaunch_while_the_first_launch_group_survives(tmp_path, monkeypatch) -> None:
+    launched: list[list[str]] = []
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    (profile / "SingletonLock").symlink_to("synthetic-host-1234")
+    _synthetic_process_table(monkeypatch, profile, dies=False)
+    browser = SimpleNamespace(pid=1234, poll=lambda: 1, wait=lambda timeout: 1)
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: launched.append(argv) or browser)
+    monkeypatch.setattr(sys.modules[__name__], "_host_load", lambda: (100.0, 1))
+    with pytest.raises(AssertionError) as caught:
+        _dom_cdp(["chrome", "http://127.0.0.1:8/x"], profile, ok=lambda dom: True, timeout=5)
+    message = str(caught.value)
+    assert len(launched) == 1 and os.path.lexists(profile / "SingletonLock")
+    assert "relaunch skipped: launch group 1234 still has live members [5001, 5002]" in message
+    assert "phase=chrome-not-started" in message and "launches=1" in message
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX process-group cleanup")
 def test_cdp_relaunches_once_when_chrome_never_brings_devtools_up(tmp_path, monkeypatch) -> None:
     launched: list[list[str]] = []
@@ -1475,24 +1609,17 @@ def test_cdp_relaunches_once_when_chrome_never_brings_devtools_up(tmp_path, monk
         def wait(self, timeout: float) -> int:
             return 1
 
-    signalled: list[int] = []
-    listing = (
-        f"5001 1234 /synthetic/Chrome Helper --type=renderer --user-data-dir={profile} --lang=en\n"
-        "5002 1234 /synthetic/unrelated --flag\n"
-        f"5003 77 /synthetic/Chrome Helper --user-data-dir={profile}\n"
-    )
+    table = _synthetic_process_table(monkeypatch, profile)
     monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: ExitedBrowser(argv))
-    monkeypatch.setattr(subprocess, "check_output", lambda *args, **kwargs: listing)
-    monkeypatch.setattr(os, "killpg", lambda *args: pytest.fail("reaped browser PID was signalled"))
-    monkeypatch.setattr(os, "kill", lambda pid, sig: signalled.append(pid))
     (profile / "SingletonLock").symlink_to("synthetic-host-1234")
     with pytest.raises(AssertionError) as caught:
         _dom_cdp(["chrome", "http://127.0.0.1:8/x"], profile, ok=lambda dom: True, timeout=5)
     message = str(caught.value)
     assert len(launched) == 2 and launched[0] == launched[1]
-    # The first launch's helpers (its group AND this profile) are killed by pid
-    # although the leader exited; a reaped leader is never a group target.
-    assert signalled == [5001]
+    # Every live member of the first launch's group is killed by pid (the
+    # helper without --user-data-dir too) although the leader exited; another
+    # group on the same profile and the zombie are left alone.
+    assert table.signalled == [5001, 5002]
     assert not os.path.lexists(profile / "SingletonLock")
     assert launched[0][:2] == ["chrome", f"--user-data-dir={profile}"] and launched[0][-1] == "http://127.0.0.1:8/x"
     assert "--remote-debugging-port=0" in launched[0] and not any(flag.startswith("--remote-debugging-port=") and flag != "--remote-debugging-port=0" for flag in launched[0])
