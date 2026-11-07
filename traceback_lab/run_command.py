@@ -65,7 +65,7 @@ from .runner import DEFAULT_TIMEOUT_S, RunTarget, StepResult, run_plan
 from .sample_metadata import with_sex_assertion
 from .scrub import Scrubber
 from .store import LabStore, ResultOrderUnavailable, SelectionSnapshotChanged, new_run_id
-from .tools import find_minimap2, find_samtools, require_aligner_tools
+from .tools import aligner_provenance, pins_of, provenance_of, require_aligner_tools, resolve_aligner_tools
 
 ALIGN_TIMEOUT_S = 48 * 3600.0
 QUICKSTART = (
@@ -582,7 +582,8 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
             data["alignment"] = "not needed (aligned input)"
             lines.append("ALIGN     not needed (aligned input)")
         else:
-            samtools, minimap2 = find_samtools(), find_minimap2()
+            samtools, minimap2 = resolve_aligner_tools()
+            data["aligner_tools"] = aligner_provenance(samtools, minimap2)
             low, high = estimate_align_minutes(chunkset.total_bytes)
             reason = "new source"
             existing = (
@@ -609,6 +610,7 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
                         minimap2_version=str(minimap2.version),
                         samtools_version=str(samtools.version),
                         aligner_argv=aligner_argv_identity(chunkset.rg_lines),
+                        tool_pins=pins_of(samtools, minimap2),
                     )
                     if input_manifest(store, input_id) is not None:
                         reason = "reused"
@@ -626,6 +628,10 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
             lines.append(
                 f"ALIGN     {reason}" + estimate
                 + (" · minimap2 index built first" if mmi_needed else "")
+            )
+            lines.append(
+                f"TOOLS     samtools {samtools.version or 'missing'} · minimap2 {minimap2.version or 'missing'} "
+                f"({provenance_of(samtools, minimap2)})"
             )
     if args.cohort is not None:
         require_cohort_input(args.cohort, platform=platform, example=example)
@@ -713,6 +719,7 @@ def _preflight_budget(
             minimap2_version=str(minimap2.version),
             samtools_version=str(samtools.version),
             aligner_argv=aligner_argv_identity(chunkset.rg_lines),
+            tool_pins=pins_of(samtools, minimap2),
         )
         if input_manifest(store, candidate) is not None:
             return
@@ -892,6 +899,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                         )
                     else:
                         samtools, minimap2 = require_aligner_tools()
+                        log.append("aligner_tools", **aligner_provenance(samtools, minimap2))
                         # Reuse needs no disk: decide reuse before the budget.
                         known_mmi = args.mmi if args.mmi is not None else mmi_path(store, reference)
                         reusable = False
@@ -903,6 +911,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                                 minimap2_version=str(minimap2.version),
                                 samtools_version=str(samtools.version),
                                 aligner_argv=aligner_argv_identity(chunkset.rg_lines),
+                                tool_pins=pins_of(samtools, minimap2),
                             )
                             reusable = input_manifest(store, candidate) is not None
                         if not reusable:

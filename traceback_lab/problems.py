@@ -81,6 +81,7 @@ PROBLEMS: dict[str, ProblemSpec] = {
     "TBX-LAB-029": ProblemSpec(EXIT_USAGE, "The support bundle path already exists"),
     "TBX-LAB-030": ProblemSpec(EXIT_PARTIAL, "An algorithm exceeded its per-algorithm memory cap"),
     "TBX-LAB-031": ProblemSpec(EXIT_BLOCKED, "The inventory directory holds no .bam chunks"),
+    "TBX-LAB-033": ProblemSpec(EXIT_BLOCKED, "The pinned aligner store is present but fails verification"),
 }
 
 
@@ -146,10 +147,15 @@ def problem_payload(command: str, problem: LabProblem, *, root: str | None = Non
 def problem_lines(problem: LabProblem) -> list[str]:
     """Human lines: CODE, CAUSE, FIX, RETRYABLE, DOCS (always in this order)."""
 
+    fix = problem.fix
+    if "<TOOLCHAIN_CACHE>" in fix:  # --json keeps the token; the terminal gets the real cache
+        from traceback_runner.toolchain import toolchain_cache_root
+
+        fix = fix.replace("<TOOLCHAIN_CACHE>", str(toolchain_cache_root()))
     return [
         f"CODE       {problem.code}",
         f"CAUSE      {problem.cause}",
-        f"FIX        {problem.fix}",
+        f"FIX        {fix}",
         f"RETRYABLE  {'yes' if problem.retryable else 'no'}",
         f"DOCS       {problem.docs}",
     ]
