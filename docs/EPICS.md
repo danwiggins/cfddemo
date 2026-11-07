@@ -322,8 +322,9 @@ Acceptance:
 - no healthy/abnormal classification appears in personalized output;
 - existing bounded privacy contracts remain intact.
 
-The healthy/abnormal rule above governs signed output; the Lab's reference-state
-labels are a separate surface, recorded in
+The healthy/abnormal rule above governs personalized output on every surface
+except the Lab (signed records and bundles, the operator site, and the demo);
+the Lab's research-use surface is the one recorded exception, see
 [ADR 0002](adr/0002-e10-reference-labels-lab-only.md).
 
 Depends on: E5, E8, separate analytical approval.
