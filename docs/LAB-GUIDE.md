@@ -138,6 +138,7 @@ traceback lab simulate cna <id12|latest> [--tf 0.03,0.10,0.30] [--cohort ID] [--
 traceback lab simulate split <id12|latest> [--cohort ID] [--verbose]                         split-half pseudo-replicate
 traceback lab algorithms [--json]          registered algorithms (id, tier, min depth, licenses, footnote)
 traceback lab inventory DIR [--recursive] [--report PATH] [--no-hash] [--json]   chunk-set completeness before alignment (read-only)
+traceback lab report --html ID12 [--out PATH] [--json]   one sample's research report as a self-contained HTML file
 traceback lab doctor [--json]              setup checks, each with a fix command
 traceback lab serve [--open] [--port N]    the local page (loopback only)
 traceback lab runs [RUN_ID] [--step S]     the run log, or one run's steps
@@ -1126,6 +1127,56 @@ attempt ID, denominator or source context is shown as unavailable.
 Research-use and synthetic-example markings stay with the printed report.
 No export or printout establishes scientific or clinical qualification.
 
+## Sharing a result as a file
+
+`traceback lab report --html ID12` writes one sample's captured research
+report as a single HTML file you can open or send without a running server:
+
+```sh
+uv run traceback lab report --html 3f9a1c2b7e04 --root R
+uv run traceback lab report --html 3f9a1c2b7e04 --out report.html --root R --json
+```
+
+The file is built from the same read-time sample projection the page serves
+(the interpretation engine runs inside it) and carries the same captured
+report as **Export / print**: sample, input and source identity, capture
+time, interpretation and cohort versions, recorded date and its kind, every
+visible registered scalar metric with its exact recorded value, declared unit,
+interpretation state and fixed reason, recorded support count, audited
+flags and curated license restrictions, per-method provenance (tool, tool
+version, parameters SHA-256, attempt ID, reference asset ID, computed UTC),
+and the report's limitations. The page's display rounding lives in the
+browser and has no Python equivalent, so the file shows exact recorded values
+with their declared units (the print view's "Exact API value"), not the
+page's formatted numbers.
+
+Every file opens with the research-use marks and a visible callout:
+
+> **FLAG: CLIA** — reads as clinical advice if a donor or clinician sees it.
+> This file may reach a donor or clinician. It is a research record of
+> recorded values, not a result for diagnosis, prevention, treatment or
+> health assessment.
+
+followed by the page's "What CLIA means for this demo" short explainer. Its
+footer says the values are frozen at export time and may differ from the live
+Lab page, and repeats the capture time and input ID. Review the file's
+intended use before sharing it.
+
+The file has no scripts, no inline event handlers, no links and no external
+resources; one inline `<style>` block styles it, and it renders with
+JavaScript disabled. Nothing the page does not show enters it: no host paths,
+read names, cohort member identities, artifacts or taxon detail. Every string
+passes the Lab scrubber (ROOT, home directory, login and host name), and free
+text that looks like a path, a credential, a long hexadecimal identifier or a
+read sequence is dropped. The same 5,000-row and 5 MiB limits as the browser
+export apply. An over-limit or unreportable sample, an existing `--out` file
+(never overwritten) or an unwritable destination is refused with TBX-LAB-034
+and no partial file. Without `--out` the file is
+`traceback-research-<id12>-<UTC>Z.html` in the current directory. The human
+output and `--json` (`data.path`, `data.size`, `data.sha256`, `data.rows`,
+`data.generated_at`) name the written file; the same sample and capture time
+always produce the same bytes on one host.
+
 ## Building a Lab cohort
 
 Use the same `--root R` as the source runs. The sample ID12 is printed by
@@ -1538,6 +1589,17 @@ unreadable entries and `.bam` files without a `_<n>.bam` index are listed
 under `data.skipped` / `data.unindexed` and do not count. A missing DIR, a
 symlink or a plain file is TBX-LAB-005 instead.
 
+### TBX-LAB-034
+
+`lab report --html` could not write the report file (exit 3). The cause says
+why: the sample's report exceeds the 5,000-row or 5 MiB export limit, its
+recorded result is unavailable, its identity or completion metadata is
+invalid, it has no eligible scalar metrics, the `--out` file already exists
+(it is never overwritten), or the destination could not be written. No
+partial file is left. Pass a new `--out PATH` in a writable directory, or
+open the Lab page and use **Export / print** for the live view. An unknown or
+ambiguous ID12 is TBX-LAB-017 instead.
+
 ## Adding an algorithm
 
 1. Add a module under `traceback_lab/algorithms/` exposing an instance of the
@@ -1555,6 +1617,7 @@ symlink or a plain file is TBX-LAB-005 instead.
 
 ## Changes
 
+- 2026-11-07: `lab report --html ID12` writes a self-contained HTML research report; TBX-LAB-034.
 - 2026-11-06: `lab inventory DIR` checks a chunk set before alignment; TBX-LAB-031.
 - 2026-11-06: `lab serve --port N` binds a fixed loopback port; TBX-LAB-026.
 - 2026-11-06: `lab gc` (dry-run by default; `--apply` deletes stale failed
