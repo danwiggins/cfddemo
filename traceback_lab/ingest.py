@@ -25,7 +25,7 @@ import re
 import shutil
 import stat
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -146,6 +146,7 @@ class Chunk:
     basecall_model: str | None = None
     aligned: bool = False
     sq: tuple[tuple[str, int], ...] = ()
+    provenance: dict[str, Any] = field(default_factory=dict)
 
     @property
     def stem(self) -> str:
@@ -178,6 +179,10 @@ class ChunkSet:
     @property
     def basecall_model(self) -> str | None:
         return self.chunks[0].basecall_model
+
+    @property
+    def header_provenance(self) -> dict[str, Any]:
+        return self.chunks[0].provenance or header_provenance("")
 
     @property
     def rg_lines(self) -> list[str]:
@@ -214,6 +219,82 @@ def _rg_model(line: str) -> str | None:
     return match.group(1) if match else None
 
 
+# Kit provenance shown on the landing page: a bare product code, model name or
+# version only. Anything with a path separator, whitespace or a sentence shape
+# is dropped, so a header cannot smuggle a path or a free-text name through.
+_PROVENANCE_VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._@+-]{0,63}")
+_FLOW_CELL_KEYS = frozenset({"flow_cell_product_code", "flowcell_product_code", "flow_cell_type", "flowcell_type"})
+_KIT_KEYS = frozenset({"sequencing_kit", "kit", "library_kit"})
+_MAX_SOFTWARE = 8
+_PROVENANCE_FIELDS = ("flow_cell", "kit", "basecall_model")
+
+
+def _provenance_value(value: Any) -> str | None:
+    if not isinstance(value, str) or not _PROVENANCE_VALUE.fullmatch(value):
+        return None
+    return value
+
+
+def header_provenance(header_text: str) -> dict[str, Any]:
+    """Kit provenance a BAM header declares: ``@RG DS`` key=value pairs and ``@PG`` PN/VN.
+
+    Identifiers never enter the result: read-group ID, PU (flow-cell ID), PM
+    (device), SM/LB (sample names), DT, ``runid`` and ``@PG CL`` are skipped.
+    Absent fields are ``None``; the landing page shows them as "not recorded".
+    """
+
+    found: dict[str, str | None] = dict.fromkeys(_PROVENANCE_FIELDS)
+    software: list[dict[str, str | None]] = []
+    for line in header_text.splitlines():
+        fields = line.split("\t")
+        if fields[0] == "@RG":
+            for part in fields[1:]:
+                if not part.startswith("DS:"):
+                    continue
+                for token in part[3:].split():
+                    key, separator, value = token.partition("=")
+                    if not separator:
+                        continue
+                    if key == "basecall_model":
+                        target = "basecall_model"
+                    elif key in _FLOW_CELL_KEYS:
+                        target = "flow_cell"
+                    elif key in _KIT_KEYS:
+                        target = "kit"
+                    else:
+                        continue
+                    if found[target] is None:
+                        found[target] = _provenance_value(value)
+        elif fields[0] == "@PG" and len(software) < _MAX_SOFTWARE:
+            tags = {part[:2]: part[3:] for part in fields[1:] if len(part) > 3 and part[2] == ":"}
+            program = _provenance_value(tags.get("PN"))
+            if program is None:
+                continue
+            entry = {"program": program, "version": _provenance_value(tags.get("VN"))}
+            if entry not in software:
+                software.append(entry)
+    return {**found, "software": software}
+
+
+def stored_header_provenance(manifest: Any) -> dict[str, Any] | None:
+    """Re-validate a stored input manifest's header provenance before it is shown.
+
+    Manifests written before this field existed have none (``None``); a
+    hand-edited value is filtered through the same value rule as ingest.
+    """
+
+    value = manifest.get("header_provenance") if isinstance(manifest, Mapping) else None
+    if not isinstance(value, Mapping):
+        return None
+    software: list[dict[str, str | None]] = []
+    entries = value.get("software")
+    for entry in (entries if isinstance(entries, list) else [])[:_MAX_SOFTWARE]:
+        program = _provenance_value(entry.get("program")) if isinstance(entry, Mapping) else None
+        if program is not None:
+            software.append({"program": program, "version": _provenance_value(entry.get("version"))})
+    return {**{key: _provenance_value(value.get(key)) for key in _PROVENANCE_FIELDS}, "software": software}
+
+
 def _read_header(chunk: Chunk) -> None:
     with pysam.AlignmentFile(str(chunk.path), "rb", check_sq=False) as bam:
         header = bam.header
@@ -223,6 +304,7 @@ def _read_header(chunk: Chunk) -> None:
         chunk.aligned = bool(chunk.sq)
     models = sorted({model for line in chunk.rg_lines if (model := _rg_model(line))})
     chunk.basecall_model = "|".join(models) if models else None
+    chunk.provenance = header_provenance(text)
 
 
 def _sha256_file(path: Path) -> str:
@@ -838,6 +920,7 @@ def align(
             "tools": {"samtools": samtools.version, "minimap2": minimap2.version},
             "aligner_argv": argv_identity,
             "basecall_model": chunkset.basecall_model,
+            "header_provenance": chunkset.header_provenance,
             "chunks": len(chunkset.chunks),
             "excluded_chunks": chunkset.excluded_indexes,
             "records": {"ubam": chunkset.total_records, "aligned_primary_plus_unmapped": aligned_count},
@@ -922,6 +1005,7 @@ def ingest_prealigned(
             "reference_id": reference.reference_id,
             "reference_sha256": reference.sha256,
             "basecall_model": chunkset.basecall_model,
+            "header_provenance": chunkset.header_provenance,
             "chunks": 1,
             "excluded_chunks": [],
             "records": {"ubam": None, "aligned_primary_plus_unmapped": count_records(bam, "-F", "0x900")},

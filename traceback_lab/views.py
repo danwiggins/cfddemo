@@ -24,7 +24,7 @@ from typing import Any
 
 from .completed_runs import completed_for_source, completion_history_unavailable
 from .envelope import ResultEnvelope
-from .ingest import id12_for, input_manifest, source_record
+from .ingest import id12_for, input_manifest, source_record, stored_header_provenance
 from .interpretation.engine import Library, classify, load_library
 from .platforms import for_input
 from .problems import LabProblem
@@ -173,6 +173,12 @@ class InputView:
                 return envelope.depth.approx_depth_x
         return None
 
+    def eligible_reads(self) -> int | None:
+        for envelope in self.results.values():
+            if envelope.depth is not None:
+                return envelope.depth.eligible_reads
+        return None
+
 
 @dataclass
 class SampleView:
@@ -185,6 +191,7 @@ class SampleView:
     operator_metadata_problem: LabProblem | None = None
     platform: str = "ont"
     completed_utc: str | None = None
+    header_provenance: dict[str, Any] | None = None
 
     def by_transform(self, transform: str) -> list[InputView]:
         return [item for item in self.derived if item.transform == transform]
@@ -351,6 +358,7 @@ def load_sample(store: LabStore, source_id: str, *,
     return SampleView(
         source_id, id12_for(store, source_id), bool(record.get("example")), full, derived,
         assertion, metadata_problem, platform, completed["completed_utc"] if completed else None,
+        header_provenance=stored_header_provenance(manifest),
     )
 
 
