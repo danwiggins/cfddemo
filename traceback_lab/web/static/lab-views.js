@@ -1590,7 +1590,7 @@
     const section = h("section", { class: "panel" },
       h("div", { class: "findings-head" }, h("h2", {}, "Griffin TF-site profile"), flagPill("LEGAL")));
     if (!a || a.status !== "ok") return [section, absent(a, "griffin", sample)];
-    section.append(h("p", { class: "help" }, "GC-corrected nucleosome protection from the pinned Griffin workflow on a compatible paired-end WGS BAM. The primary TF list is an operator-registered choice; this is not a TF expression call."));
+    section.append(h("p", { class: "help" }, "GC-corrected nucleosome protection from the pinned Griffin workflow on a compatible paired-end WGS BAM, or from the Lab's speculative single-end port on an ONT input. The primary TF list is an operator-registered choice; this is not a TF expression call."));
     const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading Griffin profile…"));
     section.append(...context(sample, "griffin", seen), slot);
     artifact(sample, "griffin", "tf-site-profile").then((data) => {

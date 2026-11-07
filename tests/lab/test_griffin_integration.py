@@ -226,8 +226,9 @@ def test_griffin_preflight_depth_and_native_ont_skip(tmp_path: Path, monkeypatch
     _, unsupported = module._bam_gate(bam, derived=False)
     assert isinstance(unsupported, Skip) and unsupported.reason_code == "platform"
     assert "single-end" in unsupported.message
+    # Native ONT now takes the in-house single-end port (test_griffin_ont.py), not a platform skip.
     platform = GRIFFIN.preflight(InputContext(**{**base, "platform": "ont"}, eligible_reads=5_000_000))
-    assert isinstance(platform, Skip) and platform.reason_code == "platform"
+    assert isinstance(platform, Ready)
     monkeypatch.setattr(module, "_require_paired_input", lambda _: None)
     monkeypatch.setattr(module, "count_d21_pairs", lambda _: 4_999_999)
     _, short_pairs = module._bam_gate(bam, derived=False)

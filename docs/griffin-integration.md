@@ -39,9 +39,10 @@ BAMs lack the required paired records. It compares the BAM's `@SQ` names and len
 and the workflow chromosome sizes with the registered FASTA index. Every
 autosome in that index must appear in the workflow sizes, so the coverage
 space cannot omit autosomes included in the depth count. This checks
-coordinate-space compatibility, not exact sequence identity. A scientifically
-reviewed ONT fragment
-adapter remains necessary for the Lab's primary input. The caller supplies
+coordinate-space compatibility, not exact sequence identity. Native ONT input
+runs the Lab's speculative single-end port instead (see the end of this
+section); a scientific review of ONT aligned spans as Griffin fragments
+remains open. The caller supplies
 the registered hg38 FASTA and its SHA-256, Griffin's
 reference assets (including mappability BigWig, exclusion BEDs and all
 15–500 bp genome GC-frequency tables), and high-mappability TF-site lists.
@@ -115,8 +116,8 @@ the profile panel. The primary registered TF list supplies the scalar
 and split controls use the shared read-name selection to create a temporary
 paired BAM; the selected records must still contain at least 5M D21 eligible
 autosomal pairs, and the temporary BAM is removed after the worker finishes
-or skips. A below-gate selection is published as a depth skip. Native
-ONT, example, and other derived transforms (including CNA) skip explicitly. No arbitrary TF activity
+or skips. A below-gate selection is published as a depth skip. Example
+inputs and other derived transforms (including CNA) skip explicitly. No arbitrary TF activity
 or diagnostic threshold is asserted.
 
 Both complete pinned Snakemake workflows ran on a 30 kb synthetic reference
@@ -128,9 +129,17 @@ the production gate is unchanged. It does not establish biological signal,
 full-depth resource needs, or a production hg38 sample. The commands,
 fixture generators, and output digests are in
 [`docs/proofs/griffin/README.md`](proofs/griffin/README.md). A production run still needs registered hg38 assets and a compatible
-toolchain. Native ONT input is incompatible with the exact upstream code; a
-scientifically reviewed ONT fragment adapter would be needed for the Lab's
-principal assay.
+toolchain. Native ONT input is incompatible with the exact upstream code,
+which reads fragments only from paired records. It runs
+`adapters/griffin_ont.py`, a port of the same pinned GC-count, GC-bias,
+coverage and merge-sites arithmetic that treats each D21-eligible primary
+autosomal aligned span from the read summary as one fragment. The port has a
+gate of 5M D21-eligible autosomal reads, uses the same registration and
+publishes the same artifacts. When synthetic spans are given to the pinned
+scripts as proper pairs, the port reproduces upstream's corrected TSV byte for
+byte, apart from the sample label ([cross-check](proofs/griffin/README.md)).
+That matches the arithmetic, not the biology: Griffin has no published ONT
+performance, and the ONT profile is SPECULATIVE.
 
 Griffin's source is BSD-3-Clause-Clear, which expressly grants no patent
 rights. The Lab's existing `method-patents` callout applies, and no

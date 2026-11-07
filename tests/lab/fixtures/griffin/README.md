@@ -17,3 +17,12 @@ real-sample output.
 It tests the corrected-profile parser only. The Lab's paired-end, 100–200 bp
 window and five-million D21 pair gates run on the full or selected BAM in a
 timed worker; this TSV fixture does not exercise those gates.
+
+`OntPortUpstream.GC_corrected.coverage.tsv` is the pinned upstream scripts'
+corrected profile for the synthetic spans of `tests/lab/test_griffin_ont.py`,
+presented as proper pairs. It contains no observed sample values.
+`docs/proofs/griffin/ont_port_crosscheck.py` regenerates it. Its SHA-256 is
+`e02a40abeafa45a02827a9cd24aa5a960db4e45e00a4b2ba7919986368655db9`.
+`test_port_matches_pinned_upstream_scripts_on_the_same_fragments` requires the
+Lab's single-end ONT port to reproduce it byte for byte, apart from the
+sample label.
