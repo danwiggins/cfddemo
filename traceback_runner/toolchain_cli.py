@@ -24,8 +24,10 @@ from .toolchain import (
     toolchain_cache_root,
 )
 
-# §11.20: `copy-number` is an alias of `ichor`.
-_TOOL_NAMES = tuple(sorted({*TOOL_PINS, *TOOL_ALIASES}))
+# §11.20: `copy-number` is an alias of `ichor`.  `aligners` is the Lab's
+# pinned samtools + minimap2 store (traceback_lab.aligner_toolchain).
+ALIGNERS = "aligners"
+_TOOL_NAMES = tuple(sorted({*TOOL_PINS, *TOOL_ALIASES, ALIGNERS}))
 
 
 def _absolute_path(value: str) -> Path:
@@ -57,6 +59,12 @@ def main(argv: Sequence[str]) -> int:
 
     args = _parser().parse_args(list(argv))
     as_json = args.as_json
+    if args.tool == ALIGNERS:
+        if args.micromamba is not None:
+            _parser().error("--micromamba does not apply to aligners")
+        from traceback_lab.aligner_toolchain import main_install
+
+        return main_install(args)
     if TOOL_ALIASES.get(args.tool, args.tool) == "ichor":
         return _main_ichor(args, progress)
     return _main_tool(args)

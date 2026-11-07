@@ -53,7 +53,7 @@ from .problems import EXIT_USAGE, LabProblem
 from .scrub import Scrubber
 from .sample_metadata import with_sex_assertion
 from .store import LabStore, write_atomic
-from .tools import Tool
+from .tools import Tool, aligner_provenance, pins_of
 
 INPUT_SCHEMA = "traceback.lab.input.v1"
 SOURCE_SCHEMA = "traceback.lab.source.v1"
@@ -772,6 +772,7 @@ def align(
         minimap2_version=str(minimap2.version),
         samtools_version=str(samtools.version),
         aligner_argv=argv_identity,
+        tool_pins=pins_of(samtools, minimap2),
     )
     existing = input_manifest(store, input_id)
     if existing is not None:
@@ -861,6 +862,7 @@ def align(
             "reference_sha256": reference.sha256,
             "mmi_sha256": mmi_sha256,
             "tools": {"samtools": samtools.version, "minimap2": minimap2.version},
+            "tool_provenance": aligner_provenance(samtools, minimap2),
             "aligner_argv": argv_identity,
             "basecall_model": chunkset.basecall_model,
             "chunks": len(chunkset.chunks),

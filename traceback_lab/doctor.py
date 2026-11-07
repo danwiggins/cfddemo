@@ -31,7 +31,7 @@ from .assets import AssetError, inspect_asset
 from .ingest import BUDGET_FACTOR, GIB, MARGIN_BYTES, MMI_FACTOR, mmi_path, resolve_reference
 from .problems import EXIT_BLOCKED, EXIT_OK, LabProblem
 from .store import LabStore
-from .tools import MIN_MINIMAP2, MIN_SAMTOOLS, find_minimap2, find_samtools
+from .tools import MIN_MINIMAP2, MIN_SAMTOOLS, PINNED, provenance_of, resolve_aligner_tools
 
 FULL_RUN_BYTES = 44 * 10**9  # budget for a ~400-chunk full run (D30)
 MIN_RAM = 16 * GIB
@@ -52,6 +52,43 @@ def _tool(tool: Any, minimum: tuple[int, int]) -> dict[str, Any]:
     if tool.numeric is None or tool.numeric < minimum:
         return _check(f"lab_{tool.name}", "blocked", f"{tool.name} {tool.version or '?'} is below {need}", f"brew upgrade {tool.name}", blocks_example=True)
     return _check(f"lab_{tool.name}", "pass", f"{tool.name} {tool.version}")
+
+
+def _aligner_checks() -> list[dict[str, Any]]:
+    """samtools, minimap2 and where they come from: the pinned store or PATH."""
+
+    from .aligner_toolchain import pins_for
+
+    install = "traceback toolchain install aligners --yes"
+    try:
+        samtools, minimap2 = resolve_aligner_tools()
+    except LabProblem as problem:
+        return [
+            _check(
+                "lab_aligner_provenance", "blocked", f"{problem.code}: {problem.cause}", problem.fix,
+                blocks_example=True,
+            )
+        ]
+    checks = [_tool(samtools, MIN_SAMTOOLS), _tool(minimap2, MIN_MINIMAP2)]
+    versions = f"samtools {samtools.version or '?'}, minimap2 {minimap2.version or '?'}"
+    if provenance_of(samtools, minimap2) == PINNED:
+        checks.append(_check(
+            "lab_aligner_provenance", "pass",
+            f"pinned: {versions} from the verified aligner store (input_id names the release digests)",
+        ))
+    elif pins_for() is None:
+        checks.append(_check(
+            "lab_aligner_provenance", "pass",
+            f"unpinned: {versions} from PATH; no pinned release artefact exists for this platform, "
+            "so input_id follows the PATH versions",
+        ))
+    else:
+        checks.append(_check(
+            "lab_aligner_provenance", "warn",
+            f"unpinned: {versions} from PATH; a tool upgrade changes input_id and realigns",
+            install,
+        ))
+    return checks
 
 
 def _ram() -> int | None:
@@ -116,8 +153,7 @@ def lab_checks(store: LabStore) -> list[dict[str, Any]]:
     root = store.root
     checks: list[dict[str, Any]] = [
         _check("python", "pass" if sys.version_info[:2] == (3, 11) else "blocked", f"Python {sys.version_info[0]}.{sys.version_info[1]}", "uv sync (Python 3.11)", blocks_example=True),
-        _tool(find_samtools(), MIN_SAMTOOLS),
-        _tool(find_minimap2(), MIN_MINIMAP2),
+        *_aligner_checks(),
     ]
     signed_root = _doctor_root(root)
     if not _writable(root):

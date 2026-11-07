@@ -81,6 +81,8 @@ before interpreting any exploratory pattern.
 ## One-time setup for real kits
 
 1. `brew install samtools minimap2` (samtools ≥ 1.20, minimap2 ≥ 2.28).
+   On Linux x86-64, `uv run traceback toolchain install aligners --yes` pins
+   them instead (see [Pinned aligners](#pinned-aligners)).
 2. Register hg38: `uv run traceback reference register --fasta hg38.fa --id hg38 --root R`.
 3. For copy-number: `uv run traceback toolchain install ichor`, then
    `uv run traceback method-asset register --from-toolchain copy-number --root R`.
@@ -329,6 +331,46 @@ minimap2`). The minimap2 index of the reference is built once under
 `ROOT/lab/refs/` (hg38: about 20–40 minutes and 8 GB); `--mmi PATH` reuses one
 you already have. Measure alignment speed on the operator's workstation and
 keep input-specific results private.
+
+### Pinned aligners
+
+`traceback toolchain install aligners` (a dry run; add `--yes` to install)
+downloads samtools 1.21 and minimap2 2.28 from the same upstream release
+URLs, with the same sha256 digests, as CI, verifies each tarball before use,
+builds samtools from source (needs a C compiler, make and the zlib, bzip2,
+xz and curl headers) and places both under the per-user toolchain cache
+(`~/.cache/traceback/toolchains/aligners-<pin set sha256>/`, shared by every
+ROOT). Only this command uses the network.
+
+`lab run` (and `--dry-run`) resolves the aligners in this order:
+
+| Store | Tools used | Provenance |
+|---|---|---|
+| installed and verified | the store's binaries | `pinned` |
+| not installed, or no pin for this platform | `samtools` / `minimap2` on `PATH` | `unpinned` |
+| present but fails verification | none: refused | TBX-LAB-033 |
+
+Verification re-hashes both binaries against the install receipt; nothing
+is downloaded and a damaged store never falls back to `PATH`. The run log
+records an `aligner_tools` event and the input's `manifest.json` records
+`tool_provenance` (provenance, version and pinned tarball digest per tool;
+never a path). `--dry-run` prints a `TOOLS` line. `lab doctor` shows one
+`lab_aligner_provenance` check: pass when pinned, a warning with the install
+command when unpinned on a pinned platform, blocked on TBX-LAB-033.
+
+Identity rule: an unpinned alignment's `input_id` is computed exactly as
+before pinning existed (versions reported by the `PATH` tools, no path), so
+an input aligned earlier keeps its `input_id` while the same versions are on
+`PATH`; a Homebrew upgrade still changes it (TBX-LAB-019). A pinned
+alignment's `input_id` adds the two release tarball digests (`tool_pins`),
+so every machine with the store computes the same `input_id` regardless of
+where the cache lives. Pinned and unpinned alignments of the same versions
+are different inputs: switching to the store realigns once.
+
+Only Linux x86-64 is pinned. Neither tool publishes an upstream macOS
+release artefact (minimap2 ships a Linux x86-64 binary; Homebrew bottles are
+rebuilt by Homebrew), so on macOS the install command says so and changes
+nothing, and the Lab keeps `PATH` tools recorded as `unpinned`.
 
 The reference is the one registered under ROOT (`traceback reference
 register`); with several, pass `--reference ID`.
@@ -1435,7 +1477,7 @@ checkout (`git pull && uv sync`). The store is never downgraded.
 
 ### TBX-LAB-019
 
-A warning (exit 0): the samtools or minimap2 version changed since this sample was last aligned, so it is realigned under a new input identity (results from the old alignment are never reused). `--dry-run` shows it first. Pin the tools to avoid it.
+A warning (exit 0): the samtools or minimap2 version changed since this sample was last aligned, so it is realigned under a new input identity (results from the old alignment are never reused). `--dry-run` shows it first. Pin the tools to avoid it ([Pinned aligners](#pinned-aligners); Linux x86-64).
 
 ### TBX-LAB-020
 
@@ -1538,6 +1580,17 @@ unreadable entries and `.bam` files without a `_<n>.bam` index are listed
 under `data.skipped` / `data.unindexed` and do not count. A missing DIR, a
 symlink or a plain file is TBX-LAB-005 instead.
 
+### TBX-LAB-033
+
+The pinned aligner store exists under the per-user toolchain cache but does
+not verify (exit 3): its install receipt is missing or malformed (an
+interrupted install), it names another pin set, or a binary is missing, not
+executable or no longer matches its recorded sha256. The Lab refuses rather
+than silently aligning with `PATH` tools under a different identity. Run
+`traceback toolchain install aligners --yes` (it replaces the damaged store),
+or remove `~/.cache/traceback/toolchains/aligners-*` to go back to `PATH`
+(`unpinned`).
+
 ## Adding an algorithm
 
 1. Add a module under `traceback_lab/algorithms/` exposing an instance of the
@@ -1555,6 +1608,9 @@ symlink or a plain file is TBX-LAB-005 instead.
 
 ## Changes
 
+- 2026-11-07: `traceback toolchain install aligners` pins samtools 1.21 and
+  minimap2 2.28 (Linux x86-64); `lab run` records aligner provenance;
+  TBX-LAB-033.
 - 2026-11-06: `lab inventory DIR` checks a chunk set before alignment; TBX-LAB-031.
 - 2026-11-06: `lab serve --port N` binds a fixed loopback port; TBX-LAB-026.
 - 2026-11-06: `lab gc` (dry-run by default; `--apply` deletes stale failed
