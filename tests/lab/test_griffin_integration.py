@@ -338,7 +338,7 @@ def test_ready_griffin_preflight_leaves_full_bam_scan_to_worker(
 def test_slow_griffin_bam_gate_obeys_worker_process_timeout(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import traceback_lab.pipeline as pipeline
+    import traceback_runner.contained_process as pipeline
 
     marker = tmp_path / "scan-started"
     real_monotonic = time.monotonic
@@ -373,7 +373,7 @@ def test_slow_griffin_bam_gate_obeys_worker_process_timeout(
         "griffin._require_paired_input = slow_scan\n"
         "griffin._bam_gate(Path('unused.bam'), derived=False)\n"
     )
-    outcome = pipeline.run_pipeline([pipeline.Stage("griffin-gate", [sys.executable, "-c", script])],
+    outcome = pipeline.run_contained_pipeline([pipeline.Stage("griffin-gate", [sys.executable, "-c", script])],
                                     timeout_s=2, cwd=tmp_path)
     assert marker.is_file() and not startup_expired, (
         "Griffin worker did not begin the BAM scan within 30 seconds",
@@ -406,7 +406,7 @@ def test_bam_scan_failure_omits_private_path_from_skip(
 def test_unreadable_bam_skip_is_published_without_private_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import traceback_lab.algorithms.griffin as module
     import traceback_lab.runner as runner
-    from traceback_lab.pipeline import PipelineResult, StageOutcome
+    from traceback_runner.contained_process import PipelineResult, StageOutcome
 
     private_path = tmp_path / "private-donor" / "aligned.bam"
 

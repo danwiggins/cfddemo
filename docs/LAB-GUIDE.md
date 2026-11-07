@@ -1695,6 +1695,9 @@ symlink or a plain file is TBX-LAB-005 instead.
 
 - 2026-11-07: the landing samples table shows kit columns (instrument, basecall
   model, modified-base models, software) from the stored header provenance.
+- 2026-11-07: the Lab's worker and alignment pipelines run through the shared
+  `traceback_runner.contained_process.run_contained_pipeline` (`traceback_lab/pipeline.py`
+  removed); no operator-facing change.
 - 2026-11-06: `bam-qc` method version 2 adds `duplicate_read_name_count` and
   `duplicate_read_name_share` (repeated read names among primary reads, from
   the read summary's 64-bit name hashes); a non-zero share shows a FLAG pill
