@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from traceback_runner.contained_process import Stage, run_contained_pipeline as run_pipeline
 from traceback_runner.serialization import canonical_json_bytes
 
 from .assets import AssetError, _check_contained
@@ -23,7 +24,6 @@ from .file_access import open_regular_no_follow
 from .identity import SHA256_PATTERN, canonical_sha256, resolve_prefix
 from .identity_sites import IdentitySitesError, inspect_sites
 from .ingest import id12_for, resolve_reference, source_ids
-from traceback_runner.contained_process import Stage, run_contained_pipeline as run_pipeline
 from .registry import execution_identity
 from .store import LabStore, new_attempt_id, write_atomic
 from . import views

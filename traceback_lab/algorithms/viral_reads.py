@@ -19,9 +19,10 @@ from typing import Any
 
 import pysam
 
+from traceback_runner.contained_process import Stage, run_contained_pipeline as run_pipeline
+
 from ..file_access import open_regular_no_follow
 from ..identity import validate_fraction
-from traceback_runner.contained_process import Stage, run_contained_pipeline as run_pipeline
 from ..registry import AlgorithmOutput, InputContext, Ready, Skip, ToolPin
 from ..tools import MIN_MINIMAP2, find_minimap2
 from ..viral_assets import TARGETS_NAME, VIRUSES, ViralReference, inspect_viral_reference

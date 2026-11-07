@@ -20,12 +20,12 @@ from traceback_lab.algorithms import viral_reads
 from traceback_lab.algorithms.viral_reads import VIRAL_READS, _count_hits, _derived_keep, _write_queries
 from traceback_lab.registry import InputContext, PlanItem, Ready, Skip
 from traceback_lab.read_summary import DS_SALT, SPLIT_SALT, downsample_mask, h64, split_mask
-from traceback_runner.contained_process import Stage, run_contained_pipeline as run_pipeline
 from traceback_lab.runner import RunTarget, run_plan
 from traceback_lab.scrub import Scrubber
 from traceback_lab.store import LabStore, new_run_id
 from traceback_lab.tools import MIN_MINIMAP2, find_minimap2
 from traceback_lab.viral_assets import add_viral_reference, inspect_viral_reference
+from traceback_runner.contained_process import Stage, run_contained_pipeline as run_pipeline
 
 
 def _sources(tmp_path: Path) -> tuple[Path, Path, dict[str, str]]:

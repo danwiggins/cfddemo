@@ -255,7 +255,7 @@ def test_tree_rss_sampler_hook_and_per_sample_abort() -> None:
     assert [stage.returncode for stage in result.stages] == [-signal.SIGTERM, -signal.SIGTERM]
 
 
-def test_pipeline_result_fields_are_the_lab_record_fields() -> None:
+def test_pipeline_result_shape_is_pinned() -> None:
     assert [f.name for f in dataclasses.fields(PipelineResult)] == [
         "stages", "duration_s", "peak_disk_bytes", "timed_out", "interrupted",
         "sampled_tree_peak_rss_bytes", "aborted",
@@ -264,6 +264,61 @@ def test_pipeline_result_fields_are_the_lab_record_fields() -> None:
         "name", "returncode", "peak_rss_bytes", "stderr", "exited_at",
     ]
     assert PipelineResult([StageOutcome("w", returncode=0)], 0.1, None).ok
+
+
+def test_lab_record_fields_come_from_the_same_attributes() -> None:
+    """What the Lab persists (ingest metrics, runner step_end/failure) and nothing else.
+
+    ``aborted`` is a hook outcome for callers; it never reaches a run log.
+    """
+
+    result = run_contained_pipeline(
+        [Stage("a", [PY, "-c", "print('x')"]), Stage("b", [PY, "-c", "import sys; sys.stdin.read()"])],
+        timeout_s=30, disk_usage=lambda: 5,
+    )
+    assert result.ok
+    lab_record = {
+        "duration_s": result.duration_s,
+        "peak_rss_bytes": result.peak_rss_bytes,
+        "peak_tree_rss_bytes": result.sampled_tree_peak_rss_bytes,
+        "peak_disk_bytes": result.peak_disk_bytes,
+        "stage_rss_bytes": {stage.name: stage.peak_rss_bytes for stage in result.stages},
+        "exit_code": result.stages[0].returncode,
+        "timed_out": result.timed_out,
+    }
+    assert list(lab_record["stage_rss_bytes"]) == ["a", "b"]
+    assert all(value is not None and value > 0 for value in lab_record["stage_rss_bytes"].values())
+    assert lab_record["peak_rss_bytes"] == max(lab_record["stage_rss_bytes"].values())
+    assert lab_record["peak_disk_bytes"] == 5
+    assert lab_record["exit_code"] == 0 and lab_record["timed_out"] is False
+    assert lab_record["duration_s"] > 0
+    assert "aborted" not in lab_record
+
+
+def test_final_group_kill_tolerates_eperm_and_esrch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """macOS refuses killpg (EPERM) while the group holds an unreaped zombie."""
+
+    real_killpg = os.killpg
+    refused: list[int] = []
+
+    def refusing_killpg(pgid: int, sig: int) -> None:
+        if sig == signal.SIGKILL:
+            refused.append(pgid)
+            raise PermissionError(1, "Operation not permitted")
+        real_killpg(pgid, sig)
+
+    monkeypatch.setattr(contained_process.os, "killpg", refusing_killpg)
+    result = run_contained_pipeline([Stage("ok", [PY, "-c", "print('done')"])], timeout_s=30)
+    assert result.ok and result.stages[0].returncode == 0
+    assert refused, "the final SIGKILL of the group was not attempted"
+    assert _gone(refused[0])
+
+    def gone_killpg(pgid: int, sig: int) -> None:
+        raise ProcessLookupError(3, "No such process")
+
+    monkeypatch.setattr(contained_process.os, "killpg", gone_killpg)
+    result = run_contained_pipeline([Stage("ok", [PY, "-c", "print('done')"])], timeout_s=30)
+    assert result.ok and result.stages[0].returncode == 0
 
 
 def test_single_stage_pipeline_matches_run_contained(tmp_path: Path) -> None:

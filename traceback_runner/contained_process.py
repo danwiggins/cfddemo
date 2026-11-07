@@ -200,6 +200,10 @@ def _finish_readers(
 
 
 def _signal_group(pgid: int, signum: int) -> None:
+    """Signal a process group; a gone group (ESRCH) or one macOS refuses to
+    signal (EPERM, while it holds an unreaped zombie) is not an error here:
+    the caller has already reaped, or is about to reap, every direct child."""
+
     try:
         os.killpg(pgid, signum)
     except (ProcessLookupError, PermissionError):
@@ -851,6 +855,8 @@ def run_contained_pipeline(
         if leader is not None:
             # Every direct child is reaped; end the group so no grandchild
             # outlives the step (SIGKILL the group, then reap the leader).
+            # _signal_group swallows ESRCH and the macOS EPERM for a group
+            # holding a zombie, as toolchain.kill_process_group's caller did.
             _signal_group(leader.pid, signal.SIGKILL)
             leader.wait()
         for thread in threads:
