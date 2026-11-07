@@ -81,7 +81,11 @@ FLAGS: dict[str, str] = {
 }
 
 # Doctor checks whose fix is an action for the operator, not a command the Lab runs.
-MANUAL_STEPS = ("python", "lab_samtools", "lab_minimap2", "root", "disk", "ram", "store_version", "active")
+# lab_aligner_provenance (pinned aligner store, #284) is manual for now: setup prints doctor's
+# `traceback toolchain install aligners --yes` instead of running an unreviewed download step.
+MANUAL_STEPS = (
+    "python", "lab_samtools", "lab_minimap2", "lab_aligner_provenance", "root", "disk", "ram", "store_version", "active",
+)
 _STEP_NAME = re.compile(r"[a-z0-9_]+")
 
 
