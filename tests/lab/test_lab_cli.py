@@ -37,6 +37,19 @@ def test_signed_cli_resolves_root_with_the_lab_resolver() -> None:
     assert lab_cli.resolve_root is resolve_root
 
 
+def test_suite_starts_without_an_ambient_traceback_root() -> None:
+    import os
+
+    assert "TRACEBACK_ROOT" not in os.environ  # tests/conftest.py
+
+
+def test_resolve_root_expands_home_and_dotdot(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+    assert lab_cli.resolve_root(Path("~/h")) == tmp_path / "h"
+    assert lab_cli.resolve_root(Path("a/../b")) == tmp_path / "b"
+
+
 def _signed(capsys, argv):
     code = signed_cli.main(argv)
     return code, capsys.readouterr().out
@@ -55,6 +68,9 @@ def test_signed_and_lab_share_env_root_across_cwds(tmp_path: Path, capsys, monke
     code, out = _signed(capsys, ["jobs"])
     assert code == 0
     assert out.splitlines()[1] == f"ROOT  {shared}"
+    code, out = _signed(capsys, ["doctor"])
+    assert out.splitlines()[1] == f"ROOT  {shared}"
+    assert out.count(f"ROOT  {shared}") == 1  # doctor's data.root is that line
     code, out = _signed(capsys, ["doctor", "--json"])
     assert json.loads(out)["data"]["root"] == str(shared)
     assert not (tmp_path / "signed-cwd" / ".traceback").exists()
@@ -66,6 +82,38 @@ def test_signed_and_lab_share_env_root_across_cwds(tmp_path: Path, capsys, monke
     code, out = _run(capsys, ["runs", "--json"])
     assert json.loads(out)["data"]["root"] == str(shared)
     assert not (tmp_path / "lab-cwd" / ".traceback").exists()
+
+
+def test_signed_write_without_root_goes_to_the_exported_store(tmp_path: Path, capsys, monkeypatch) -> None:
+    """A signed write command started elsewhere with TRACEBACK_ROOT exported
+    writes to that store and creates nothing under its cwd."""
+
+    from traceback_runner.fixtures import create_local_golden_path_inputs
+
+    inputs = create_local_golden_path_inputs(tmp_path / "inputs", eligible=False)
+    store = tmp_path / "store"
+    cwd = tmp_path / "elsewhere"
+    cwd.mkdir()
+    monkeypatch.setenv("TRACEBACK_ROOT", str(store))
+    monkeypatch.chdir(cwd)
+    code, out = _signed(capsys, ["reference", "register", "--fasta", str(inputs.fasta_path), "--id", "ref"])
+    assert code == 0, out
+    assert out.splitlines()[1] == f"ROOT  {store}"
+    assert (store / "references" / "ref").is_dir()
+    assert any((store / "references" / "ref").iterdir())
+    assert list(cwd.iterdir()) == []
+
+
+def test_signed_relative_root_resolves_under_cwd_and_json_carries_no_path(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    code, out = _signed(capsys, ["jobs", "--root", "rel/dir"])
+    assert code == 0
+    assert out.splitlines()[1] == f"ROOT  {tmp_path / 'rel' / 'dir'}"
+    code, out = _signed(capsys, ["jobs", "--json", "--root", "rel/dir"])
+    assert code == 0
+    assert str(tmp_path) not in out and "rel/dir" not in out and "root" not in json.loads(out)["data"]
 
 
 def test_signed_explicit_root_overrides_env(tmp_path: Path, capsys, monkeypatch) -> None:

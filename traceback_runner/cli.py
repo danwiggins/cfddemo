@@ -506,8 +506,9 @@ def _emit(payload: dict[str, Any], *, as_json: bool, root: Path | None = None) -
 
     ``root`` is the resolved ROOT of a command that took ``--root``: human
     output prints it as ``ROOT  /absolute/path`` right after the status line
-    (a ``data.root`` value, as ``doctor`` carries, is that same line and is
-    not printed twice).  ``--json`` bytes do not change.
+    (a ``data.root`` equal to it, as ``doctor`` carries, is that same line and
+    is not printed twice; a different value still prints).  ``--json`` bytes
+    do not change.
     """
 
     human = payload.get(_HUMAN)
@@ -524,7 +525,7 @@ def _emit(payload: dict[str, Any], *, as_json: bool, root: Path | None = None) -
             print(line)
         return
     for key, value in payload.get("data", {}).items():
-        if key == "root" and root is not None:
+        if key == "root" and root is not None and str(value) == str(root):
             continue
         rendered = (
             json.dumps(value, sort_keys=True, separators=(",", ":"))
@@ -3695,7 +3696,7 @@ def _serve_main(args: argparse.Namespace) -> int:
         except KeyboardInterrupt:
             return int(ExitCode.OK)
     except ReferenceProblem as problem:
-        _emit(_local_envelope(_problem("serve", problem)), as_json=False)
+        _emit(_local_envelope(_problem("serve", problem)), as_json=False, root=args.root)
         return int(problem.exit_code)
     except Exception:
         # For example a damaged catalog database.  No detail: it may name a path.
@@ -3709,6 +3710,7 @@ def _serve_main(args: argparse.Namespace) -> int:
                 )
             ),
             as_json=False,
+            root=args.root,
         )
         return int(ExitCode.BLOCKED)
     finally:

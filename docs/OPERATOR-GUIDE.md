@@ -135,10 +135,19 @@ ROOT is where a command reads and writes local data. Every command that
 takes `--root` resolves it the same way, on both surfaces (signed CLI and
 [Lab](LAB-GUIDE.md#root)): `--root R` wins; without it `$TRACEBACK_ROOT`;
 without that `.traceback` in the current directory. The result is an absolute
-path. Human output prints it as `ROOT  /…` on the line after the status
-line; `doctor --json` carries it as `data.root`. `--json` output of the other
-commands is unchanged. `serve` prints only its link. Set `TRACEBACK_ROOT`
-once so commands started in different directories share one ROOT.
+path (`~` and `..` are resolved). An exported `TRACEBACK_ROOT` applies to
+signed commands too: `run`, `reference register`, `catalog import` and every
+other write started without `--root` go to that store, not to the current
+directory. Set it once so commands started in different directories share
+one ROOT.
+
+Human output of every signed result prints `ROOT  /…` on the line after the
+status line, including refusals. Two outputs carry no ROOT line: `serve`
+once it starts (its first line is the link; its refusals print ROOT), and an
+argument error (exit 2, argparse usage text). ROOT is the one local path
+`--json` may carry: `doctor --json` has `data.root`, and the JSON of every
+other signed command carries no path (the Lab's JSON carries `data.root` on
+every command).
 
 `verify --root` is not a data root default: it selects ROOT's trust store as
 the trust source (against `--trust-store` and `--trust-registry`) and must
