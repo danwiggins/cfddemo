@@ -194,6 +194,7 @@ def test_same_index_twice_in_one_group_only() -> None:
     one = inventory_command.Group(id=1, parts=(), entries=[entry(1, "x_1.bam", 1, "a" * 64), entry(1, "y_1.bam", 1, "b" * 64)])
     assert duplicates([one]) == [{
         "kind": "same_index", "chunks": [{"group": 1, "name": "x_1.bam"}, {"group": 1, "name": "y_1.bam"}], "index": 1,
+        "content_compared": True,
     }]
     two = inventory_command.Group(id=2, parts=("barcode02",), entries=[entry(2, "z_1.bam", 1, "c" * 64)])
     one.entries.pop()
@@ -201,7 +202,8 @@ def test_same_index_twice_in_one_group_only() -> None:
     # Without hashes the same index twice is still a duplicate; same content across groups is not checked.
     assert duplicates([one, two], hashing=False) == []
     one.entries.append(entry(1, "y_1.bam", 1, None))
-    assert duplicates([one], hashing=False)[0]["kind"] == "same_index"
+    unhashed = duplicates([one], hashing=False)[0]
+    assert unhashed["kind"] == "same_index" and unhashed["content_compared"] is False
 
 
 def test_final_summary_mismatch_is_incomplete(run_dir: Path, tmp_path: Path, capsys) -> None:

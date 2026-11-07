@@ -168,6 +168,16 @@ def _digest_prefix(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:DIGEST_PREFIX]
 
 
+def _skipped_name(name: str) -> str | None:
+    """A chunk-shaped ``.bam`` name as is; any other name only as a digest."""
+
+    if not name.endswith(".bam"):
+        return None
+    if chunk_index(name) is not None:
+        return name
+    return f".bam file (sha256 {_digest_prefix(name)})"
+
+
 def group_label(number: int, parts: Sequence[str]) -> str:
     """``DIR`` for the top level, the MinKNOW directory names when every name is one, else a digest."""
 
@@ -307,11 +317,11 @@ class _Walker:
             try:
                 info = os.lstat(path)
             except OSError:
-                self.skipped.append(Skipped(label, name if name.endswith(".bam") else None, "unreadable"))
+                self.skipped.append(Skipped(label, _skipped_name(name), "unreadable"))
                 continue
             if stat.S_ISLNK(info.st_mode):
                 if name.endswith(".bam"):
-                    self.skipped.append(Skipped(label, name, "a symlink"))
+                    self.skipped.append(Skipped(label, _skipped_name(name), "a symlink"))
                 elif self.recursive and path.is_dir():
                     self.counter += 1
                     self.skipped.append(Skipped(group_label(self.counter, (*parts, name)), None, "a symlink, not followed"))
@@ -323,9 +333,9 @@ class _Walker:
             if not name.endswith(".bam"):
                 continue
             if not stat.S_ISREG(info.st_mode):
-                self.skipped.append(Skipped(label, name, "not a regular file"))
+                self.skipped.append(Skipped(label, _skipped_name(name), "not a regular file"))
             elif not os.access(path, os.R_OK):
-                self.skipped.append(Skipped(label, name, "unreadable"))
+                self.skipped.append(Skipped(label, _skipped_name(name), "unreadable"))
             elif (index := chunk_index(name)) is None:
                 unindexed.append({"name_sha256_12": _digest_prefix(name), "bytes": info.st_size})
             else:
@@ -535,7 +545,9 @@ def duplicates(groups: Sequence[Group], *, hashing: bool = True) -> list[dict[st
                     by_hash[entry.sha256] = entry
             other = by_index.setdefault(entry.index, entry)
             if other is not entry and not (hashing and entry.sha256 and other.sha256 == entry.sha256):
-                found.append({"kind": "same_index", "chunks": [_ref(other), _ref(entry)], "index": entry.index})
+                compared = bool(hashing and entry.sha256 and other.sha256)
+                found.append({"kind": "same_index", "chunks": [_ref(other), _ref(entry)], "index": entry.index,
+                              "content_compared": compared})
     return found
 
 
@@ -657,7 +669,7 @@ def find_reports(directory: Path, explicit: Path | None) -> list[dict[str, Any]]
 
     if explicit is not None:
         path = Path(os.path.abspath(explicit.expanduser()))
-        shown = explicit.name or str(explicit)
+        shown = report_label(explicit.name, "report") if explicit.name else "report"
         try:
             info = os.lstat(path)
         except FileNotFoundError:
@@ -825,6 +837,9 @@ def verdict_for(scan: Scan, found_duplicates: Sequence[dict[str, Any]] | None,
     truncated = [entry for entry in scan.entries if entry.truncated]
     if truncated:
         damaged.append(f"{len(truncated)} truncated chunk(s)")
+    unreadable = [entry for entry in scan.entries if not entry.truncated and entry.records is None]
+    if unreadable:
+        damaged.append(f"{len(unreadable)} chunk(s) whose records cannot be read")
     if found_duplicates:
         damaged.append(f"{len(found_duplicates)} duplicate(s)")
     for comparison in comparisons:
@@ -1005,7 +1020,8 @@ def inventory_command(args: argparse.Namespace, store: LabStore) -> tuple[int, d
     duplicate_text = "; ".join(
         f"{' = '.join(_chunk_text(ref, labels) for ref in d['chunks'])} ("
         + (f"same content, sha256 {d['sha256_12']}" if d["kind"] == "same_content"
-           else f"same index {d['index']}, different content")
+           else f"same index {d['index']}, "
+           + ("different content" if d.get("content_compared") else "content not compared"))
         + ")"
         for d in found_duplicates
     )
