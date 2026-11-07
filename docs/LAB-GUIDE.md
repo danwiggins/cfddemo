@@ -1071,6 +1071,33 @@ the scroll controls are hidden.
   panels (short version, "Read the full explainer" expands in place, full text
   at `#/about/clia`), followed by the samples table and license callouts. The
   research-use notice is shown in the page header on every route.
+
+  The samples table also shows each sample's **kit columns**: instrument,
+  basecall model, modified-base models and the sequencer/basecaller software
+  versions. They come from the BAM header provenance recorded in the input
+  manifest at ingest (`@RG PM`, `@RG DS` `basecall_model` and
+  `modbase_models`, `@PG` program name and version), never from re-reading the
+  BAM when the page loads, and they are not part of the input ID. Instrument
+  is the device type inferred from the position/serial prefix in `@RG PM`
+  (`MN` + five digits is a MinION, `P2S_…-A/B` a P2 Solo, `X1`–`X5` a GridION
+  position) or an allowlisted device model name; the serial and its digits are
+  never stored, and any other PM (including PromethION position labels) reads
+  "not recorded". Otherwise only a dorado model name (`dna…@vN`, with a fixed
+  modified-base suffix vocabulary; MinKNOW's `modbase_model_version_id`
+  placeholder is not a model) of at most 64 characters, or a program version,
+  is kept: read-group IDs, flow-cell serials (`PU`), device serials,
+  sample and library names (`SM`, `LB`), run IDs, dates and `@PG` command lines
+  are not stored or shown. Only included chunks count (a chunk skipped with
+  `--skip-bad-chunks` does not). When chunks or read groups disagree, the
+  column reads "mixed (N values)" (a chunk that did not record the field counts
+  as one value); the manifest keeps up to 16 distinct values per field with the
+  full distinct count and `truncated: true` when more were seen. A field no
+  header carried, or any other value, reads "not recorded"; an input ingested
+  before this was recorded shows only the manifest's basecall model. The
+  flow-cell product code and library kit are not in an ONT BAM header; they are
+  in the MinKNOW run report, and showing them (via the `final_summary` that
+  `lab inventory` reads) is a follow-up, as is a full Kit lens. Rows keep the
+  run-date order; nothing is sorted by these values.
 - **Findings**: only above/below-reference results are cards (sorted by tier,
   then severity); not-interpretable, no-reference and in-range metrics are
   counted, collapsible rows. Before the kit cohort exists (n < 10) most
@@ -1732,6 +1759,8 @@ symlink or a plain file is TBX-LAB-005 instead.
 
 ## Changes
 
+- 2026-11-07: the landing samples table shows kit columns (instrument, basecall
+  model, modified-base models, software) from the stored header provenance.
 - 2026-11-07: the Lab's worker and alignment pipelines run through the shared
   `traceback_runner.contained_process.run_contained_pipeline` (`traceback_lab/pipeline.py`
   removed); no operator-facing change.
