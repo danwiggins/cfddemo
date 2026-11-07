@@ -90,7 +90,10 @@ class FakeWorld:
             if name in self.done:
                 rows.append({"name": name, "status": "pass", "detail": "done", "blocks_example": False})
             else:
-                rows.append({"name": name, "status": "warn", "detail": "missing", "fix": self.fixes[name], "blocks_example": False})
+                row = {"name": name, "status": "warn", "detail": "missing", "blocks_example": False}
+                if self.fixes[name] is not None:
+                    row["fix"] = self.fixes[name]
+                rows.append(row)
         return rows
 
 
@@ -257,6 +260,57 @@ def test_only_filters_steps_and_reports_satisfied_ones(world: FakeWorld, tmp_pat
     assert code == 0 and _steps(out) == [("ichor_assets", "ok")]
 
 
+def test_only_reasons_come_from_the_checks_own_status(monkeypatch, tmp_path: Path, capsys) -> None:
+    world = FakeWorld(monkeypatch, tmp_path, [("ram", "manual", None), ("staging", LOCAL, "gc")])
+    world.done.add("staging")
+    code, out = _run(capsys, ["--root", str(tmp_path / "root"), "--only", "ram,staging,loyfer_assets"])
+    assert code == 0 and world.calls == []
+    assert "STEP  ram  skipped  doctor reports warn; no automatic fix" in out
+    assert "STEP  staging  skipped  nothing to do: doctor passes this check" in out
+    assert "STEP  loyfer_assets  skipped  doctor lists no check with this name this run" in out
+
+
+def test_an_installed_toolchain_satisfies_the_assets_prerequisite(world: FakeWorld, tmp_path: Path, capsys) -> None:
+    world.done.add("ichor_toolchain")  # doctor passes it; nothing to confirm or download
+    code, out = _run(capsys, ["--root", str(tmp_path / "root"), "--only", "ichor_toolchain,ichor_assets"])
+    assert code == 0, out
+    assert world.calls == ["ichor_assets"]
+    assert _steps(out) == [("ichor_toolchain", "skipped"), ("ichor_assets", "ok")]
+    assert "FLAG" not in out and "[y/N]" not in out
+
+
+def test_manual_and_blocked_steps_print_no_flag_line(monkeypatch, tmp_path: Path, capsys) -> None:
+    world = FakeWorld(monkeypatch, tmp_path, [
+        ("pmd_asset", "manual", "Restore the original pinned PMD bytes, then run traceback lab asset inspect pmd --root <ROOT>"),
+        ("ichor_toolchain", DOWNLOAD, "traceback toolchain install ichor"),
+        ("ichor_assets", LOCAL, "traceback method-asset register --from-toolchain copy-number --root <ROOT>"),
+    ])
+    code, payload = _json(capsys, ["--root", str(tmp_path / "root")])
+    assert code == 8 and world.calls == []
+    by_name = {step["name"]: step for step in payload["data"]["steps"]}
+    assert by_name["pmd_asset"]["status"] == "skipped" and by_name["pmd_asset"]["flag"] is None
+    assert by_name["ichor_assets"]["status"] == "skipped" and by_name["ichor_assets"]["flag"] is None
+    assert by_name["ichor_toolchain"]["flag"] == FLAGS["ichor_toolchain"]
+    code, out = _run(capsys, ["--root", str(tmp_path / "root")])
+    assert out.count("FLAG  ") == 1 and FLAGS["pmd_asset"] not in out
+
+
+def test_a_lab_problem_in_a_step_renders_its_fix_with_the_real_root(world: FakeWorld, tmp_path: Path, capsys) -> None:
+    from traceback_lab.problems import LabProblem
+
+    def refuse(context: SetupContext) -> str:
+        raise LabProblem("TBX-LAB-004", cause="no usable reference", fix="register one under <ROOT>/references")
+
+    setup_command.CATALOGUE["mmi"] = StepSpec(LOCAL, run=refuse)
+    root = tmp_path / "root"
+    code, out = _run(capsys, ["--root", str(root), "--only", "mmi"])
+    assert code == 8
+    assert "STEP  mmi  failed  TBX-LAB-004: no usable reference" in out
+    assert f"  | fix: register one under {root}/references" in out
+    code, payload = _json(capsys, ["--root", str(root), "--only", "mmi"])
+    assert payload["data"]["steps"][0]["stderr_tail"] == ["fix: register one under <ROOT>/references"]
+
+
 def test_only_refuses_unknown_step_names(tmp_path: Path, capsys) -> None:
     code = signed_cli.main(["lab", "setup", "--root", str(tmp_path), "--only", "bogus,mmi"])
     captured = capsys.readouterr()
@@ -326,14 +380,41 @@ def test_run_signed_runs_a_child_and_scrubs_its_tail(tmp_path: Path, capsys) -> 
     said: list[str] = []
     context = SetupContext(
         store=LabStore(root), scrubber=Scrubber(root=root), say=said.append, ask=said.append,
-        yes=True, interactive=False, echo_child=False,
+        yes=True, interactive=False, echo_child=True,
     )
-    assert run_signed(context, ["lab", "algorithms", "--root", str(root), "--json"]) == "command exited 0"
+    assert run_signed(context, ["lab", "algorithms", "--root", str(root)]) == "command exited 0"
+    echoed = capsys.readouterr().out
+    assert "ROOT  <ROOT>" in echoed and str(root) not in echoed  # echoed child lines are scrubbed
+    context.echo_child = False
     with pytest.raises(StepFailed) as failure:
         run_signed(context, ["lab", "runs", "no-such-run", "--root", str(root), "--json"])
     assert failure.value.exit_code == 4
     assert failure.value.tail and "TBX-LAB-017" in failure.value.tail[-1]
     assert str(tmp_path) not in "\n".join(failure.value.tail)
+
+
+def test_signed_children_run_under_the_setup_writer_lock(tmp_path: Path, synthetic_world: dict[str, Path]) -> None:
+    """``reference register`` / ``method-asset register`` take ROOT/.operator.lock, not ROOT/lab/.lock."""
+
+    from traceback_runner.cli import _operator_lock
+
+    root = tmp_path / "root"
+    store = LabStore(root)
+    said: list[str] = []
+    context = SetupContext(
+        store=store, scrubber=Scrubber(root=root), say=said.append, ask=said.append,
+        yes=True, interactive=False, echo_child=False,
+    )
+    argv = ["reference", "register", "--fasta", str(synthetic_world["fasta"]), "--id", "under-lock", "--root", str(root)]
+    with store.writer("setup", new_run_id(), step="ichor_assets"):
+        assert run_signed(context, argv) == "command exited 0"
+        assert resolve_reference(root, "under-lock").reference_id == "under-lock"
+    # The same child is refused while the signed operator lock is held: the two locks are distinct.
+    with _operator_lock(root), pytest.raises(StepFailed) as failure:
+        run_signed(context, [*argv[:-4], "--id", "second", "--root", str(root)])
+    assert failure.value.exit_code not in (0, None)
+    assert any("local action or unexpired worker lease is active" in line for line in failure.value.tail), failure.value.tail
+    assert str(root) not in "\n".join(failure.value.tail)
 
 
 # -- guide ---------------------------------------------------------------------------------

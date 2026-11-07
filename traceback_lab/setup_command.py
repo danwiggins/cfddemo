@@ -163,7 +163,9 @@ def run_signed(context: SetupContext, argv: Sequence[str]) -> str:
 
     stdout_keep = BoundedStderr(head=0, tail=TAIL_LINES)
     stderr_keep = BoundedStderr(head=0, tail=TAIL_LINES)
-    echo = (lambda line: print(line, flush=True)) if context.echo_child else None
+    # Echoed lines pass through the scrubber too: a child's stdout can name the
+    # per-user toolchain cache under $HOME or any other host path.
+    echo = (lambda line: print(context.scrubber.line(line), flush=True)) if context.echo_child else None
     try:
         process = subprocess.Popen(
             _child_argv(argv), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -193,6 +195,9 @@ def _run_ichor_toolchain(context: SetupContext) -> str:
 
 
 def _run_ichor_assets(context: SetupContext) -> str:
+    # The signed command serialises on ROOT/.operator.lock (``_operator_lock`` in
+    # traceback_runner.cli), not on the Lab writer lock ROOT/lab/.lock this
+    # command holds, so the child neither blocks nor refuses under setup's lock.
     run_signed(context, ["method-asset", "register", "--from-toolchain", "copy-number", "--root", str(context.store.root)])
     return "ichorCNA method assets registered"
 
@@ -295,6 +300,17 @@ def plan_steps(checks: Sequence[dict[str, Any]], only: Sequence[str] | None) -> 
     return plan
 
 
+def _not_planned(name: str, checks: Sequence[dict[str, Any]]) -> str:
+    """Why an ``--only`` name has no step this run, from the check's own status."""
+
+    check = next((check for check in checks if check["name"] == name), None)
+    if check is None:
+        return "doctor lists no check with this name this run"
+    if check["status"] == "pass":
+        return "nothing to do: doctor passes this check"
+    return f"doctor reports {check['status']}; no automatic fix"
+
+
 def _interactive() -> bool:
     try:
         return bool(sys.stdin.isatty())
@@ -317,30 +333,41 @@ def _confirm(context: SetupContext, name: str) -> tuple[bool, str]:
     return False, "declined at the prompt"
 
 
-def execute(step: PlannedStep, context: SetupContext, done: Sequence[StepResult]) -> StepResult:
-    """Run one planned step; never raises for a failing step."""
+def execute(
+    step: PlannedStep, context: SetupContext, done: Sequence[StepResult], passing: Sequence[str] = (),
+) -> StepResult:
+    """Run one planned step; never raises for a failing step.
+
+    ``passing`` names the doctor checks that already pass: a prerequisite in
+    ``spec.after`` is satisfied when doctor passes it or when it ended ``ok``
+    earlier in this run; it blocks only when it ran (or was refused) earlier in
+    this run and did not end ``ok``.
+    """
 
     spec = step.spec
     template = spec.command(context, step.check) if spec.command is not None else str(step.check["fix"])
     shown = show(template, context.store)
     flag = FLAGS.get(step.name)
     result = StepResult(step.name, spec.kind, SKIPPED, "", template, flag)
-    if flag is not None:
-        context.say(f"FLAG  {flag}")
     if spec.kind == MANUAL:
+        result.flag = None  # nothing prompts or runs: no FLAG line
         result.reason = f"manual; run it yourself: {template}"
         return result
+    earlier = {done_step.name: done_step for done_step in done}
+    blocked = [
+        name for name in spec.after
+        if name not in passing and name in earlier and earlier[name].status != OK
+    ]
+    if blocked:
+        result.flag = None
+        result.reason = f"needs {', '.join(blocked)} first ({', '.join(earlier[name].status for name in blocked)})"
+        return result
+    if flag is not None:
+        context.say(f"FLAG  {flag}")
     if spec.kind == INPUT:
         context.say(f"TEMPLATE  {shown}")
         result.status = NEEDS_INPUT
         result.reason = f"replace {spec.placeholder} with your local path, then run: {template}"
-        return result
-    blocked = [
-        earlier.name for earlier in done
-        if earlier.name in spec.after and earlier.status != OK
-    ]
-    if blocked:
-        result.reason = f"needs {', '.join(blocked)} first ({', '.join(e.status for e in done if e.name in blocked)})"
         return result
     if spec.kind == DOWNLOAD:
         confirmed, why = _confirm(context, step.name)
@@ -421,16 +448,17 @@ def setup_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[
         log.append("run_start", command="setup", pid=os.getpid(), yes=bool(args.yes), only=only)
         say(f"ROOT  {store.root}")
         before = lab_checks(store)
+        passing = [check["name"] for check in before if check["status"] == "pass"]
         plan = plan_steps(before, only)
         for name in only or ():
             if name not in {step.name for step in plan}:
                 kind = CATALOGUE.get(name, StepSpec(MANUAL)).kind
-                results.append(StepResult(name, kind, SKIPPED, "nothing to do: doctor passes this check", "", None))
+                results.append(StepResult(name, kind, SKIPPED, _not_planned(name, before), "", None))
                 say(step_line(results[-1], store))
         for step in plan:
             lock.set_step(step.name)
             log.append("step_start", step=step.name, kind=step.spec.kind)
-            result = execute(step, context, results)
+            result = execute(step, context, results, passing)
             log.append("step_end", step=step.name, status=result.status, reason=result.reason, exit_code=result.exit_code)
             results.append(result)
             say(step_line(result, store))
@@ -461,7 +489,7 @@ def setup_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[
     if failed:
         for result in failed:
             lines.append(f"FAILED  {result.name}  {show(result.reason, store)}")
-            lines.extend(f"  | {line}" for line in result.tail)
+            lines.extend(f"  | {show(line, store)}" for line in result.tail)
         first = failed[0]
         problem = LabProblem(
             "TBX-LAB-032",

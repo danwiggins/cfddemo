@@ -51,13 +51,13 @@ because it can download things. Every step ends in one state, printed as
 | State | Meaning |
 |---|---|
 | `ok` | the step ran and succeeded |
-| `skipped` | nothing to run: a manual step (`brew install`, free disk, `git pull`), a `--only` name doctor already passes, or a step whose prerequisite in this run did not end `ok` (`ichor_assets` after a refused `ichor_toolchain`) |
+| `skipped` | nothing to run: a manual step (`brew install`, free disk, `git pull`), a `--only` name doctor already passes or lists without an automatic fix, or a step whose prerequisite ran earlier in this run and did not end `ok` (`ichor_assets` after a refused `ichor_toolchain`; an already installed toolchain satisfies it) |
 | `needs_input` | the fix needs a path doctor cannot know; the template is printed with its placeholder and nothing is guessed |
 | `refused` | a download or licence-bearing step was not confirmed |
 | `failed` | the step ran and did not succeed ([TBX-LAB-032](#tbx-lab-032)); later steps are still attempted |
 
 Steps that download or install a licence-bearing asset print the FLAG line
-below first and need a per-step confirmation: `y` at the prompt on a TTY, or
+below first (manual and prerequisite-blocked steps print none) and need a per-step confirmation: `y` at the prompt on a TTY, or
 `--yes` for a non-interactive run (without it they are `refused`). Steps that
 only compute locally run without a prompt: building the minimap2 index
 (`mmi`, hg38: ~20-40 min and ~8 GB), registering an already installed
@@ -75,7 +75,11 @@ A host path is never auto-filled: the operator replaces the placeholder and
 runs the printed template. `lab setup` is a writer: it holds the Lab writer
 lock for the whole run (TBX-LAB-012 while `lab run`, `simulate`, `cohort`,
 `gc --apply` or a registration holds it) and writes one `setup` run to the run
-log. The output ends with the re-run `DOCTOR` summary and how many steps
+log. The signed commands it runs as children (`toolchain install`,
+`method-asset register`) serialise on the signed CLI's own
+`ROOT/.operator.lock`, not on `ROOT/lab/.lock`, so they run under setup's
+lock. Lines a child prints are echoed through the same scrubber as stored
+output (host paths become `<path>`). The output ends with the re-run `DOCTOR` summary and how many steps
 doctor still lists. Exit 0 when every runnable step ended `ok` (manual steps
 never change the exit code; read the `DOCTOR` line); exit 8 when any step
 failed, needs input or was refused; exit 3 on the lock. `--json` carries the
