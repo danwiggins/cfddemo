@@ -867,7 +867,9 @@ the scroll controls are hidden.
 - **Findings**: only above/below-reference results are cards (sorted by tier,
   then severity); not-interpretable, no-reference and in-range metrics are
   counted, collapsible rows. Before the kit cohort exists (n < 10) most
-  metrics read "no reference".
+  metrics read "no reference". This grouping is a Lab-only surface; the
+  signed operator surface never groups or sorts by biological value
+  ([ADR 0002](adr/0002-e10-reference-labels-lab-only.md)).
 - **Compare**: choose a published Lab cohort generation and read finite scalar
   metrics against compatible, status-ok members. This is an exploratory
   selected-cohort distribution, not a healthy or clinical reference. The

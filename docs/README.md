@@ -89,5 +89,6 @@ current CLI and the operator or Lab guide before relying on a workflow.
 - [E12 source-value projection adapters](SOURCE-VALUE-PROJECTION.md)
 - [Traceback Release-One Test Plan](TEST-PLAN.md)
 - [ADR 0001: provisional execution-substrate direction](adr/0001-execution-substrate-comparison.md)
+- [ADR 0002: reference-state labels are a Lab-only surface](adr/0002-e10-reference-labels-lab-only.md)
 - [Method comparison explorer: states and interactions](designs/method-comparison-explorer-notes.md)
 - [Griffin pinned Snakemake synthetic workflow proof](proofs/griffin/README.md)
