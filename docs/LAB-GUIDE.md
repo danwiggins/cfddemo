@@ -133,6 +133,7 @@ traceback lab run (<BAM|uBAM|chunk dir>... | <id12> | latest | --example)
     [--downsample 0.5,0.25,0.1 | --no-downsample]
     [--controls | --no-controls] [--tf 0.03,0.10,0.30]
     [--skip-bad-chunks] [--sex M|F] [--force] [--rehash] [--timeout-s 3600]
+    [--threads N] [--sort-mem 1G] [--mmi PATH] [--keep-staging]
     [--memory-cap BYTES | --no-memory-cap]
     [--threads N] [--sort-mem 1G] [--mmi PATH]
     [--dry-run] [--verbose] [--json] [--root R]
@@ -491,6 +492,30 @@ even if an earlier preview passed.
 
 **Interruption.** Ctrl-C (or SIGTERM) stops the current step, kills its tools
 and exits 6. Completed results are kept; rerun the same command.
+
+**Alignment failure.** Alignment and prealigned ingest build the input in a
+`.staging-*` directory under `ROOT/lab/inputs/` and publish it in one rename
+only after the record count reconciles, so a failure (TBX-LAB-011, -013,
+-014, or a reference or index that changed under it) publishes nothing and
+removes that directory. `--keep-staging` keeps it instead, for inspection:
+the failure names it on its `align ... failed · staging kept <label>` line,
+at the end of the `FIX` text and as `staging_kept` in `--json` and in the
+run log's `step_end` event (`traceback lab runs RUN_ID --step align`). The
+label is `ROOT/lab`-relative (`inputs/.staging-<hex>`), the form `lab gc`
+lists it under; no host path is printed. A full volume still removes the
+staging so a rerun has its bytes back: TBX-LAB-011, and any failure whose
+error is `ENOSPC` or carries "No space left on device" (a TBX-LAB-014 from
+`samtools sort` or `index` on a full disk); an interruption removes it too.
+The kept directory is an ordinary orphan: `lab doctor` warns about it and
+`traceback lab gc --staging-only --apply --root <ROOT>` removes it. A
+successful run never keeps staging; for a stored sample (`latest`, `<id12>`)
+nothing is aligned, so the flag is recorded as not applicable with one
+notice line. Recorded fields: the `run_start` event's `flags.keep_staging`
+and `--json` `data.keep_staging` (run and dry run, `--example` included)
+hold the flag as it applied (`false` for a stored sample, with or without
+the flag); `staging_kept` appears only when a directory was kept, in the
+problem's `data` and in the failed `align` step's `step_end` event (that
+event is written only then; without the flag the run log is unchanged).
 
 **Output.** The run ends with a summary block (`ROOT`, `RUN`, `SAMPLE`,
 `DONE`, any `FAILED` lines, `NEXT`). With `--json`, stdout is one
@@ -1427,7 +1452,8 @@ Categories:
   attempt), so its failed attempts are ordinary candidates. `--staging-only`
   skips this category entirely.
 - **staging** — orphaned `.staging-*` directories under `ROOT/lab` (the same
-  set `lab doctor` warns about: inputs, results, cohorts, assets). A dry run
+  set `lab doctor` warns about: inputs, results, cohorts, assets), including
+  one a `lab run --keep-staging` failure kept. A dry run
   leaves them unlisted, with a count, while a live writer heartbeat exists,
   because that writer may still own them; `--apply` holds the lock, so every
   remaining `.staging-*` directory is an orphan.
@@ -1587,7 +1613,7 @@ After alignment, the uBAM record total did not equal the aligned primary-plus-un
 
 ### TBX-LAB-014
 
-An alignment process failed or timed out (exit 3, retryable). The cause names the process and its first scrubbed stderr line. Rerun with `--verbose` to see live stderr; check `traceback lab doctor`.
+An alignment process failed or timed out (exit 3, retryable). The cause names the process and its first scrubbed stderr line. Rerun with `--verbose` to see live stderr; check `traceback lab doctor`. The staging directory was removed; rerun with `--keep-staging` to keep it for inspection (the `FIX` text then names it and how `lab gc --staging-only` removes it).
 
 ### TBX-LAB-015
 
@@ -1759,6 +1785,12 @@ symlink or a plain file is TBX-LAB-005 instead.
 
 ## Changes
 
+- 2026-11-07: `lab run --keep-staging` keeps a failed alignment's staging
+  directory for inspection; `lab gc --staging-only` removes it. New:
+  `LabStore.publish_directory(keep_staging=)`, `ingest.publish_input` and
+  `ingest.volume_full`, the `keep_staging` run-start flag and `--json`
+  field, `staging_kept` in the problem data, the `FIX` text and a failed
+  `align` `step_end` event. No new TBX code.
 - 2026-11-07: the landing samples table shows kit columns (instrument, basecall
   model, modified-base models, software) from the stored header provenance.
 - 2026-11-07: the Lab's worker and alignment pipelines run through the shared

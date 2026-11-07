@@ -102,6 +102,7 @@ def add_run_parser(commands: Any, common: Callable[[argparse.ArgumentParser], No
     run.add_argument("--threads", type=_threads, metavar="N", help="alignment threads (default min(8, cores-2))")
     run.add_argument("--sort-mem", type=_sort_mem, default="1G", metavar="MEM", help="samtools sort memory per thread (e.g. 768M, 2G)")
     run.add_argument("--mmi", type=Path, metavar="PATH", help="reuse an existing minimap2 index")
+    run.add_argument("--keep-staging", action="store_true", help="keep a failed alignment's staging directory under ROOT/lab/inputs for inspection (traceback lab gc --staging-only removes it)")
     run.add_argument("--methylbert-bundle-sha256", type=_sha256, metavar="SHA256", help="operator-trusted registered MethylBERT tumour/normal bundle")
     run.add_argument("--methylbert-code-sha256", type=_sha256, metavar="SHA256", help="trusted digest of the pinned installed MethylBERT Python sources")
     run.add_argument("--methylbert-min-classified", type=_positive_count, metavar="N", help="independently qualified minimum unique classified reads for this MethylBERT model")
@@ -216,6 +217,8 @@ def _flags(args: argparse.Namespace) -> dict[str, Any]:
         "threads": args.threads,
         "sort_mem": args.sort_mem,
         "mmi_override": args.mmi is not None,
+        # Requested and applicable: a stored sample (<id12>, latest) aligns nothing.
+        "keep_staging": args.keep_staging and not (len(args.inputs) == 1 and _is_stored(args.inputs[0])),
         "reference_id": args.reference_id,
         "declared_sex": args.sex,
         "stored_sample": len(args.inputs) == 1 and _is_stored(args.inputs[0]),
@@ -432,7 +435,7 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
         for item in items
     ]
     memory_warning = _memory_warning()
-    data: dict[str, Any] = {"root": str(store.root), "dry_run": True, "rehash": False,
+    data: dict[str, Any] = {"root": str(store.root), "dry_run": True, "keep_staging": False, "rehash": False,
                             "rehash_requested": args.rehash, "plan": plan_rows,
                             "warnings": [memory_warning] if memory_warning else []}
     lines = [f"ROOT      {store.root}"]
@@ -550,6 +553,7 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
             paths, store, skip_bad_chunks=args.skip_bad_chunks, write_cache=False, rehash=args.rehash,
         )
         data["rehash"] = args.rehash
+        data["keep_staging"] = args.keep_staging
         input_platform = _declared_platform(chunkset)
         platform = input_platform if chunkset.aligned else "ont"
         data["sample"] = {"source_id": chunkset.source_id,
@@ -746,6 +750,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
             payload = _local_envelope(
                 _result("lab run", "ok", "dry run: nothing written", data={
                     "root": str(store.root), "dry_run": True, "example": True,
+                    "keep_staging": args.keep_staging,  # the example run aligns, so the flag applies
                     "alignment": "example not generated yet: generated and aligned on first run (~200k reads, under a minute)",
                     "warnings": [memory_warning] if memory_warning else [],
                 })
@@ -832,6 +837,8 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     example = bool(record.get("example"))
                     scrubber = Scrubber(root=store.root)
                     progress(f"ingest                   stored sample {id12_for(store, source_id)}")
+                    if args.keep_staging:
+                        progress("ingest                   --keep-staging: not applicable to a stored sample (nothing is aligned)")
                 else:
                     log.append("step_start", step="ingest")
                     if args.example:
@@ -881,7 +888,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                             require_budget(budget, "ingest")
                         aligned = ingest_prealigned(
                             store, chunkset, reference, reference_proof=reference_proof,
-                            progress=progress,
+                            progress=progress, keep_staging=args.keep_staging,
                         )
                     else:
                         samtools, minimap2 = require_aligner_tools()
@@ -945,6 +952,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                             scrubber=scrubber,
                             echo=_echo(args.verbose),
                             progress=progress,
+                            keep_staging=args.keep_staging,
                         )
                     write_source(store, chunkset, aligned, example=example, declared_sex=args.sex)
                     align_info = aligned.manifest.get("align", {})
@@ -1008,6 +1016,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     store, run_id, aligned, id12, chunkset, results, warnings, time.monotonic() - started,
                     depth=target.depth.model_dump() if target.depth is not None else None,
                     controls=controls["summary"], platform=target.platform,
+                    keep_staging=args.keep_staging and chunkset is not None,
                     memory_cap=memory_cap,
                     rehash=args.rehash and chunkset is not None, rehash_requested=args.rehash,
                 )
@@ -1022,6 +1031,12 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     data={"step": current, "run_id": run_id},
                 ) from None
             except LabProblem as problem:
+                kept = problem.data.get("staging_kept") if isinstance(problem.data, dict) else None
+                if kept is not None:
+                    # --keep-staging: the failed step's staging stays; name it where
+                    # `lab runs RUN_ID --step align` and the operator will look.
+                    log.append("step_end", step=lock.step, status="failed", code=problem.code, staging_kept=kept)
+                    progress(f"{lock.step:<24} failed · staging kept {kept}")
                 log.append("run_end", status="blocked", exit_code=problem.exit_code, code=problem.code, step=lock.step)
                 raise
             except OSError as exc:
@@ -1182,6 +1197,7 @@ def _summary(
     depth: dict[str, Any] | None = None,
     controls: dict[str, Any] | None = None,
     platform: str = "ont",
+    keep_staging: bool = False,
     memory_cap: MemoryCapPolicy | None = None,
     rehash: bool = False,
     rehash_requested: bool = False,
@@ -1221,6 +1237,7 @@ def _summary(
         "steps": [result.public() for result in results],
         "controls": controls,
         "excluded_chunks": aligned.manifest.get("excluded_chunks", []),
+        "keep_staging": keep_staging,
         "rehash": rehash,
         "rehash_requested": rehash_requested,
         "warnings": warnings,

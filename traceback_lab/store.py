@@ -856,12 +856,14 @@ class LabStore:
 
     # -- atomic directory publish (D35) ------------------------------------
     def publish_directory(
-        self, parent: Path, name: str, build: Callable[[Path], None]
+        self, parent: Path, name: str, build: Callable[[Path], None], *, keep_staging: bool = False
     ) -> Path:
         """Stage a directory with ``build(staging)`` and publish it as ``parent/name``.
 
         Raises ``FileExistsError`` if ``parent/name`` already exists.  Any
-        failure removes the staging directory.
+        failure removes the staging directory, unless ``keep_staging``: then
+        the failed build's staging stays where it is (an orphan ``lab gc
+        --staging-only`` lists and removes) and the caller names it.
         """
 
         parent.mkdir(parents=True, exist_ok=True)
@@ -883,7 +885,7 @@ class LabStore:
             finally:
                 os.close(descriptor)
         finally:
-            if not published:
+            if not published and not keep_staging:
                 shutil.rmtree(staging, ignore_errors=True)
         return parent / name
 
