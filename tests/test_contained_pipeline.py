@@ -70,14 +70,36 @@ def test_three_stage_pipe_happy_path(tmp_path: Path) -> None:
 
 
 def test_middle_stage_failure_records_every_stage(tmp_path: Path) -> None:
+    # Handshake: the sink writes its stderr line, then touches ``ready``; the
+    # middle stage fails only once ``ready`` exists.  Without it, a slow
+    # interpreter start (hosted Ubuntu) let the group kill land before the
+    # sink ever printed, so there was no line to capture.
+    ready = tmp_path / "sink.ready"
+    middle = (
+        "import pathlib, sys, time\n"
+        "sys.stdin.readline()\n"
+        f"ready = pathlib.Path({str(ready)!r})\n"
+        "deadline = time.monotonic() + 30\n"
+        "while not ready.exists() and time.monotonic() < deadline:\n"
+        " time.sleep(0.01)\n"
+        "print('middle: bad input', file=sys.stderr)\n"
+        "sys.exit(3)\n"
+    )
+    sink = (
+        "import pathlib, sys\n"
+        "print('sink started', file=sys.stderr, flush=True)\n"
+        f"pathlib.Path({str(ready)!r}).touch()\n"
+        "sys.stdin.read()\n"
+    )
     result = run_contained_pipeline(
         [
             Stage("emit", [PY, "-c", "import signal, time\nsignal.signal(signal.SIGPIPE, signal.SIG_DFL)\nwhile True:\n print('x' * 100, flush=True)\n time.sleep(0.001)"]),
-            Stage("middle", [PY, "-c", "import sys; sys.stdin.readline(); print('middle: bad input', file=sys.stderr); sys.exit(3)"]),
-            Stage("sink", [PY, "-c", "import sys; print('sink started', file=sys.stderr); sys.stdin.read()"]),
+            Stage("middle", [PY, "-c", middle]),
+            Stage("sink", [PY, "-c", sink]),
         ],
         timeout_s=60,
     )
+    assert ready.exists(), "the sink never started"
     assert not result.ok
     codes = {stage.name: stage.returncode for stage in result.stages}
     assert codes["middle"] == 3
@@ -193,19 +215,45 @@ def test_stdin_path_must_be_absolute(tmp_path: Path) -> None:
         run_contained_pipeline([Stage("x", [PY, "-c", "pass"])], timeout_s=5, stdin_path=Path("relative.txt"))
 
 
-def test_peak_rss_is_recorded_per_stage() -> None:
-    result = run_contained_pipeline(
-        [
-            Stage("small", [PY, "-c", "import sys; sys.stdout.write('go\\n')"]),
-            Stage("large", [PY, "-c", "import sys; sys.stdin.read(); blob = bytearray(60_000_000); blob[:] = b'x' * len(blob)"]),
-        ],
-        timeout_s=60,
+_PEAK_RSS_DRIVER = """
+import json, sys
+from traceback_runner.contained_process import Stage, run_contained_pipeline
+PY = sys.executable
+result = run_contained_pipeline(
+    [
+        Stage("small", [PY, "-c", "import sys; sys.stdout.write('go\\\\n')"]),
+        Stage("large", [PY, "-c", "import sys; sys.stdin.read(); blob = bytearray(150_000_000); blob[:] = b'x' * len(blob)"]),
+    ],
+    timeout_s=60,
+)
+print(json.dumps({
+    "ok": result.ok,
+    "rss": {stage.name: stage.peak_rss_bytes for stage in result.stages},
+    "peak": result.peak_rss_bytes,
+}))
+"""
+
+
+def test_peak_rss_is_recorded_per_stage(tmp_path: Path) -> None:
+    """Each stage's peak is its own ``wait4`` maximum, not the group's.
+
+    The pipeline runs from a fresh, small driver process: on Linux a child's
+    ``ru_maxrss`` starts at its parent's resident size when it was forked
+    (the high-water mark survives fork and exec), so forked straight from a
+    large pytest process every stage would report that process's size.
+    """
+
+    import json
+
+    completed = subprocess.run(
+        [PY, "-c", _PEAK_RSS_DRIVER], capture_output=True, text=True, timeout=120, cwd=tmp_path, check=True,
     )
-    assert result.ok
-    rss = {stage.name: stage.peak_rss_bytes for stage in result.stages}
+    report = json.loads(completed.stdout)
+    assert report["ok"]
+    rss = report["rss"]
     assert rss["small"] and rss["small"] > 0
-    assert rss["large"] and rss["large"] >= rss["small"] + 50_000_000
-    assert result.peak_rss_bytes == rss["large"]
+    assert rss["large"] and rss["large"] >= rss["small"] + 100_000_000
+    assert report["peak"] == rss["large"]
 
 
 def test_preexec_fn_runs_in_every_child(tmp_path: Path) -> None:
