@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from .contracts import JobState
-from .filesystem import rename_directory_exclusive_at
+from .filesystem import DEFAULT_ROOT, ROOT_ENV, rename_directory_exclusive_at, resolve_root
 from .operator import build_job_view, support_payload
 from .protocol import render_protocol, synthetic_protocol_manifest
 from .references import DOCS_ANCHOR, ReferenceProblem, validate_reference_id
@@ -62,11 +62,14 @@ class AssetEvidenceInputError(ValueError):
 
 
 def _root_argument(parser: argparse.ArgumentParser) -> None:
+    """``--root``; ``main`` resolves it (``--root``, else ``$TRACEBACK_ROOT``,
+    else ``.traceback``) exactly as the Lab does."""
+
     parser.add_argument(
         "--root",
         type=Path,
-        default=Path(".traceback"),
-        help="local runner data root (default: .traceback)",
+        default=None,
+        help=f"local runner data root (default: ${ROOT_ENV}, else {DEFAULT_ROOT})",
     )
 
 
@@ -75,6 +78,22 @@ def _reference_id_argument(value: str) -> str:
         return validate_reference_id(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _port_argument(value: str) -> int:
+    """``serve --port N``: an integer in 1024-65535 (argparse reports anything else)."""
+
+    from .web.server import PORT_MAX, PORT_MIN
+
+    try:
+        port = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"expected an integer port in {PORT_MIN}-{PORT_MAX}, got {value!r}"
+        ) from None
+    if not PORT_MIN <= port <= PORT_MAX:
+        raise argparse.ArgumentTypeError(f"port must be in {PORT_MIN}-{PORT_MAX}, got {port}")
+    return port
 
 
 def _assembly_argument(value: str) -> str:
@@ -332,6 +351,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     _root_argument(serve)
     serve.add_argument("--ipv6", action="store_true", help="bind ::1 instead of 127.0.0.1")
+    serve.add_argument(
+        "--port",
+        type=_port_argument,
+        default=0,
+        metavar="N",
+        help="bind loopback port N (1024-65535) instead of an ephemeral port",
+    )
 
     inspect = commands.add_parser("inspect", help="inspect an unverified local bundle")
     inspect.add_argument("bundle", type=Path)
@@ -497,9 +523,16 @@ def _docs_anchor(code: str) -> str:
 _HUMAN = "_human"
 
 
-def _emit(payload: dict[str, Any], *, as_json: bool) -> None:
+def _emit(payload: dict[str, Any], *, as_json: bool, root: Path | None = None) -> None:
     """Print one result.  ``_human`` lines (tables, operator labels) are for
-    human output only and never reach ``--json``."""
+    human output only and never reach ``--json``.
+
+    ``root`` is the resolved ROOT of a command that took ``--root``: human
+    output prints it as ``ROOT  /absolute/path`` right after the status line
+    (a ``data.root`` equal to it, as ``doctor`` carries, is that same line and
+    is not printed twice; a different value still prints).  ``--json`` bytes
+    do not change.
+    """
 
     human = payload.get(_HUMAN)
     if as_json:
@@ -508,11 +541,15 @@ def _emit(payload: dict[str, Any], *, as_json: bool) -> None:
         return
     label = "PASS" if payload["status"] == "ok" else payload["status"].upper()
     print(f"{label}  {payload['summary']}")
+    if root is not None:
+        print(f"ROOT  {root}")
     if human is not None and human.get("replace_data"):
         for line in human["lines"]:
             print(line)
         return
     for key, value in payload.get("data", {}).items():
+        if key == "root" and root is not None and str(value) == str(root):
+            continue
         rendered = (
             json.dumps(value, sort_keys=True, separators=(",", ":"))
             if isinstance(value, (dict, list))
@@ -3481,7 +3518,27 @@ def _label(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
 
 
 class ServeProblem(ReferenceProblem):
-    """A ``traceback serve`` refusal with the six operator fields; no listener started."""
+    """A ``traceback serve`` refusal with the six operator fields; no listener started.
+
+    ``data`` adds measured facts (for example the requested port); it never
+    carries a host path.
+    """
+
+    def __init__(
+        self,
+        code: str,
+        summary: str,
+        *,
+        cause: str,
+        fix: str,
+        exit_code: int = 3,
+        retryable: bool = False,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(
+            code, summary, cause=cause, fix=fix, exit_code=exit_code, retryable=retryable
+        )
+        self.data = dict(data or {})
 
 
 def _no_catalog() -> ServeProblem:
@@ -3527,8 +3584,25 @@ def _serve_material(root: Path) -> Path:
 
 
 def _serve_start_problem(exc: Exception) -> ServeProblem:
-    """Map a listener start failure; its message is a fixed string with no path."""
+    """Map a listener start failure; its message is a fixed string with no path.
 
+    An operator-chosen port (``--port N``) that cannot be bound is
+    ``TBX-SERVE-005``; every other start failure keeps ``TBX-SERVE-003``.
+    """
+
+    from .web.server import LocalListenerUnavailable
+
+    if isinstance(exc, LocalListenerUnavailable) and exc.port:
+        return ServeProblem(
+            "TBX-SERVE-005",
+            "The requested loopback port could not be bound; nothing was served",
+            cause=f"loopback port {exc.port} cannot be bound ({exc.reason}); "
+            "another process may be listening on it",
+            fix="Pass a different --port, stop the process using that port, "
+            "or omit --port for an ephemeral one",
+            retryable=True,
+            data={"port": exc.port, "errno": exc.reason},
+        )
     message = str(exc)
     busy = message == "local web startup lock is busy"
     return ServeProblem(
@@ -3590,6 +3664,7 @@ def _serve(
                     ipv6=args.ipv6,
                     explorer=explorer.source,
                     records=LocalRecordSource(root=root, catalog=explorer.catalog, store=store),
+                    port=int(getattr(args, "port", 0) or 0),
                 )
             except LocalWebServerError as exc:
                 raise _serve_start_problem(exc) from None
@@ -3682,7 +3757,7 @@ def _serve_main(args: argparse.Namespace) -> int:
         except KeyboardInterrupt:
             return int(ExitCode.OK)
     except ReferenceProblem as problem:
-        _emit(_local_envelope(_problem("serve", problem)), as_json=False)
+        _emit(_local_envelope(_problem("serve", problem)), as_json=False, root=args.root)
         return int(problem.exit_code)
     except Exception:
         # For example a damaged catalog database.  No detail: it may name a path.
@@ -3696,6 +3771,7 @@ def _serve_main(args: argparse.Namespace) -> int:
                 )
             ),
             as_json=False,
+            root=args.root,
         )
         return int(ExitCode.BLOCKED)
     finally:
@@ -5161,6 +5237,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         return lab_main(raw[1:])
     parser = _parser()
     args = parser.parse_args(argv)
+    # Commands that take --root resolve it as the Lab does: --root, else
+    # $TRACEBACK_ROOT, else .traceback, made absolute (verify's --root is a
+    # trust-source choice and keeps its own meaning).
+    if "root" in args:
+        args.root = resolve_root(args.root)
     _require_trust_registry_identity(parser, args)
     _require_analysis_settings(parser, args)
     if args.command == "serve":  # long-running; its first stdout line is the link
@@ -5331,7 +5412,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         payload["data"]["job_id"] = failed_job_id
     if _concerns_local_data(args):
         payload = _local_envelope(payload)
-    _emit(payload, as_json=as_json)
+    _emit(payload, as_json=as_json, root=getattr(args, "root", None))
     return int(code)
 
 

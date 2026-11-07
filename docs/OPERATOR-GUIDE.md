@@ -45,7 +45,7 @@ traceback catalog import RECORD_ID|RECORD_DIR [--root ROOT] [--json]
 traceback catalog list [--root ROOT] [--json]
 traceback catalog export --csv OUT.csv [--root ROOT] [--json]
 traceback label RECORD_ID TEXT [--root ROOT] [--json]
-traceback serve [--root ROOT] [--ipv6]
+traceback serve [--root ROOT] [--ipv6] [--port N]
 traceback status JOB_ID [--root ROOT] [--json]
 traceback status JOB_ID [--root ROOT] --trust-registry REGISTRY_ROOT \
   --trust-registry-id ID --trust-registry-epoch EPOCH \
@@ -128,6 +128,30 @@ real-data execution. `run` without `--reference` refuses (TBX-RUN-003);
 `run --reference` makes an unqualified local record (see "Real local BAM
 (unqualified)"). File-selection arguments may be local paths; JSON output,
 support bundles, and exported record content do not include them.
+
+## ROOT
+
+ROOT is where a command reads and writes local data. Every command that
+takes `--root` resolves it the same way, on both surfaces (signed CLI and
+[Lab](LAB-GUIDE.md#root)): `--root R` wins; without it `$TRACEBACK_ROOT`;
+without that `.traceback` in the current directory. The result is an absolute
+path (`~` and `..` are resolved). An exported `TRACEBACK_ROOT` applies to
+signed commands too: `run`, `reference register`, `catalog import` and every
+other write started without `--root` go to that store, not to the current
+directory. Set it once so commands started in different directories share
+one ROOT.
+
+Human output of every signed result prints `ROOT  /…` on the line after the
+status line, including refusals. Two outputs carry no ROOT line: `serve`
+once it starts (its first line is the link; its refusals print ROOT), and an
+argument error (exit 2, argparse usage text). ROOT is the one local path
+`--json` may carry: `doctor --json` has `data.root`, and the JSON of every
+other signed command carries no path (the Lab's JSON carries `data.root` on
+every command).
+
+`verify --root` is not a data root default: it selects ROOT's trust store as
+the trust source (against `--trust-store` and `--trust-registry`) and must
+be given explicitly.
 
 ## Offline synthetic assets
 
@@ -355,6 +379,14 @@ uv run traceback serve --root "$R"
    `Stopped; the web lock for ROOT is released.` The page shows the jobs and
    the catalog; records stay unqualified and local. A record imported while
    `serve` runs appears on the next catalog request; no restart is needed.
+   The port is ephemeral (chosen by the operating system) unless `--port N`
+   names one in 1024-65535; the link carries whichever port was bound.
+   `--port` changes the port only: the server still binds the literal
+   loopback address (`127.0.0.1`, or `::1` with `--ipv6`) and nothing else,
+   and the Host, Origin and session rules are the same as for an ephemeral
+   port. A port that is busy or cannot be bound is refused with
+   TBX-SERVE-005 before any link is printed; a value outside 1024-65535 is a
+   usage error (exit 2).
 
 `--json` on every command except `serve` emits one canonical
 `traceback.cli-result.v2` object with `data_origin: "local_unqualified"`; the
@@ -560,6 +592,7 @@ says otherwise. Exit codes are listed under "Stable exit codes".
 | <a id="tbx-serve-002"></a>TBX-SERVE-002 | 4 | `serve`: no `R/catalog`: no record imported; nothing started | `traceback catalog import R/records/RECORD_ID --root R` first |
 | <a id="tbx-serve-003"></a>TBX-SERVE-003 | 3 | `serve` could not start its listener. `local web service is already running`: another `serve` holds this ROOT's web lock. `local web startup lock is busy` (retryable): another local web service was starting at the same moment. Other messages: `R/web` or the temporary directory is not private | Already running: use that service, or stop it (Ctrl-C in its terminal) and start again. Busy: wait a few seconds and retry. Otherwise make `R` and `R/web` owned by you, not group/other-writable |
 | <a id="tbx-serve-004"></a>TBX-SERVE-004 | 3 | `serve` stopped itself: a security check of the running service failed (its state directory or listener changed) | Restart `traceback serve --root R` |
+| <a id="tbx-serve-005"></a>TBX-SERVE-005 | 3 | `serve --port N`: loopback port N could not be bound (retryable); usually another process is listening on it. `PORT` and the OS `ERRNO` name (for example `EADDRINUSE`) are printed; nothing was served. Without `--port`, a listener failure stays TBX-SERVE-003 | Pass a different `--port`, stop the process using that port, or omit `--port` for an ephemeral one |
 | <a id="tbx-auth-001"></a>TBX-AUTH-001 | browser 401 | The browser session expired (8 h), was idle for 20 min, or was logged out | Press Enter in `serve`'s terminal for a fresh link (or restart `serve`) |
 | <a id="tbx-auth-002"></a>TBX-AUTH-002 | browser 403 | A changing request carried no valid CSRF token | Reload the page from a fresh `serve` link |
 | <a id="tbx-auth-003"></a>TBX-AUTH-003 | browser 403 | The request's host, origin or path is not the local service's own (for example through a proxy) | Open the link `serve` printed, on this machine |

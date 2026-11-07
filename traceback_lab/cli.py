@@ -1,7 +1,8 @@
 """``traceback lab …``: the Lab's argparse tree, ROOT resolution and output.
 
 Every Lab command takes ``--root`` and ``--json``.  ROOT is ``--root``, else
-``$TRACEBACK_ROOT``, else ``.traceback`` (the signed default), always printed
+``$TRACEBACK_ROOT``, else ``.traceback`` (``resolve_root`` in
+``traceback_runner.filesystem``, shared with the signed CLI), always printed
 as an absolute path: the first human line is ``ROOT  /absolute/path`` and
 ``--json`` carries ``data.root`` (D36).  ``--json`` prints exactly one
 ``traceback.cli-result.v2`` object on stdout.
@@ -10,30 +11,19 @@ as an absolute path: the first human line is ``ROOT  /absolute/path`` and
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
 from traceback_runner.cli import _HUMAN, _emit, _local_envelope, _result, _with_human
+from traceback_runner.filesystem import DEFAULT_ROOT, ROOT_ENV, resolve_root
 
 from .problems import EXIT_INTERNAL, EXIT_OK, EXIT_USAGE, LabProblem, problem_lines, problem_payload
 from .registry import load_registry
 from .store import LabStore, RunLog, summarize_run
 
-ROOT_ENV = "TRACEBACK_ROOT"
-DEFAULT_ROOT = ".traceback"
-
 Handler = Callable[[argparse.Namespace, LabStore], tuple[int, dict[str, Any]]]
-
-
-def resolve_root(value: Path | None, environ: dict[str, str] | None = None) -> Path:
-    """``--root``, else ``$TRACEBACK_ROOT``, else ``.traceback``; made absolute."""
-
-    env = os.environ if environ is None else environ
-    chosen = value if value is not None else Path(env[ROOT_ENV]) if env.get(ROOT_ENV) else Path(DEFAULT_ROOT)
-    return Path(os.path.abspath(chosen.expanduser()))
 
 
 class UsageError(Exception):
@@ -116,6 +106,10 @@ def build_parser() -> argparse.ArgumentParser:
     from .identity_command import add_identity_parser
 
     add_identity_parser(commands, _common)
+
+    from .gc_command import add_gc_parser
+
+    add_gc_parser(commands, _common)
 
     from .support_bundle_command import add_support_bundle_parser
 
