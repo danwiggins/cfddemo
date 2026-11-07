@@ -13,8 +13,9 @@ Categories:
   unreadable is skipped whole and reported: unknown never triggers deletion
   (D35).
 - ``staging``: orphaned ``.staging-*`` directories under ``ROOT/lab`` (the set
-  ``lab doctor`` reports).  A dry run leaves them unlisted while a live writer
-  holds the lock, because that writer may still own them.
+  ``lab doctor`` reports), a directory ``lab run --keep-staging`` kept among
+  them.  A dry run leaves them unlisted while a live writer holds the lock,
+  because that writer may still own them.
 - ``interrupted``: ``.staging-gc-<attempt>`` directories, an attempt removal
   that a previous ``--apply`` renamed aside and then could not finish.  The
   store ignores every ``.staging-*`` name, so a half-removed attempt is never

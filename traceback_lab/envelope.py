@@ -133,6 +133,7 @@ class Failure(_Strict):
     stderr_tail: list[Annotated[str, Field(max_length=300)]] = Field(max_length=50)
     exit_code: int | None = None
     timed_out: bool = False
+    reason: Literal["memory"] | None = None  # killed by the per-algorithm memory cap
 
 
 class ResultEnvelope(_Strict):

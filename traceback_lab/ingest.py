@@ -13,7 +13,9 @@ Unaligned chunks (no ``@SQ``) are aligned in one process group::
 
 into ``ROOT/lab/inputs/.staging-<random>/``.  The uBAM record total must equal
 the aligned primary-plus-unmapped count (TBX-LAB-013) before the directory is
-published as ``ROOT/lab/inputs/<input_id>/`` in one rename (D35).
+published as ``ROOT/lab/inputs/<input_id>/`` in one rename (D35).  A failed
+build removes its staging directory; ``lab run --keep-staging`` keeps it for
+inspection and names it (``staging_kept``), except on a full volume.
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ import re
 import shutil
 import stat
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -148,6 +150,7 @@ class Chunk:
     basecall_model: str | None = None
     aligned: bool = False
     sq: tuple[tuple[str, int], ...] = ()
+    provenance: dict[str, Any] = field(default_factory=dict)
 
     @property
     def stem(self) -> str:
@@ -180,6 +183,10 @@ class ChunkSet:
     @property
     def basecall_model(self) -> str | None:
         return self.chunks[0].basecall_model
+
+    @property
+    def header_provenance(self) -> dict[str, Any]:
+        return merge_header_provenance([chunk.provenance for chunk in self.chunks])
 
     @property
     def rg_lines(self) -> list[str]:
@@ -216,6 +223,195 @@ def _rg_model(line: str) -> str | None:
     return match.group(1) if match else None
 
 
+# Kit provenance shown on the landing page. Each field has a shape rule for
+# what an instrument model, model name or version looks like; anything else
+# (a flow-cell serial, a device serial, a person's name, an e-mail, a path) is
+# dropped as "not recorded", so a header cannot smuggle an identifier through.
+# Every distinct value across included chunks and read groups is kept (up to
+# _MAX_VALUES, with the distinct count recorded); ``None`` in a list means at
+# least one chunk/read group did not record that field. Flow-cell product code
+# and library kit are not in an ONT BAM header (they are in the MinKNOW report).
+_MAX_DS_VALUE = 64
+# ONT device model names, for a header whose @RG PM carries a name rather than a position.
+_INSTRUMENTS = frozenset({
+    "MinION", "MinION Mk1B", "MinION Mk1C", "MinION Mk1D", "GridION", "GridION Mk1",
+    "PromethION", "PromethION 2", "PromethION 2 Solo", "PromethION 24", "PromethION 48",
+    "P2", "P2 Solo", "P24", "P48", "Flongle",
+})
+_MODEL = r"(?:dna|rna)[a-z0-9_.]*@v[0-9]+(?:\.[0-9]+)*"
+# Modified-base suffixes are a fixed vocabulary, so an upper-case sample-like
+# suffix (``..._JANEDOE@v1``) is refused.
+_MOD = r"(?:5mCG|5hmCG|5mC|5hmC|6mA|4mC|m6A|DRACH|pseU|inosine|m5C|2OmeG)"
+_BASECALL_MODEL = re.compile(_MODEL)
+_MODBASE_MODEL = re.compile(rf"{_MODEL}_{_MOD}(?:_{_MOD})*@v[0-9]+(?:\.[0-9]+)*")
+_PROGRAM = re.compile(r"[A-Za-z][A-Za-z0-9._-]{0,31}")
+_VERSION = re.compile(r"[0-9][A-Za-z0-9._+-]{0,31}")
+_PROVENANCE_FIELDS = ("instrument", "basecall_model", "modbase_models")
+_MAX_VALUES = 16
+
+
+def _shaped(pattern: re.Pattern[str], value: Any, limit: int = _MAX_DS_VALUE) -> str | None:
+    return value if isinstance(value, str) and len(value) <= limit and pattern.fullmatch(value) else None
+
+
+# dorado writes the flow-cell position as @RG PM (dorado hts_utils/fastq_tags.cpp:
+# "PM:Z:MN12345" is the device_id). minknow_api manager.proto (FlowCellPosition.name,
+# AddSimulatedDeviceRequest.name; nanoporetech/minknow_api@fa567fbd): "For MinIONs, this
+# is the name of the MinION (eg: MN12345). For integrated positions, this is the label for
+# the position on the sequencer (eg: X1 for GridION ...)"; real P2 Solo positions are
+# "P2S_" + five digits + "-A"/"-B" ("P2S" + four digits up to MinKNOW Core 5.5).
+# Only the device type is kept: the serial and its digits never leave this function.
+# GridION/PromethION machine serials (GXB..., PCA...) are not PM values, and
+# PromethION position labels ("1-A1-D1") are too generic to map, so neither is listed.
+_POSITION_DEVICE_TYPES = (
+    (re.compile(r"MN[0-9]{5}"), "MinION"),
+    (re.compile(r"P2S(?:[_-][0-9]{5}-[AB]|[0-9]{4})"), "P2 Solo"),
+    (re.compile(r"X[1-5]"), "GridION"),
+)
+
+
+def _instrument(value: Any) -> str | None:
+    if not isinstance(value, str) or len(value) > _MAX_DS_VALUE:
+        return None
+    if value in _INSTRUMENTS:
+        return value
+    return next((device for pattern, device in _POSITION_DEVICE_TYPES if pattern.fullmatch(value)), None)
+
+
+def _modbase_set(value: Any) -> str | None:
+    """One read group's modified-base models: the shaped ones, sorted, comma-joined."""
+
+    if not isinstance(value, str):
+        return None
+    shaped = sorted({item for item in value.split(",") if _shaped(_MODBASE_MODEL, item)})
+    return ",".join(shaped[:_MAX_VALUES]) or None
+
+
+def _field_value(name: str, value: Any) -> str | None:
+    if name == "instrument":
+        return _instrument(value)
+    if name == "modbase_models":
+        return _modbase_set(value)
+    return _shaped(_BASECALL_MODEL, value)
+
+
+def _distinct(values: Iterable[str | None]) -> list[str | None]:
+    distinct = set(values)
+    return [*sorted(value for value in distinct if value is not None), *([None] if None in distinct else [])]
+
+
+def _software_entries(entries: Iterable[Mapping[str, Any]]) -> list[dict[str, str | None]]:
+    distinct = {(entry["program"], entry["version"]) for entry in entries}
+    return [{"program": program, "version": version}
+            for program, version in sorted(distinct, key=lambda pair: (pair[0], pair[1] or ""))]
+
+
+def header_provenance(header_text: str) -> dict[str, Any]:
+    """Kit provenance one BAM header declares: ``@RG`` PM and DS models, ``@PG`` PN/VN.
+
+    Identifiers never enter the result: read-group ID, PU (flow-cell serial),
+    the PM serial itself (only its device type), SM/LB (sample/library names), DT,
+    ``runid`` and ``@PG CL`` are skipped. Each field is the full list of
+    distinct shaped values over the header's read groups, with ``None`` for a
+    read group (or a header) that recorded none; capping happens in
+    :func:`merge_header_provenance`.
+    """
+
+    per_field: dict[str, list[str | None]] = {name: [] for name in _PROVENANCE_FIELDS}
+    software: list[dict[str, str | None]] = []
+    read_groups = 0
+    for line in header_text.splitlines():
+        fields = line.split("\t")
+        if fields[0] == "@RG":
+            read_groups += 1
+            tags = {part[:2]: part[3:] for part in fields[1:] if len(part) > 3 and part[2] == ":"}
+            per_field["instrument"].append(_instrument(tags.get("PM")))
+            ds = dict(token.partition("=")[::2] for token in tags.get("DS", "").split() if "=" in token)
+            per_field["basecall_model"].append(_field_value("basecall_model", ds.get("basecall_model")))
+            per_field["modbase_models"].append(_field_value("modbase_models", ds.get("modbase_models")))
+        elif fields[0] == "@PG":
+            tags = {part[:2]: part[3:] for part in fields[1:] if len(part) > 3 and part[2] == ":"}
+            program = _shaped(_PROGRAM, tags.get("PN"))
+            if program is not None:
+                software.append({"program": program, "version": _shaped(_VERSION, tags.get("VN"))})
+    if not read_groups:
+        for name in _PROVENANCE_FIELDS:
+            per_field[name].append(None)
+    return {**{name: _distinct(values) for name, values in per_field.items()},
+            "software": _software_entries(software)}
+
+
+def _capped(values: list[Any]) -> tuple[list[Any], bool]:
+    """Keep at most _MAX_VALUES recorded values; a ``None`` (some chunk recorded none) is always kept."""
+
+    recorded = [value for value in values if value is not None]
+    return recorded[:_MAX_VALUES] + ([None] if None in values else []), len(recorded) > _MAX_VALUES
+
+
+def merge_header_provenance(parts: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """All distinct values over the included chunks' headers, capped, with distinct counts."""
+
+    if not parts:
+        parts = [header_provenance("")]
+    result: dict[str, Any] = {}
+    distinct: dict[str, int] = {}
+    truncated = False
+    for name in _PROVENANCE_FIELDS:
+        values = _distinct(value for part in parts for value in part.get(name, [None]))
+        distinct[name] = len(values)
+        result[name], cut = _capped(values)
+        truncated = truncated or cut
+    software = _software_entries(entry for part in parts for entry in part.get("software", []))
+    distinct["software"] = len(software)
+    result["software"] = software[:_MAX_VALUES]
+    truncated = truncated or len(software) > _MAX_VALUES
+    return {**result, "distinct": distinct, "truncated": truncated}
+
+
+def stored_header_provenance(manifest: Any) -> dict[str, Any] | None:
+    """Re-validate a stored input manifest's header provenance before it is shown.
+
+    A manifest written before this field existed shows every field as not
+    recorded, except the basecall model from its legacy ``basecall_model``
+    (``a|b`` when read groups differed). A hand-edited value is filtered
+    through the same shape rules as ingest.
+    """
+
+    if not isinstance(manifest, Mapping):
+        return None
+    value = manifest.get("header_provenance")
+    if not isinstance(value, Mapping):
+        models = manifest.get("basecall_model")
+        parts = models.split("|") if isinstance(models, str) and models else []
+        return merge_header_provenance([{
+            "instrument": [None], "modbase_models": [None], "software": [],
+            "basecall_model": [_field_value("basecall_model", part) for part in parts] or [None],
+        }])
+    result: dict[str, Any] = {}
+    distinct: dict[str, int] = {}
+    for name in _PROVENANCE_FIELDS:
+        raw = value.get(name)
+        items = raw if isinstance(raw, list) and raw else [None]
+        result[name], _ = _capped(_distinct(_field_value(name, item) for item in items[: _MAX_VALUES + 1]))
+        distinct[name] = len(result[name])
+    entries = value.get("software")
+    software = []
+    for entry in (entries if isinstance(entries, list) else [])[:_MAX_VALUES]:
+        program = _shaped(_PROGRAM, entry.get("program")) if isinstance(entry, Mapping) else None
+        if program is not None:
+            software.append({"program": program, "version": _shaped(_VERSION, entry.get("version"))})
+    result["software"] = _software_entries(software)
+    distinct["software"] = len(result["software"])
+    truncated = value.get("truncated") is True
+    stored_counts = value.get("distinct")
+    if truncated and isinstance(stored_counts, Mapping):
+        # A cut list cannot show its own size; trust a stored count only when it is larger.
+        for name in distinct:
+            count = stored_counts.get(name)
+            if isinstance(count, int) and not isinstance(count, bool) and distinct[name] < count <= 10_000:
+                distinct[name] = count
+    return {**result, "distinct": distinct, "truncated": truncated}
+
 BGZF_EOF = bytes.fromhex("1f8b08040000000000ff0600424302001b0003000000000000000000")
 
 
@@ -246,10 +442,11 @@ def read_header_lines(path: Path) -> tuple[tuple[str, ...], tuple[str, ...], tup
 
 
 def _read_header(chunk: Chunk) -> None:
-    chunk.rg_lines, _, chunk.sq = read_header_lines(chunk.path)
+    chunk.rg_lines, pg_lines, chunk.sq = read_header_lines(chunk.path)
     chunk.aligned = bool(chunk.sq)
     models = sorted({model for line in chunk.rg_lines if (model := _rg_model(line))})
     chunk.basecall_model = "|".join(models) if models else None
+    chunk.provenance = header_provenance("\n".join((*chunk.rg_lines, *pg_lines)))
 
 
 def _sha256_file(path: Path) -> str:
@@ -789,6 +986,74 @@ def input_manifest(store: LabStore, input_id: str) -> dict[str, Any] | None:
         return None
 
 
+STAGING_KEPT_FIX = (
+    "staging kept for inspection at ROOT/lab/{label}; "
+    "`traceback lab gc --staging-only --apply --root <ROOT>` removes it"
+)
+
+
+def volume_full(problem: BaseException) -> bool:
+    """True when the failure is a full volume, under any code.
+
+    TBX-LAB-011 names it; so does ``errno.ENOSPC`` on any ``OSError`` in the
+    cause/context chain, or samtools' "No space left on device" in a problem's
+    cause, first stderr line or any chained message (a TBX-LAB-014 from
+    ``samtools sort``/``index`` on a full disk).
+    """
+
+    seen: set[int] = set()
+    exc: BaseException | None = problem
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, OSError) and exc.errno == errno.ENOSPC:
+            return True
+        if isinstance(exc, LabProblem):
+            first_line = exc.data.get("first_line") if isinstance(exc.data, dict) else None
+            if exc.code == "TBX-LAB-011" or _no_space([exc.cause, str(first_line or "")]):
+                return True
+        if _no_space([str(exc)]):
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
+
+
+def publish_input(
+    store: LabStore, input_id: str, build: Callable[[Path], None], *, keep_staging: bool = False
+) -> Path:
+    """``publish_directory`` under ``inputs/``; with ``keep_staging`` a failed build's staging is kept and named.
+
+    The staging is kept only for a Lab refusal that is not a full volume
+    (``volume_full``: TBX-LAB-011, ENOSPC or "No space left on device" under
+    any code): an interrupt, an unexpected error or a full volume removes it
+    exactly as without the flag, so a rerun has its bytes back.  A kept
+    directory is named by its ``ROOT/lab``-relative label
+    (``inputs/.staging-<hex>``, the form ``lab gc`` lists it under, never a
+    host path) in ``problem.data["staging_kept"]`` and at the end of the
+    problem's FIX text.
+    """
+
+    staged: dict[str, Path] = {}
+
+    def record(staging: Path) -> None:
+        staged["path"] = staging
+        build(staging)
+
+    try:
+        return store.publish_directory(store.inputs_dir, input_id, record, keep_staging=keep_staging)
+    except BaseException as problem:
+        staging = staged.get("path")
+        if keep_staging and staging is not None:
+            if isinstance(problem, LabProblem) and not volume_full(problem):
+                label = staging.relative_to(store.lab).as_posix()
+                if not isinstance(problem.data, dict):  # RunProblem always builds a dict; never trust it blindly
+                    problem.data = {}
+                problem.data["staging_kept"] = label
+                problem.fix = f"{problem.fix}; {STAGING_KEPT_FIX.format(label=label)}"
+            else:
+                shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+
 def _threads(requested: int | None) -> int:
     if requested is not None:
         return max(1, requested)
@@ -865,6 +1130,7 @@ def align(
     scrubber: Scrubber,
     echo: Callable[[str], None] | None = None,
     progress: Callable[[str], None] | None = None,
+    keep_staging: bool = False,
 ) -> AlignedInput:
     """Align into staging, reconcile counts, publish ``inputs/<input_id>/``."""
 
@@ -973,6 +1239,7 @@ def align(
             "tool_provenance": aligner_provenance(samtools, minimap2),
             "aligner_argv": argv_identity,
             "basecall_model": chunkset.basecall_model,
+            "header_provenance": chunkset.header_provenance,
             "chunks": len(chunkset.chunks),
             "excluded_chunks": chunkset.excluded_indexes,
             "records": {"ubam": chunkset.total_records, "aligned_primary_plus_unmapped": aligned_count},
@@ -989,7 +1256,7 @@ def align(
         (staging / "manifest.json").write_bytes(canonical_json_bytes(manifest))
         metrics["manifest"] = manifest
 
-    store.publish_directory(store.inputs_dir, input_id, build)
+    publish_input(store, input_id, build, keep_staging=keep_staging)
     store.bump_generation()
     metrics.setdefault("duration_s", round(time.monotonic() - started, 1))
     return AlignedInput(input_id, source_id, store.inputs_dir / input_id, metrics["manifest"], reused=False)
@@ -1002,6 +1269,7 @@ def ingest_prealigned(
     *,
     reference_proof: str | None = None,
     progress: Callable[[str], None] | None = None,
+    keep_staging: bool = False,
 ) -> AlignedInput:
     """Copy one already-aligned BAM into the store and index it."""
 
@@ -1057,6 +1325,7 @@ def ingest_prealigned(
             "reference_id": reference.reference_id,
             "reference_sha256": reference.sha256,
             "basecall_model": chunkset.basecall_model,
+            "header_provenance": chunkset.header_provenance,
             "chunks": 1,
             "excluded_chunks": [],
             "records": {"ubam": None, "aligned_primary_plus_unmapped": count_records(bam, "-F", "0x900")},
@@ -1067,7 +1336,7 @@ def ingest_prealigned(
         (staging / "manifest.json").write_bytes(canonical_json_bytes(manifest))
         holder["manifest"] = manifest
 
-    store.publish_directory(store.inputs_dir, input_id, build)
+    publish_input(store, input_id, build, keep_staging=keep_staging)
     store.bump_generation()
     return AlignedInput(input_id, source_id, store.inputs_dir / input_id, holder["manifest"], reused=False)
 
@@ -1230,8 +1499,10 @@ __all__ = [
     "require_unchanged",
     "is_sample_reference",
     "mmi_path",
+    "publish_input",
     "read_header_lines",
     "require_budget",
+    "volume_full",
     "resolve_reference",
     "resolve_sample",
     "source_ids",
