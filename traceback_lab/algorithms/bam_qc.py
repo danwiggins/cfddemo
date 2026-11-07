@@ -144,20 +144,21 @@ def duplicate_read_names(name_hash: np.ndarray, flag: np.ndarray) -> int:
     Every record of a repeated name counts (two copies of one read are two
     duplicate records), so the share is the fraction of primary reads that
     would be double-counted.  Paired-end mates share a name by design, so
-    hashes are compared within one mate class (``flag & 0xC0``: unpaired,
-    first, second) and never across mates.  With a 64-bit hash the expected
-    number of falsely colliding pairs is about N^2 / 2^65: about 3e-6 at
-    10 million reads, so a false duplicate is negligible at ONT read counts.
+    hashes are keyed by mate class (``flag & 0xC0``: unpaired, first,
+    second) and never compared across mates.  A template with four or more
+    segments sets both 0x40 and 0x80 on its middle segments, so those land
+    in one class and could count as duplicates of each other; that never
+    arises for ONT single-end or Illumina paired-end input.  With a 64-bit
+    hash the expected number of falsely colliding pairs is about
+    N^2 / 2^65: about 3e-6 at 10 million reads, so a false duplicate is
+    negligible at ONT read counts.
     """
 
     if name_hash.size == 0:
         return 0
-    duplicates = 0
-    mate = flag & 0xC0
-    for mate_class in np.unique(mate):
-        _, counts = np.unique(name_hash[mate == mate_class], return_counts=True)
-        duplicates += int(counts[counts > 1].sum())
-    return duplicates
+    keyed = np.column_stack((flag & 0xC0, name_hash)).astype(np.uint64, copy=False)
+    _, counts = np.unique(keyed, axis=0, return_counts=True)
+    return int(counts[counts > 1].sum())
 
 
 @dataclass

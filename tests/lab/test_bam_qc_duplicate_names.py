@@ -5,12 +5,14 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from tests.lab.bam_fixtures import Read, context_for
 from tests.lab.test_landing import _dom, needs_chrome
 from traceback_lab.algorithms.bam_qc import BAM_QC, BamQc
 from traceback_lab.interpretation.engine import load_library
+from traceback_lab.read_summary import COLUMNS, ReadSummary
 from traceback_lab.registry import execution_identity
 from traceback_lab.store import LabStore
 from traceback_lab.synthetic import write_chunks
@@ -34,6 +36,15 @@ def _reads(rows: list[tuple[str, int]]) -> list[Read]:
 def _metrics(tmp_path: Path, rows: list[tuple[str, int]]) -> dict[str, dict]:
     context = context_for(tmp_path, CONTIGS, _reads(rows))
     return {row["metric_id"]: row for row in BAM_QC.run(context, tmp_path).metrics}
+
+
+def test_name_hash_column_is_64_bits_wide(tmp_path: Path) -> None:
+    """The collision figure and the exact-zero QC band assume a 64-bit hash."""
+
+    assert np.dtype(COLUMNS["h_ds"]) == np.uint64
+    context_for(tmp_path, CONTIGS, _reads([("synthetic-a", 0)]))
+    column = ReadSummary.open(tmp_path / "read-summary" / "columns").column("h_ds")
+    assert column.dtype == np.uint64 and column.dtype.itemsize * 8 == 64
 
 
 def test_repeated_names_count_every_primary_copy_and_skip_secondary_and_supplementary(tmp_path: Path) -> None:
@@ -94,7 +105,8 @@ def test_library_entries_carry_the_nonzero_flag_and_no_published_range() -> None
     library = load_library()
     for metric_id in NEW_METRICS:
         entry = library.entries[("bam-qc", metric_id)]
-        assert entry["nonzero_flag"] == FLAG_TEXT
+        # One pill per condition: only the share entry carries the flag.
+        assert entry.get("nonzero_flag") == (FLAG_TEXT if metric_id == "duplicate_read_name_share" else None)
         assert entry["reference"] == {"kind": "none"}
         assert entry["performance_missing_reason"] == "none published"
         assert entry["flags"] == [] and entry["headline"] is False
@@ -147,7 +159,7 @@ def test_two_chunks_with_the_same_read_names_are_counted_exactly(rebasecalled_ro
     assert metrics["duplicate_read_name_share"]["state"] == "no_reference"
     assert metrics["duplicate_read_name_share"]["reason"] == "none_published"
     assert metrics["duplicate_read_name_share"]["entry"]["nonzero_flag"] == FLAG_TEXT
-    assert metrics["duplicate_read_name_count"]["entry"]["nonzero_flag"] == FLAG_TEXT
+    assert metrics["duplicate_read_name_count"]["entry"]["nonzero_flag"] is None
 
 
 @needs_chrome
@@ -161,3 +173,13 @@ def test_trust_qc_shows_the_duplicate_name_flag_pill(rebasecalled_root, tmp_path
     assert "✕ fail" in row.group(1)
     assert f'<span class="flag-pill">{FLAG_TEXT}</span>' in row.group(1)
     assert dom.count(FLAG_TEXT) == 1
+
+
+@needs_chrome
+def test_findings_shows_the_duplicate_name_flag_pill_once(rebasecalled_root, tmp_path) -> None:
+    id12 = rebasecalled_root["id12"]
+    with RunningLabServer(LabStore(rebasecalled_root["root"])) as server:
+        dom = _dom(server, tmp_path, route=f"/sample/{id12}/findings", want=lambda page: "No reference (" in page)
+    assert dom.count(FLAG_TEXT) == 1
+    row = re.search(r"<tr>(?:(?!</tr>).)*Share of primary reads with a repeated read name(?:(?!</tr>).)*</tr>", dom, re.S)
+    assert row and f'<span class="flag-pill">{FLAG_TEXT}</span>' in row.group(0)

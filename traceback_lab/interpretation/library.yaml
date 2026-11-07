@@ -405,7 +405,6 @@ entries:
       clinical_setting: null
     license_ids: []
     flags: []
-    nonzero_flag: "FLAG: duplicate read names — possible re-basecalled chunk"
     headline: false
     stability: {kind: scales_with_depth, tolerance: 0.10}
     citations: []
