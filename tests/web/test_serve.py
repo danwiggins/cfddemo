@@ -365,7 +365,10 @@ def test_busy_port_is_refused_with_tbx_serve_005(world, busy_port: int) -> None:
     assert "RETRYABLE  True" in lines
     assert "DOCS  docs/OPERATOR-GUIDE.md#tbx-serve-005" in lines
     assert f"PORT  {busy_port}" in lines and "ERRNO  EADDRINUSE" in lines
-    assert str(root.parent) not in text
+    # The resolved ROOT is the one path signed human output prints (ROOT line,
+    # see OPERATOR-GUIDE § ROOT); the problem block itself stays path-free.
+    assert f"ROOT  {root}" in lines
+    assert str(root.parent) not in "\n".join(line for line in lines if not line.startswith("ROOT  "))
     # The web lock was released: the same ROOT serves on a free port afterwards.
     port = _free_port()
     with _serving(root, port=port) as (service, _):
