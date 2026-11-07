@@ -17,11 +17,11 @@ import pytest
 from traceback_lab.algorithms import fetal_fraction as fetal
 from traceback_lab.cli import main as lab_main
 from traceback_lab.fetal_contract import FetalContractError, inspect_contract, register_contract
-from traceback_lab.pipeline import Stage, run_pipeline
 from traceback_lab.registry import InputContext, PlanItem, Ready, Skip
 from traceback_lab.runner import RunTarget, run_plan
 from traceback_lab.scrub import Scrubber
 from traceback_lab.store import LabStore, new_run_id
+from traceback_runner.contained_process import Stage, run_contained_pipeline as run_pipeline
 
 
 SOURCE = "a" * 64
