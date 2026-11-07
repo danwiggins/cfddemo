@@ -11,5 +11,13 @@ import pytest
 
 
 @pytest.fixture(autouse=True)
-def _no_ambient_traceback_root(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("TRACEBACK_ROOT", raising=False)
+def _no_ambient_traceback_root():
+    # A private MonkeyPatch: requesting the shared ``monkeypatch`` fixture here
+    # would set it up before every test's own fixtures and undo it after them,
+    # so a registry fixture would close while a test's class patch was live.
+    patch = pytest.MonkeyPatch()
+    patch.delenv("TRACEBACK_ROOT", raising=False)
+    try:
+        yield
+    finally:
+        patch.undo()
