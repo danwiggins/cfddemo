@@ -30,6 +30,7 @@ from traceback_lab.store import (
 )
 from traceback_lab.views import selected_results
 from tests.lab.fake_algorithms import _Base
+from tests.lab.conftest import restore_mtime_past_ctime
 
 A = "a" * 64
 B = "b" * 64
@@ -975,7 +976,7 @@ def test_hash_cache_key_changes_when_a_same_size_same_mtime_replacement_has_a_ne
     # An in-place rewrite (cp -p onto an existing file) keeps the inode and can
     # restore the mtime, but bumps ctime: the key changes too.
     chunk.write_bytes(b"cccc")
-    os.utime(chunk, ns=(old.st_atime_ns, old.st_mtime_ns))
+    restore_mtime_past_ctime(chunk, new)
     rewritten = chunk.stat()
     assert rewritten.st_ino == new.st_ino
     assert (rewritten.st_size, rewritten.st_mtime_ns) == (old.st_size, old.st_mtime_ns)

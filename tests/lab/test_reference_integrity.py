@@ -19,6 +19,7 @@ from traceback_lab.scrub import Scrubber
 from traceback_lab.store import LabStore
 from traceback_runner.cli import main
 from traceback_runner.references import register_reference
+from tests.lab.conftest import restore_mtime_past_ctime
 
 
 def _reference(tmp_path: Path) -> tuple[LabStore, Path]:
@@ -95,7 +96,7 @@ def test_same_size_restored_mtime_fasta_edit_fails_registered_digest(tmp_path) -
     verify_reference_source(store, reference, write_cache=True)
     old = fasta.stat()
     fasta.write_text(fasta.read_text().replace("ACGT", "TCGT", 1))
-    os.utime(fasta, ns=(old.st_atime_ns, old.st_mtime_ns))
+    restore_mtime_past_ctime(fasta, old)
     edited = fasta.stat()
     assert (edited.st_ino, edited.st_size, edited.st_mtime_ns) == (old.st_ino, old.st_size, old.st_mtime_ns)
     assert edited.st_ctime_ns != old.st_ctime_ns
@@ -162,7 +163,7 @@ def test_index_edit_then_restore_invalidates_pre_use_proof(tmp_path) -> None:
     fields[2] = str(int(fields[2]) + 1)
     fai.write_text("\t".join(fields) + "\n")
     fai.write_bytes(original)
-    os.utime(fai, ns=(old.st_atime_ns, old.st_mtime_ns))
+    restore_mtime_past_ctime(fai, old)
     assert fai.stat().st_ctime_ns != old.st_ctime_ns
     with pytest.raises(LabProblem) as error:
         verify_reference_source(store, reference, write_cache=True, expected_proof=proof)
@@ -255,7 +256,7 @@ def test_mmi_cache_rehashes_same_size_restored_mtime_replacement(tmp_path) -> No
     strong_key = store.strong_hash_cache_key(mmi)
     # In-place rewrite with the mtime restored: same inode, size and mtime; only ctime moves.
     mmi.write_bytes(b"bbbb")
-    os.utime(mmi, ns=(old.st_atime_ns, old.st_mtime_ns))
+    restore_mtime_past_ctime(mmi, old)
     rewritten = mmi.stat()
     assert (rewritten.st_ino, rewritten.st_size, rewritten.st_mtime_ns) == (old.st_ino, old.st_size, old.st_mtime_ns)
     assert rewritten.st_ctime_ns != old.st_ctime_ns
@@ -436,7 +437,7 @@ def test_worker_edit_then_restore_cannot_publish_consumed_bases(tmp_path, capsys
             if metric["metric_id"] == "gc_bias_slope"
         )
         fasta.write_bytes(original)
-        os.utime(fasta, ns=(old.st_atime_ns, old.st_mtime_ns))
+        restore_mtime_past_ctime(fasta, old)
         consumed["ctime_changed"] = fasta.stat().st_ctime_ns != old.st_ctime_ns
         return outcome
 

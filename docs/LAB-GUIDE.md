@@ -254,7 +254,12 @@ restored mtime (a restore from backup, `rsync -a` into a fresh directory)
 lands on a new inode; a copy onto the existing file (`cp -p`, `rsync -a`
 over the old chunk) keeps the inode and restores the mtime but moves ctime.
 Both miss the cache and are hashed again. That guarantee holds only on
-filesystems with a kernel-maintained change time (APFS, ext4, XFS, NFS).
+filesystems with a kernel-maintained change time (APFS, ext4, XFS, NFS);
+Linux kernels before 6.13 stamp it at tick granularity (about 4 ms), so a
+rewrite completing inside the tick of the file's previous change is the one
+blind spot. Metadata-only changes (chmod, chown, extended attributes written by
+sync clients or Finder tags) also move ctime and cost one extra hash of that
+chunk on the next run.
 exFAT and FAT keep no independent change time and synthesise inode numbers
 from the directory slot, and SMB lets a client set every timestamp: there
 the cache cannot see an in-place rewrite, ingest prints one line saying so

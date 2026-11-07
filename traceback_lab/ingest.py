@@ -295,7 +295,7 @@ def inspect_chunks(
                 f"ingest  hash cache written by an older version "
                 f"({store.legacy_hash_cache_entries_dropped} chunk entries dropped): every chunk is hashed once"
             )
-        blind = cache_blind_filesystem(chunks[0].path)
+        blind = cache_blind_filesystem(chunks[0].path) if chunks else None
         if blind is not None:
             progress(
                 f"ingest  inputs are on {blind}: the hash cache cannot detect an in-place rewrite there; "

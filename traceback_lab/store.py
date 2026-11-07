@@ -1532,7 +1532,9 @@ class LabStore:
         A file replaced by another of the same size with a restored mtime
         lives on a new inode (or, where the inode number is recycled, carries
         a new ctime); an in-place rewrite that keeps the inode and restores
-        the mtime still bumps ctime, which no unprivileged tool can restore.
+        the mtime still bumps ctime, which no unprivileged tool can restore
+        (Linux before 6.13 stamps ctime at tick granularity, about 4 ms, so a
+        rewrite inside the tick of the previous change is the one blind spot).
         Both miss the cache and are rehashed. The device number is left out
         on purpose: it changes across remounts of external and network
         volumes and would rehash an unchanged kit after every remount.
