@@ -133,6 +133,7 @@ traceback lab run (<BAM|uBAM|chunk dir>... | <id12> | latest | --example)
 traceback lab simulate cna <id12|latest> [--tf 0.03,0.10,0.30] [--cohort ID] [--verbose]   synthetic CNA spike, copy-number recovery
 traceback lab simulate split <id12|latest> [--cohort ID] [--verbose]                         split-half pseudo-replicate
 traceback lab algorithms [--json]          registered algorithms (id, tier, min depth, licenses, footnote)
+traceback lab inventory DIR [--recursive] [--report PATH] [--json]   chunk-set completeness before alignment (read-only)
 traceback lab doctor [--json]              setup checks, each with a fix command
 traceback lab serve [--open] [--port N]    the local page (loopback only)
 traceback lab runs [RUN_ID] [--step S]     the run log, or one run's steps
@@ -155,6 +156,60 @@ traceback lab donor register|inspect [options] [--root R]
 The registration lines are a map, not complete copy-paste syntax. Their
 input files and required flags are specified in the method sections and
 linked guides below; `traceback lab COMMAND --help` shows exact options.
+
+## Inventory before you align
+
+`traceback lab inventory DIR` is the read-only check of a MinKNOW output
+directory that the spec's step S0 asks for: the chunk count, read count and
+basecaller/protocol provenance of the whole run, with checksums, before any
+alignment is paid for. A partially downloaded or damaged run is otherwise
+found only when `lab run` refuses a chunk at ingest.
+
+```
+uv run traceback lab inventory /path/to/run/bam_pass --root R
+```
+
+It lists every `*.bam` under DIR (`--recursive` adds subdirectories) and,
+for each chunk: size, whether the 28-byte BGZF EOF block is present and
+`samtools quickcheck -u` passes, the `_<n>.bam` index, the header's
+`@RG` basecall and modified-base models and `@PG` program versions, its
+sha256 (the Lab hash cache under ROOT is read when the same chunks were
+ingested before, never written) and its record count. A chunk is counted
+exactly when the cache holds it or the whole file is read; otherwise the
+count is an estimate from the first 2,000 records extrapolated by compressed
+size and is labelled `~` / `estimate` wherever it appears. The run id and
+sample id are reported only as present plus a sha256 prefix; their values are
+never printed. Chunk file names are printed as on disk (they carry the
+operator-local run id, as the `lab run` output does); nothing else beyond
+ROOT and DIR as given names a host path.
+
+The report then gives: chunk count and total bytes; index coverage with
+missing indices as ranges (`missing 2, 5-6`); truncated chunks; duplicate
+content (same sha256) or one index with two contents; the estimated or
+exact total reads; the merged provenance; and any MinKNOW report it can
+compare against. A `final_summary*.txt` or `sequencing_summary*.txt` is
+auto-detected in DIR, then in its parent (MinKNOW writes them beside
+`bam_pass/`), or named with `--report PATH`. `final_summary` declares the
+BAM-file total (pass plus fail; a sibling `bam_fail/` is counted by name);
+`sequencing_summary` declares the read and pass-read totals and, when it
+lists `filename_bam`, the pass chunk names, which are checked against DIR.
+
+The last line is the verdict:
+
+| Verdict | Meaning | Exit |
+|---|---|---:|
+| `COMPLETE` | no gaps, nothing truncated or duplicated, and a MinKNOW report agrees with the disk | 0 |
+| `UNKNOWN` | no gaps or damage, but no report to compare against (contiguous indices alone do not prove the run is whole) | 0 |
+| `INCOMPLETE` | missing indices, or a report declares more chunks than are on disk | 8 |
+| `DAMAGED` | a truncated chunk (no EOF block or quickcheck failure) or duplicate content | 8 |
+
+A DIR with no readable `.bam` chunk is TBX-LAB-030; a missing DIR, a
+symlink or a file is TBX-LAB-005. Symlinked or unreadable chunks are listed
+as skipped and not counted; `lab run` refuses them. `--json` carries the
+verdict, the reasons, every per-chunk row and the report comparison under
+`data`. The inventory writes nothing, takes no lock and makes no claim about
+the reads' content or quality; it is a completeness check of the files
+`lab run` will ingest.
 
 ## Running on a kit
 
@@ -1343,6 +1398,14 @@ port. Without `--port`, no ephemeral loopback port could be bound; check that
 the loopback interface is up and retry. `--json` carries the requested `port`
 (`null` when ephemeral) and the OS `errno` name under `data`.
 
+### TBX-LAB-030
+
+`lab inventory DIR` found no readable `.bam` chunk in DIR (exit 3). Point
+it at the MinKNOW `bam_pass` directory (the chunks are `<run>_pass_<hash>_<hash>_<n>.bam`),
+or pass the run folder with `--recursive`. Symlinked or unreadable `.bam`
+entries are listed under `data.skipped` and do not count. A missing DIR, a
+symlink or a plain file is TBX-LAB-005 instead.
+
 ## Adding an algorithm
 
 1. Add a module under `traceback_lab/algorithms/` exposing an instance of the
@@ -1360,6 +1423,7 @@ the loopback interface is up and retry. `--json` carries the requested `port`
 
 ## Changes
 
+- 2026-11-06: `lab inventory DIR` checks a chunk set before alignment; TBX-LAB-030.
 - 2026-11-06: `lab serve --port N` binds a fixed loopback port; TBX-LAB-026.
 - 2026-10-17: documented the expanded registered catalog, platform-specific
   methods, input-scoped calibrations, and current Lab writer commands.
