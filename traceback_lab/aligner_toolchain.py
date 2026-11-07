@@ -445,7 +445,7 @@ def _build_source(pin: AlignerPin, source: Path, staging: Path, *, runner: Runne
                 TOOL_MISSING,
                 f"Building {pin.tool} {pin.version} did not finish",
                 tool=pin.tool,
-                cause=f"`{' '.join(argv[:2])}` could not run or timed out",
+                cause=f"`{argv[0]}` ({' '.join(argv[2:3]) or 'build step'}) could not run or timed out",
                 fix="Install a C compiler, make, and the zlib, bzip2, xz and curl development headers "
                 "(Debian/Ubuntu: build-essential zlib1g-dev libbz2-dev liblzma-dev libcurl4-openssl-dev), "
                 "then run the install again; see the install log next to the toolchain cache",
@@ -455,7 +455,7 @@ def _build_source(pin: AlignerPin, source: Path, staging: Path, *, runner: Runne
                 TOOL_MISSING,
                 f"Building {pin.tool} {pin.version} failed",
                 tool=pin.tool,
-                cause=f"`{' '.join(argv[:2])}` exited {completed.returncode}",
+                cause=f"`{argv[0]}` exited {completed.returncode}",
                 fix="Install a C compiler, make, and the zlib, bzip2, xz and curl development headers "
                 "(Debian/Ubuntu: build-essential zlib1g-dev libbz2-dev liblzma-dev libcurl4-openssl-dev), "
                 "then run the install again; see the install log next to the toolchain cache",
@@ -589,7 +589,10 @@ def install_aligners(
 
     pins = tuple(pins)
     try:
-        existing = resolve_pinned_aligners(pins=pins, cache_root=cache_root)
+        # Probe like `lab doctor` does: a store whose binaries no longer run (a
+        # shared library gone after an OS upgrade) is damage to replace, not a
+        # verified store to keep, or doctor's reinstall fix would loop.
+        existing = resolve_pinned_aligners(pins=pins, cache_root=cache_root, probe=True)
     except ReferenceProblem:  # a damaged store is replaced below
         existing = None
     if existing is not None:
@@ -648,7 +651,7 @@ def install_aligners(
                 # A concurrent install may have published a verified store since
                 # the check above, and a run may already be using it: keep it.
                 try:
-                    published = _verify_store(pins, cache_root, probe=False)
+                    published = _verify_store(pins, cache_root, probe=True)
                 except ReferenceProblem:
                     published = None
                 if published is not None:

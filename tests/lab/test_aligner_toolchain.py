@@ -450,6 +450,42 @@ def test_doctor_runs_the_pinned_binaries(pinned_host, fake_release, tmp_path) ->
     assert "does not run" in check["detail"]
 
 
+
+def test_doctors_reinstall_fix_replaces_a_store_that_does_not_run(pinned_host, fake_release, tmp_path) -> None:
+    store = _install(fake_release, pinned_host)
+    _replant(store, "samtools", b"#!/bin/sh\nexit 127\n")  # digest-consistent, cannot run
+    assert _provenance_check(LabStore(tmp_path / "root"))["status"] == "blocked"
+    again, installed = at.install_aligners(
+        fake_release["pins"], cache_root=pinned_host, platform_name=FAKE_PLATFORM,
+        downloader=fake_release["downloader"],
+    )
+    assert installed  # the install probed the store and rebuilt it, instead of "already verified"
+    assert again.prefix == store.prefix
+    assert _provenance_check(LabStore(tmp_path / "root2"))["status"] == "pass"
+
+
+def test_a_failed_build_names_no_host_path(tmp_path, fake_release) -> None:
+    releases = tmp_path / "src-release"
+    releases.mkdir()
+    archive = releases / "samtools-1.21.tar.bz2"
+    digest = _tarball(archive, {"samtools-1.21/configure": b"#!/bin/sh\n"})
+    url = "https://example.invalid/samtools-1.21.tar.bz2"
+    pins = (at.AlignerPin("samtools", "1.21", url, digest, "source", "samtools-1.21"), fake_release["pins"][1])
+
+    class Failed:
+        returncode = 1
+
+    def downloader(target_url: str, destination: Path) -> None:
+        shutil.copyfile(archive if target_url == url else fake_release["sources"][target_url], destination)
+
+    cache = tmp_path / "toolchains"
+    with pytest.raises(ToolProblem) as error:
+        at.install_aligners(
+            pins, cache_root=cache, platform_name=FAKE_PLATFORM, downloader=downloader,
+            runner=lambda argv, **kwargs: Failed(),
+        )
+    assert "./configure" in error.value.cause and str(tmp_path) not in error.value.cause
+
 # -- identity -----------------------------------------------------------------------------
 _IDENTITY = dict(
     source_id="a" * 64,
