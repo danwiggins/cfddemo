@@ -223,7 +223,7 @@ def test_curated_text_is_scrubbed_not_filtered(tmp_path) -> None:
     sample = _reportable_sample()
     root = tmp_path / "root"
     row = next(row for row in sample["catalog"] if row["algorithm_id"] == "bam-qc")
-    row["question"] = f"What does {root}/lab/x show for {getpass.getuser()}?"
+    row["question"] = f"What does {root}/lab/x show?"
     row["limitations"] = [f"Curated limitation {n}: risk-adjusted, task-specific, tokenized." for n in range(15)]
     row["requirements"] = ["Trade secret law in Slovakia applies to sk-adjacent prose."]
     body = "A long curated license body. " * 70
@@ -235,7 +235,6 @@ def test_curated_text_is_scrubbed_not_filtered(tmp_path) -> None:
     _, document = build_html(sample, FROZEN_AT, report_scrubber(root), library)
     text = document.decode()
     assert str(root) not in text and "&lt;ROOT&gt;/lab/x" in text
-    assert not re.search(rf"(?<![A-Za-z0-9]){re.escape(getpass.getuser())}(?![A-Za-z0-9])", text)
     for n in range(15):
         assert f"Curated limitation {n}: risk-adjusted, task-specific, tokenized." in text
     assert "Trade secret law in Slovakia applies to sk-adjacent prose." in text
@@ -244,12 +243,16 @@ def test_curated_text_is_scrubbed_not_filtered(tmp_path) -> None:
 
 
 def test_library_free_text_is_withheld_only_when_it_looks_private(tmp_path) -> None:
-    prose = ["risk-adjusted", "task-specific", "Slovakia", "trade secret", "tokenized", "bearer of news"]
+    prose = ["risk-adjusted", "task-specific", "Slovakia", "trade secret", "tokenized", "Bearer of news",
+             "log2/GC slope", "and/or", "reads / 1M unmapped primaries", "N/A", "5'/3' ends", "ratio 1:2"]
     private = ["/Users/someone/run.bam", "AKIA" + "ABCDEFGHIJKLMNOP", "sk-" + "a1B2c3D4e5F6g7H8i9", "password=hunter2",
-               "read " + "ACGT" * 8, "f" * 40]
+               "read " + "ACGT" * 8, "f" * 40, "`/data/donors/Smith_J/run.bam`", "path=/Volumes/JDoe/x.bam",
+               "see,/mnt/runs/x", "[/srv/data/run]", "~/runs/x.bam", "C:/Users/JDoe/run.bam", "D:\\runs",
+               "file:///tmp/x.bam", "FILE://host/share", "read 3f9a1c2b-7e04-4c1d-9a2b-0123456789ab"]
     library = _library(entries={
         ("bam-qc", "total_reads"): {"confounders": prose + private, "label": "Primary reads, risk-adjusted"},
         ("bam-qc", "mapped_fraction"): {"label": "/Users/someone/label"},
+        ("bam-qc", "mean_read_q"): {"label": ""},
     })
     report, document = build_html(_reportable_sample(), FROZEN_AT, report_scrubber(tmp_path), library)
     text = document.decode()
@@ -258,24 +261,39 @@ def test_library_free_text_is_withheld_only_when_it_looks_private(tmp_path) -> N
     assert row["confounders"] == "; ".join(prose) + f"; [{len(private)} items withheld]"
     mapped = next(row for row in report["metrics"] if row["metric_id"] == "mapped_fraction")
     assert mapped["label"] == "mapped_fraction [1 item withheld]"
+    unlabelled = next(row for row in report["metrics"] if row["metric_id"] == "mean_read_q")
+    assert unlabelled["label"] == "mean_read_q (label not recorded)"
     assert WITHHELD_TEXT in report["limitations"]
     for secret in private:
         assert html.escape(secret) not in text
     assert f"[{len(private)} items withheld]" in text
 
 
-def test_host_names_are_scrubbed_from_text_but_not_identifiers(tmp_path, monkeypatch) -> None:
-    monkeypatch.setattr(report_command, "_hostname", lambda: "lab.example.org")
+@pytest.mark.parametrize("host", ("clia", "root", "lab.example.org"))
+def test_host_names_are_scrubbed_from_library_text_only(tmp_path, monkeypatch, host) -> None:
+    monkeypatch.setattr(report_command, "_hostname", lambda: host)
+    word = host.split(".")[0]
+    root = tmp_path / "root"
     sample = _reportable_sample()
     row = next(row for row in sample["catalog"] if row["algorithm_id"] == "bam-qc")
-    row["question"] = "Is the LAB host or lab.example.org named? Labels stay."
+    row["question"] = f"Curated: {word.upper()} and {word} stay; {root}/lab/x is ROOT."
     for algorithm in sample["algorithms"]:
-        algorithm["provenance"]["tool"] = "lab"
-    report, document = build_html(sample, FROZEN_AT, report_scrubber(tmp_path))
+        algorithm["provenance"]["tool"] = word
+    library = _library(entries={("bam-qc", "total_reads"): {
+        "confounders": [f"Library {word.upper()} note for {getpass.getuser()}", "Labels stay"]}})
+    report, document = build_html(sample, FROZEN_AT, report_scrubber(root), library)
     text = document.decode()
-    assert "Is the &lt;redacted&gt; host or &lt;redacted&gt; named? Labels stay." in text
-    assert "Tool: lab;" in text
-    assert all(row["tool"] == "lab" for row in report["metrics"])
+    # Curated repo text and the CLIA explainer are never word-redacted.
+    assert f"Curated: {word.upper()} and {word} stay; &lt;ROOT&gt;/lab/x is ROOT." in text
+    assert "What CLIA means for this demo" in text and "<strong>CLIA</strong> (1988)" in text
+    assert '<p class="flag">FLAG: CLIA</p>' in text
+    # Library free text loses the host word and the login.
+    total = next(row for row in report["metrics"] if row["metric_id"] == "total_reads")
+    assert total["confounders"] == "Library <redacted> note for <redacted>; Labels stay"
+    # Validated identifiers are never rewritten.
+    assert f"Tool: {word};" in text and all(row["tool"] == word for row in report["metrics"])
+    scrub = report_scrubber(root)
+    assert scrub.redact_words(f"<ROOT> <path> <redacted> {word}") == "<ROOT> <path> <redacted> <redacted>"
     assert report_command._host_pattern("ab") is None
 
 
@@ -292,11 +310,12 @@ def test_minute_precision_instants_are_accepted_and_impossible_dates_refused() -
             project_report(sample, FROZEN_AT, scrubber)
 
 
-def test_unreadable_clia_copy_is_refused(ran_root, tmp_path, capsys, monkeypatch, frozen) -> None:
+@pytest.mark.parametrize("error", (OSError, ValueError, TypeError, AttributeError, IndexError, KeyError))
+def test_unreadable_clia_copy_is_refused(ran_root, tmp_path, capsys, monkeypatch, frozen, error) -> None:
     from traceback_lab.web import server
 
     def broken():
-        raise OSError("gone")
+        raise error("gone")
 
     monkeypatch.setattr(server, "clia_copy", broken)
     out = tmp_path / "r.html"
@@ -319,6 +338,25 @@ def test_a_file_that_appears_after_the_check_is_never_replaced(ran_root, tmp_pat
     assert code == 3 and payload["data"]["code"] == "TBX-LAB-034" and payload["data"]["exists"] is True
     assert out.read_text() == "someone else's file"
     assert not list(tmp_path.glob("*part-*"))
+
+
+def test_staging_is_short_random_and_a_collision_is_not_reported_as_exists(
+        ran_root, tmp_path, capsys, monkeypatch, frozen) -> None:
+    out = tmp_path / ("r" * 250 + ".html")
+    monkeypatch.setattr(report_command.secrets, "token_hex", lambda n: "0" * (2 * n))
+    staging = tmp_path / f".traceback-report-{os.getpid()}-{'0' * 16}.part"
+    staging.write_text("another writer's staging")
+    code, payload = _report(capsys, "--html", _id12(ran_root), "--root", str(ran_root), "--out", str(out))
+    assert code == 3 and payload["data"]["code"] == "TBX-LAB-034"
+    assert "exists" not in payload["data"] and "could not be written" in payload["data"]["cause"]
+    assert staging.read_text() == "another writer's staging"
+    assert not out.exists()
+    staging.unlink()
+    monkeypatch.undo()
+    monkeypatch.setattr(report_command, "_utcnow", lambda: FROZEN_AT)
+    code, payload = _report(capsys, "--html", _id12(ran_root), "--root", str(ran_root), "--out", str(out))
+    assert code == 0 and out.exists()
+    assert sorted(path.name for path in tmp_path.iterdir()) == [out.name]
 
 
 def test_filesystems_without_hard_links_get_an_exclusive_create(ran_root, tmp_path, capsys, monkeypatch, frozen) -> None:
@@ -410,6 +448,8 @@ def _parity_cases() -> dict[str, tuple[dict, list[str]]]:
     _metric(values, "bam-qc", "mean_read_q").update(state="not_interpretable", reason="no_pon", n=-1)
     _metric(values, "bam-qc", "duplicate_fraction")["n"] = 12
     _metric(values, "bam-qc", "gc_bias_slope")["value"] = "text"
+    _metric(values, "bam-qc", "supplementary_fraction")["unit"] = "reads"  # a known unit, but not this metric's
+    _metric(values, "fragment-size", "mode_bp")["unit"] = None  # declared producer unit, payload None
     _algorithm(values, "bam-qc")["metrics"].append({"metric_id": "not_registered", "value": 1, "unit": "reads"})
     values["excluded_chunks"] = [3, -1, "x", True]
     cases["values"] = (values, ["bam-qc/genome_ge1x_fraction", "copy-number/tumor_fraction"])
@@ -469,6 +509,115 @@ def test_rows_and_limitations_match_the_browser_projection() -> None:
     exported = {(row["algorithm_id"], row["metric_id"]) for row in base["metrics"]}
     assert ("sex-check", "call") in exported and ("copy-number", "identifiable") in exported
     assert ("copy-number", "pon_policy") not in exported
+
+
+def _every_entry_sample() -> dict:
+    """Every visible library entry with a value its kind accepts and its producer unit."""
+
+    sample = _reportable_sample()
+    sample["completed_utc"] = sample["run_utc"]
+    library = load_library()
+    categories = {("sex-check", "call"): "male", ("copy-number", "pon_policy"): "lab_loo_v1"}
+    for algorithm in sample["algorithms"]:
+        for metric in algorithm["metrics"]:
+            key = (algorithm["algorithm_id"], metric["metric_id"])
+            kind = library.entry(*key).get("value_kind")
+            if kind == "categorical":
+                metric["value"] = categories.get(key, True)
+            elif kind == "vector":
+                metric["value"] = [1, 2]
+            else:
+                metric["value"] = 0.25
+            metric["unit"] = report_command.audited_units()[key]
+    return sample
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js unavailable")
+@pytest.mark.parametrize("cell_origin_version", ("1", "2"))
+def test_every_library_entry_matches_the_browser_rows_and_restrictions(cell_origin_version) -> None:
+    library = load_library()
+    sample = _every_entry_sample()
+    _algorithm(sample, "cell-origin")["algorithm_version"] = cell_origin_version
+    script = r"""
+      require(process.argv[1]);
+      let input = '';
+      process.stdin.on('data', (chunk) => { input += chunk; });
+      process.stdin.on('end', () => {
+        const sample = JSON.parse(input), core = globalThis.TracebackLabReport;
+        const model = core.project(sample, '2026-11-07T12:00:00Z',
+          (m) => ({displayValue: m.value == null ? 'unavailable' : String(m.value), displayUnit: m.unit}));
+        const versions = Object.fromEntries(sample.algorithms.map((row) => [row.algorithm_id, row.algorithm_version]));
+        const restrictions = model.metrics.map((row) => {
+          const r = core.restrictionsForMetric(row.algorithm_id, row.metric_id, versions[row.algorithm_id]);
+          return {flags: r.flags, license_ids: r.licenseIds};
+        });
+        process.stdout.write(JSON.stringify({model, restrictions}));
+      });
+    """
+    js = json.loads(subprocess.run(["node", "-e", script, str(REPORT_JS)], input=json.dumps(sample),
+                                   capture_output=True, text=True, check=True).stdout)
+    py = project_report(sample, FROZEN_AT, report_scrubber(Path("/nonexistent")))
+    keys = ("algorithm_id", "metric_id", "label", "raw_value", "raw_unit", "recorded_support_n",
+            "interpretation_state", "interpretation_reason")
+    assert [[row[key] for key in keys] for row in py["metrics"]] == [[row[key] for key in keys] for row in js["model"]["metrics"]]
+    assert py["limitations"] == js["model"]["limitations"]
+    # modbase-qc/mod_codes is categorical with no category lab-report.js accepts, so both omit it.
+    visible = {key for key in library.entries if key[0] not in library.hidden_algorithms
+               and library.entries[key].get("value_kind") != "vector" and key != ("modbase-qc", "mod_codes")}
+    exported = {(row["algorithm_id"], row["metric_id"]) for row in py["metrics"]}
+    assert exported == {key for key in visible if key[0] in {row["algorithm_id"] for row in sample["algorithms"]}}
+    assert len(exported) > 150
+
+    def joined(value) -> str | None:
+        items = value if isinstance(value, list) else [value] if value else []
+        return "; ".join(items) or None
+
+    for row, restriction in zip(py["metrics"], js["restrictions"]):
+        assert row["flags"] == restriction["flags"], row["metric_id"]
+        assert row["license_ids"] == restriction["license_ids"], row["metric_id"]
+        entry = library.entry(row["algorithm_id"], row["metric_id"])
+        reference = entry.get("reference") or {}
+        expected_reference = ": ".join(str(part) for part in (reference.get("kind"), reference.get("source")) if part)
+        assert row["reference"] == (expected_reference or None)
+        steps = entry.get("next_steps") or {}
+        assert row["confounders"] == joined(entry.get("confounders"))
+        assert row["analytical_next_steps"] == joined(steps.get("analytical"))
+        assert row["clinical_next_steps"] == joined(steps.get("clinical_setting"))
+    assert not any("withheld" in str(value) for row in py["metrics"] for value in row.values())
+    modkit = any("modkit-ont-public" in row["license_ids"] for row in py["metrics"])
+    assert modkit is (cell_origin_version == "1")
+
+
+def test_units_vocabulary_matches_the_browser() -> None:
+    source = REPORT_JS.read_text()
+    block = source.split("  const units = new Set([", 1)[1].split("]);", 1)[0]
+    assert set(re.findall(r'"([^"]+)"', block)) == set(report_command.UNITS)
+
+
+def test_unknown_library_flag_or_license_is_disclosed_as_incomplete() -> None:
+    shipped = load_library()
+
+    def consistent() -> dict:
+        # Payload restriction metadata that agrees with the library everywhere.
+        sample = _every_entry_sample()
+        for algorithm in sample["algorithms"]:
+            for metric in algorithm["metrics"]:
+                flags, licenses = report_command._restrictions(
+                    shipped, algorithm["algorithm_id"], metric["metric_id"], algorithm.get("algorithm_version"))
+                metric["entry"] = {**metric["entry"], "flags": flags, "license_ids": licenses}
+        sample["licenses"] = [{"license_id": key, **value} for key, value in shipped.licenses.items()]
+        return sample
+
+    library = _library(entries={("bam-qc", "total_reads"): {"flags": ["CLIA", "NOT_A_FLAG"]}})
+    sample = consistent()
+    _metric(sample, "bam-qc", "total_reads")["entry"]["flags"] = ["CLIA", "NOT_A_FLAG"]
+    baseline = project_report(consistent(), FROZEN_AT, report_scrubber(Path("/nonexistent")))
+    report = project_report(sample, FROZEN_AT, report_scrubber(Path("/nonexistent")), library)
+    assert report_command.INCOMPLETE_RESTRICTIONS not in baseline["limitations"]
+    assert report_command.INCOMPLETE_RESTRICTIONS in report["limitations"]
+    row = next(row for row in report["metrics"] if row["metric_id"] == "total_reads")
+    assert row["flags"] == [RESTRICTION_FLAG_TEXT["CLIA"]]
+    assert "NOT_A_FLAG" not in json.dumps(report)
 
 
 def test_clia_explainer_is_the_page_copy() -> None:

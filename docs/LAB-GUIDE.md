@@ -1168,14 +1168,17 @@ JavaScript disabled. Nothing the page does not show enters it: no host paths,
 read names, cohort member identities, artifacts or taxon detail. Metric
 identities, labels, value kinds, flags and license terms come from the
 interpretation library, as in the browser export. Identifiers, hashes and
-numbers are pattern-checked and shown as recorded. Curated text (method
-questions, requirements and limitations, license terms, the CLIA explainer)
-is shown in full after the Lab scrubber replaces ROOT, the home directory,
-the login name and the host name (whole words of three or more characters).
-Library free text (labels, confounders, next steps, references) is scrubbed
-the same way, and an item that looks like a path, a credential, a long
-hexadecimal identifier or a read sequence is withheld; the file marks it in
-place (`[1 item withheld]`) and says so under limitations. The same 5,000-row
+numbers are pattern-checked and shown as recorded, and each metric's unit
+must be its producer's audited unit, as in the browser. Curated repo text
+(method questions, requirements and limitations, license terms, the CLIA
+explainer) is shown in full with ROOT and the home directory replaced; it is
+never filtered or word-redacted. Library free text (labels, confounders, next
+steps, references) also loses the login name and the host name (whole words
+of three or more characters), and an item that looks like a path (POSIX,
+home, Windows drive or `file:` URL), a credential, a read sequence, a long
+hexadecimal identifier or a UUID is withheld; the file marks it in place
+(`[1 item withheld]`) and says so under limitations. A metric without a
+recorded label shows `(label not recorded)`. The same 5,000-row
 and 5 MiB limits as the browser export apply, to both the report projection
 and the HTML file. An over-limit or unreportable sample, an unreadable CLIA
 explainer, an existing `--out` file (never overwritten, even if it appears

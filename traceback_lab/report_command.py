@@ -19,12 +19,11 @@ view).
 
 Text handling has three classes.  Identifiers, hashes, numbers and
 enumerations are validated by pattern and only HTML-escaped.  Curated repo
-text (method catalogue, license copy, the CLIA explainer) is scrubbed (ROOT,
-home, login, host name) and never filtered by content.  Library free text
-(labels, confounders, next steps, references) is scrubbed and additionally
-withheld when it looks like a path, a credential, a long hexadecimal
-identifier or a read sequence; a withheld item is marked in place and in the
-limitations.  The same 5,000-row and 5 MiB limits as the browser export
+text (method catalogue, license copy, the CLIA explainer) has ROOT and home
+replaced and is never filtered or word-redacted.  Library free text (labels,
+confounders, next steps, references) also loses the login and host name, and
+is withheld when it looks like a path, a credential or a read name; a
+withheld item is marked in place and in the limitations.  The same 5,000-row and 5 MiB limits as the browser export
 apply; an over-limit report is refused (TBX-LAB-034) without writing a
 partial file.
 """
@@ -33,14 +32,16 @@ from __future__ import annotations
 
 import argparse
 import errno
+import functools
+import getpass
 import hashlib
 import html
 import json
 import math
 import os
 import re
+import secrets
 import socket
-import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -51,7 +52,7 @@ from traceback_runner.cli import _local_envelope, _result, _with_human
 
 from .interpretation.engine import NO_REFERENCE_REASONS, NOT_INTERPRETABLE_REASONS, Library, load_library
 from .problems import EXIT_OK, LabProblem
-from .scrub import REDACTED, Scrubber
+from .scrub import PATH_TOKEN, REDACTED, ROOT_TOKEN
 from .store import LabStore
 
 MAX_ROWS = 5000
@@ -104,9 +105,8 @@ SKIP_REASONS = frozenset({
     "missing_input", "input_kind", "reference", "upstream", "unqualified_support",
     "missing_gpu", "model_not_ready",
 })
-# lab-report.js's producer-unit vocabulary.  The browser also checks each unit
-# against the metric's own producer unit; Python has no static per-metric unit
-# table, so a unit outside this vocabulary is the omission rule here.
+# lab-report.js's producer-unit vocabulary (kept equal by test).  Each metric's
+# own producer unit is read from lab-report.js's audited table (``audited_units``).
 UNITS = frozenset({
     "end-count difference", "fraction", "arms", "log2", "log2/GC", "phred", "reads",
     "copies", "reads per million", "ratio", "bp", "records", "x", "index", "fragments",
@@ -137,16 +137,25 @@ _ATTEMPT = re.compile(r"^a-\d{8}T\d{12}-[0-9a-f]{8}$")
 # Withholding heuristics for library free text.  Credential tokens are matched
 # by their case-sensitive shape (``AKIA`` + 16, ``sk-`` + 16 at a word start)
 # or as an assignment (``password=…``), so prose such as "risk-adjusted",
-# "Slovakia", "trade secret" or "tokenized" passes.
+# "Slovakia", "trade secret" or "tokenized" passes.  Paths match anywhere
+# that is not inside a word ("log2/GC", "and/or" pass): POSIX absolute and
+# home paths of two or more segments, Windows drive paths and file URLs.
+# Read names are sequences, long hexadecimal runs and hyphenated UUIDs.
 _UNSAFE_CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\\]")
 _CREDENTIAL = re.compile(
     r"\bAKIA[0-9A-Z]{16}\b|(?<![A-Za-z0-9])sk-[A-Za-z0-9_-]{16,}"
     r"|(?i:\b(?:password|passwd|secret|token|api[_ -]?key)\b\s*[:=])"
-    r"|(?i:\bbearer\s+[A-Za-z0-9._~+/=-]{12,})"
 )
-_READ_SEQUENCE = re.compile(r"[ACGTN]{30,}")
-_PATH_LIKE = re.compile(r"(?:^|[\s(:'\"])(?:~|/[A-Za-z][\w.-]*)(?:/[\w.-]+)+")
-_LONG_HEX = re.compile(r"\b[0-9a-fA-F]{32,}\b")
+_PATH_LIKE = re.compile(
+    r"(?<![\w.])(?:~(?=/)|/[A-Za-z0-9._-]+)(?:/[A-Za-z0-9._ -]+)+"
+    r"|(?<![A-Za-z0-9])[A-Za-z]:[\\/]"
+    r"|(?i:\bfile:/)"
+)
+_READ_NAME = re.compile(
+    r"[ACGTN]{30,}|\b[0-9a-fA-F]{32,}\b"
+    r"|\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
+)
+_SCRUB_TOKENS = re.compile("(" + "|".join(re.escape(token) for token in (ROOT_TOKEN, PATH_TOKEN, REDACTED)) + ")")
 _INLINE = re.compile(r"\*\*(.+?)\*\*|\[\[(.+?)\]\]|\[([^\]]+)\]\((https?:[^)]+)\)")
 
 
@@ -177,32 +186,79 @@ def _host_pattern(hostname: str | None) -> re.Pattern[str] | None:
 
 @dataclass(frozen=True)
 class ReportScrubber:
-    """ROOT, home, login and host-name redaction for every text the file carries."""
+    """Redaction for the two text classes the file carries.
 
-    scrubber: Scrubber
+    Both classes have every literal form of ROOT replaced by ``<ROOT>`` and
+    the home directory by ``<redacted>``.  Curated repo text is public
+    content and gets nothing else, so a host or login called ``clia`` or
+    ``root`` cannot rewrite it.  Library free text that looks like a path is
+    withheld before this runs; what remains also loses the login name and
+    the host name as whole words, outside the ``<ROOT>``/``<path>``/
+    ``<redacted>`` tokens.  The signed scrubber's generic path rule is not
+    used: it rewrites prose such as "5'/3' ends".
+    """
+
+    roots: tuple[str, ...] = ()
+    home: str | None = None
+    login: str | None = None
     host: re.Pattern[str] | None = None
 
-    def curated(self, text: str) -> str:
-        """Scrub repo-curated text line by line, without truncation or content filtering."""
+    def _literal(self, text: str) -> str:
+        for root in self.roots:
+            text = text.replace(root, ROOT_TOKEN)
+        return text.replace(self.home, REDACTED) if self.home else text
 
-        out = "\n".join(self.scrubber.line(line) for line in text.split("\n"))
-        return self.host.sub(REDACTED, out) if self.host is not None else out
+    def curated(self, text: str) -> str:
+        """Scrub repo-curated text, without truncation or content filtering."""
+
+        return self._literal(text)
+
+    def redact_words(self, text: str) -> str:
+        """Login and host-name redaction outside the scrubber tokens."""
+
+        patterns = [pattern for pattern in (
+            re.compile(rf"(?<![A-Za-z0-9]){re.escape(self.login)}(?![A-Za-z0-9])") if self.login else None,
+            self.host,
+        ) if pattern is not None]
+        if not patterns:
+            return text
+        parts = _SCRUB_TOKENS.split(text)
+        for index in range(0, len(parts), 2):
+            for pattern in patterns:
+                parts[index] = pattern.sub(REDACTED, parts[index])
+        return "".join(parts)
 
     def free_text(self, value: Any) -> str | None:
         """Scrubbed library free text, or ``None`` when it must be withheld."""
 
         if not isinstance(value, str) or not value:
             return None
-        if (_UNSAFE_CONTROL.search(value) or _CREDENTIAL.search(value) or _READ_SEQUENCE.search(value)
-                or _PATH_LIKE.search(value) or _LONG_HEX.search(value)):
+        if (_UNSAFE_CONTROL.search(value) or _CREDENTIAL.search(value) or _READ_NAME.search(value)
+                or _PATH_LIKE.search(value)):
             return None
-        return self.curated(value) or None
+        return self.redact_words(self._literal(value)) or None
+
+
+def _login() -> str | None:
+    try:
+        name = getpass.getuser()
+    except Exception:  # noqa: BLE001 - no login name is fine
+        return None
+    return name if name and len(name) >= 2 else None
 
 
 def report_scrubber(root: Path) -> ReportScrubber:
-    """The report's scrubber: no line cap, host words of three or more characters."""
+    """The report's scrubber for one ROOT (host words of three or more characters)."""
 
-    return ReportScrubber(Scrubber(root=root, max_line=sys.maxsize), _host_pattern(_hostname()))
+    forms = {str(root)}
+    try:
+        forms.add(os.path.realpath(root))
+    except OSError:
+        pass
+    roots = tuple(sorted((form.rstrip("/") for form in forms if form not in ("", "/")), key=len, reverse=True))
+    home = os.path.expanduser("~").rstrip("/")
+    return ReportScrubber(roots=roots, home=home if home and home != "~" else None,
+                          login=_login(), host=_host_pattern(_hostname()))
 
 
 class ReportRefused(Exception):
@@ -317,6 +373,31 @@ def _restrictions(library: Library, algorithm_id: str, metric_id: str,
     return flags, licenses
 
 
+_REPORT_JS = Path(__file__).resolve().parent / "web" / "static" / "lab-report.js"
+
+
+@functools.lru_cache(maxsize=4)
+def _audited_units(path: Path = _REPORT_JS, mtime_ns: int = 0) -> dict[tuple[str, str], str | None]:
+    """Each metric's producer unit from lab-report.js's audited table: the browser's own source.
+
+    The table is ``{algorithm: {metric: [label, producer unit, value kind]}}``;
+    tests/lab/test_lab_report.py checks it against the algorithm producers.
+    """
+
+    del mtime_ns  # part of the cache key only
+    source = path.read_text(encoding="utf-8")
+    table = json.loads(source.split("  const audited = ", 1)[1].split(";\n  // Fixed, audited restrictions", 1)[0])
+    return {(algorithm, metric): definition[1]
+            for algorithm, metrics in table.items() for metric, definition in metrics.items()}
+
+
+def audited_units() -> dict[tuple[str, str], str | None]:
+    try:
+        return _audited_units(_REPORT_JS, _REPORT_JS.stat().st_mtime_ns)
+    except (OSError, IndexError, ValueError, TypeError, AttributeError, KeyError) as error:
+        raise ReportRefused(f"the audited producer units could not be read ({type(error).__name__})") from None
+
+
 def _visible_algorithms(library: Library) -> set[str]:
     from .registry import load_registry
 
@@ -398,6 +479,7 @@ def project_report(sample: dict[str, Any], generated_at: str, scrub: ReportScrub
         note("Input-exclusion status was unavailable; collection completeness could not be confirmed.")
 
     audited = _visible_algorithms(library)
+    units = audited_units()
     catalog = [row for row in sample["catalog"] if isinstance(row, dict)
                and isinstance(row.get("algorithm_id"), str) and _ALGORITHM.match(row["algorithm_id"])
                and row["algorithm_id"] in audited]
@@ -473,7 +555,9 @@ def project_report(sample: dict[str, Any], generated_at: str, scrub: ReportScrub
                 note("Some metrics were omitted because their provenance was unavailable or invalid.")
                 continue
             unit = metric.get("unit")
-            if unit is not None and unit not in UNITS:
+            producer_unit = units.get((algorithm_id, metric_id))
+            if (not (unit is None or unit == producer_unit)
+                    or (producer_unit is not None and producer_unit not in UNITS)):
                 note("Some metrics were omitted because their units did not match audited producer metadata.")
                 continue
             if nonfinite:
@@ -497,7 +581,10 @@ def project_report(sample: dict[str, Any], generated_at: str, scrub: ReportScrub
             supplied_entry = metric.get("entry") if isinstance(metric.get("entry"), dict) else {}
             if (not _same_ids(supplied_entry.get("flags"), flag_ids)
                     or not _same_ids(supplied_entry.get("license_ids"), license_ids)
-                    or any(license_id not in supplied for license_id in license_ids)):
+                    or any(license_id not in supplied for license_id in license_ids)
+                    # The library loader does not enforce the flag or license vocabulary.
+                    or any(flag not in RESTRICTION_FLAG_TEXT for flag in flag_ids)
+                    or any(license_id not in library.licenses for license_id in license_ids)):
                 note(INCOMPLETE_RESTRICTIONS)
             flags = [VIRAL_PRIVACY_TEXT if flag == "PRIVACY" and algorithm_id == "viral-reads"
                      else RESTRICTION_FLAG_TEXT[flag] for flag in flag_ids if flag in RESTRICTION_FLAG_TEXT]
@@ -542,8 +629,11 @@ def project_report(sample: dict[str, Any], generated_at: str, scrub: ReportScrub
                 parts = [part for part in (reference.get("kind"), reference.get("source")) if part]
                 reference_text = _free_text(": ".join(map(str, parts)), scrub, note) if parts else None
             next_steps = entry.get("next_steps") if isinstance(entry.get("next_steps"), dict) else {}
-            label = scrub.free_text(entry.get("label"))
-            if label is None:
+            raw_label = entry.get("label")
+            label = scrub.free_text(raw_label)
+            if not isinstance(raw_label, str) or not raw_label:
+                label = f"{metric_id} (label not recorded)"
+            elif label is None:
                 note(WITHHELD_TEXT)
                 label = f"{metric_id} {_withheld(1)}"
             rows.append({
@@ -771,7 +861,7 @@ def build_html(sample: dict[str, Any], generated_at: str, scrub: ReportScrubber,
                             bytes=projection, rows=len(report["metrics"]))
     try:
         clia_short = clia_copy()["short"]
-    except (OSError, IndexError, KeyError, UnicodeDecodeError) as error:
+    except (OSError, IndexError, KeyError, ValueError, TypeError, AttributeError) as error:
         raise ReportRefused(f"the CLIA explainer copy could not be read ({type(error).__name__})") from None
     document = render_html(report, scrub.curated(clia_short)).encode("utf-8")
     if len(document) > MAX_BYTES:
@@ -799,25 +889,34 @@ def add_report_parser(commands: Any, common: Callable[[argparse.ArgumentParser],
     parser.set_defaults(handler=run_report)
 
 
+class OutputExists(Exception):
+    """``--out`` already exists (or appeared while the report was written)."""
+
+
 def _write_new(out: Path, document: bytes) -> None:
     """Publish ``document`` at ``out`` complete or not at all, never replacing an existing file.
 
-    The bytes are written and fsynced to a sibling staging file, then
+    The bytes are written and fsynced to a sibling staging file with a short
+    random name (well under NAME_MAX whatever ``out`` is called), then
     hard-linked into place: ``os.link`` fails if ``out`` exists, even when it
-    appeared after the check.  A filesystem without hard links gets an
-    exclusive create of ``out`` itself, removed again if the write fails.
+    appeared after the check, and only that failure is ``OutputExists``.  A
+    filesystem without hard links gets an exclusive create of ``out`` itself,
+    removed again if the write fails.  The staging file is removed only when
+    this call created it.
     """
 
-    staging = out.with_name(f".{out.name}.part-{os.getpid()}")
+    staging = out.with_name(f".traceback-report-{os.getpid()}-{secrets.token_hex(8)}.part")
+    created_staging = False
     try:
         with open(staging, "xb") as handle:
+            created_staging = True
             handle.write(document)
             handle.flush()
             os.fsync(handle.fileno())
         try:
             os.link(staging, out)
         except FileExistsError:
-            raise
+            raise OutputExists from None
         except OSError as error:
             if error.errno not in (errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.EMLINK, errno.EXDEV):
                 raise
@@ -828,6 +927,8 @@ def _write_new(out: Path, document: bytes) -> None:
                     handle.write(document)
                     handle.flush()
                     os.fsync(handle.fileno())
+            except FileExistsError:
+                raise OutputExists from None
             except BaseException:
                 if created:
                     try:
@@ -836,10 +937,11 @@ def _write_new(out: Path, document: bytes) -> None:
                         pass
                 raise
     finally:
-        try:
-            staging.unlink()
-        except OSError:
-            pass
+        if created_staging:
+            try:
+                staging.unlink()
+            except OSError:
+                pass
 
 
 def run_report(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]]:
@@ -889,7 +991,7 @@ def run_report(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str
         raise exists
     try:
         _write_new(out, document)
-    except FileExistsError:
+    except OutputExists:
         raise exists from None
     except OSError as error:
         raise LabProblem(
