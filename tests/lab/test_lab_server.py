@@ -8,6 +8,7 @@ import http.client
 import io
 import json
 import os
+import types
 import re
 import signal
 import shutil
@@ -753,6 +754,12 @@ def _list_processes() -> list[tuple[int, int, str, str]]:
     return rows
 
 
+# Leader pids this harness started with start_new_session; only these groups
+# may ever be swept, so a test's stand-in process can never reach real host
+# processes (pid 1 is launchd/init and is never a launch group).
+_LAUNCHED_GROUPS: set[int] = set()
+
+
 def _sweep_launch_group(pgid: int, *, clock=None, pause=None,
                         settle: float = 2.0) -> tuple[list[int], list[int]]:
     """Kill, by pid, every live (non-zombie) member of OUR launch group ``pgid``.
@@ -826,7 +833,8 @@ def _stop_browser(process, *, sweep: str = "never", notes: list[str] | None = No
             process.wait(timeout=1)
         except subprocess.TimeoutExpired:
             cleanup_error = "direct browser process did not exit after kill"
-    if os.name != "nt" and (sweep == "always" or (sweep == "if-exited" and returncode is not None)):
+    ours = process.pid > 1 and process.pid in _LAUNCHED_GROUPS
+    if ours and os.name != "nt" and (sweep == "always" or (sweep == "if-exited" and returncode is not None)):
         # start_new_session made the leader's pid the group id at launch.
         try:
             killed, survivors = _sweep_launch_group(process.pid)
@@ -838,6 +846,16 @@ def _stop_browser(process, *, sweep: str = "never", notes: list[str] | None = No
             return cleanup_error or f"launch group {process.pid} still has live members {survivors}"
     return cleanup_error
 
+
+
+def test_stop_browser_never_sweeps_a_process_it_did_not_launch(monkeypatch) -> None:
+    listed: list[int] = []
+    monkeypatch.setattr(sys.modules[__name__], "_list_processes", lambda: listed.append(1) or [])
+    monkeypatch.setattr(os, "kill", lambda *a: (_ for _ in ()).throw(AssertionError("signalled a host process")))
+    for pid in (1, 424242):
+        stand_in = types.SimpleNamespace(pid=pid, poll=lambda: 1, wait=lambda timeout=None: 1, kill=lambda: None)
+        assert _stop_browser(stand_in, sweep="always") is None
+    assert listed == []  # no process listing, no signal, for a pid this harness never launched
 
 def _stderr_tail(stderr) -> str:
     stderr.seek(0, os.SEEK_END)
@@ -918,6 +936,7 @@ def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90,
                 process = subprocess.Popen(
                     launch_argv, stdout=stdout, stderr=stderr, start_new_session=os.name != "nt",
                 )
+                _LAUNCHED_GROUPS.add(process.pid)
                 try:
                     port, target_url = _discover_page_target(
                         read_port=lambda: _read_debug_port(active_port), fetch_targets=fetch_targets,
