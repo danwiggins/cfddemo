@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 from pathlib import Path
@@ -13,6 +14,7 @@ from traceback_lab import ingest
 from traceback_lab.problems import LabProblem
 from traceback_lab.store import LabStore
 from traceback_lab.synthetic import rg_line, write_chunks, write_reference
+from tests.lab.conftest import restore_mtime_past_ctime
 
 
 def _problem(callable_, *args, **kwargs) -> LabProblem:
@@ -131,12 +133,242 @@ def test_hash_cache_avoids_rehashing(lab_world, monkeypatch) -> None:
     store.ensure()
     paths = ingest.collect_paths([str(lab_world["chunks"])])
     first = ingest.inspect_chunks(paths, store)
+    cached_file = store.hash_cache_file.read_bytes()
     calls: list[Path] = []
-    monkeypatch.setattr(ingest, "_sha256_file", lambda path: calls.append(path) or "0" * 64)
+    counts: list[Path] = []
+    original_hash, original_count = ingest._sha256_file, ingest.count_records
+    monkeypatch.setattr(ingest, "_sha256_file", lambda path: calls.append(path) or original_hash(path))
+    monkeypatch.setattr(ingest, "count_records", lambda path, *flags: counts.append(path) or original_count(path, *flags))
     second = ingest.inspect_chunks(paths, store)
-    assert calls == []
+    assert calls == [] and counts == []
     assert first.source_id == second.source_id
     assert second.total_records == 1800
+    assert store.hash_cache_file.read_bytes() == cached_file
+    # --rehash ignores every cached entry, recomputes, and rewrites the same identity.
+    third = ingest.inspect_chunks(paths, store, rehash=True)
+    assert sorted(calls) == sorted(paths) and sorted(counts) == sorted(paths)
+    assert third.source_id == first.source_id
+    assert store.hash_cache_file.read_bytes() == cached_file
+    # A rehash with write_cache=False (dry run, preflight) also recomputes and writes nothing.
+    calls.clear()
+    ingest.inspect_chunks(paths, store, rehash=True, write_cache=False)
+    assert sorted(calls) == sorted(paths)
+    assert store.hash_cache_file.read_bytes() == cached_file
+
+
+def _rewrite_uncompressed(src: Path, dst: Path, *, flip_first_base: bool) -> None:
+    """Write ``src`` as an uncompressed BAM so a one-base edit keeps the byte size."""
+
+    with pysam.AlignmentFile(str(src), "rb", check_sq=False) as inp, pysam.AlignmentFile(
+        str(dst), "wbu", header=inp.header
+    ) as out:
+        for number, record in enumerate(inp):
+            if flip_first_base and number == 0:
+                sequence = list(record.query_sequence)
+                qualities = record.query_qualities
+                sequence[0] = "C" if sequence[0] != "C" else "G"
+                record.query_sequence = "".join(sequence)
+                record.query_qualities = qualities
+            out.write(record)
+
+
+def test_same_size_same_mtime_replacement_on_a_new_inode_is_rehashed(lab_world, monkeypatch) -> None:
+    store = LabStore(lab_world["root"])
+    store.ensure()
+    chunks = lab_world["chunks"]
+    target = chunks / "SYNTH0001_pass_synthetic_1.bam"
+    staged = lab_world["tmp"] / "uncompressed.bam"
+    _rewrite_uncompressed(target, staged, flip_first_base=False)
+    os.replace(staged, target)
+    paths = ingest.collect_paths([str(chunks)])
+    first = ingest.inspect_chunks(paths, store)
+    before = target.stat()
+    first_sha = next(chunk.sha256 for chunk in first.chunks if chunk.path == target)
+
+    restored = lab_world["tmp"] / "restored.bam"
+    _rewrite_uncompressed(target, restored, flip_first_base=True)
+    restore_mtime_past_ctime(restored, before)
+    os.replace(restored, target)
+    after = target.stat()
+    assert (after.st_size, after.st_mtime_ns) == (before.st_size, before.st_mtime_ns)
+    assert after.st_ino != before.st_ino
+
+    calls: list[Path] = []
+    original_hash = ingest._sha256_file
+    monkeypatch.setattr(ingest, "_sha256_file", lambda path: calls.append(path) or original_hash(path))
+    second = ingest.inspect_chunks(paths, store)
+    assert calls == [target]
+    second_sha = next(chunk.sha256 for chunk in second.chunks if chunk.path == target)
+    assert second_sha != first_sha
+    assert second.source_id != first.source_id
+    assert second.total_records == first.total_records == 1800
+    # The fresh entry is cached under the new key: a third pass recomputes nothing.
+    calls.clear()
+    assert ingest.inspect_chunks(paths, store).source_id == second.source_id
+    assert calls == []
+
+
+def test_in_place_rewrite_with_restored_mtime_is_rehashed_without_the_flag(lab_world, monkeypatch) -> None:
+    store = LabStore(lab_world["root"])
+    store.ensure()
+    chunks = lab_world["chunks"]
+    target = chunks / "SYNTH0001_pass_synthetic_1.bam"
+    staged = lab_world["tmp"] / "uncompressed.bam"
+    _rewrite_uncompressed(target, staged, flip_first_base=False)
+    os.replace(staged, target)
+    paths = ingest.collect_paths([str(chunks)])
+    first = ingest.inspect_chunks(paths, store)
+    before = target.stat()
+
+    # `cp -p` onto an existing chunk: truncate and rewrite the same inode, restore the mtime.
+    source = lab_world["tmp"] / "edited.bam"
+    _rewrite_uncompressed(target, source, flip_first_base=True)
+    target.write_bytes(source.read_bytes())
+    restore_mtime_past_ctime(target, before)
+    after = target.stat()
+    assert after.st_ino == before.st_ino
+    assert (after.st_size, after.st_mtime_ns) == (before.st_size, before.st_mtime_ns)
+    assert after.st_ctime_ns != before.st_ctime_ns
+
+    calls: list[Path] = []
+    original_hash = ingest._sha256_file
+    monkeypatch.setattr(ingest, "_sha256_file", lambda path: calls.append(path) or original_hash(path))
+    second = ingest.inspect_chunks(paths, store)
+    assert calls == [target]
+    assert second.source_id != first.source_id
+    calls.clear()
+    assert ingest.inspect_chunks(paths, store).source_id == second.source_id
+    assert calls == []
+
+
+def test_rehash_corrects_a_stale_entry_and_overwrites_it(lab_world, monkeypatch) -> None:
+    """A cache that lies about current bytes is corrected by one --rehash run."""
+
+    store = LabStore(lab_world["root"])
+    store.ensure()
+    chunks = lab_world["chunks"]
+    target = chunks / "SYNTH0001_pass_synthetic_1.bam"
+    staged = lab_world["tmp"] / "uncompressed.bam"
+    _rewrite_uncompressed(target, staged, flip_first_base=False)
+    os.replace(staged, target)
+    paths = ingest.collect_paths([str(chunks)])
+    first = ingest.inspect_chunks(paths, store)
+    stale_sha = next(chunk.sha256 for chunk in first.chunks if chunk.path == target)
+
+    edited = lab_world["tmp"] / "edited.bam"
+    _rewrite_uncompressed(target, edited, flip_first_base=True)
+    os.replace(edited, target)
+    # Simulate a cache the key cannot see through: the stale digest planted under the current key.
+    cache = store.load_hash_cache()
+    cache[store.hash_cache_key(target)] = {"sha256": stale_sha, "records": 600}
+    store.save_hash_cache(cache)
+
+    calls: list[Path] = []
+    original_hash = ingest._sha256_file
+    monkeypatch.setattr(ingest, "_sha256_file", lambda path: calls.append(path) or original_hash(path))
+    served_stale = ingest.inspect_chunks(paths, store)
+    assert calls == []
+    assert served_stale.source_id == first.source_id
+
+    corrected = ingest.inspect_chunks(paths, store, rehash=True)
+    assert sorted(calls) == sorted(paths)
+    assert corrected.source_id != first.source_id
+    fresh_sha = next(chunk.sha256 for chunk in corrected.chunks if chunk.path == target)
+    assert fresh_sha != stale_sha
+    assert store.load_hash_cache()[store.hash_cache_key(target)]["sha256"] == fresh_sha
+
+    calls.clear()
+    assert ingest.inspect_chunks(paths, store).source_id == corrected.source_id
+    assert calls == []
+
+
+def test_unknown_cache_schema_is_announced_and_rewritten(lab_world) -> None:
+    store = LabStore(lab_world["root"])
+    store.ensure()
+    paths = ingest.collect_paths([str(lab_world["chunks"])])
+    store.hash_cache_file.parent.mkdir(parents=True, exist_ok=True)
+    store.hash_cache_file.write_bytes(json.dumps({"schema": "traceback.lab.hash-cache.v9", "entries": {}}).encode())
+    lines: list[str] = []
+    ingest.inspect_chunks(paths, store, progress=lines.append)
+    assert lines[0] == (
+        "ingest  hash cache schema 'traceback.lab.hash-cache.v9' is unknown to this checkout: "
+        "ignored, every digest is recomputed once"
+    )
+    assert json.loads(store.hash_cache_file.read_bytes())["schema"] == "traceback.lab.hash-cache.v2"
+    lines.clear()
+    ingest.inspect_chunks(paths, store, progress=lines.append)
+    assert lines == []
+
+
+def test_cache_blind_filesystem_is_announced_at_ingest(lab_world, monkeypatch) -> None:
+    store = LabStore(lab_world["root"])
+    store.ensure()
+    paths = ingest.collect_paths([str(lab_world["chunks"])])
+    monkeypatch.setattr(ingest, "filesystem_type", lambda path: "exfat")
+    lines: list[str] = []
+    ingest.inspect_chunks(paths, store, progress=lines.append)
+    assert lines[0] == (
+        "ingest  inputs are on exfat: the hash cache cannot detect an in-place rewrite there; "
+        "rerun with --rehash after any timestamp-preserving copy"
+    )
+    monkeypatch.setattr(ingest, "filesystem_type", lambda path: "apfs")
+    lines.clear()
+    ingest.inspect_chunks(paths, store, progress=lines.append)
+    assert lines == []
+    monkeypatch.setattr(ingest, "filesystem_type", lambda path: None)
+    ingest.inspect_chunks(paths, store, progress=lines.append)
+    assert lines == []
+
+
+def test_filesystem_type_is_best_effort_and_picks_the_longest_mount(tmp_path: Path) -> None:
+    darwin = (
+        "/dev/disk3s1s1 on / (apfs, sealed, local, read-only, journaled)\n"
+        "devfs on /dev (devfs, local, nobrowse)\n"
+        "map auto_home on /System/Volumes/Data/home (autofs, automounted, nobrowse)\n"
+        "/dev/disk4s1 on /Volumes/KIT (exfat, local, nodev, nosuid, noowners)\n"
+        "//user@nas/share on /Volumes/My Share (smbfs, nodev, nosuid, mounted by user)\n"
+    )
+    mounts = ingest._mounts_from_darwin(darwin)
+    assert ("/Volumes/KIT", "exfat") in mounts and ("/Volumes/My Share", "smbfs") in mounts
+    assert ingest._mount_type("/Volumes/KIT/run1/chunk_0.bam", mounts) == "exfat"
+    assert ingest._mount_type("/Volumes/KITCHEN/chunk_0.bam", mounts) == "apfs"
+    assert ingest._mount_type("/Volumes/My Share/x.bam", mounts) == "smbfs"
+    assert ingest._mount_type("/Users/op/x.bam", mounts) == "apfs"
+    assert ingest._mount_type("/Volumes/KIT", mounts) == "exfat"
+    proc = (
+        "/dev/nvme0n1p2 / ext4 rw,relatime 0 0\n"
+        "/dev/sdb1 /mnt/kit\\040disk vfat rw,uid=1000 0 0\n"
+        "//nas/share /mnt/nas cifs rw 0 0\n"
+    )
+    mounts = ingest._mounts_from_proc(proc)
+    assert ingest._mount_type("/mnt/kit disk/chunk_0.bam", mounts) == "vfat"
+    assert ingest._mount_type("/mnt/nas/x.bam", mounts) == "cifs"
+    assert ingest._mount_type("/home/op/x.bam", mounts) == "ext4"
+    assert ingest._mount_type("/x", []) is None
+    live = ingest.filesystem_type(tmp_path)
+    assert live is None or (isinstance(live, str) and live == live.lower())
+    assert ingest.cache_blind_filesystem(tmp_path) in (None, *ingest.CACHE_BLIND_FILESYSTEMS)
+
+
+def test_legacy_cache_file_is_announced_once(lab_world) -> None:
+    store = LabStore(lab_world["root"])
+    store.ensure()
+    paths = ingest.collect_paths([str(lab_world["chunks"])])
+    entries = {}
+    for path in paths:
+        info = path.stat()
+        entries[f"{os.path.realpath(path)}\0{info.st_size}\0{info.st_mtime_ns}"] = {"sha256": "0" * 64, "records": 1}
+    store.hash_cache_file.parent.mkdir(parents=True, exist_ok=True)
+    store.hash_cache_file.write_bytes(json.dumps({"schema": "traceback.lab.hash-cache.v1", "entries": entries}).encode())
+    lines: list[str] = []
+    chunkset = ingest.inspect_chunks(paths, store, progress=lines.append)
+    assert lines[0] == "ingest  hash cache written by an older version (3 chunk entries dropped): every chunk is hashed once"
+    assert sum(line.startswith("ingest  hashing chunk") for line in lines) == 3
+    assert chunkset.total_records == 1800
+    assert json.loads(store.hash_cache_file.read_bytes())["schema"] == "traceback.lab.hash-cache.v2"
+    lines.clear()
+    ingest.inspect_chunks(paths, store, progress=lines.append)
+    assert lines == []
 
 
 def _aligned_header_bam(path: Path, contigs) -> None:
