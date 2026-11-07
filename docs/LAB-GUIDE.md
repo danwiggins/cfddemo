@@ -968,23 +968,28 @@ the scroll controls are hidden.
   at `#/about/clia`), followed by the samples table and license callouts. The
   research-use notice is shown in the page header on every route.
 
-  The samples table also shows each sample's **kit columns**: flow-cell
-  type, library kit, basecall model and the sequencer/basecaller software
+  The samples table also shows each sample's **kit columns**: instrument,
+  basecall model, modified-base models and the sequencer/basecaller software
   versions. They come from the BAM header provenance recorded in the input
-  manifest at ingest (`@RG DS` `flow_cell_product_code`/`flow_cell_type`,
-  `sequencing_kit`/`library_kit` and `basecall_model` keys; `@PG` program
-  name and version), never from re-reading the BAM when the page loads, and
-  they are not part of the input ID. Only values shaped like a product code
-  (`FLO-…`; `SQK-…`, `EXP-…`, `SKI-…`), a dorado model name (`dna…@vN`) or a
-  version are kept: read-group IDs, flow-cell IDs (`PU`), device (`PM`), sample
-  and library names (`SM`, `LB`), run IDs, dates and `@PG` command lines are
-  not stored or shown. When chunks or read groups disagree, the column reads
-  "mixed (N values)" (a chunk that did not record the field counts as one
-  value) and the manifest keeps every distinct value. A field no header
-  carried, or any other value, reads "not recorded"; an input ingested before
-  this was recorded shows only the manifest's basecall model. Rows keep the
-  run-date order; nothing is sorted by these values. A full Kit lens is a
-  follow-up.
+  manifest at ingest (`@RG PM`, `@RG DS` `basecall_model` and
+  `modbase_models`, `@PG` program name and version), never from re-reading the
+  BAM when the page loads, and they are not part of the input ID. Only an
+  allowlisted ONT device model (MinION, GridION, PromethION, P2 Solo, Flongle
+  and their listed variants), a dorado model name (`dna…@vN`, with a fixed
+  modified-base suffix vocabulary) of at most 64 characters, or a program
+  version is kept: read-group IDs, flow-cell serials (`PU`), device serials,
+  sample and library names (`SM`, `LB`), run IDs, dates and `@PG` command lines
+  are not stored or shown. Only included chunks count (a chunk skipped with
+  `--skip-bad-chunks` does not). When chunks or read groups disagree, the
+  column reads "mixed (N values)" (a chunk that did not record the field counts
+  as one value); the manifest keeps up to 16 distinct values per field with the
+  full distinct count and `truncated: true` when more were seen. A field no
+  header carried, or any other value, reads "not recorded"; an input ingested
+  before this was recorded shows only the manifest's basecall model. The
+  flow-cell product code and library kit are not in an ONT BAM header; they are
+  in the MinKNOW run report, and showing them (via the `final_summary` that
+  `lab inventory` reads) is a follow-up, as is a full Kit lens. Rows keep the
+  run-date order; nothing is sorted by these values.
 - **Findings**: only above/below-reference results are cards (sorted by tier,
   then severity); not-interpretable, no-reference and in-range metrics are
   counted, collapsible rows. Before the kit cohort exists (n < 10) most
@@ -1573,8 +1578,8 @@ symlink or a plain file is TBX-LAB-005 instead.
 
 ## Changes
 
-- 2026-11-07: the landing samples table shows kit columns (flow cell, library
-  kit, basecall model, software) from the stored header provenance.
+- 2026-11-07: the landing samples table shows kit columns (instrument, basecall
+  model, modified-base models, software) from the stored header provenance.
 - 2026-11-06: `lab inventory DIR` checks a chunk set before alignment; TBX-LAB-031.
 - 2026-11-06: `lab serve --port N` binds a fixed loopback port; TBX-LAB-026.
 - 2026-11-06: `lab gc` (dry-run by default; `--apply` deletes stale failed

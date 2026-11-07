@@ -219,35 +219,59 @@ def _rg_model(line: str) -> str | None:
     return match.group(1) if match else None
 
 
-# Kit provenance shown on the landing page. Each field has a shape pattern for
-# what the product code, model name or version looks like; anything else
-# (a flow-cell ID, a person's name, an e-mail, a path) is dropped as "not
-# recorded", so a header cannot smuggle an identifier through. Every distinct
-# value across chunks and read groups is kept; ``None`` in a list means at
-# least one chunk/read group did not record that field.
-_FIELD_PATTERNS = {
-    "flow_cell": re.compile(r"FLO-[A-Z0-9]+"),
-    "kit": re.compile(r"(?:SQK|EXP|SKI)-[A-Z0-9-]+"),
-    # Basecall models are the one value with "@": only the dorado "@v<version>" form.
-    "basecall_model": re.compile(r"(?:dna|rna)[a-z0-9_.]*@v[0-9]+(?:\.[0-9]+)*"),
-}
+# Kit provenance shown on the landing page. Each field has a shape rule for
+# what an instrument model, model name or version looks like; anything else
+# (a flow-cell serial, a device serial, a person's name, an e-mail, a path) is
+# dropped as "not recorded", so a header cannot smuggle an identifier through.
+# Every distinct value across included chunks and read groups is kept (up to
+# _MAX_VALUES, with the distinct count recorded); ``None`` in a list means at
+# least one chunk/read group did not record that field. Flow-cell product code
+# and library kit are not in an ONT BAM header (they are in the MinKNOW report).
+_MAX_DS_VALUE = 64
+# ONT device models as an @RG PM value; device and flow-cell serials never match.
+_INSTRUMENTS = frozenset({
+    "MinION", "MinION Mk1B", "MinION Mk1C", "MinION Mk1D", "GridION", "GridION Mk1",
+    "PromethION", "PromethION 2", "PromethION 2 Solo", "PromethION 24", "PromethION 48",
+    "P2", "P2 Solo", "P24", "P48", "Flongle",
+})
+_MODEL = r"(?:dna|rna)[a-z0-9_.]*@v[0-9]+(?:\.[0-9]+)*"
+# Modified-base suffixes are a fixed vocabulary, so an upper-case sample-like
+# suffix (``..._JANEDOE@v1``) is refused.
+_MOD = r"(?:5mCG|5hmCG|5mC|5hmC|6mA|4mC|m6A|DRACH|pseU|inosine|m5C|2OmeG)"
+_BASECALL_MODEL = re.compile(_MODEL)
+_MODBASE_MODEL = re.compile(rf"{_MODEL}_{_MOD}(?:_{_MOD})*@v[0-9]+(?:\.[0-9]+)*")
 _PROGRAM = re.compile(r"[A-Za-z][A-Za-z0-9._-]{0,31}")
 _VERSION = re.compile(r"[0-9][A-Za-z0-9._+-]{0,31}")
-_DS_KEYS = {
-    "flow_cell_product_code": "flow_cell", "flowcell_product_code": "flow_cell",
-    "flow_cell_type": "flow_cell", "flowcell_type": "flow_cell",
-    "sequencing_kit": "kit", "library_kit": "kit",
-    "basecall_model": "basecall_model",
-}
-_PROVENANCE_FIELDS = ("flow_cell", "kit", "basecall_model")
+_PROVENANCE_FIELDS = ("instrument", "basecall_model", "modbase_models")
 _MAX_VALUES = 16
 
 
-def _shaped(pattern: re.Pattern[str], value: Any) -> str | None:
-    return value if isinstance(value, str) and pattern.fullmatch(value) else None
+def _shaped(pattern: re.Pattern[str], value: Any, limit: int = _MAX_DS_VALUE) -> str | None:
+    return value if isinstance(value, str) and len(value) <= limit and pattern.fullmatch(value) else None
 
 
-def _sorted_values(values: Iterable[str | None]) -> list[str | None]:
+def _instrument(value: Any) -> str | None:
+    return value if isinstance(value, str) and value in _INSTRUMENTS else None
+
+
+def _modbase_set(value: Any) -> str | None:
+    """One read group's modified-base models: the shaped ones, sorted, comma-joined."""
+
+    if not isinstance(value, str):
+        return None
+    shaped = sorted({item for item in value.split(",") if _shaped(_MODBASE_MODEL, item)})
+    return ",".join(shaped[:_MAX_VALUES]) or None
+
+
+def _field_value(name: str, value: Any) -> str | None:
+    if name == "instrument":
+        return _instrument(value)
+    if name == "modbase_models":
+        return _modbase_set(value)
+    return _shaped(_BASECALL_MODEL, value)
+
+
+def _distinct(values: Iterable[str | None]) -> list[str | None]:
     distinct = set(values)
     return [*sorted(value for value in distinct if value is not None), *([None] if None in distinct else [])]
 
@@ -259,12 +283,14 @@ def _software_entries(entries: Iterable[Mapping[str, Any]]) -> list[dict[str, st
 
 
 def header_provenance(header_text: str) -> dict[str, Any]:
-    """Kit provenance one BAM header declares: ``@RG DS`` key=value pairs and ``@PG`` PN/VN.
+    """Kit provenance one BAM header declares: ``@RG`` PM and DS models, ``@PG`` PN/VN.
 
-    Identifiers never enter the result: read-group ID, PU (flow-cell ID), PM
-    (device), SM/LB (sample names), DT, ``runid`` and ``@PG CL`` are skipped.
-    Each field is the list of distinct shaped values over the header's read
-    groups, with ``None`` for a read group (or a header) that recorded none.
+    Identifiers never enter the result: read-group ID, PU (flow-cell serial),
+    a PM that is not a known device model, SM/LB (sample/library names), DT,
+    ``runid`` and ``@PG CL`` are skipped. Each field is the full list of
+    distinct shaped values over the header's read groups, with ``None`` for a
+    read group (or a header) that recorded none; capping happens in
+    :func:`merge_header_provenance`.
     """
 
     per_field: dict[str, list[str | None]] = {name: [] for name in _PROVENANCE_FIELDS}
@@ -274,17 +300,11 @@ def header_provenance(header_text: str) -> dict[str, Any]:
         fields = line.split("\t")
         if fields[0] == "@RG":
             read_groups += 1
-            found: dict[str, str | None] = dict.fromkeys(_PROVENANCE_FIELDS)
-            for part in fields[1:]:
-                if not part.startswith("DS:"):
-                    continue
-                for token in part[3:].split():
-                    key, separator, value = token.partition("=")
-                    target = _DS_KEYS.get(key) if separator else None
-                    if target is not None and found[target] is None:
-                        found[target] = _shaped(_FIELD_PATTERNS[target], value)
-            for name in _PROVENANCE_FIELDS:
-                per_field[name].append(found[name])
+            tags = {part[:2]: part[3:] for part in fields[1:] if len(part) > 3 and part[2] == ":"}
+            per_field["instrument"].append(_instrument(tags.get("PM")))
+            ds = dict(token.partition("=")[::2] for token in tags.get("DS", "").split() if "=" in token)
+            per_field["basecall_model"].append(_field_value("basecall_model", ds.get("basecall_model")))
+            per_field["modbase_models"].append(_field_value("modbase_models", ds.get("modbase_models")))
         elif fields[0] == "@PG":
             tags = {part[:2]: part[3:] for part in fields[1:] if len(part) > 3 and part[2] == ":"}
             program = _shaped(_PROGRAM, tags.get("PN"))
@@ -293,20 +313,35 @@ def header_provenance(header_text: str) -> dict[str, Any]:
     if not read_groups:
         for name in _PROVENANCE_FIELDS:
             per_field[name].append(None)
-    return {**{name: _sorted_values(values)[:_MAX_VALUES] for name, values in per_field.items()},
-            "software": _software_entries(software)[:_MAX_VALUES]}
+    return {**{name: _distinct(values) for name, values in per_field.items()},
+            "software": _software_entries(software)}
+
+
+def _capped(values: list[Any]) -> tuple[list[Any], bool]:
+    """Keep at most _MAX_VALUES recorded values; a ``None`` (some chunk recorded none) is always kept."""
+
+    recorded = [value for value in values if value is not None]
+    return recorded[:_MAX_VALUES] + ([None] if None in values else []), len(recorded) > _MAX_VALUES
 
 
 def merge_header_provenance(parts: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """All distinct values over a chunk set's headers (``None`` kept when a chunk lacks a field)."""
+    """All distinct values over the included chunks' headers, capped, with distinct counts."""
 
     if not parts:
-        return header_provenance("")
-    return {
-        **{name: _sorted_values(value for part in parts for value in part.get(name, [None]))[:_MAX_VALUES]
-           for name in _PROVENANCE_FIELDS},
-        "software": _software_entries(entry for part in parts for entry in part.get("software", []))[:_MAX_VALUES],
-    }
+        parts = [header_provenance("")]
+    result: dict[str, Any] = {}
+    distinct: dict[str, int] = {}
+    truncated = False
+    for name in _PROVENANCE_FIELDS:
+        values = _distinct(value for part in parts for value in part.get(name, [None]))
+        distinct[name] = len(values)
+        result[name], cut = _capped(values)
+        truncated = truncated or cut
+    software = _software_entries(entry for part in parts for entry in part.get("software", []))
+    distinct["software"] = len(software)
+    result["software"] = software[:_MAX_VALUES]
+    truncated = truncated or len(software) > _MAX_VALUES
+    return {**result, "distinct": distinct, "truncated": truncated}
 
 
 def stored_header_provenance(manifest: Any) -> dict[str, Any] | None:
@@ -324,14 +359,17 @@ def stored_header_provenance(manifest: Any) -> dict[str, Any] | None:
     if not isinstance(value, Mapping):
         models = manifest.get("basecall_model")
         parts = models.split("|") if isinstance(models, str) and models else []
-        shaped = [_shaped(_FIELD_PATTERNS["basecall_model"], part) for part in parts]
-        return {"flow_cell": [None], "kit": [None],
-                "basecall_model": _sorted_values(shaped or [None])[:_MAX_VALUES], "software": []}
+        return merge_header_provenance([{
+            "instrument": [None], "modbase_models": [None], "software": [],
+            "basecall_model": [_field_value("basecall_model", part) for part in parts] or [None],
+        }])
     result: dict[str, Any] = {}
+    distinct: dict[str, int] = {}
     for name in _PROVENANCE_FIELDS:
         raw = value.get(name)
         items = raw if isinstance(raw, list) and raw else [None]
-        result[name] = _sorted_values(_shaped(_FIELD_PATTERNS[name], item) for item in items[:_MAX_VALUES])
+        result[name], _ = _capped(_distinct(_field_value(name, item) for item in items[: _MAX_VALUES + 1]))
+        distinct[name] = len(result[name])
     entries = value.get("software")
     software = []
     for entry in (entries if isinstance(entries, list) else [])[:_MAX_VALUES]:
@@ -339,7 +377,16 @@ def stored_header_provenance(manifest: Any) -> dict[str, Any] | None:
         if program is not None:
             software.append({"program": program, "version": _shaped(_VERSION, entry.get("version"))})
     result["software"] = _software_entries(software)
-    return result
+    distinct["software"] = len(result["software"])
+    truncated = value.get("truncated") is True
+    stored_counts = value.get("distinct")
+    if truncated and isinstance(stored_counts, Mapping):
+        # A cut list cannot show its own size; trust a stored count only when it is larger.
+        for name in distinct:
+            count = stored_counts.get(name)
+            if isinstance(count, int) and not isinstance(count, bool) and distinct[name] < count <= 10_000:
+                distinct[name] = count
+    return {**result, "distinct": distinct, "truncated": truncated}
 
 BGZF_EOF = bytes.fromhex("1f8b08040000000000ff0600424302001b0003000000000000000000")
 
