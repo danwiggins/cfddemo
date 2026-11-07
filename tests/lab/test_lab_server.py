@@ -725,24 +725,48 @@ def _read_debug_port(path: Path) -> str | None:
     return None if endpoint is None else endpoint[0]
 
 
-def _stop_browser(process, *, pgid: int | None = None) -> str | None:
+def _kill_profile_orphans(pgid: int, profile: Path) -> list[int]:
+    """SIGKILL processes still in launch group ``pgid`` that run on ``profile``.
+
+    Used after the group leader is already reaped, when its PID must never be a
+    group target: each victim is named by pid and must show both the recorded
+    group id and this test's own ``--user-data-dir`` on its command line.
+    Raises when the process listing itself fails; the caller records that.
+    """
+
+    listing = subprocess.check_output(["ps", "-A", "-o", "pid=,pgid=,command="], text=True, timeout=5)
+    killed = []
+    for row in listing.splitlines():
+        fields = row.split(None, 2)
+        if len(fields) == 3 and fields[1] == str(pgid) and f"--user-data-dir={profile}" in fields[2]:
+            try:
+                os.kill(int(fields[0]), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, ValueError):
+                continue
+            killed.append(int(fields[0]))
+    return killed
+
+
+def _stop_browser(process, *, profile: Path | None = None, notes: list[str] | None = None) -> str | None:
     """Kill one launched Chrome (whole group on POSIX); return a cleanup error or None.
 
-    ``pgid`` is the group recorded at launch. With it, the group is killed even
-    after its leader exited, so a relaunch never shares the profile with the
-    first launch's helpers; the group id stays reserved while any member
-    lives, and a vanished group is ProcessLookupError. Without it, a reaped
-    leader's PID is never used as a group target.
+    With ``profile`` (the relaunch path), helpers left behind by a leader that
+    already exited are killed too, so the relaunch never shares the profile
+    with the first launch's processes. A failed sweep is noted in ``notes``
+    (diagnostics only); the relaunch still gets its own Singleton* cleanup.
     """
 
     cleanup_error = None
-    if pgid is not None and os.name != "nt":
+    if profile is not None and os.name != "nt" and process.poll() is not None:
+        # start_new_session made the leader's pid the group id at launch.
         try:
-            os.killpg(pgid, signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
-        if process.poll() is not None:
-            return None
+            killed = _kill_profile_orphans(process.pid, profile)
+        except Exception as exc:
+            killed = []
+            if notes is not None:
+                notes.append(f"orphan sweep failed: {exc!r}")
+        if killed and notes is not None:
+            notes.append(f"killed leftover helpers {killed}")
     if process.poll() is not None:
         pass  # Reaped leader PID must never be used as a process-group target.
     elif os.name == "nt":
@@ -848,8 +872,6 @@ def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90,
                 process = subprocess.Popen(
                     launch_argv, stdout=stdout, stderr=stderr, start_new_session=os.name != "nt",
                 )
-                # start_new_session makes the leader's pid the group id.
-                pgid = process.pid if os.name != "nt" else None
                 try:
                     port, target_url = _discover_page_target(
                         read_port=lambda: _read_debug_port(active_port), fetch_targets=fetch_targets,
@@ -859,7 +881,7 @@ def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90,
                 except ChromeTargetUnavailable as exc:
                     launches.append(f"attempt {attempt}: {exc}")
                     if attempt == 1 and exc.phase == "chrome-not-started" and deadline - time.monotonic() > 1:
-                        cleanup_error = _stop_browser(process, pgid=pgid)
+                        cleanup_error = _stop_browser(process, profile=profile, notes=launches)
                         process = None
                         for singleton in ("SingletonLock", "SingletonSocket", "SingletonCookie"):
                             try:
@@ -1454,22 +1476,37 @@ def test_cdp_relaunches_once_when_chrome_never_brings_devtools_up(tmp_path, monk
             return 1
 
     signalled: list[int] = []
+    listing = (
+        f"5001 1234 /synthetic/Chrome Helper --type=renderer --user-data-dir={profile} --lang=en\n"
+        "5002 1234 /synthetic/unrelated --flag\n"
+        f"5003 77 /synthetic/Chrome Helper --user-data-dir={profile}\n"
+    )
     monkeypatch.setattr(subprocess, "Popen", lambda argv, **kwargs: ExitedBrowser(argv))
-    monkeypatch.setattr(os, "killpg", lambda pgid, sig: signalled.append(pgid))
+    monkeypatch.setattr(subprocess, "check_output", lambda *args, **kwargs: listing)
+    monkeypatch.setattr(os, "killpg", lambda *args: pytest.fail("reaped browser PID was signalled"))
+    monkeypatch.setattr(os, "kill", lambda pid, sig: signalled.append(pid))
     (profile / "SingletonLock").symlink_to("synthetic-host-1234")
     with pytest.raises(AssertionError) as caught:
         _dom_cdp(["chrome", "http://127.0.0.1:8/x"], profile, ok=lambda dom: True, timeout=5)
     message = str(caught.value)
     assert len(launched) == 2 and launched[0] == launched[1]
-    # The first launch's group (recorded at launch) is killed although its
-    # leader exited; the final cleanup still never signals a reaped leader.
-    assert signalled == [1234]
+    # The first launch's helpers (its group AND this profile) are killed by pid
+    # although the leader exited; a reaped leader is never a group target.
+    assert signalled == [5001]
     assert not os.path.lexists(profile / "SingletonLock")
     assert launched[0][:2] == ["chrome", f"--user-data-dir={profile}"] and launched[0][-1] == "http://127.0.0.1:8/x"
     assert "--remote-debugging-port=0" in launched[0] and not any(flag.startswith("--remote-debugging-port=") and flag != "--remote-debugging-port=0" for flag in launched[0])
     assert "attempt 1: Chrome did not expose its Lab page through DevTools: phase=chrome-not-started" in message
     assert "attempt 2: Chrome did not expose" in message and "returncode=1" in message
     assert "launches=2" in message and "budget=" in message and "load1=" in message
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group cleanup")
+def test_reaped_browser_is_never_a_group_target_on_a_loaded_host(tmp_path, monkeypatch) -> None:
+    # A load-scaled budget opens the relaunch path even for timeout=1; the
+    # reaped leader must still never be signalled as a group.
+    monkeypatch.setattr(sys.modules[__name__], "_host_load", lambda: (100.0, 1))
+    test_cdp_does_not_signal_an_already_reaped_browser(tmp_path, monkeypatch)
 
 
 def test_cdp_refuses_a_profile_that_differs_from_the_chrome_flag(tmp_path) -> None:

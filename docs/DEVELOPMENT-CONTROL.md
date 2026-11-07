@@ -170,8 +170,10 @@ historical timings.
 
 Retries, each once only and inside the same overall budget:
 
-- If Chrome never writes a usable `DevToolsActivePort` (or exits first), its
-  whole process group (recorded at launch) is killed, the profile's
+- If Chrome never writes a usable `DevToolsActivePort` (or exits first), it is
+  killed with its process group; if the leader already exited, each leftover
+  process in its launch group that runs on the same `--user-data-dir` is
+  killed by pid (a reaped leader's pid is never a group target). The profile's
   `SingletonLock`/`SingletonSocket`/`SingletonCookie` are removed, and Chrome
   is launched once more.
 - If the first page WebSocket attach (before any emulation or navigation)
