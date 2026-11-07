@@ -185,9 +185,10 @@ Retries, each once only and inside the same overall budget:
   `--user-data-dir`); zombies are ignored. Only when no member survives a 2 s settle are the profile's
   `SingletonLock`/`SingletonSocket`/`SingletonCookie` removed and Chrome
   launched once more; otherwise the relaunch is skipped and the test fails with
-  `relaunch skipped: launch group <pgid> still has live members [...]`. The same
-  sweep runs after every browser is stopped; a survivor or a `ps` failure there
-  is a cleanup error.
+  `relaunch skipped: launch group <pgid> still has live members [...]`. At the
+  end of every call, a browser whose leader already exited gets the same sweep
+  (a running leader is killed with its group); a survivor or a `ps` failure
+  (15 s timeout) there is a cleanup error.
 - If the first page WebSocket attach (before any emulation or navigation)
   fails with a socket error or timeout, the harness re-discovers the target and
   attaches again.

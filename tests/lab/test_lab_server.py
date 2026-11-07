@@ -743,7 +743,7 @@ def _list_processes() -> list[tuple[int, int, str, str]]:
 
     listing = subprocess.run(
         ["ps", "-ww", "-A", "-o", "pid=,pgid=,stat=,command="],
-        capture_output=True, text=True, timeout=5, check=True,
+        capture_output=True, text=True, timeout=15, check=True,
     ).stdout
     rows = []
     for row in listing.splitlines():
@@ -788,15 +788,18 @@ def _sweep_launch_group(pgid: int, *, clock=None, pause=None,
         pause(0.1)
 
 
-def _stop_browser(process, *, sweep: bool = False, notes: list[str] | None = None) -> str | None:
+def _stop_browser(process, *, sweep: str = "never", notes: list[str] | None = None) -> str | None:
     """Kill one launched Chrome (whole group on POSIX); return a cleanup error or None.
 
     A leader that is still running is killed with its group. A leader that
-    already exited is never used as a group target. With ``sweep``, the
-    launch group is then swept by pid (``_sweep_launch_group``); a member
-    that survives, or a ps failure, is a cleanup error, because the profile
-    may still be in use.
+    already exited is never used as a group target, so its group is swept by
+    pid instead (``_sweep_launch_group``) when ``sweep`` is "if-exited".
+    "always" also sweeps after a group kill, to prove no member survives
+    before the profile is reused. A member that survives, or a ps failure,
+    is a cleanup error, because the profile may still be in use.
     """
+
+    assert sweep in ("never", "if-exited", "always"), sweep
 
     cleanup_error = None
     returncode = process.poll()
@@ -823,7 +826,7 @@ def _stop_browser(process, *, sweep: bool = False, notes: list[str] | None = Non
             process.wait(timeout=1)
         except subprocess.TimeoutExpired:
             cleanup_error = "direct browser process did not exit after kill"
-    if sweep and os.name != "nt":
+    if os.name != "nt" and (sweep == "always" or (sweep == "if-exited" and returncode is not None)):
         # start_new_session made the leader's pid the group id at launch.
         try:
             killed, survivors = _sweep_launch_group(process.pid)
@@ -924,7 +927,7 @@ def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90,
                 except ChromeTargetUnavailable as exc:
                     launches.append(f"attempt {attempt}: {exc}")
                     if attempt == 1 and exc.phase == "chrome-not-started" and deadline - time.monotonic() > 1:
-                        stop_error = _stop_browser(process, sweep=True, notes=launches)
+                        stop_error = _stop_browser(process, sweep="always", notes=launches)
                         process = None
                         if stop_error is not None:
                             # The first launch may still hold the profile: never
@@ -1052,7 +1055,7 @@ def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90,
                 except Exception as exc:
                     cleanup_error = f"DevTools close failed: {exc!r}"
             if process is not None:
-                cleanup_error = _stop_browser(process, sweep=True, notes=launches) or cleanup_error
+                cleanup_error = _stop_browser(process, sweep="if-exited", notes=launches) or cleanup_error
             stderr_tail = _stderr_tail(stderr)
     if failure or cleanup_error:
         raise AssertionError(
@@ -1573,6 +1576,22 @@ def _synthetic_process_table(monkeypatch, profile: Path, *, dies: bool = True, r
     monkeypatch.setattr(os, "kill", table.kill)
     monkeypatch.setattr(os, "killpg", lambda *args: pytest.fail("reaped browser PID was signalled"))
     return table
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process-group cleanup")
+def test_end_of_call_sweep_runs_only_for_a_leader_that_already_exited(tmp_path, monkeypatch) -> None:
+    signalled: list[int] = []
+    monkeypatch.setattr(os, "killpg", lambda pgid, sig: signalled.append(pgid))
+    monkeypatch.setattr(sys.modules[__name__], "_list_processes",
+                        lambda: pytest.fail("a group kill of a running leader needs no ps listing"))
+    running = SimpleNamespace(pid=4242, poll=lambda: None, wait=lambda timeout: 0)
+    assert _stop_browser(running, sweep="if-exited") is None and signalled == [4242]
+
+    table = _synthetic_process_table(monkeypatch, tmp_path / "profile", rows=_CRASHPAD_ONLY)
+    notes: list[str] = []
+    exited = SimpleNamespace(pid=1234, poll=lambda: 0, wait=lambda timeout: 0)
+    assert _stop_browser(exited, sweep="if-exited", notes=notes) is None
+    assert table.signalled == [5005] and notes == ["killed launch group 1234 members [5005]"]
 
 
 def test_process_listing_asks_ps_for_full_width_command_lines(monkeypatch) -> None:
