@@ -53,6 +53,7 @@ OK, SKIPPED, NEEDS_INPUT, REFUSED, FAILED = "ok", "skipped", "needs_input", "ref
 STATUSES = (OK, SKIPPED, NEEDS_INPUT, REFUSED, FAILED)
 LOCAL, DOWNLOAD, INPUT, MANUAL = "local", "download", "needs_input", "manual"
 TAIL_LINES = 20
+PIPE_DRAIN_S = 5.0  # after the child is gone, how long its output readers may still drain
 MMI_TIMEOUT_S = 48 * 3600.0  # the same ceiling ``lab run`` gives the index build
 CHILD_TIMEOUT_S = 5 * 60.0  # a signed child that registers local files
 TOOLCHAIN_TIMEOUT_S = 30 * 60.0  # ``toolchain install ichor --yes`` (network, ~3 GB)
@@ -167,7 +168,11 @@ def run_signed(context: SetupContext, argv: Sequence[str], *, timeout_s: float =
     Raw child output is only echoed to the operator's own terminal (human mode);
     the bounded tails persisted with TBX-LAB-032 pass through the scrubber.  A
     child still running after ``timeout_s`` is killed and the step fails, so a
-    stalled download never holds ``ROOT/lab/.lock``.
+    stalled download never holds ``ROOT/lab/.lock``.  The child runs in its own
+    session (so its whole process group can be killed) with ``TRACEBACK_ROOT``
+    pinned to this store's ROOT.  Whatever way the wait ends (exit, timeout,
+    Ctrl-C/SIGTERM in this process), nothing of the child's group outlives this
+    call: the group is killed and the output readers are joined with a bound.
     """
 
     stdout_keep = BoundedStderr(head=0, tail=TAIL_LINES)
@@ -179,6 +184,7 @@ def run_signed(context: SetupContext, argv: Sequence[str], *, timeout_s: float =
         process = subprocess.Popen(
             _child_argv(argv), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, errors="replace", start_new_session=True,
+            env={**os.environ, "TRACEBACK_ROOT": str(context.store.root)},
         )
     except OSError as exc:
         raise StepFailed(f"could not start the command ({type(exc).__name__})") from exc
@@ -192,24 +198,38 @@ def run_signed(context: SetupContext, argv: Sequence[str], *, timeout_s: float =
     try:
         code = process.wait(timeout=timeout_s)
     except subprocess.TimeoutExpired:
-        # Kill the child's whole process group: a grandchild (micromamba under
-        # ``toolchain install``) inherits the pipes and would keep the pump
-        # threads, and so setup's lock, alive after the child alone is killed.
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except OSError:
-            process.kill()
-        process.wait()
-        for thread in threads:
-            thread.join(timeout=5)
+        _reap(process, threads)
         tail = stderr_keep.scrubbed(context.scrubber) or stdout_keep.scrubbed(context.scrubber)
         raise StepFailed(f"timed out after {timeout_s:g} s and was killed", tail=tail) from None
-    for thread in threads:
-        thread.join()
+    except BaseException:
+        # KeyboardInterrupt/SystemExit: the child's own session never saw the
+        # signal, so it must not keep downloading after the lock is released.
+        _reap(process, threads)
+        raise
+    # A grandchild (micromamba under ``toolchain install``) can outlive the
+    # child and hold the pipes: kill what remains of the group, then drain.
+    _reap(process, threads)
     if code != 0:
         tail = stderr_keep.scrubbed(context.scrubber) or stdout_keep.scrubbed(context.scrubber)
         raise StepFailed(f"exit {code}", exit_code=code, tail=tail)
     return "command exited 0"
+
+
+def _reap(process: subprocess.Popen[str], threads: Sequence[threading.Thread]) -> None:
+    """Kill the child's whole process group (if any member remains) and join its readers with a bound."""
+
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass  # the group is gone (the leader's pgid has no member left)
+    except OSError:
+        process.kill()
+    try:
+        process.wait(timeout=PIPE_DRAIN_S)
+    except subprocess.TimeoutExpired:
+        pass
+    for thread in threads:
+        thread.join(timeout=PIPE_DRAIN_S)
 
 
 def _run_ichor_toolchain(context: SetupContext) -> str:
@@ -344,8 +364,11 @@ def _not_planned(name: str, checks: Sequence[dict[str, Any]]) -> str:
 
 
 def _interactive() -> bool:
+    """A prompt is shown only when the operator can both see and answer it:
+    ``lab setup > log`` would hide the prompt, so it is non-interactive."""
+
     try:
-        return bool(sys.stdin.isatty())
+        return bool(sys.stdin.isatty() and sys.stdout.isatty())
     except (AttributeError, ValueError, OSError):
         return False
 
@@ -429,6 +452,10 @@ def execute(
     return result
 
 
+def _interrupted_handler(signum: int, frame: Any) -> None:
+    raise KeyboardInterrupt
+
+
 def show(template: str, store: LabStore) -> str:
     """The human form of a ``<ROOT>`` template (JSON and the run log keep the token)."""
 
@@ -478,36 +505,60 @@ def setup_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[
     )
     run_id = new_run_id()
     results: list[StepResult] = []
-    with store.writer("setup", run_id, step="doctor") as lock:
-        log = store.run_log(run_id)
-        log.append("run_start", command="setup", pid=os.getpid(), yes=bool(args.yes), only=only)
-        say(f"ROOT  {store.root}")
-        # Doctor under this writer's own lock reads the same store a standalone
-        # doctor would: the ``active`` check warns only on a dead heartbeat, and
-        # ours is live; the lock's stop() unlinks it afterwards.
-        before = lab_checks(store)
-        passing = [check["name"] for check in before if check["status"] == "pass"]
-        plan = plan_steps(before, only)
-        for name in only or ():
-            if name not in {step.name for step in plan}:
-                results.append(StepResult(name, MANUAL, SKIPPED, _not_planned(name, before), "", None))
-                say(step_line(results[-1], store))
-        for step in plan:
-            lock.set_step(step.name)
-            log.append("step_start", step=step.name, kind=step.spec.kind)
-            result = execute(step, context, results, passing)
-            log.append("step_end", step=step.name, status=result.status, reason=result.reason, exit_code=result.exit_code)
-            results.append(result)
-            say(step_line(result, store))
-        lock.set_step("doctor")
-        after = doctor_summary(lab_checks(store))
-        failed = [result for result in results if result.status == FAILED]
-        incomplete = [result for result in results if result.status in {NEEDS_INPUT, REFUSED}]
-        code = EXIT_PARTIAL if failed or incomplete else EXIT_OK
-        log.append(
-            "run_end", status="partial_failure" if code else "ok", exit_code=code,
-            ok=sum(result.status == OK for result in results), failed=len(failed), step="doctor",
-        )
+    # SIGTERM raises KeyboardInterrupt, as in ``lab run``: a running signed child's
+    # group is then killed (``run_signed``) and the run log still gets its run_end.
+    current = "doctor"  # the step an interrupt lands in, for its run_end and TBX-LAB-015
+    previous_term = signal.signal(signal.SIGTERM, _interrupted_handler)
+    try:
+        with store.writer("setup", run_id, step="doctor") as lock:
+            log = store.run_log(run_id)
+            log.append("run_start", command="setup", pid=os.getpid(), yes=bool(args.yes), only=only)
+            try:
+                say(f"ROOT  {store.root}")
+                # Doctor under this writer's own lock reads the same store a standalone
+                # doctor would: the ``active`` check warns only on a dead heartbeat, and
+                # ours is live; the lock's stop() unlinks it afterwards.
+                before = lab_checks(store)
+                passing = [check["name"] for check in before if check["status"] == "pass"]
+                plan = plan_steps(before, only)
+                for name in only or ():
+                    if name not in {step.name for step in plan}:
+                        results.append(StepResult(name, MANUAL, SKIPPED, _not_planned(name, before), "", None))
+                        say(step_line(results[-1], store))
+                for step in plan:
+                    current = step.name
+                    lock.set_step(step.name)
+                    log.append("step_start", step=step.name, kind=step.spec.kind)
+                    result = execute(step, context, results, passing)
+                    log.append("step_end", step=step.name, status=result.status, reason=result.reason, exit_code=result.exit_code)
+                    results.append(result)
+                    say(step_line(result, store))
+                current = "doctor"
+                lock.set_step("doctor")
+                after = doctor_summary(lab_checks(store))
+                failed = [result for result in results if result.status == FAILED]
+                incomplete = [result for result in results if result.status in {NEEDS_INPUT, REFUSED}]
+                code = EXIT_PARTIAL if failed or incomplete else EXIT_OK
+            except KeyboardInterrupt:
+                log.append("run_end", status="interrupted", exit_code=6, step=current)
+                raise
+            except BaseException as exc:
+                log.append("run_end", status="internal_error", exit_code=7, error=type(exc).__name__)
+                raise
+            log.append(
+                "run_end", status="partial_failure" if code else "ok", exit_code=code,
+                ok=sum(result.status == OK for result in results), failed=len(failed), step="doctor",
+            )
+    except KeyboardInterrupt:
+        # The writer lock is released and any signed child's group was killed.
+        raise LabProblem(
+            "TBX-LAB-015",
+            cause=f"Interrupted during the setup step {current}; its child processes were stopped",
+            fix="Rerun `traceback lab setup --root <ROOT>`; steps that ended ok are not listed again",
+            data={"step": current},
+        ) from None
+    finally:
+        signal.signal(signal.SIGTERM, previous_term)
     counts = {status: sum(result.status == status for result in results) for status in STATUSES}
     data = {
         "root": str(store.root),

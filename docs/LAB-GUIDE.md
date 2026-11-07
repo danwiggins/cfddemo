@@ -57,7 +57,8 @@ because it can download things. Every step ends in one state, printed as
 | `failed` | the step ran and did not succeed ([TBX-LAB-032](#tbx-lab-032)); later steps are still attempted |
 
 Steps that download or install a licence-bearing asset print the FLAG line
-below first (manual and prerequisite-blocked steps print none) and need a per-step confirmation: `y` at the prompt on a TTY, or
+below first (manual and prerequisite-blocked steps print none) and need a per-step confirmation: `y` at the prompt on a terminal (stdin and
+stdout both TTYs, so `lab setup > log` never hides a prompt), or
 `--yes` for a non-interactive run (without it they are `refused`; `--json`
 never prompts and refuses the same way, with the FLAG line on stderr). Steps that
 only compute locally run without a prompt: building the minimap2 index
@@ -67,8 +68,12 @@ toolchain's assets (`ichor_assets`), removing orphaned staging (`staging`).
 only when doctor's fix is the catalogue's command for that check; any other
 fix text is `skipped` with that text. A signed child (`toolchain install`,
 `method-asset register`) that is still running after its time limit (30 min
-for the install, 5 min otherwise) is killed and the step `failed`, so a
-stalled download never keeps the writer lock.
+for the install, 5 min otherwise) is killed with its whole process group and the step `failed`, so a
+stalled download never keeps the writer lock; a grandchild left behind after
+the child exits is stopped the same way. Ctrl-C or SIGTERM also stops the
+running child's process group, writes the run's `run_end` (`interrupted`)
+and exits with [TBX-LAB-015](#tbx-lab-015). Every child gets
+`TRACEBACK_ROOT` set to setup's ROOT as well as `--root`.
 
 | Step (doctor check) | Kind | FLAG line printed before it |
 |---|---|---|

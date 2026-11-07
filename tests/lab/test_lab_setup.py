@@ -473,6 +473,135 @@ def test_run_signed_kills_a_stalled_grandchild_that_holds_the_pipes(tmp_path: Pa
     assert failure.value.reason == "timed out after 1 s and was killed"
 
 
+def _context(root: Path, **overrides: Any) -> SetupContext:
+    fields: dict[str, Any] = dict(
+        store=LabStore(root), scrubber=Scrubber(root=root), say=lambda line: None,
+        ask=lambda text: None, yes=True, interactive=False, echo_child=False,
+    )
+    fields.update(overrides)
+    return SetupContext(**fields)
+
+
+def _gone(pid: int, within: float = 5.0) -> bool:
+    import os
+    import time
+
+    deadline = time.monotonic() + within
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+        time.sleep(0.05)
+    return False
+
+
+# The child writes its grandchild's pid, then (``EXIT``) exits 0 or (``WAIT``) sleeps;
+# the grandchild sleeps holding the child's stdout and stderr.
+_SPAWN = (
+    "import subprocess, sys, time; "
+    "g = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+    "open(sys.argv[1], 'w').write(str(g.pid)); "
+    "time.sleep(0 if sys.argv[2] == 'EXIT' else 60)"
+)
+
+
+def test_run_signed_returns_when_the_child_exits_but_a_grandchild_holds_the_pipes(tmp_path: Path, monkeypatch) -> None:
+    import sys
+    import time
+
+    pid_file = tmp_path / "grandchild.pid"
+    monkeypatch.setattr(setup_command, "_child_argv", lambda argv: [sys.executable, "-c", _SPAWN, str(pid_file), "EXIT"])
+    started = time.monotonic()
+    assert run_signed(_context(tmp_path / "root"), ["anything"], timeout_s=30) == "command exited 0"
+    assert time.monotonic() - started < 10  # not blocked on the grandchild's open pipes
+    assert _gone(int(pid_file.read_text()))  # nothing of the child's group outlives the step
+
+
+def test_an_interrupt_during_the_wait_kills_the_childs_group_and_reraises(tmp_path: Path, monkeypatch) -> None:
+    import subprocess
+    import sys
+    import time
+
+    pid_file = tmp_path / "grandchild.pid"
+    monkeypatch.setattr(setup_command, "_child_argv", lambda argv: [sys.executable, "-c", _SPAWN, str(pid_file), "WAIT"])
+    children: list[subprocess.Popen[str]] = []
+
+    class Interrupted(subprocess.Popen):  # type: ignore[type-arg]
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            children.append(self)
+            self._interrupt = True
+
+        def wait(self, timeout: float | None = None) -> int:
+            if self._interrupt:
+                self._interrupt = False
+                deadline = time.monotonic() + 10
+                while not pid_file.exists() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                raise KeyboardInterrupt  # Ctrl-C/SIGTERM in setup while the child runs
+            return super().wait(timeout)
+
+    monkeypatch.setattr(setup_command.subprocess, "Popen", Interrupted)
+    started = time.monotonic()
+    with pytest.raises(KeyboardInterrupt):
+        run_signed(_context(tmp_path / "root"), ["anything"], timeout_s=30)
+    assert time.monotonic() - started < 20
+    assert children[0].poll() is not None
+    assert _gone(int(pid_file.read_text()))
+
+
+def test_an_interrupted_setup_writes_run_end_and_releases_the_lock(world: FakeWorld, tmp_path: Path, capsys) -> None:
+    def interrupted(context: SetupContext) -> str:
+        raise KeyboardInterrupt
+
+    setup_command.CATALOGUE["staging"] = StepSpec(LOCAL, run=interrupted)
+    root = tmp_path / "root"
+    human, data = _assert_both_modes(capsys, ["setup", "--root", str(root), "--only", "staging"], "TBX-LAB-015", 6)
+    assert data["step"] == "staging" and data["retryable"] is True
+    signed_cli.main(["lab", "runs", "--root", str(root), "--json"])
+    rows = json.loads(capsys.readouterr().out)["data"]["runs"]
+    assert rows and all(row["command"] == "setup" and row["status"] == "interrupted" for row in rows)
+    with LabStore(root).writer("run", new_run_id(), step="ingest"):  # the interrupted run released the lock
+        pass
+
+
+def test_signed_children_get_this_stores_root(tmp_path: Path, monkeypatch) -> None:
+    import sys
+
+    out = tmp_path / "env.txt"
+    script = f"import os; open({str(out)!r}, 'w').write(os.environ.get('TRACEBACK_ROOT', ''))"
+    monkeypatch.setattr(setup_command, "_child_argv", lambda argv: [sys.executable, "-c", script])
+    monkeypatch.setenv("TRACEBACK_ROOT", str(tmp_path / "some-other-root"))
+    root = tmp_path / "root"
+    run_signed(_context(root), ["anything"])
+    assert out.read_text() == str(LabStore(root).root)
+
+
+@pytest.mark.parametrize(("stdin", "stdout", "expected"), [(True, True, True), (True, False, False), (False, True, False)])
+def test_interactive_needs_both_a_tty_stdin_and_stdout(monkeypatch, stdin, stdout, expected) -> None:
+    class Stream:
+        def __init__(self, tty: bool) -> None:
+            self.tty = tty
+
+        def isatty(self) -> bool:
+            return self.tty
+
+    monkeypatch.setattr(setup_command.sys, "stdin", Stream(stdin))
+    monkeypatch.setattr(setup_command.sys, "stdout", Stream(stdout))
+    assert setup_command._interactive() is expected
+
+
+def test_every_check_doctor_emits_is_a_known_step(lab_world: dict[str, Path]) -> None:
+    names = [check["name"] for check in lab_checks(LabStore(lab_world["root"]))]
+    assert names
+    for name in names:
+        assert name in setup_command.KNOWN_STEPS or name.startswith("signed_"), name
+        assert step_names(name) == [name]  # --only accepts it
+
+
 def test_run_signed_runs_a_child_and_scrubs_its_tail(tmp_path: Path, capsys) -> None:
     root = tmp_path / "root"
     said: list[str] = []
