@@ -1725,10 +1725,12 @@
     const joint = fragXMethSignals(sample);
     const seen = new Set();
     if (!present.length && !joint.length) return [h("p", { class: "empty" }, "No methylation summary algorithm has run on this sample yet (Phase 1). Cell-type composition is in Body map.")];
+    // Scalar tables scroll inside .table-wrap at narrow widths (AC24) instead of widening the page.
     return [...joint, ...present.map((a) => h("section", { class: "panel" }, h("h2", {}, a.algorithm_id), a.status === "ok"
-      ? h("table", { class: "data-table" }, h("tbody", {}, ...a.metrics.filter((m) => m.value === null || typeof m.value !== "object").map((m) => h("tr", {}, h("th", { scope: "row" }, m.label),
-        h("td", {}, rawCell(fmtMetric(m, { algorithmId: a.algorithm_id }), m.value, m.unit,
-          `${a.algorithm_id}/${m.metric_id}`)), h("td", {}, stateChip(m))))))
+      ? h("div", { class: "table-wrap", tabindex: "0", role: "region", "aria-label": `${a.algorithm_id} scalar metrics` },
+        h("table", { class: "data-table" }, h("tbody", {}, ...a.metrics.filter((m) => m.value === null || typeof m.value !== "object").map((m) => h("tr", {}, h("th", { scope: "row" }, m.label),
+          h("td", {}, rawCell(fmtMetric(m, { algorithmId: a.algorithm_id }), m.value, m.unit,
+            `${a.algorithm_id}/${m.metric_id}`)), h("td", {}, stateChip(m)))))))
       : absent(a, a.algorithm_id), ...context(sample, a.algorithm_id, seen)))];
   }
 

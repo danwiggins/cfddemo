@@ -226,6 +226,12 @@ pre.stderr { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; 
 .multiple-svg .split { fill: var(--this-run); font-size: 14px; }
 .multiple-svg .gap, .multiple-svg .axis { fill: var(--muted); font-size: 10px; }
 @media (min-width: 1200px) {
+  /* Landing budget (AC6): the overview's actions sit beside its facts so the depth curve stays above the fold. */
+  .landing-intro { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: 1.5rem; align-items: start; }
+  .landing-intro > * { grid-column: 1; }
+  .landing-intro > .landing-actions { grid-column: 2; grid-row: 1 / span 3; margin-top: 0; flex-direction: column; align-items: stretch; }
+  .landing-intro > .landing-actions a { justify-content: center; }
+  .curve-heading .legend { font-size: .875rem; }
   .landing-band { grid-template-columns: 4fr 8fr; align-items: start; }
   .landing-band .defended { grid-column: 1; grid-row: 1; }
   .landing-band .curve { grid-column: 2; grid-row: 1 / span 2; }
