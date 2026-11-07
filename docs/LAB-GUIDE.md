@@ -143,6 +143,7 @@ traceback lab doctor [--json]              setup checks, each with a fix command
 traceback lab serve [--open] [--port N]    the local page (loopback only)
 traceback lab runs [RUN_ID] [--step S]     the run log, or one run's steps
 traceback lab gc [--apply] [--keep-attempts N] [--staging-only] [--json]   stale failed attempts and orphaned staging; dry-run unless --apply
+traceback lab support-bundle RUN_ID [--out PATH] [--force] [--json]   scrubbed .tar.gz of one run, for asking for help
 traceback lab identity sites add --file SITES.vcf.gz --sha256 SHA256 --source-label LABEL [--root R]
 traceback lab identity sites inspect [--root R]
 traceback lab identity compare SAMPLE_A SAMPLE_B [--force] [--json] [--root R]
@@ -1401,6 +1402,50 @@ assets and panels. `--apply` writes one `gc` run to the run log
 the planned size. A ROOT without a Lab store is TBX-LAB-017; `gc` never
 creates one. An item that cannot be removed is TBX-LAB-027.
 
+## Support bundle
+
+`traceback lab support-bundle RUN_ID --root R` writes one `.tar.gz` you can
+send to someone when a run needs a second pair of eyes. Nothing is uploaded;
+you send the file. The default path is `ROOT/lab/support/RUN_ID.tar.gz`
+(`--out PATH` for another); an existing file is refused unless you pass
+`--force` (TBX-LAB-029). `--json` carries the path, size and member list.
+
+In the bundle, under `RUN_ID/`:
+
+- `run.jsonl`: the run log, one scrubbed canonical event per line (step
+  events; hashes and ids, no paths);
+- `doctor.json`: `traceback lab doctor --json` captured when the bundle is
+  written;
+- `versions.json`: the traceback package version, Python, platform, the first
+  line of `samtools --version` and `minimap2 --version` (or `missing`), and
+  the store version;
+- `failed/<step>/<attempt_id>/result.json` and `artifacts.json`: for every
+  step that failed in that run, the envelope (with the scrubbed
+  `failure.stderr_tail`) and the artifact inventory of its retained attempt
+  directory. Nothing else from an attempt ships: a method's own artifacts
+  (tables, calls, logs) can carry read names or sample labels the scrubber
+  cannot know, so they are listed by name under `omitted` and left out. The
+  newest three failed attempts per result are kept (D35); an older one is
+  listed as `pruned`; an attempt directory that resolves outside `ROOT/lab`
+  (a symlink) is `outside_root` and left out;
+- `MANIFEST.json`: every member with its size and sha256, the failed steps,
+  and every omitted file with its reason.
+
+Every member is JSON. Its string values pass through the same scrubber as
+stored stderr (D34): `ROOT` becomes `<ROOT>`, every other path `<path>`, and
+the home directory and login `<redacted>`. Free text (stderr lines, doctor
+messages, version strings) also has the host name and its first label
+redacted as whole words, case-insensitively; a host name (or first label)
+shorter than three characters is not redacted. Keys, identifiers and member
+names are never rewritten. Stderr is scrubbed for paths, user and host
+names, and algorithm artifacts are not included; a tool's stderr line is
+otherwise shipped as stored. The archive's entries
+carry no owner name. Not in the bundle: BAMs, aligned inputs, reference
+files, any method artifact (successful or failed), source records, the hash
+cache, or anything from outside `ROOT/lab`. A run log that exists but holds
+no events is refused (TBX-LAB-028): there is nothing to bundle. Open the
+archive before sending if you want to check.
+
 ## Exit codes
 
 | Code | Meaning |
@@ -1492,7 +1537,7 @@ The run was interrupted by Ctrl-C or SIGTERM (exit 6, retryable). Completed resu
 
 ### TBX-LAB-016
 
-The run completed and one or more algorithms failed (exit 8). The summary's `FAILED` lines name them with their first scrubbed stderr line. `traceback lab runs RUN_ID --step ALG` shows the step; a rerun recomputes only the failed results.
+The run completed and one or more algorithms failed (exit 8). The summary's `FAILED` lines name them with their first scrubbed stderr line. `traceback lab runs RUN_ID --step ALG` shows the step; a rerun recomputes only the failed results. `traceback lab support-bundle RUN_ID` packages the failed steps' scrubbed evidence for asking for help.
 
 ### TBX-LAB-017
 
@@ -1602,6 +1647,21 @@ ownership and permissions under `ROOT/lab`, then rerun the command the
 `--keep-attempts N`) with `--root <ROOT>`, so a rerun never prunes more than
 the refused run would have.
 
+### TBX-LAB-028
+
+`support-bundle` found no run with that id under this ROOT, or the run log
+exists but holds no events (exit 4; `reason` is `unknown_run` or
+`empty_log`). Nothing was written. `traceback lab runs` lists runs; pass the
+same `--root` (or `TRACEBACK_ROOT`) you ran with. `candidates` names up to
+ten other runs.
+
+### TBX-LAB-029
+
+The support bundle's output path already exists, or is a directory (exit 2;
+`is_directory` says which). Nothing was written. Pass `--force` to replace an
+existing file, or `--out PATH` naming a new file; a directory is never
+replaced.
+
 ### TBX-LAB-031
 
 `lab inventory DIR` found no readable indexed `.bam` chunk in DIR (exit 3).
@@ -1645,6 +1705,8 @@ symlink or a plain file is TBX-LAB-005 instead.
 - 2026-11-06: `lab gc` (dry-run by default; `--apply` deletes stale failed
   attempts, orphaned staging and interrupted removals; `--staging-only`;
   panels of normals are not collected); TBX-LAB-027.
+- 2026-11-06: `lab support-bundle RUN_ID`, a scrubbed archive of one run
+  (TBX-LAB-028, TBX-LAB-029).
 - 2026-11-06: the input hash cache keys on inode and ctime as well as path,
   size and mtime (schema v2; v1 files load as misses); `lab run --rehash`
   ignores the cache for one run and is recorded in the run log and `--json`.
