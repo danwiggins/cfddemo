@@ -83,6 +83,7 @@ PROBLEMS: dict[str, ProblemSpec] = {
     "TBX-LAB-031": ProblemSpec(EXIT_BLOCKED, "The inventory directory holds no .bam chunks"),
     "TBX-LAB-033": ProblemSpec(EXIT_BLOCKED, "The pinned aligner store is present but fails verification"),
     "TBX-LAB-032": ProblemSpec(EXIT_PARTIAL, "A setup step failed", retryable=True),
+    "TBX-LAB-034": ProblemSpec(EXIT_BLOCKED, "The HTML research report cannot be written"),
 }
 
 
