@@ -117,6 +117,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     add_identity_parser(commands, _common)
 
+    from .gc_command import add_gc_parser
+
+    add_gc_parser(commands, _common)
+
     runs = commands.add_parser("runs", help="list Lab runs, or one run's steps")
     runs.add_argument("run_id", nargs="?", metavar="RUN_ID")
     runs.add_argument("--step", metavar="S", help="only this step's events")

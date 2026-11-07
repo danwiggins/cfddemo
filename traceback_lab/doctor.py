@@ -186,7 +186,7 @@ def lab_checks(store: LabStore) -> list[dict[str, Any]]:
         checks.append(_check("active", "warn", f"stale heartbeat from {active.run_id} (pid {active.pid} gone); the run was interrupted", "rerun the same lab command; only missing results recompute"))
     orphans = store.orphaned_staging()
     if orphans:
-        checks.append(_check("staging", "warn", f"{len(orphans)} orphaned .staging-* director{'y' if len(orphans) == 1 else 'ies'} under ROOT/lab", "after confirming no lab command runs: find <ROOT>/lab -name '.staging-*' -prune -exec rm -rf {} +"))
+        checks.append(_check("staging", "warn", f"{len(orphans)} orphaned .staging-* director{'y' if len(orphans) == 1 else 'ies'} under ROOT/lab", "traceback lab gc --staging-only --root <ROOT> (lists them), then traceback lab gc --staging-only --apply --root <ROOT>"))
     return checks
 
 
