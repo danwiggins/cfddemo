@@ -74,6 +74,9 @@ MAX_REQUEST_BYTES = 4096
 MAX_REQUEST_HEADERS = 32
 MAX_REQUEST_HEADER_BYTES = 16 * 1024
 MAX_HTTP_WORKERS = 16
+#: An operator-chosen listener port (``serve --port N``) is unprivileged.
+PORT_MIN = 1024
+PORT_MAX = 65535
 REQUEST_TIMEOUT_SECONDS = 2
 STATE_DIRECTORY_MODE = 0o700
 STATE_FILE_MODE = 0o600
@@ -156,6 +159,20 @@ class LocalWebServerError(RuntimeError):
 
 class LocalWebServerStopped(LocalWebServerError):
     """The service was closed, or its security watchdog shut it down (H6)."""
+
+
+class LocalListenerUnavailable(LocalWebServerError):
+    """The literal loopback listener could not be bound.
+
+    ``port`` is the requested port (0 for an ephemeral one) and ``reason`` the
+    operating-system errno name (for example ``EADDRINUSE``); the message is a
+    fixed string with no path.
+    """
+
+    def __init__(self, port: int, reason: str) -> None:
+        super().__init__("literal loopback listener is unavailable")
+        self.port = port
+        self.reason = reason
 
 
 #: The one code an unexpected handler exception produces (H6).
@@ -1564,9 +1581,14 @@ class RunningLocalWebService:
         explorer: IntegratedExplorerSource | None = None,
         reader_registry: ReaderAuthorizationRegistry | None = None,
         records: LocalRecordSource | None = None,
+        port: int = 0,
     ) -> Self:
         """Start the loopback service.
 
+        ``port`` 0 (the default) binds an ephemeral loopback port; a value in
+        ``PORT_MIN``-``PORT_MAX`` binds that port on the same literal loopback
+        address.  Either way nothing but loopback is ever bound.  A port that
+        cannot be bound raises ``LocalListenerUnavailable``.
         ``reader_registry`` enables the E12 reader launch exchange route for
         that protected registry; without it the route answers not found.
         ``records`` enables the local record routes (usability C1/C5); it must
@@ -1578,6 +1600,8 @@ class RunningLocalWebService:
             type(records) is not LocalRecordSource or explorer is None
         ):
             raise LocalWebServerError("record routes require a record source and explorer")
+        if type(port) is not int or (port != 0 and not PORT_MIN <= port <= PORT_MAX):
+            raise LocalWebServerError("listener port is out of range")
 
         state_directory = state_directory.absolute()
         startup_anchor: _StartupAnchor | None = None
@@ -1605,10 +1629,10 @@ class RunningLocalWebService:
             host = "::1" if ipv6 else "127.0.0.1"
             server_type = _LoopbackHttpServerV6 if ipv6 else _LoopbackHttpServer
             try:
-                server = server_type((host, 0), _Handler)
+                server = server_type((host, port), _Handler)
             except OSError as exc:
-                raise LocalWebServerError(
-                    "literal loopback listener is unavailable"
+                raise LocalListenerUnavailable(
+                    port, errno.errorcode.get(exc.errno or 0, "OSError")
                 ) from exc
             port = int(server.server_address[1])
             config = build_loopback_config(port=port, ipv6=ipv6)
@@ -1932,7 +1956,10 @@ class RunningLocalWebService:
 
 __all__ = [
     "INTERNAL_ERROR_CODE",
+    "LocalListenerUnavailable",
     "LocalWebServerError",
     "LocalWebServerStopped",
+    "PORT_MAX",
+    "PORT_MIN",
     "RunningLocalWebService",
 ]
