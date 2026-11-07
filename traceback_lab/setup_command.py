@@ -34,6 +34,7 @@ import argparse
 import os
 import re
 import shlex
+import signal
 import subprocess
 import sys
 import threading
@@ -177,7 +178,7 @@ def run_signed(context: SetupContext, argv: Sequence[str], *, timeout_s: float =
     try:
         process = subprocess.Popen(
             _child_argv(argv), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, errors="replace",
+            text=True, errors="replace", start_new_session=True,
         )
     except OSError as exc:
         raise StepFailed(f"could not start the command ({type(exc).__name__})") from exc
@@ -191,10 +192,16 @@ def run_signed(context: SetupContext, argv: Sequence[str], *, timeout_s: float =
     try:
         code = process.wait(timeout=timeout_s)
     except subprocess.TimeoutExpired:
-        process.kill()
+        # Kill the child's whole process group: a grandchild (micromamba under
+        # ``toolchain install``) inherits the pipes and would keep the pump
+        # threads, and so setup's lock, alive after the child alone is killed.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except OSError:
+            process.kill()
         process.wait()
         for thread in threads:
-            thread.join()
+            thread.join(timeout=5)
         tail = stderr_keep.scrubbed(context.scrubber) or stdout_keep.scrubbed(context.scrubber)
         raise StepFailed(f"timed out after {timeout_s:g} s and was killed", tail=tail) from None
     for thread in threads:

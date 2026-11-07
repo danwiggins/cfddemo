@@ -456,6 +456,23 @@ def test_run_signed_kills_a_stalled_child(tmp_path: Path, monkeypatch) -> None:
     assert failure.value.reason == "timed out after 0.5 s and was killed" and failure.value.exit_code is None
 
 
+def test_run_signed_kills_a_stalled_grandchild_that_holds_the_pipes(tmp_path: Path, monkeypatch) -> None:
+    import sys
+    import time
+
+    spawn = "import subprocess, sys, time; subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); time.sleep(60)"
+    monkeypatch.setattr(setup_command, "_child_argv", lambda argv: [sys.executable, "-c", spawn])
+    context = SetupContext(
+        store=LabStore(tmp_path / "root"), scrubber=Scrubber(root=tmp_path / "root"), say=lambda line: None,
+        ask=lambda text: None, yes=True, interactive=False, echo_child=False,
+    )
+    started = time.monotonic()
+    with pytest.raises(StepFailed) as failure:
+        run_signed(context, ["anything"], timeout_s=1.0)
+    assert time.monotonic() - started < 5  # the grandchild was killed too: its pipes closed
+    assert failure.value.reason == "timed out after 1 s and was killed"
+
+
 def test_run_signed_runs_a_child_and_scrubs_its_tail(tmp_path: Path, capsys) -> None:
     root = tmp_path / "root"
     said: list[str] = []
