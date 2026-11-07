@@ -121,6 +121,7 @@ Lab data lives under `ROOT/lab/` and never touches signed records:
 |---|---|
 | `ROOT/lab/STORE_VERSION` | layout version; a newer store is refused |
 | `ROOT/lab/runs/<run_id>.jsonl` | one line per step event; hashes only, never paths |
+| `ROOT/lab/inputs/index.json` | the input hash cache (schema v2; see Reruns) |
 | `ROOT/lab/inputs/<input_id>/` | an aligned input and its intermediates |
 | `ROOT/lab/results/<input_id>/<algorithm>/<parameters_sha256>/` | immutable attempts plus `selected.json` |
 
@@ -131,7 +132,7 @@ traceback lab run (<BAM|uBAM|chunk dir>... | <id12> | latest | --example)
     [--reference ID] [--profile all|fast] [--only a,b] [--cohort ID]
     [--downsample 0.5,0.25,0.1 | --no-downsample]
     [--controls | --no-controls] [--tf 0.03,0.10,0.30]
-    [--skip-bad-chunks] [--sex M|F] [--force] [--timeout-s 3600]
+    [--skip-bad-chunks] [--sex M|F] [--force] [--rehash] [--timeout-s 3600]
     [--threads N] [--sort-mem 1G] [--mmi PATH]
     [--dry-run] [--verbose] [--json] [--root R]
 traceback lab simulate cna <id12|latest> [--tf 0.03,0.10,0.30] [--cohort ID] [--verbose]   synthetic CNA spike, copy-number recovery
@@ -305,9 +306,9 @@ of MinKNOW chunks (`*.bam`, not recursive). It:
 
 1. refuses symlinks, non-regular and unreadable files, truncated chunks
    (`samtools quickcheck -u`), duplicate chunks and mixed basecall models;
-2. orders chunks by the `_<n>.bam` index, hashes them (cached by path, size
-   and mtime) and derives the sample identity (`id12`, the first 12+ hex of
-   the chunk-set digest);
+2. orders chunks by the `_<n>.bam` index, hashes them (cached by path,
+   inode, size, mtime and ctime) and derives the sample identity (`id12`,
+   the first 12+ hex of the chunk-set digest);
 3. checks free space against the disk budget (about 2.2x the chunk bytes,
    plus the minimap2 index the first time, plus 2 GB);
 4. aligns unaligned chunks in one process group:
@@ -340,6 +341,54 @@ unchanged chunks are not re-hashed and the alignment is reused.
 sample without the chunk paths. `--force` recomputes every result.
 `--only a,b` runs just those algorithms (overriding `--profile`), plus the
 intermediates they need, labelled "(upstream)".
+
+**Input hash cache.** `ROOT/lab/inputs/index.json` remembers each chunk's
+SHA-256 and record count under a key of its real path, inode number, byte
+size, mtime and ctime (nanoseconds); the same file holds the minimap2 index
+digest and the reference FASTA/`.fai` proof under their own keys. A chunk
+whose key matches is not read again, so a rerun with unchanged inputs
+finishes in seconds. A file replaced by another of the same size with a
+restored mtime (a restore from backup, `rsync -a` into a fresh directory)
+lands on a new inode; a copy onto the existing file (`cp -p`, `rsync -a`
+over the old chunk) keeps the inode and restores the mtime but moves ctime.
+Both miss the cache and are hashed again. That guarantee holds only on
+filesystems with a kernel-maintained change time (APFS, ext4, XFS, NFS);
+Linux kernels before 6.13 stamp it at tick granularity (about 4 ms), so a
+rewrite completing inside the tick of the file's previous change is the one
+blind spot. Metadata-only changes (chmod, chown, extended attributes written by
+sync clients or Finder tags) also move ctime and cost one extra hash of that
+chunk on the next run.
+exFAT and FAT keep no independent change time and synthesise inode numbers
+from the directory slot, and SMB lets a client set every timestamp: there
+the cache cannot see an in-place rewrite, ingest prints one line saying so
+when it can tell the volume type (`mount` on macOS, `/proc/mounts` on
+Linux; silent when unknown), and **`--rehash` is required after any
+timestamp-preserving copy onto such a volume**. The device number is not
+part of the key, so an unchanged kit on an external or network volume stays
+cached across remounts; moving or renaming the inputs directory changes the
+real path and misses every entry, so the chunks are hashed once more.
+`--rehash` ignores every cached digest for one run (the chunks, the
+minimap2 index digest and the reference proof), reads the bytes again and
+overwrites the entries; use it when you do not trust the cache itself, for
+example after restoring `ROOT/lab` from a backup, moving a store between
+hosts, or any restore or copy of the inputs whose timestamps you cannot
+account for. It does not re-check the aligned BAM or results under
+`ROOT/lab/inputs/<input_id>/`, which are not cached by this index. The
+ingest `step_end` event and `--json` (`data.rehash`) record whether chunks
+were actually rehashed; `data.rehash_requested` and the `run_start` flags
+(`rehash`, `rehash_requested`) record the flag itself. A stored sample
+(`latest`, `<id12>`) has no chunks: the run prints one line saying the flag
+does not apply to its chunks, re-verifies the reference digest, and records
+`rehash: false` with `rehash_requested: true`. The cache file is schema
+`traceback.lab.hash-cache.v2`; a file written before inode and ctime joined
+the key (v1) still loads, its chunk entries are dropped as misses, the run
+prints one line saying so and every chunk is hashed once. Only a real run
+writes the file back as v2: a dry run and the read-only preflight write
+nothing, so the notice and the full hash repeat until a run completes
+ingest. A file with a schema this checkout does not know is ignored with a
+line saying so and rewritten on the next save. Under a tight disk budget
+`--rehash` also hashes in the read-only preflight, so the chunks, index and
+FASTA are read twice in that run.
 
 A result is reused only when its selected attempt matches the input, algorithm,
 and execution identity. Dependents also record the exact upstream attempts
@@ -434,7 +483,7 @@ may reveal, including epigenetic age, read the
 | id | What it reports |
 |---|---|
 | `read-summary` | intermediate: one pass over the aligned BAM into memmapped columns (no read names); every pysam algorithm and every downsample or split-half view reads it |
-| `bam-qc` | primaries, mapped and MAPQ ≥ 20 shares, supplementary share, mean read Q, share of sampled genome covered ≥ 1x, GC-bias slope, duplicate share (only when marked); supplementary share as a chimera proxy and mean read Q interpretation are ONT-specific |
+| `bam-qc` | primaries, mapped and MAPQ ≥ 20 shares, supplementary share, mean read Q, share of sampled genome covered ≥ 1x, GC-bias slope, duplicate share (only when marked), and (v2) the count and share of primary reads whose read name repeats: content-identical chunks are refused at ingest, but the same reads re-basecalled into a differently named chunk pass that check and would double-count, so any non-zero share carries a `FLAG: duplicate read names` pill in Trust/QC (names are compared as 64-bit hashes; about 3e-6 false pairs are expected at 10 M reads; paired-end mates are compared within one mate class); supplementary share as a chimera proxy and mean read Q interpretation are ONT-specific |
 | `depth` | eligible reads (primary, MAPQ ≥ 20, chr1–22/X/Y), mean aligned span per eligible read, approximate aligned-base depth; the index count is shown only as an upper bound, and Illumina aligned span is not template length (`abs(TLEN)`) |
 | `fragment-size` | 1-bp aligned-span histogram, mode, short (< 150 bp) share, mono/di peaks, 10 bp periodicity |
 | `lionheart` | opt-in upstream LIONHEART v2.2.0 extraction of 898 raw sample-standardized chromatin-accessibility correlation scores from the selected hg38 BAM; needs ≥5M eligible reads, the modified mosdepth and Zenodo v003 resources; ONT single-end mode is experimental, and no cancer prediction is run |
@@ -1580,11 +1629,19 @@ symlink or a plain file is TBX-LAB-005 instead.
 
 - 2026-11-07: the landing samples table shows kit columns (instrument, basecall
   model, modified-base models, software) from the stored header provenance.
+- 2026-11-06: `bam-qc` method version 2 adds `duplicate_read_name_count` and
+  `duplicate_read_name_share` (repeated read names among primary reads, from
+  the read summary's 64-bit name hashes); a non-zero share shows a FLAG pill
+  for a possible re-basecalled chunk. Stored v1 results stay valid under their
+  own identity; the next run computes v2.
 - 2026-11-06: `lab inventory DIR` checks a chunk set before alignment; TBX-LAB-031.
 - 2026-11-06: `lab serve --port N` binds a fixed loopback port; TBX-LAB-026.
 - 2026-11-06: `lab gc` (dry-run by default; `--apply` deletes stale failed
   attempts, orphaned staging and interrupted removals; `--staging-only`;
   panels of normals are not collected); TBX-LAB-027.
+- 2026-11-06: the input hash cache keys on inode and ctime as well as path,
+  size and mtime (schema v2; v1 files load as misses); `lab run --rehash`
+  ignores the cache for one run and is recorded in the run log and `--json`.
 - 2026-10-17: documented the expanded registered catalog, platform-specific
   methods, input-scoped calibrations, and current Lab writer commands.
 - 2026-10-15: first slice: `lab run`, `lab runs`, `lab algorithms`,

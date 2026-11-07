@@ -64,6 +64,12 @@
       ? flagPill(type, "FLAG: PRIVACY — viral-read signals can reveal sensitive infection-related information.")
       : flagPill(type);
   }
+  // A library entry's nonzero_flag is a data-quality pill shown only for a non-zero value.
+  function valueFlag(metric) {
+    const text = metric.entry && metric.entry.nonzero_flag;
+    return typeof text === "string" && typeof metric.value === "number" && metric.value > 0 ? flagPill("VALUE", text) : "";
+  }
+  L.valueFlag = valueFlag;
   function tierBadge(tier) { return tier ? h("span", { class: `tier tier-${tier}` }, tier) : h("span", { class: "tier" }, "—"); }
   function stateReason(state, reason, fallback) {
     return state !== "failed" && typeof reason === "string" && reason
@@ -571,7 +577,7 @@
       h("p", {}, "Performance: ", perf ? `${perf.value} (${perf.platform || ""}${perf.depth ? ", " + perf.depth : ""}; ${perf.source || ""})` : (entry.performance_missing_reason || "none published"),
         spacedUnverifiedBadge(metric.entry)),
       meaning ? h("p", {}, meaning.split(". ")[0] + ".") : "",
-      h("p", {}, ...(entry.flags || []).map((f) => metricFlag(metric, f)), ...licenses),
+      h("p", {}, ...(entry.flags || []).map((f) => metricFlag(metric, f)), valueFlag(metric), ...licenses),
       toggle, details);
   }
 
@@ -630,7 +636,7 @@
       for (const m of groups[key]) { out.push(card(sample, m, seen, first)); first = false; }
     }
     const reasons = (list) => { const c = {}; for (const m of list) c[m.reason || "—"] = (c[m.reason || "—"] || 0) + 1; return Object.entries(c).map(([k, v]) => `${k.replace(/_/g, " ")} ${v}`).join(" · "); };
-    const extras = (m) => [h("span", {}, ...(m.entry && m.entry.flags || []).map((flag) => metricFlag(m, flag)),
+    const extras = (m) => [h("span", {}, ...(m.entry && m.entry.flags || []).map((flag) => metricFlag(m, flag)), valueFlag(m),
       ...(m.entry && m.entry.license_ids || []).map((id) => seen.has(id) ? licenseRef(sample, id) : (seen.add(id), licenseRef(sample, id)))), unverifiedBadge(m.entry)];
     out.push(collapsed(`Not interpretable (${groups.not_interpretable.length})`, reasons(groups.not_interpretable), ["Metric", "Value", "Reason", "Needs", ""],
       groups.not_interpretable.map((m) => [m.label,

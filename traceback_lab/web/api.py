@@ -1519,6 +1519,7 @@ def _metric_payload(row: Any, entry: Any, band: str | None) -> dict[str, Any]:
                 "next_steps",
                 "license_ids",
                 "flags",
+                "nonzero_flag",
                 "headline",
                 "citations",
                 "citation_checked",
