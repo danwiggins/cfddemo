@@ -73,6 +73,8 @@ PROBLEMS: dict[str, ProblemSpec] = {
     "TBX-LAB-023": ProblemSpec(EXIT_BLOCKED, "Sample sex assertion conflicts or needs restoration"),
     "TBX-LAB-024": ProblemSpec(EXIT_BLOCKED, "Input platform is unknown, unsupported, or inconsistent"),
     "TBX-LAB-025": ProblemSpec(EXIT_OK, "Physical RAM is below the alignment recommendation"),
+    "TBX-LAB-026": ProblemSpec(EXIT_NOT_FOUND, "No Lab run with that id to bundle"),
+    "TBX-LAB-027": ProblemSpec(EXIT_USAGE, "The support bundle path already exists"),
 }
 
 

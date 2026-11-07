@@ -136,6 +136,7 @@ traceback lab algorithms [--json]          registered algorithms (id, tier, min 
 traceback lab doctor [--json]              setup checks, each with a fix command
 traceback lab serve [--open]               the local page (loopback only)
 traceback lab runs [RUN_ID] [--step S]     the run log, or one run's steps
+traceback lab support-bundle RUN_ID [--out PATH] [--force] [--json]   scrubbed .tar.gz of one run, for asking for help
 traceback lab identity sites add --file SITES.vcf.gz --sha256 SHA256 --source-label LABEL [--root R]
 traceback lab identity sites inspect [--root R]
 traceback lab identity compare SAMPLE_A SAMPLE_B [--force] [--json] [--root R]
@@ -1149,6 +1150,39 @@ copy-number on each. It measures sampling noise only, not a known answer.
 
 Both take the writer lock and rerun only what is missing.
 
+## Support bundle
+
+`traceback lab support-bundle RUN_ID --root R` writes one `.tar.gz` you can
+send to someone when a run needs a second pair of eyes. Nothing is uploaded;
+you send the file. The default path is `ROOT/lab/support/RUN_ID.tar.gz`
+(`--out PATH` for another); an existing file is refused unless you pass
+`--force` (TBX-LAB-027). `--json` carries the path, size and member list.
+
+In the bundle, under `RUN_ID/`:
+
+- `run.jsonl`: the run log, line for line (step events; hashes, never paths or
+  read names);
+- `doctor.json`: `traceback lab doctor --json` captured when the bundle is
+  written;
+- `versions.json`: the traceback package version, Python, platform, the first
+  line of `samtools --version` and `minimap2 --version` (or `missing`), and
+  the store version;
+- `failed/<step>/<attempt_id>/…`: for every step that failed in that run, the
+  text files of its retained attempt directory: `result.json` (with the
+  scrubbed `failure.stderr_tail`), `artifacts.json`, and any text artifact.
+  The newest three failed attempts per result are kept (D35); an older one is
+  listed in the manifest as not present;
+- `MANIFEST.json`: every member with its size and sha256, the failed steps,
+  and what was skipped.
+
+Every member passes through the same scrubber as stored stderr (D34), with
+the host name added: `ROOT` becomes `<ROOT>`, every other path `<path>`, and
+the home directory, login and host name `<redacted>`. The archive's entries
+carry no owner name. Not in the bundle: BAMs, aligned inputs, reference
+files, result artifacts of successful steps, binary files (listed as skipped),
+files over 8 MiB, source records, the hash cache, or anything from outside
+`ROOT/lab`. Open it before sending if you want to check.
+
 ## Exit codes
 
 | Code | Meaning |
@@ -1240,7 +1274,7 @@ The run was interrupted by Ctrl-C or SIGTERM (exit 6, retryable). Completed resu
 
 ### TBX-LAB-016
 
-The run completed and one or more algorithms failed (exit 8). The summary's `FAILED` lines name them with their first scrubbed stderr line. `traceback lab runs RUN_ID --step ALG` shows the step; a rerun recomputes only the failed results.
+The run completed and one or more algorithms failed (exit 8). The summary's `FAILED` lines name them with their first scrubbed stderr line. `traceback lab runs RUN_ID --step ALG` shows the step; a rerun recomputes only the failed results. `traceback lab support-bundle RUN_ID` packages the failed steps' scrubbed evidence for asking for help.
 
 ### TBX-LAB-017
 
@@ -1327,6 +1361,18 @@ for full hg38 alignment. The run continues, but alignment may fail or be slow.
 Use a machine with at least 16 GiB RAM for a full alignment. If physical RAM
 cannot be detected, the Lab omits this advisory rather than blocking the run.
 
+### TBX-LAB-026
+
+`support-bundle` found no run with that id under this ROOT (exit 4). Nothing
+was written. `traceback lab runs` lists runs; pass the same `--root` (or
+`TRACEBACK_ROOT`) you ran with. The cause's `candidates` names up to ten
+runs.
+
+### TBX-LAB-027
+
+The support bundle's output path already exists (exit 2). Nothing was
+written. Pass `--force` to replace it, or `--out PATH` for a new file.
+
 ## Adding an algorithm
 
 1. Add a module under `traceback_lab/algorithms/` exposing an instance of the
@@ -1344,6 +1390,8 @@ cannot be detected, the Lab omits this advisory rather than blocking the run.
 
 ## Changes
 
+- 2026-11-06: `lab support-bundle RUN_ID`, a scrubbed archive of one run
+  (TBX-LAB-026, TBX-LAB-027).
 - 2026-10-17: documented the expanded registered catalog, platform-specific
   methods, input-scoped calibrations, and current Lab writer commands.
 - 2026-10-15: first slice: `lab run`, `lab runs`, `lab algorithms`,
