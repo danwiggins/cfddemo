@@ -13,7 +13,7 @@ import pytest
 
 from traceback_lab.ingest import cached_sha256, ensure_mmi, mmi_path, resolve_reference
 from traceback_lab.problems import LabProblem
-from traceback_lab.reference_integrity import verify_reference_source
+from traceback_lab.reference_integrity import _proof_key, _stamps, verify_reference_source
 from traceback_lab.runner import RunTarget, _verify_target_reference
 from traceback_lab.scrub import Scrubber
 from traceback_lab.store import LabStore
@@ -268,6 +268,48 @@ def test_mmi_cache_rehashes_same_size_restored_mtime_replacement(tmp_path) -> No
     os.replace(replacement, mmi)
     assert store.strong_hash_cache_key(mmi) != strong_key
     assert cached_sha256(store, mmi) == hashlib.sha256(b"cccc").hexdigest()
+
+
+def test_rehash_recomputes_a_stale_index_digest_under_the_current_strong_key(tmp_path) -> None:
+    store = LabStore(tmp_path / "root")
+    store.ensure()
+    mmi = tmp_path / "tiny.mmi"
+    mmi.write_bytes(b"aaaa")
+    stale = cached_sha256(store, mmi)
+    mmi.write_bytes(b"bbbb")
+    fresh = hashlib.sha256(b"bbbb").hexdigest()
+    # A cache that lies about the current bytes: the stale digest planted under the CURRENT key.
+    cache = store.load_hash_cache()
+    cache[store.strong_hash_cache_key(mmi)] = {"sha256": stale, "records": -1}
+    store.save_hash_cache(cache)
+    assert cached_sha256(store, mmi) == stale
+    assert cached_sha256(store, mmi, write_cache=False, rehash=True) == fresh
+    assert cached_sha256(store, mmi) == stale  # a read-only rehash writes nothing
+    assert cached_sha256(store, mmi, rehash=True) == fresh
+    assert store.load_hash_cache()[store.strong_hash_cache_key(mmi)]["sha256"] == fresh
+    assert cached_sha256(store, mmi) == fresh
+
+
+def test_rehash_detects_an_edit_hidden_by_a_stale_reference_proof(tmp_path) -> None:
+    store, fasta = _reference(tmp_path)
+    reference = resolve_reference(store.root, "hg38")
+    verify_reference_source(store, reference, write_cache=True)
+    old = fasta.stat()
+    fasta.write_text(fasta.read_text().replace("ACGT", "TCGT", 1))
+    os.utime(fasta, ns=(old.st_atime_ns, old.st_mtime_ns))
+    with pytest.raises(LabProblem):
+        verify_reference_source(store, reference, write_cache=False)
+    # A stale proof planted under the CURRENT key hides the edit from a plain verification.
+    key = _proof_key(reference, _stamps(fasta))
+    cache = store.load_hash_cache()
+    cache[key] = {"sha256": reference.sha256, "indexed_m5_verified": True}
+    store.save_hash_cache(cache)
+    assert verify_reference_source(store, reference, write_cache=False) == key
+    with pytest.raises(LabProblem, match="No usable registered reference") as error:
+        verify_reference_source(store, reference, write_cache=True, rehash=True)
+    assert error.value.code == "TBX-LAB-004"
+    with pytest.raises(LabProblem):
+        verify_reference_source(store, reference, write_cache=False, rehash=True)
 
 
 def test_normal_cached_run_and_dry_run_refuse_changed_reference(tmp_path, capsys) -> None:

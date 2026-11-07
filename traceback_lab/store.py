@@ -54,7 +54,8 @@ from .file_access import directory_no_follow, open_regular_no_follow, write_atom
 from .identity import ALGORITHM_ID_PATTERN, SHA256_PATTERN
 from .problems import LabProblem
 
-HASH_CACHE_SCHEMA = "traceback.lab.hash-cache.v2"  # v1: unprefixed chunk keys without inode/ctime
+HASH_CACHE_SCHEMA = "traceback.lab.hash-cache.v2"
+HASH_CACHE_SCHEMA_V1 = "traceback.lab.hash-cache.v1"  # unprefixed chunk keys without inode/ctime
 HEARTBEAT_INTERVAL_S = 10.0
 HEARTBEAT_FRESH_S = 30.0
 KEEP_FAILED_ATTEMPTS = 3
@@ -1470,36 +1471,51 @@ class LabStore:
     # -- hash cache (D11) ---------------------------------------------------
     legacy_hash_cache_entries_dropped: int = 0
     """How many v1 chunk entries the last ``load_hash_cache`` dropped."""
+    hash_cache_notice: str | None = None
+    """One line for the operator when the last ``load_hash_cache`` ignored the file."""
 
     def load_hash_cache(self) -> dict[str, dict[str, Any]]:
-        """Read the cache; a file written by older code loads as misses.
+        """Read the cache, branching on its ``schema``.
 
-        Schema v1 keyed chunks on ``realpath\\0size\\0mtime_ns`` with no
-        prefix. Every v2 chunk key carries the ``chunk-v2`` prefix, so a v1
-        chunk entry can never match and is dropped here (counted in
-        ``legacy_hash_cache_entries_dropped`` so the caller can say why every
-        chunk is hashed once); the next save rewrites the file as v2. Index
-        proofs and reference proofs carry their own prefixes and survive the
-        bump unchanged.
+        v2 (current): every entry is kept. v1 (or no schema field): chunk
+        entries were keyed on ``realpath\\0size\\0mtime_ns`` with no prefix
+        and can never match a ``chunk-v2`` key, so they are dropped (counted
+        in ``legacy_hash_cache_entries_dropped`` so the caller can say why
+        every chunk is hashed once); index proofs and reference proofs carry
+        their own prefixes and are kept. Any other schema is unknown to this
+        checkout: the file is treated as empty, ``hash_cache_notice`` says
+        so, and the next save rewrites it as v2.
         """
 
         self.legacy_hash_cache_entries_dropped = 0
+        self.hash_cache_notice = None
         try:
             data = json.loads(self.hash_cache_file.read_bytes())
         except (FileNotFoundError, ValueError):
             return {}
-        entries = data.get("entries", {}) if isinstance(data, dict) else {}
+        if not isinstance(data, dict):
+            return {}
+        schema = data.get("schema")
+        entries = data.get("entries", {})
         if not isinstance(entries, dict):
             return {}
-        kept: dict[str, dict[str, Any]] = {}
-        for key, value in entries.items():
-            if not isinstance(value, dict):
-                continue
-            if str(key).startswith("/"):
-                self.legacy_hash_cache_entries_dropped += 1
-                continue
-            kept[str(key)] = value
-        return kept
+        if schema == HASH_CACHE_SCHEMA:
+            return {str(key): value for key, value in entries.items() if isinstance(value, dict)}
+        if schema is None or schema == HASH_CACHE_SCHEMA_V1:
+            kept: dict[str, dict[str, Any]] = {}
+            for key, value in entries.items():
+                if not isinstance(value, dict):
+                    continue
+                if str(key).startswith("/"):
+                    self.legacy_hash_cache_entries_dropped += 1
+                    continue
+                kept[str(key)] = value
+            return kept
+        shown = str(schema)[:60]
+        self.hash_cache_notice = (
+            f"hash cache schema {shown!r} is unknown to this checkout: ignored, every digest is recomputed once"
+        )
+        return {}
 
     def save_hash_cache(self, entries: Mapping[str, Mapping[str, Any]]) -> None:
         """Rewrite the cache (callers hold the writer lock)."""

@@ -241,28 +241,46 @@ intermediates they need, labelled "(upstream)".
 
 **Input hash cache.** `ROOT/lab/inputs/index.json` remembers each chunk's
 SHA-256 and record count under a key of its real path, inode number, byte
-size, mtime and ctime (nanoseconds). A chunk whose key matches is not read
-again, so a rerun with unchanged inputs finishes in seconds. A file replaced
-by another of the same size with a restored mtime (a restore from backup,
-`rsync -a` into a fresh directory) lands on a new inode; a copy onto the
-existing file (`cp -p`, `rsync -a` over the old chunk) keeps the inode and
-restores the mtime but moves ctime, which no unprivileged tool can restore.
-Both miss the cache and are hashed again. The device number is not part of
-the key, so an unchanged kit on an external or network volume stays cached
-across remounts. `--rehash` ignores the cache for one run, hashes and counts
-every chunk, and overwrites the entries; use it when you do not trust the
-cache itself, for example after restoring `ROOT/lab` from a backup, moving
-a store between hosts, or any restore or copy of the inputs whose timestamps
-you cannot account for. The ingest `step_end` event and `--json`
-(`data.rehash`) record whether chunks were actually rehashed; the `run_start`
-flags record `rehash: true` when the flag was given for an input that has
-chunks (a stored sample, `latest` or `<id12>`, has none, so both read
-`false`). The cache file is schema `traceback.lab.hash-cache.v2`; a file
-written before inode and ctime joined the key (v1) still loads, its chunk
-entries are dropped as misses, the run prints one line saying so, every
-chunk is hashed once, and the next write stores the file as v2. Under a
-tight disk budget `--rehash` also hashes the chunks in the read-only
-preflight, so they are read twice in that run.
+size, mtime and ctime (nanoseconds); the same file holds the minimap2 index
+digest and the reference FASTA/`.fai` proof under their own keys. A chunk
+whose key matches is not read again, so a rerun with unchanged inputs
+finishes in seconds. A file replaced by another of the same size with a
+restored mtime (a restore from backup, `rsync -a` into a fresh directory)
+lands on a new inode; a copy onto the existing file (`cp -p`, `rsync -a`
+over the old chunk) keeps the inode and restores the mtime but moves ctime.
+Both miss the cache and are hashed again. That guarantee holds only on
+filesystems with a kernel-maintained change time (APFS, ext4, XFS, NFS).
+exFAT and FAT keep no independent change time and synthesise inode numbers
+from the directory slot, and SMB lets a client set every timestamp: there
+the cache cannot see an in-place rewrite, ingest prints one line saying so
+when it can tell the volume type (`mount` on macOS, `/proc/mounts` on
+Linux; silent when unknown), and **`--rehash` is required after any
+timestamp-preserving copy onto such a volume**. The device number is not
+part of the key, so an unchanged kit on an external or network volume stays
+cached across remounts; moving or renaming the inputs directory changes the
+real path and misses every entry, so the chunks are hashed once more.
+`--rehash` ignores every cached digest for one run (the chunks, the
+minimap2 index digest and the reference proof), reads the bytes again and
+overwrites the entries; use it when you do not trust the cache itself, for
+example after restoring `ROOT/lab` from a backup, moving a store between
+hosts, or any restore or copy of the inputs whose timestamps you cannot
+account for. It does not re-check the aligned BAM or results under
+`ROOT/lab/inputs/<input_id>/`, which are not cached by this index. The
+ingest `step_end` event and `--json` (`data.rehash`) record whether chunks
+were actually rehashed; `data.rehash_requested` and the `run_start` flags
+(`rehash`, `rehash_requested`) record the flag itself. A stored sample
+(`latest`, `<id12>`) has no chunks: the run prints one line saying the flag
+does not apply to its chunks, re-verifies the reference digest, and records
+`rehash: false` with `rehash_requested: true`. The cache file is schema
+`traceback.lab.hash-cache.v2`; a file written before inode and ctime joined
+the key (v1) still loads, its chunk entries are dropped as misses, the run
+prints one line saying so and every chunk is hashed once. Only a real run
+writes the file back as v2: a dry run and the read-only preflight write
+nothing, so the notice and the full hash repeat until a run completes
+ingest. A file with a schema this checkout does not know is ignored with a
+line saying so and rewritten on the next save. Under a tight disk budget
+`--rehash` also hashes in the read-only preflight, so the chunks, index and
+FASTA are read twice in that run.
 
 A result is reused only when its selected attempt matches the input, algorithm,
 and execution identity. Dependents also record the exact upstream attempts

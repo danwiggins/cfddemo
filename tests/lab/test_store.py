@@ -970,6 +970,8 @@ def test_hash_cache_key_changes_when_a_same_size_same_mtime_replacement_has_a_ne
     assert (new.st_size, new.st_mtime_ns) == (old.st_size, old.st_mtime_ns)
     replaced_key = store.hash_cache_key(chunk)
     assert replaced_key != key
+    assert str(new.st_ino) in replaced_key.split("\0")
+    assert str(old.st_ino) in key.split("\0") and str(old.st_ino) not in replaced_key.split("\0")
     # An in-place rewrite (cp -p onto an existing file) keeps the inode and can
     # restore the mtime, but bumps ctime: the key changes too.
     chunk.write_bytes(b"cccc")
@@ -1013,6 +1015,31 @@ def test_hash_cache_written_by_v1_code_loads_as_misses_and_is_rewritten_as_v2(tm
     assert on_disk["schema"] == "traceback.lab.hash-cache.v2"
     assert legacy_key not in on_disk["entries"]
     assert store.load_hash_cache() == loaded
+    assert store.legacy_hash_cache_entries_dropped == 0 and store.hash_cache_notice is None
+
+
+def test_hash_cache_loader_branches_on_schema_not_key_shape(tmp_path: Path) -> None:
+    store = LabStore(tmp_path)
+    store.hash_cache_file.parent.mkdir(parents=True)
+    unprefixed = {"/some/path\x001\x002": {"sha256": A, "records": 1}}
+    # v2: every entry is kept, whatever its key looks like.
+    store.hash_cache_file.write_bytes(json.dumps({"schema": "traceback.lab.hash-cache.v2", "entries": unprefixed}).encode())
+    assert store.load_hash_cache() == unprefixed
+    assert store.legacy_hash_cache_entries_dropped == 0 and store.hash_cache_notice is None
+    # No schema field: treated like v1.
+    store.hash_cache_file.write_bytes(json.dumps({"entries": unprefixed}).encode())
+    assert store.load_hash_cache() == {}
+    assert store.legacy_hash_cache_entries_dropped == 1 and store.hash_cache_notice is None
+    # Unknown (newer) schema: empty, with a notice; the next save rewrites it as v2.
+    store.hash_cache_file.write_bytes(json.dumps({"schema": "traceback.lab.hash-cache.v9", "entries": {"chunk-v9\x00x": {"sha256": A}}}).encode())
+    assert store.load_hash_cache() == {}
+    assert store.legacy_hash_cache_entries_dropped == 0
+    assert store.hash_cache_notice == (
+        "hash cache schema 'traceback.lab.hash-cache.v9' is unknown to this checkout: ignored, every digest is recomputed once"
+    )
+    store.save_hash_cache({})
+    assert json.loads(store.hash_cache_file.read_bytes())["schema"] == "traceback.lab.hash-cache.v2"
+    assert store.load_hash_cache() == {} and store.hash_cache_notice is None
 
 
 def test_orphaned_staging_is_reported(tmp_path: Path) -> None:

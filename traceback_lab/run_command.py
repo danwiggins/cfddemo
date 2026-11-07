@@ -199,6 +199,7 @@ def _flags(args: argparse.Namespace) -> dict[str, Any]:
         "force": args.force,
         # Requested and applicable: a stored sample (<id12>, latest) has no chunks to rehash.
         "rehash": args.rehash and not (len(args.inputs) == 1 and _is_stored(args.inputs[0])),
+        "rehash_requested": args.rehash,
         "timeout_s": args.timeout_s,
         "threads": args.threads,
         "sort_mem": args.sort_mem,
@@ -419,7 +420,8 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
         for item in items
     ]
     memory_warning = _memory_warning()
-    data: dict[str, Any] = {"root": str(store.root), "dry_run": True, "rehash": False, "plan": plan_rows,
+    data: dict[str, Any] = {"root": str(store.root), "dry_run": True, "rehash": False,
+                            "rehash_requested": args.rehash, "plan": plan_rows,
                             "warnings": [memory_warning] if memory_warning else []}
     lines = [f"ROOT      {store.root}"]
     if memory_warning:
@@ -448,7 +450,7 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
                 cause="stored input and current reference registration have different SHA-256 values",
                 fix="Restore the original reference registration for this stored input",
             )
-        verify_reference_source(store, registered, write_cache=False)
+        verify_reference_source(store, registered, write_cache=False, rehash=args.rehash)
         with_sex_assertion(record, args.sex)
         data["sample"] = {
             "id12": id12_for(store, source_id), "input_id": aligned.input_id, "platform": platform,
@@ -543,7 +545,7 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
         mark_platform_skips(platform)
         with_sex_assertion(source_record(store, chunkset.source_id) or {}, args.sex)
         reference = resolve_reference(store.root, args.reference_id)
-        verify_reference_source(store, reference, write_cache=False)
+        verify_reference_source(store, reference, write_cache=False, rehash=args.rehash)
         data["reference_id"] = reference.reference_id
         data["chunks"] = {"count": len(chunkset.chunks), "bytes": chunkset.total_bytes, "excluded": chunkset.excluded_indexes}
         lines.append(f"REFERENCE {reference.reference_id}")
@@ -675,7 +677,7 @@ def _preflight_budget(
     )
     input_platform = _declared_platform(chunkset)
     with_sex_assertion(source_record(store, chunkset.source_id) or {}, args.sex)
-    verify_reference_source(store, reference, write_cache=False)
+    verify_reference_source(store, reference, write_cache=False, rehash=args.rehash)
     if chunkset.aligned:
         candidate = prealigned_input_id(
             source_id=chunkset.source_id, reference_sha256=reference.sha256,
@@ -691,7 +693,7 @@ def _preflight_budget(
         candidate = aligned_input_id(
             source_id=chunkset.source_id,
             reference_sha256=reference.sha256,
-            mmi_sha256=cached_sha256(store, known_mmi, write_cache=False),
+            mmi_sha256=cached_sha256(store, known_mmi, write_cache=False, rehash=args.rehash),
             minimap2_version=str(minimap2.version),
             samtools_version=str(samtools.version),
             aligner_argv=aligner_argv_identity(chunkset.rg_lines),
@@ -801,7 +803,12 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                             cause="stored input and current reference registration have different SHA-256 values",
                             fix="Restore the original reference registration for this stored input",
                         )
-                    verify_reference_source(store, registered, write_cache=True)
+                    if args.rehash:
+                        progress(
+                            "ingest                   --rehash: a stored sample has no chunks to rehash; "
+                            "the reference digest is re-verified"
+                        )
+                    verify_reference_source(store, registered, write_cache=True, rehash=args.rehash)
                     record = record_source_sex(store, source_id, args.sex)
                     example = bool(record.get("example"))
                     scrubber = Scrubber(root=store.root)
@@ -816,7 +823,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     paths = collect_paths(args.inputs)
                     scrubber = Scrubber(root=store.root, chunk_stems=[p.name[:-4] for p in paths])
                     if args.rehash:
-                        progress("ingest                   --rehash: ignoring the input hash cache")
+                        progress("ingest                   --rehash: ignoring every cached digest (chunks, index, reference)")
                     chunkset = inspect_chunks(
                         paths, store, skip_bad_chunks=args.skip_bad_chunks, rehash=args.rehash,
                         progress=progress,
@@ -824,7 +831,9 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     input_platform = _declared_platform(chunkset)
                     with_sex_assertion(source_record(store, chunkset.source_id) or {}, args.sex)
                     reference = resolve_reference(store.root, args.reference_id, example=args.example)
-                    reference_proof = verify_reference_source(store, reference, write_cache=True)
+                    reference_proof = verify_reference_source(
+                        store, reference, write_cache=True, rehash=args.rehash,
+                    )
                     reference_id, reference_sha256 = reference.reference_id, reference.sha256
                     example = bool(args.example)
                     progress(
@@ -864,7 +873,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                             candidate = aligned_input_id(
                                 source_id=chunkset.source_id,
                                 reference_sha256=reference.sha256,
-                                mmi_sha256=cached_sha256(store, known_mmi),
+                                mmi_sha256=cached_sha256(store, known_mmi, rehash=args.rehash),
                                 minimap2_version=str(minimap2.version),
                                 samtools_version=str(samtools.version),
                                 aligner_argv=aligner_argv_identity(chunkset.rg_lines),
@@ -968,7 +977,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     store, run_id, aligned, id12, chunkset, results, warnings, time.monotonic() - started,
                     depth=target.depth.model_dump() if target.depth is not None else None,
                     controls=controls["summary"], platform=target.platform,
-                    rehash=args.rehash and chunkset is not None,
+                    rehash=args.rehash and chunkset is not None, rehash_requested=args.rehash,
                 )
                 log.append("run_end", status=payload["status"], exit_code=code)
             except KeyboardInterrupt:
@@ -1140,6 +1149,7 @@ def _summary(
     controls: dict[str, Any] | None = None,
     platform: str = "ont",
     rehash: bool = False,
+    rehash_requested: bool = False,
 ) -> tuple[int, dict[str, Any]]:
     ok = sum(result.status == "ok" for result in results)
     skipped: dict[str, int] = {}
@@ -1177,6 +1187,7 @@ def _summary(
         "controls": controls,
         "excluded_chunks": aligned.manifest.get("excluded_chunks", []),
         "rehash": rehash,
+        "rehash_requested": rehash_requested,
         "warnings": warnings,
         "remediations": remedies,
         "next": next_argv,

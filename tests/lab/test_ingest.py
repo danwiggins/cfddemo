@@ -281,6 +281,74 @@ def test_rehash_corrects_a_stale_entry_and_overwrites_it(lab_world, monkeypatch)
     assert calls == []
 
 
+def test_unknown_cache_schema_is_announced_and_rewritten(lab_world) -> None:
+    store = LabStore(lab_world["root"])
+    store.ensure()
+    paths = ingest.collect_paths([str(lab_world["chunks"])])
+    store.hash_cache_file.parent.mkdir(parents=True, exist_ok=True)
+    store.hash_cache_file.write_bytes(json.dumps({"schema": "traceback.lab.hash-cache.v9", "entries": {}}).encode())
+    lines: list[str] = []
+    ingest.inspect_chunks(paths, store, progress=lines.append)
+    assert lines[0] == (
+        "ingest  hash cache schema 'traceback.lab.hash-cache.v9' is unknown to this checkout: "
+        "ignored, every digest is recomputed once"
+    )
+    assert json.loads(store.hash_cache_file.read_bytes())["schema"] == "traceback.lab.hash-cache.v2"
+    lines.clear()
+    ingest.inspect_chunks(paths, store, progress=lines.append)
+    assert lines == []
+
+
+def test_cache_blind_filesystem_is_announced_at_ingest(lab_world, monkeypatch) -> None:
+    store = LabStore(lab_world["root"])
+    store.ensure()
+    paths = ingest.collect_paths([str(lab_world["chunks"])])
+    monkeypatch.setattr(ingest, "filesystem_type", lambda path: "exfat")
+    lines: list[str] = []
+    ingest.inspect_chunks(paths, store, progress=lines.append)
+    assert lines[0] == (
+        "ingest  inputs are on exfat: the hash cache cannot detect an in-place rewrite there; "
+        "rerun with --rehash after any timestamp-preserving copy"
+    )
+    monkeypatch.setattr(ingest, "filesystem_type", lambda path: "apfs")
+    lines.clear()
+    ingest.inspect_chunks(paths, store, progress=lines.append)
+    assert lines == []
+    monkeypatch.setattr(ingest, "filesystem_type", lambda path: None)
+    ingest.inspect_chunks(paths, store, progress=lines.append)
+    assert lines == []
+
+
+def test_filesystem_type_is_best_effort_and_picks_the_longest_mount(tmp_path: Path) -> None:
+    darwin = (
+        "/dev/disk3s1s1 on / (apfs, sealed, local, read-only, journaled)\n"
+        "devfs on /dev (devfs, local, nobrowse)\n"
+        "map auto_home on /System/Volumes/Data/home (autofs, automounted, nobrowse)\n"
+        "/dev/disk4s1 on /Volumes/KIT (exfat, local, nodev, nosuid, noowners)\n"
+        "//user@nas/share on /Volumes/My Share (smbfs, nodev, nosuid, mounted by user)\n"
+    )
+    mounts = ingest._mounts_from_darwin(darwin)
+    assert ("/Volumes/KIT", "exfat") in mounts and ("/Volumes/My Share", "smbfs") in mounts
+    assert ingest._mount_type("/Volumes/KIT/run1/chunk_0.bam", mounts) == "exfat"
+    assert ingest._mount_type("/Volumes/KITCHEN/chunk_0.bam", mounts) == "apfs"
+    assert ingest._mount_type("/Volumes/My Share/x.bam", mounts) == "smbfs"
+    assert ingest._mount_type("/Users/op/x.bam", mounts) == "apfs"
+    assert ingest._mount_type("/Volumes/KIT", mounts) == "exfat"
+    proc = (
+        "/dev/nvme0n1p2 / ext4 rw,relatime 0 0\n"
+        "/dev/sdb1 /mnt/kit\\040disk vfat rw,uid=1000 0 0\n"
+        "//nas/share /mnt/nas cifs rw 0 0\n"
+    )
+    mounts = ingest._mounts_from_proc(proc)
+    assert ingest._mount_type("/mnt/kit disk/chunk_0.bam", mounts) == "vfat"
+    assert ingest._mount_type("/mnt/nas/x.bam", mounts) == "cifs"
+    assert ingest._mount_type("/home/op/x.bam", mounts) == "ext4"
+    assert ingest._mount_type("/x", []) is None
+    live = ingest.filesystem_type(tmp_path)
+    assert live is None or (isinstance(live, str) and live == live.lower())
+    assert ingest.cache_blind_filesystem(tmp_path) in (None, *ingest.CACHE_BLIND_FILESYSTEMS)
+
+
 def test_legacy_cache_file_is_announced_once(lab_world) -> None:
     store = LabStore(lab_world["root"])
     store.ensure()
