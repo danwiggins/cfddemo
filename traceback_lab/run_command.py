@@ -19,7 +19,7 @@ from . import registry
 from .cohort_command import _cohort_id
 from .completed_runs import record_completion
 from .identity import SHA256_PATTERN, aligned_input_id, prealigned_input_id
-from .memory_cap import MemoryCapPolicy, format_bytes, parse_memory_cap
+from .memory_cap import MemoryCapPolicy, format_bytes, parse_memory_cap, update_history
 from .ingest import (
     EXAMPLE_REFERENCE_ID,
     GIB,
@@ -958,6 +958,8 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     store, override_bytes=getattr(args, "memory_cap", None),
                     disabled=bool(getattr(args, "no_memory_cap", False)),
                 )
+                for notice in memory_cap.notices:
+                    progress(f"NOTE  {notice}")
                 results = run_plan(
                     store,
                     lock,
@@ -979,6 +981,10 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     memory_cap=memory_cap,
                 )
                 results = [*results, *controls["results"]]
+                try:
+                    update_history(store, results)  # advisory: rebuilt from the logs if lost
+                except OSError as exc:
+                    progress(f"NOTE  memory history not saved ({type(exc).__name__}); rebuilt next run")
                 code, payload = _summary(
                     store, run_id, aligned, id12, chunkset, results, warnings, time.monotonic() - started,
                     depth=target.depth.model_dump() if target.depth is not None else None,
@@ -1292,8 +1298,9 @@ def _memory_cap_problem(exceeded: dict[str, Any], run_id: str) -> LabProblem:
             f"({cap_bytes} bytes, basis: {exceeded['basis']}) and was stopped"
         ),
         fix=(
-            f"Rerun with `--memory-cap {format_bytes(higher).replace(' ', '')}` (or higher) "
-            "or `--no-memory-cap`; only the failed result recomputes"
+            f"Rerun with `--memory-cap {format_bytes(higher).replace(' ', '')}` (twice the cap; raise again if "
+            "needed); `--no-memory-cap` only as a last resort, it lets one algorithm take all memory. "
+            "Only the failed result recomputes"
         ),
         data={"algorithm_id": exceeded["algorithm_id"], "cap_bytes": cap_bytes, "run_id": run_id},
     )

@@ -16,10 +16,12 @@ Per-process peak RSS comes from ``os.wait4``; the caller may pass a directory
 whose size is sampled for peak disk.
 
 ``memory_cap_bytes`` caps the pipeline (Lab algorithm workers only; the
-aligner never passes one): every stage sets the platform's address-space
-rlimit in the child before ``exec`` where the kernel enforces one (Linux),
-and on every platform the tree-RSS sampler terminates the group as soon as
-a sample exceeds the cap (``PipelineResult.memory_exceeded``).
+aligner never passes one): on every platform the tree-RSS sampler
+terminates the group as soon as a sample exceeds the cap while the group is
+still alive (``PipelineResult.memory_exceeded``), and where the kernel
+enforces one (Linux) every stage sets the address-space rlimit to
+``memory_rlimit_bytes`` (the cap plus import headroom) in the child before
+``exec``.
 """
 
 from __future__ import annotations
@@ -37,7 +39,7 @@ from typing import IO, Any
 
 from traceback_runner.toolchain import kill_process_group
 
-from .memory_cap import apply_memory_limit, select_memory_limit
+from .memory_cap import MemoryCapError, apply_memory_limit, select_memory_limit
 from .scrub import BoundedStderr, Scrubber
 
 GRACE_S = 5.0
@@ -76,7 +78,7 @@ class PipelineResult:
     timed_out: bool = False
     interrupted: bool = False
     sampled_tree_peak_rss_bytes: int | None = None
-    memory_exceeded: bool = False  # the RSS sampler killed the group at the cap
+    memory_exceeded: bool = False  # our kill: an over-cap sample while the group was alive
     memory_limit: str | None = None  # the rlimit set in the children, if any
 
     @property
@@ -332,14 +334,17 @@ def run_pipeline(
     disk_usage: Callable[[], int] | None = None,
     on_tick: Callable[[float], None] | None = None,
     memory_cap_bytes: int | None = None,
+    memory_rlimit_bytes: int | None = None,
 ) -> PipelineResult:
     """Run ``stages`` as one pipeline in one process group.
 
     ``KeyboardInterrupt`` kills the group and is re-raised.  ``stdout_path``
     (absolute, new) receives the last stage's stdout; otherwise it is
     discarded.  ``memory_cap_bytes`` applies the per-algorithm memory cap
-    (rlimit before exec where enforced, plus the RSS sampler on every
-    platform).
+    through the RSS sampler on every platform; where the kernel enforces an
+    address-space rlimit it is set to ``memory_rlimit_bytes`` (default: the
+    cap) in each child before exec.  A child that cannot be started under
+    the rlimit raises ``MemoryCapError``.
     """
 
     if not stages:
@@ -348,10 +353,14 @@ def run_pipeline(
         raise ValueError("timeout must be positive")
     if memory_cap_bytes is not None and memory_cap_bytes <= 0:
         raise ValueError("memory cap must be positive")
+    if memory_rlimit_bytes is None:
+        memory_rlimit_bytes = memory_cap_bytes
+    elif memory_cap_bytes is None or memory_rlimit_bytes < memory_cap_bytes:
+        raise ValueError("memory rlimit needs a cap and is never below it")
     memory_limit = select_memory_limit() if memory_cap_bytes is not None else None
     preexec: Callable[[], None] | None = None
-    if memory_cap_bytes is not None and memory_limit is not None:
-        cap, limit_name = memory_cap_bytes, memory_limit
+    if memory_rlimit_bytes is not None and memory_limit is not None:
+        cap, limit_name = memory_rlimit_bytes, memory_limit
 
         def _limit_child() -> None:
             # Between fork and exec: only the rlimit call, nothing that takes a lock.
@@ -393,17 +402,24 @@ def run_pipeline(
         previous_stdout: IO[bytes] | None = None
         for position, stage in enumerate(stages):
             last = position == len(stages) - 1
-            process = subprocess.Popen(  # noqa: S603 - absolute argv, never a shell
-                list(stage.argv),
-                stdin=previous_stdout if previous_stdout is not None else subprocess.DEVNULL,
-                stdout=(sink if sink is not None else subprocess.DEVNULL) if last else subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                cwd=str(cwd) if cwd is not None else None,
-                env=dict(env) if env is not None else None,
-                process_group=0 if leader is None else leader.pid,
-                close_fds=True,
-                preexec_fn=preexec,
-            )
+            try:
+                process = subprocess.Popen(  # noqa: S603 - absolute argv, never a shell
+                    list(stage.argv),
+                    stdin=previous_stdout if previous_stdout is not None else subprocess.DEVNULL,
+                    stdout=(sink if sink is not None else subprocess.DEVNULL) if last else subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    cwd=str(cwd) if cwd is not None else None,
+                    env=dict(env) if env is not None else None,
+                    process_group=0 if leader is None else leader.pid,
+                    close_fds=True,
+                    preexec_fn=preexec,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                if preexec is None:
+                    raise
+                raise MemoryCapError(
+                    f"{stage.name} could not start under the memory cap: {type(exc).__name__}: {exc}"
+                ) from exc
             if previous_stdout is not None:
                 previous_stdout.close()  # the child holds its own copy
             previous_stdout = process.stdout if not last else None
@@ -442,10 +458,14 @@ def run_pipeline(
             except Empty:
                 pass
             if (memory_cap_bytes is not None and peak_tree_rss is not None
-                    and peak_tree_rss > memory_cap_bytes
-                    and any(process.returncode is None for process in processes)):
-                memory_exceeded = True
-                _terminate(leader, processes, outcomes)
+                    and peak_tree_rss > memory_cap_bytes):
+                # The sample came from live members; reap again before deciding,
+                # so a group that finished meanwhile keeps its own exit codes.
+                for position in range(len(processes)):
+                    _reap(processes[position], outcomes[position], block=False)
+                if any(process.returncode is None for process in processes):
+                    memory_exceeded = True  # the kill below is ours
+                    _terminate(leader, processes, outcomes)
                 break
             if now >= next_rss and (rss_thread is None or not rss_thread.is_alive()):
                 def sample_rss() -> None:

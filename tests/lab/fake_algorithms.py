@@ -153,6 +153,21 @@ class Hogs(_Base):
 
 
 @dataclass
+class UsesNumpy(_Base):
+    """Imports numpy (OpenBLAS thread pool) and reports the pinned thread count."""
+
+    def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
+        import numpy
+
+        total = float(numpy.ones(1000).sum())
+        threads = int(os.environ.get("OPENBLAS_NUM_THREADS", "0"))
+        return AlgorithmOutput(metrics=[
+            {"metric_id": "ones", "value": total, "unit": "count"},
+            {"metric_id": "blas_threads", "value": threads, "unit": "threads"},
+        ])
+
+
+@dataclass
 class SkipsDepth(_Base):
     def preflight(self, ctx: InputContext) -> Ready | Skip:
         return Skip("depth", "needs 2,000,000 eligible reads")
@@ -191,6 +206,7 @@ HANGS = Hangs("cell-origin", cost="slow")
 WAITS = Waits("cell-origin", cost="slow")
 SKIPS = SkipsDepth("instability", cost="slow")
 HOGS = Hogs("copy-number", cost="slow")
+USES_NUMPY = UsesNumpy("bam-qc")
 BAD_PANEL = BadPanel("mtdna")
 ASSET_PROBE = AssetProbe("asset-probe", tools=(ToolPin("probe", "2.2.0"),))
 DEPENDS_ON_FAILURE = Counter("tf-concordance", family="composite", upstream=("copy-number",))

@@ -231,36 +231,58 @@ keep input-specific results private.
 The reference is the one registered under ROOT (`traceback reference
 register`); with several, pass `--reference ID`.
 
-**Memory cap.** One algorithm cannot take the workstation down: each
-algorithm worker runs under a per-algorithm memory cap. The default cap is
-`max(2 GiB, 2 x the highest peak RSS this ROOT's run logs recorded for that
-algorithm)`; with no history the cap is the registry's floor for the
-algorithm (`MEMORY_FLOOR_BYTES` in `traceback_lab/registry.py`, declared
-only with a measured reason) or 2 GiB. Steps the cap itself stopped do not
-feed the history, so a runaway algorithm cannot raise its own cap by being
-rerun. Each step's `step_start` event records `memory_cap_bytes` and
-`memory_cap_basis` (`history`, `floor`, `default`, `override` or `disabled`).
-`--memory-cap BYTES` (suffixes `KiB`, `MiB`, `GiB`, `TiB`; for example
-`--memory-cap 4GiB`) caps every algorithm in the run at that value and
-`--no-memory-cap` runs without one; both are recorded in the run log's
-`run_start` flags and under `data.memory_cap` in `--json`. On Linux the
-worker sets `RLIMIT_AS` (`RLIMIT_DATA` where `RLIMIT_AS` is unavailable)
-in the child before `exec`, so every allocation past the cap is refused and
-every descendant inherits the limit; that limit counts virtual address
-space, and numpy's OpenBLAS reserves roughly 40 MB per CPU when it loads, so
-on a Linux host with many cores set `OPENBLAS_NUM_THREADS` or pass a higher
-`--memory-cap`. macOS refuses address-space limits
-below the process's already reserved address space (hundreds of GiB on
-Apple silicon; `setrlimit` returns `EINVAL`) and does not enforce the values
-it accepts, so no rlimit is set there. On both platforms the runner samples
-the worker's process-tree resident set every 0.5 s and stops the group as
-soon as a sample exceeds the cap. An algorithm the cap stopped ends `failed`
-with reason `memory` and `memory cap exceeded (<cap>)` as its first line; the
-run continues with the next algorithm, exits 8 (TBX-LAB-016) and prints one
+**Memory cap.** Each algorithm worker runs under a per-algorithm memory
+cap so that one runaway algorithm is stopped at a known size instead of
+consuming the workstation. The default cap is `min(max(floor, 2 x the
+algorithm's highest recorded peak RSS from steps that ended ok), ceiling)`:
+the floor is the registry's entry for the algorithm (`MEMORY_FLOOR_BYTES` in
+`traceback_lab/registry.py`, declared only with a measured reason) or 2 GiB,
+and the ceiling is `0.8 x physical RAM`, never above 64 GiB. Only `ok` steps
+feed the history: a step that failed, timed out, was stopped by the cap or
+ran uncapped and failed does not raise the next cap, so a runaway cannot
+escalate its own cap by being rerun. The history is kept in
+`ROOT/lab/memory-history.json` (`{algorithm: highest ok peak}`), updated at
+the end of each run under the writer lock and rebuilt once from the run logs
+when it is missing or damaged (an unreadable run log is skipped with a
+`NOTE` line, never a refusal). Each step's `step_start` event records
+`memory_cap_bytes`, `memory_cap_basis` (`history`, `floor`, `default`,
+`ceiling`, `override` or `disabled`), `memory_cap_observed_bytes`,
+`memory_rlimit_bytes` and `blas_threads`. `--memory-cap BYTES` (at least
+256 MiB; suffixes `KiB`, `MiB`, `GiB`, `TiB`; for example
+`--memory-cap 4GiB`) caps every algorithm in the run at that value and is
+not bounded by the ceiling; `--no-memory-cap` runs without one. Both are
+recorded in the run log's `run_start` flags and under `data.memory_cap` in
+`--json`.
+
+Enforcement is honest about what each kernel offers. On every platform the
+runner samples the worker's process-tree resident set every 0.5 s and stops
+the group (SIGTERM, then SIGKILL after 5 s) as soon as a sample exceeds the
+cap while the group is still alive; an allocation burst faster than one
+sample interval can therefore exceed the cap before the kill lands. On
+Linux the worker additionally sets `RLIMIT_AS` (`RLIMIT_DATA` where
+`RLIMIT_AS` is unavailable) in the child before `exec`, so an allocation
+past the limit is refused and every descendant inherits it. That limit
+counts virtual address space, which numpy's OpenBLAS inflates by roughly
+64 MiB per BLAS thread when it loads, so the worker pins
+`OPENBLAS_NUM_THREADS`, `OMP_NUM_THREADS` and `MKL_NUM_THREADS` to
+`min(4, CPUs)` (an algorithm may declare `blas_threads`; a variable already
+set in the operator's environment is kept and widens the headroom) and the
+rlimit is the cap plus 512 MiB plus 64 MiB per BLAS thread of import
+headroom; the sampler enforces the cap itself. macOS refuses address-space
+limits below the process's already reserved address space (hundreds of GiB
+on Apple silicon; `setrlimit` returns `EINVAL`) and does not enforce the
+values it accepts, so no rlimit is set there and the sampler is the cap.
+
+An algorithm the cap stopped ends `failed` with reason `memory` and
+`memory cap exceeded (<cap>)` as its first line (a worker that could not be
+started under its limit fails the same way, never the run); the run
+continues with the next algorithm, exits 8 (TBX-LAB-016) and prints one
 `MEMORY` line plus a TBX-LAB-030 problem per stopped algorithm naming the
-cap and the fix (`--memory-cap` higher, or `--no-memory-cap`). The aligner
-(`samtools cat | samtools fastq | minimap2 | samtools sort` at ingest) is not
-an algorithm and never runs under a cap; `--sort-mem` governs its memory.
+cap and the fix: rerun with `--memory-cap` at twice the printed cap (raise
+again if needed); `--no-memory-cap` only as a last resort, because it lets
+one algorithm take all memory. The aligner (`samtools cat | samtools fastq
+| minimap2 | samtools sort` at ingest) is not an algorithm and never runs
+under a cap; `--sort-mem` governs its memory.
 
 **Reruns.** Rerunning the same command recomputes missing or failed results
 and a dependent result when a selected upstream attempt has changed;
@@ -1376,12 +1398,14 @@ the loopback interface is up and retry. `--json` carries the requested `port`
 (`null` when ephemeral) and the OS `errno` name under `data`.
 ### TBX-LAB-030
 
-An algorithm exceeded its per-algorithm memory cap and was stopped (the run
-completed and exits 8 with TBX-LAB-016; this problem line names the algorithm,
-the cap in bytes and its basis). The result is `failed` with reason `memory`;
-the other algorithms ran. Rerun with a higher `--memory-cap` (for example twice
-the printed cap) or with `--no-memory-cap`; only the failed result recomputes.
-The default cap is `max(2 GiB, 2 x the algorithm's highest recorded peak RSS)`;
+An algorithm exceeded its per-algorithm memory cap and was stopped, or could
+not be started under its limit (the run completed and exits 8 with
+TBX-LAB-016; this problem line names the algorithm, the cap in bytes and its
+basis). The result is `failed` with reason `memory`; the other algorithms
+ran. Rerun with `--memory-cap` at twice the printed cap, raising again if
+needed; use `--no-memory-cap` only as a last resort, since it lets one
+algorithm take all memory. Only the failed result recomputes. The default cap
+is `min(max(2 GiB, 2 x the algorithm's highest ok peak RSS), 0.8 x RAM, 64 GiB)`;
 see "Memory cap" under "Running on a kit". The aligner is never capped.
 
 ## Adding an algorithm
@@ -1403,7 +1427,10 @@ see "Memory cap" under "Running on a kit". The aligner is never capped.
 
 - 2026-11-06: `lab serve --port N` binds a fixed loopback port; TBX-LAB-026.
 - 2026-11-06: per-algorithm memory cap for `lab run` (`--memory-cap`,
-  `--no-memory-cap`, TBX-LAB-030).
+  `--no-memory-cap`, TBX-LAB-030); failed results gain an optional
+  `failure.reason` field and `ROOT/lab/memory-history.json` is new. The
+  store version pin means runtimes older than this checkout reading a newer
+  ROOT are not a goal.
 - 2026-10-17: documented the expanded registered catalog, platform-specific
   methods, input-scoped calibrations, and current Lab writer commands.
 - 2026-10-15: first slice: `lab run`, `lab runs`, `lab algorithms`,

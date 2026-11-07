@@ -27,7 +27,16 @@ from traceback_runner.serialization import canonical_json_bytes
 
 from .envelope import Depth, Failure, ResultEnvelope, provenance
 from .ingest import resolve_reference
-from .memory_cap import MemoryCap, MemoryCapPolicy, format_bytes, looks_like_allocation_failure
+from .memory_cap import (
+    MemoryCap,
+    MemoryCapError,
+    MemoryCapPolicy,
+    address_space_limit,
+    blas_threads,
+    failure_reason,
+    format_bytes,
+    pin_blas_threads,
+)
 from .pipeline import Stage, run_pipeline
 from .problems import LabProblem
 from .reference_integrity import verify_reference_source
@@ -179,11 +188,15 @@ class RunTarget:
         )
 
 
-def _worker_env() -> dict[str, str]:
+def _worker_env(threads: int | None = None) -> dict[str, str]:
+    """The worker's environment; ``threads`` pins the BLAS thread count (memory cap)."""
+
     env = dict(os.environ)
     paths = [entry for entry in sys.path if entry and os.path.isdir(entry)]
     env["PYTHONPATH"] = os.pathsep.join(paths)
     env.setdefault("PYTHONDONTWRITEBYTECODE", "1")
+    if threads is not None:
+        pin_blas_threads(env, threads)
     return env
 
 
@@ -285,7 +298,12 @@ def run_plan(
         scoped_assets_of = getattr(algorithm, "asset_sha256s_for_input", None)
         identity_parameters = getattr(algorithm, "identity_parameters", None)
         identity_tools = getattr(algorithm, "identity_tools", None)
-        worker_env = _worker_env()
+        cap: MemoryCap | None = memory_cap.for_algorithm(algorithm.id) if memory_cap is not None else None
+        threads = blas_threads(algorithm) if cap is not None and cap.bytes is not None else None
+        worker_env = _worker_env(threads)
+        effective_threads = pin_blas_threads(dict(worker_env), threads) if threads is not None else None
+        rlimit_bytes = (address_space_limit(cap.bytes, effective_threads)
+                        if cap is not None and cap.bytes is not None and effective_threads is not None else None)
         # A platform skip consumes no live toolchain.  Dynamic tool probes may
         # launch processes or hash binaries, so use an explicit static skip pin
         # when an algorithm declares one.  Static algorithms keep their prior
@@ -445,10 +463,11 @@ def run_plan(
         # Ready: run it in a worker process group.
         if lock is not None:
             lock.set_step(step)
-        cap: MemoryCap | None = memory_cap.for_algorithm(algorithm.id) if memory_cap is not None else None
         log.append(
             "step_start", step=step, parameters_sha256=identity,
             **(cap.log_fields() if cap is not None else {}),
+            **({"memory_rlimit_bytes": rlimit_bytes, "blas_threads": effective_threads}
+               if cap is not None and cap.bytes is not None else {}),
         )
         if progress:
             progress(f"{step:<24} running{' (upstream)' if item.upstream_only else ''}")
@@ -461,17 +480,29 @@ def run_plan(
                 {"entry": entries[algorithm.id], "context": context_to_json(ctx), "out_dir": str(scratch)}
             )
         )
+        outcome = None
         try:
-            outcome = run_pipeline(
-                [Stage("worker", [sys.executable, "-m", "traceback_lab.worker", str(request)])],
-                timeout_s=timeout_s,
-                env=worker_env,
-                cwd=scratch,
-                echo=echo,
-                disk_path=scratch,
-                memory_cap_bytes=cap.bytes if cap is not None else None,
-            )
-            if outcome.ok:
+            try:
+                outcome = run_pipeline(
+                    [Stage("worker", [sys.executable, "-m", "traceback_lab.worker", str(request)])],
+                    timeout_s=timeout_s,
+                    env=worker_env,
+                    cwd=scratch,
+                    echo=echo,
+                    disk_path=scratch,
+                    memory_cap_bytes=cap.bytes if cap is not None else None,
+                    memory_rlimit_bytes=rlimit_bytes,
+                )
+            except MemoryCapError as exc:
+                # The child never ran: no dangling step, the step fails under its cap.
+                assert cap is not None and cap.bytes is not None
+                result = _publish_failure(
+                    store, algorithm, target, identity, item, log, step,
+                    first_line=scrubber.line(f"memory cap could not be applied ({format_bytes(cap.bytes)}): {exc}"),
+                    tail=[], exit_code=None, timed_out=False, duration_s=0.0,
+                    peak_rss=None, peak_disk=None, reason="memory", memory_cap_bytes=cap.bytes,
+                )
+            if outcome is not None and outcome.ok:
                 try:
                     produced = json.loads((scratch / "output.json").read_bytes())
                     if not isinstance(produced, dict):
@@ -559,14 +590,16 @@ def run_plan(
                     )
                     if run_skip is None:
                         _after_ok(store, target, algorithm, identity, result, envelope)
-            else:
+            elif outcome is not None:
                 stage = outcome.stages[0]
                 tail = stage.stderr.scrubbed(scrubber, last=50)
                 lines = [line for line in tail if line.strip()]
-                capped = cap is not None and cap.bytes is not None
-                memory_killed = capped and (
-                    outcome.memory_exceeded or looks_like_allocation_failure(stage.returncode, tail)
+                reason = failure_reason(
+                    capped=cap is not None and cap.bytes is not None,
+                    memory_exceeded=outcome.memory_exceeded, timed_out=outcome.timed_out,
+                    exit_code=stage.returncode, stderr_tail=tail,
                 )
+                memory_killed = reason == "memory"
                 if outcome.timed_out:
                     first = "timed out"
                 elif memory_killed:
@@ -581,7 +614,7 @@ def run_plan(
                     peak_rss=outcome.peak_rss_bytes,
                     peak_tree_rss=outcome.sampled_tree_peak_rss_bytes,
                     peak_disk=outcome.peak_disk_bytes,
-                    reason="memory" if memory_killed else None,
+                    reason=reason,
                     memory_cap_bytes=cap.bytes if memory_killed and cap is not None else None,
                 )
         finally:
