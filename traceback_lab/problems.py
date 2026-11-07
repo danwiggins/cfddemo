@@ -77,6 +77,7 @@ PROBLEMS: dict[str, ProblemSpec] = {
         EXIT_BLOCKED, "The requested loopback port cannot be bound", retryable=True
     ),
     "TBX-LAB-027": ProblemSpec(EXIT_BLOCKED, "Garbage collection could not remove an item", retryable=True),
+    "TBX-LAB-032": ProblemSpec(EXIT_PARTIAL, "A setup step failed", retryable=True),
 }
 
 

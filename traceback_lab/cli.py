@@ -87,6 +87,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     add_doctor_parser(commands, _common)
 
+    from .setup_command import add_setup_parser
+
+    add_setup_parser(commands, _common)
+
     from .serve_command import add_serve_parser
 
     add_serve_parser(commands, _common)

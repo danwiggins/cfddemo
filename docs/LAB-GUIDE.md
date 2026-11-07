@@ -37,6 +37,53 @@ M-series Mac. Copy-number is skipped (`example_reference`): it needs
 hg38-scale assets. The sample carries an **EXAMPLE (synthetic)** pill.
 `lab serve --open` prints the one-use link and opens it.
 
+### Setup in one command
+
+```
+traceback lab setup [--yes] [--only STEP,...] [--json] [--root R]
+```
+
+`lab setup` runs the steps `lab doctor` lists, in doctor's order, and prints
+the exact command before each one. It is not part of the journey block above
+because it can download things. Every step ends in one state, printed as
+`STEP <name> <state> <reason>`:
+
+| State | Meaning |
+|---|---|
+| `ok` | the step ran and succeeded |
+| `skipped` | nothing to run: a manual step (`brew install`, free disk, `git pull`), a `--only` name doctor already passes, or a step whose prerequisite in this run did not end `ok` (`ichor_assets` after a refused `ichor_toolchain`) |
+| `needs_input` | the fix needs a path doctor cannot know; the template is printed with its placeholder and nothing is guessed |
+| `refused` | a download or licence-bearing step was not confirmed |
+| `failed` | the step ran and did not succeed ([TBX-LAB-032](#tbx-lab-032)); later steps are still attempted |
+
+Steps that download or install a licence-bearing asset print the FLAG line
+below first and need a per-step confirmation: `y` at the prompt on a TTY, or
+`--yes` for a non-interactive run (without it they are `refused`). Steps that
+only compute locally run without a prompt: building the minimap2 index
+(`mmi`, hg38: ~20-40 min and ~8 GB), registering an already installed
+toolchain's assets (`ichor_assets`), removing orphaned staging (`staging`).
+`--only mmi,staging` limits the run to those doctor check names.
+
+| Step (doctor check) | Kind | FLAG line printed before it |
+|---|---|---|
+| `reference` | needs_input (`hg38.fa`) | OPERATOR-SUPPLIED REFERENCE: the hg38 FASTA is never downloaded by the Lab; obtain it through your approved local process and check its data terms |
+| `ichor_toolchain` | download (`traceback toolchain install ichor --yes`) | GPL/AGPL COPYLEFT: ichorCNA (R 4.4, HMMcopy, readCounter) is downloaded into the per-user toolchain cache (needs the network, about 3 GB) and runs as a separate process |
+| `loyfer_assets` | needs_input (`LOYFER_DIR`) | ATLAS DATA-USE TERMS UNKNOWN: Loyfer atlas; RESEARCH-ONLY: Loyfer UXM (Yissum); the atlas directory is operator-supplied and never downloaded |
+| `pmd_asset` | needs_input (`YOUR_LOCAL_PMD_coordinates_hg38.bed.gz`) | DATA TERMS UNKNOWN: Zhou 2018 PMD annotation; the BED.gz is operator-supplied and never downloaded |
+
+A host path is never auto-filled: the operator replaces the placeholder and
+runs the printed template. `lab setup` is a writer: it holds the Lab writer
+lock for the whole run (TBX-LAB-012 while `lab run`, `simulate`, `cohort`,
+`gc --apply` or a registration holds it) and writes one `setup` run to the run
+log. The output ends with the re-run `DOCTOR` summary and how many steps
+doctor still lists. Exit 0 when every runnable step ended `ok` (manual steps
+never change the exit code; read the `DOCTOR` line); exit 8 when any step
+failed, needs input or was refused; exit 3 on the lock. `--json` carries the
+per-step list under `data.steps` (`name`, `kind`, `status`, `reason`,
+`command` with `<ROOT>` as a token, `flag`, `exit_code`, `stderr_tail`), the
+`counts` by state and `doctor_before` / `doctor_after` summaries; no host
+path beyond `data.root`.
+
 If an already-open Lab page says there are no runs, use the ROOT printed by
 the serving process for `lab doctor --root R` and `lab run --example --root R`.
 Reload the page after the example completes. Its landing starts with an
@@ -85,7 +132,9 @@ before interpreting any exploratory pattern.
 3. For copy-number: `uv run traceback toolchain install ichor`, then
    `uv run traceback method-asset register --from-toolchain copy-number --root R`.
 4. `uv run traceback lab doctor --root R` shows setup checks and recovery commands;
-   inspect readiness for the methods you intend to run. Other methods have
+   `uv run traceback lab setup --root R` runs the ones it can (see
+   [Setup in one command](#setup-in-one-command)); inspect readiness for the
+   methods you intend to run. Other methods have
    additional optional tools, assets, or input-scoped calibrations below.
 
 Before running a real chunk directory, confirm the platform, basecall and
@@ -138,6 +187,7 @@ traceback lab simulate cna <id12|latest> [--tf 0.03,0.10,0.30] [--cohort ID] [--
 traceback lab simulate split <id12|latest> [--cohort ID] [--verbose]                         split-half pseudo-replicate
 traceback lab algorithms [--json]          registered algorithms (id, tier, min depth, licenses, footnote)
 traceback lab doctor [--json]              setup checks, each with a fix command
+traceback lab setup [--yes] [--only STEP,...] [--json]   run the steps doctor lists; asks before each download
 traceback lab serve [--open] [--port N]    the local page (loopback only)
 traceback lab runs [RUN_ID] [--step S]     the run log, or one run's steps
 traceback lab gc [--apply] [--keep-attempts N] [--staging-only] [--json]   stale failed attempts and orphaned staging; dry-run unless --apply
@@ -1429,6 +1479,19 @@ ownership and permissions under `ROOT/lab`, then rerun the command the
 `FIX` line gives: it repeats your own scope (`--staging-only`, a non-default
 `--keep-attempts N`) with `--root <ROOT>`, so a rerun never prunes more than
 the refused run would have.
+### TBX-LAB-032
+
+A `traceback lab setup` step ran and did not succeed (exit 8, retryable).
+The output lists every step's state, then `FAILED <step> <reason>` with the
+scrubbed tail of that step's stderr (its stdout when stderr was empty;
+`ROOT` as `<ROOT>`, other paths as `<path>`), then the problem block. Later
+steps were still attempted; the cause names how many failed and the first
+one. `data` carries `steps`, `failed` (the step names) and each failed
+step's `exit_code` and `stderr_tail`. Fix the cause the tail shows (a
+toolchain install needs the network and micromamba; the index build needs
+minimap2 and free disk), then rerun `traceback lab setup --root <ROOT>`:
+steps doctor now passes are not listed again, so nothing that ended `ok` is
+rerun.
 
 ## Adding an algorithm
 
@@ -1447,6 +1510,9 @@ the refused run would have.
 
 ## Changes
 
+- 2026-11-07: `lab setup` runs the steps `lab doctor` lists (per-step
+  confirmation before downloads, templates for operator-supplied paths,
+  `--only`, `--yes`); TBX-LAB-032.
 - 2026-11-06: `lab serve --port N` binds a fixed loopback port; TBX-LAB-026.
 - 2026-11-06: `lab gc` (dry-run by default; `--apply` deletes stale failed
   attempts, orphaned staging and interrupted removals; `--staging-only`;
