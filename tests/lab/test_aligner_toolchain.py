@@ -62,10 +62,13 @@ def fake_release(tmp_path: Path) -> dict[str, object]:
         ("minimap2", "2.28", "2.28-r1209", MINIMAP2),
     ):
         archive = releases / f"{tool}-{version}.tar.bz2"
-        digest = _tarball(archive, {f"{tool}-{version}/{tool}": _script(line, real)})
+        body = _script(line, real)
+        digest = _tarball(archive, {f"{tool}-{version}/{tool}": body})
         url = f"https://example.invalid/{tool}-{version}.tar.bz2"
         sources[url] = archive
-        pins.append(at.AlignerPin(tool, version, url, digest, "prebuilt", f"{tool}-{version}/{tool}"))
+        # Like the real pins: only minimap2's release binary digest is pinned.
+        binary = hashlib.sha256(body).hexdigest() if tool == "minimap2" else None
+        pins.append(at.AlignerPin(tool, version, url, digest, "prebuilt", f"{tool}-{version}/{tool}", binary))
 
     def downloader(url: str, destination: Path) -> None:
         shutil.copyfile(sources[url], destination)
@@ -82,6 +85,16 @@ def pinned_host(monkeypatch, tmp_path: Path, fake_release) -> Path:
     monkeypatch.setattr(at, "toolchain_cache_root", lambda: cache)
     monkeypatch.setitem(at.ALIGNER_PINS, FAKE_PLATFORM, fake_release["pins"])
     return cache
+
+
+def _replant(store: at.PinnedAligners, tool: str, body: bytes) -> None:
+    """Replace one store binary AND rewrite the receipt to match it (a consistent plant)."""
+
+    binary = store.prefix / "bin" / tool
+    binary.write_bytes(body)
+    receipt = json.loads((store.prefix / at.RECEIPT_NAME).read_bytes())
+    receipt["tools"][tool]["installed_binary_sha256"] = hashlib.sha256(body).hexdigest()
+    (store.prefix / at.RECEIPT_NAME).write_text(json.dumps(receipt))
 
 
 def _install(fake_release, cache: Path) -> at.PinnedAligners:
@@ -103,6 +116,7 @@ def test_linux_pins_are_the_ci_workflow_urls_and_digests() -> None:
         "samtools": "1.21", "minimap2": "2.28",
     }
     assert "osx-arm64" not in at.ALIGNER_PINS  # no upstream macOS release artefact
+    assert at.MINIMAP2_LINUX.binary_sha256 and at.SAMTOOLS_LINUX.binary_sha256 is None
 
 
 # -- install ------------------------------------------------------------------------------
@@ -217,7 +231,106 @@ def test_a_damaged_store_is_tbx_lab_033_never_path(pinned_host, fake_release, da
     assert caught.value.code == "TBX-LAB-033"
     assert caught.value.exit_code == 3
     assert "traceback toolchain install aligners --yes" in caught.value.fix
+    assert f"remove {pinned_host / 'aligners-*'}" in caught.value.fix
     assert str(pinned_host) not in json.dumps(caught.value.data)
+
+
+def test_a_consistently_planted_minimap2_is_refused_by_its_pin(pinned_host, fake_release) -> None:
+    store = _install(fake_release, pinned_host)
+    _replant(store, "minimap2", _script("2.28-r1209", MINIMAP2) + b"# planted\n")
+    with pytest.raises(LabProblem) as caught:
+        resolve_aligner_tools()
+    assert caught.value.code == "TBX-LAB-033" and "pinned release binary" in caught.value.cause
+
+
+@pytest.mark.parametrize("where", ["cache_root", "prefix", "bin", "binary", "receipt"])
+def test_a_store_others_can_write_is_tbx_lab_033(pinned_host, fake_release, where) -> None:
+    store = _install(fake_release, pinned_host)
+    target = {
+        "cache_root": pinned_host, "prefix": store.prefix, "bin": store.prefix / "bin",
+        "binary": store.prefix / "bin" / "samtools", "receipt": store.prefix / at.RECEIPT_NAME,
+    }[where]
+    target.chmod(target.stat().st_mode | 0o020)
+    with pytest.raises(LabProblem) as caught:
+        resolve_aligner_tools()
+    assert caught.value.code == "TBX-LAB-033" and "writable by group or other" in caught.value.cause
+
+
+def test_a_store_owned_by_another_user_is_tbx_lab_033(pinned_host, fake_release, monkeypatch) -> None:
+    _install(fake_release, pinned_host)
+    monkeypatch.setattr(at, "_current_uid", lambda: 4242424)
+    with pytest.raises(LabProblem) as caught:
+        resolve_aligner_tools()
+    assert caught.value.code == "TBX-LAB-033" and "not owned by this user" in caught.value.cause
+
+
+def test_an_unreadable_store_is_tbx_lab_033(pinned_host, fake_release, monkeypatch) -> None:
+    store = _install(fake_release, pinned_host)
+    real = Path.is_symlink
+
+    def denied(self):
+        if self == store.prefix:
+            raise PermissionError(13, "denied")
+        return real(self)
+
+    monkeypatch.setattr(Path, "is_symlink", denied)
+    with pytest.raises(LabProblem) as caught:
+        resolve_aligner_tools()
+    assert caught.value.code == "TBX-LAB-033" and "PermissionError" in caught.value.cause
+
+
+def test_install_refuses_a_shared_cache_root(tmp_path, fake_release) -> None:
+    cache = tmp_path / "toolchains"
+    cache.mkdir(mode=0o700)
+    cache.chmod(0o777)
+    with pytest.raises(LabProblem) as caught:
+        at.install_aligners(
+            fake_release["pins"], cache_root=cache, platform_name=FAKE_PLATFORM, downloader=fake_release["downloader"]
+        )
+    assert caught.value.code == "TBX-LAB-033"
+    assert not at.store_prefix(fake_release["pins"], cache).exists()
+
+
+def test_install_maps_a_cache_write_failure_to_a_tool_problem(tmp_path, fake_release, monkeypatch) -> None:
+    def no_mkdtemp(*args, **kwargs):
+        raise PermissionError(13, "denied")
+
+    monkeypatch.setattr(at.tempfile, "mkdtemp", no_mkdtemp)
+    with pytest.raises(ToolProblem) as caught:
+        at.install_aligners(
+            fake_release["pins"], cache_root=tmp_path / "toolchains", platform_name=FAKE_PLATFORM,
+            downloader=fake_release["downloader"],
+        )
+    assert "PermissionError" in caught.value.cause
+
+
+def test_a_failed_reinstall_keeps_the_old_store_and_a_good_one_swaps_it(pinned_host, fake_release) -> None:
+    store = _install(fake_release, pinned_host)
+    (store.prefix / "bin" / "minimap2").write_bytes(b"#!/bin/sh\n")  # damaged
+
+    def offline(url: str, destination: Path) -> None:
+        raise OSError("offline")
+
+    with pytest.raises(ToolProblem):
+        at.install_aligners(fake_release["pins"], cache_root=pinned_host, platform_name=FAKE_PLATFORM, downloader=offline)
+    assert (store.prefix / "bin" / "minimap2").read_bytes() == b"#!/bin/sh\n"  # not rmtree'd first
+    again, installed = at.install_aligners(
+        fake_release["pins"], cache_root=pinned_host, platform_name=FAKE_PLATFORM,
+        downloader=fake_release["downloader"],
+    )
+    assert installed and again.prefix == store.prefix
+    assert resolve_aligner_tools()[1].provenance == PINNED
+    assert not [p for p in pinned_host.iterdir() if p.name.startswith(".")]  # no staging or retired dirs
+
+
+def test_doctor_runs_the_pinned_binaries(pinned_host, fake_release, tmp_path) -> None:
+    store = _install(fake_release, pinned_host)
+    # Digest-consistent but cannot run (as with a missing shared library).
+    _replant(store, "samtools", b"#!/bin/sh\nexit 127\n")
+    assert resolve_aligner_tools()[0].provenance == PINNED  # resolution executes nothing
+    check = _provenance_check(LabStore(tmp_path / "root"))
+    assert check["status"] == "blocked" and check["detail"].startswith("TBX-LAB-033: ")
+    assert "does not run" in check["detail"]
 
 
 # -- identity -----------------------------------------------------------------------------
@@ -353,6 +466,7 @@ def test_lab_run_records_provenance_and_keeps_existing_input_ids(
     manifest = json.loads((lab.inputs_dir / pinned_id / "manifest.json").read_bytes())
     assert manifest["tool_provenance"]["provenance"] == PINNED
     assert manifest["tool_provenance"]["minimap2"]["pin_sha256"] == fake_release["pins"][1].tarball_sha256
+    assert manifest["tool_provenance"]["minimap2"]["installed_binary_sha256"] == fake_release["pins"][1].binary_sha256
     event = _aligner_event(root, pinned)
     assert event["provenance"] == PINNED
     for log in (root / "lab" / "runs").glob("*.jsonl"):

@@ -32,6 +32,8 @@ class Tool:
     # release tarball digest.  ``unpinned``: whatever ``PATH`` resolved.
     provenance: str = UNPINNED
     pin_sha256: str | None = None
+    # The installed binary's sha256 (pinned only): provenance, not identity.
+    binary_sha256: str | None = None
 
     @property
     def numeric(self) -> tuple[int, int] | None:
@@ -64,16 +66,17 @@ def find_minimap2() -> Tool:
     return Tool("minimap2", path, version)
 
 
-def resolve_aligner_tools() -> tuple[Tool, Tool]:
+def resolve_aligner_tools(*, probe: bool = False) -> tuple[Tool, Tool]:
     """samtools and minimap2 from the verified pinned store, else ``PATH``.
 
     A store that is present but does not verify is TBX-LAB-033.  Reads the
-    cache and hashes files only: never the network.
+    cache and hashes files only: never the network.  ``probe`` (doctor) also
+    runs the pinned binaries' ``--version``.
     """
 
     from .aligner_toolchain import resolve_aligners
 
-    return resolve_aligners()
+    return resolve_aligners(probe=probe)
 
 
 def provenance_of(samtools: Tool, minimap2: Tool) -> str:
@@ -97,7 +100,12 @@ def aligner_provenance(samtools: Tool, minimap2: Tool) -> dict[str, object]:
     return {
         "provenance": provenance_of(samtools, minimap2),
         **{
-            tool.name: {"version": tool.version, "provenance": tool.provenance, "pin_sha256": tool.pin_sha256}
+            tool.name: {
+                "version": tool.version,
+                "provenance": getattr(tool, "provenance", UNPINNED),
+                "pin_sha256": getattr(tool, "pin_sha256", None),
+                "installed_binary_sha256": getattr(tool, "binary_sha256", None),
+            }
             for tool in (samtools, minimap2)
         },
     }

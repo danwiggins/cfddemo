@@ -73,6 +73,9 @@ class AlignerPin:
     # prebuilt: the binary's path inside the extracted tarball.
     # source: the extracted source directory; the build installs bin/<tool>.
     member: str
+    # The extracted binary's sha256 when the release ships one (prebuilt).
+    # A source build's bytes depend on the compiler, so it has none.
+    binary_sha256: str | None = None
 
     @property
     def archive_name(self) -> str:
@@ -96,6 +99,7 @@ MINIMAP2_LINUX = AlignerPin(
     tarball_sha256="51f2cf0e486d0f9f88ace1aa58fdc56571382a676ea0889ae607301c60693377",
     kind="prebuilt",
     member="minimap2-2.28_x64-linux/minimap2",
+    binary_sha256="56e910107685c2448c5b673e094098bfdf70472bfa46f0b38c617edb8438e0dd",
 )
 # No official macOS release artefact exists for either tool (minimap2 ships a
 # Linux x86-64 binary only; Homebrew bottles are Homebrew's, not upstream's),
@@ -170,16 +174,38 @@ def tool_pins(pins: Sequence[AlignerPin]) -> dict[str, str]:
     return {pin.tool: pin.tarball_sha256 for pin in pins}
 
 
-def _broken(cause: str, *, data: dict[str, Any] | None = None):
+def _broken(cause: str, *, cache_root: Path | None = None, data: dict[str, Any] | None = None):
     from .problems import LabProblem
 
+    root = cache_root if cache_root is not None else toolchain_cache_root()
     return LabProblem(
         "TBX-LAB-033",
         cause=cause,
         fix="Run `traceback toolchain install aligners --yes` (replaces the damaged store), "
-        "or remove ~/.cache/traceback/toolchains/aligners-* to fall back to PATH",
+        f"or remove {root / 'aligners-*'} to fall back to PATH",
         data={"store": "aligners", **(data or {})},
     )
+
+
+def _current_uid() -> int:
+    return os.getuid()
+
+
+def _require_private(path: Path, what: str, cache_root: Path) -> None:
+    """Refuse a store path another account could have written (TBX-LAB-033).
+
+    The receipt only proves the store is self-consistent; this proves that
+    only this user could have put it there.
+    """
+
+    try:
+        info = path.lstat()
+    except OSError as exc:
+        raise _broken(f"the {what} could not be inspected ({type(exc).__name__})", cache_root=cache_root) from None
+    if info.st_uid != _current_uid():
+        raise _broken(f"the {what} is not owned by this user", cache_root=cache_root, data={"refused": what})
+    if info.st_mode & 0o022:
+        raise _broken(f"the {what} is writable by group or other", cache_root=cache_root, data={"refused": what})
 
 
 def resolve_pinned_aligners(
@@ -187,46 +213,83 @@ def resolve_pinned_aligners(
     pins: Sequence[AlignerPin] | None = None,
     platform_name: str | None = None,
     cache_root: Path | None = None,
+    probe: bool = False,
 ) -> PinnedAligners | None:
     """The verified store, ``None`` when there is none, TBX-LAB-033 when damaged.
 
-    Verification re-hashes both binaries against the receipt and checks the
-    receipt names exactly this pin set; nothing is executed.
+    Verification checks that this user owns the cache root, the store and
+    its files and that no group/other can write them; that the receipt names
+    exactly this pin set; that each binary's sha256 matches the receipt and,
+    where the release fixes it (minimap2), the pin.  ``probe`` (``lab
+    doctor``) also runs each binary's ``--version``, which catches a missing
+    shared library; resolution alone executes nothing.
     """
 
     if pins is None:
         pins = pins_for(platform_name)
         if pins is None:
             return None
-    prefix = store_prefix(pins, cache_root)
-    if prefix.is_symlink():
-        raise _broken("the aligner store directory is a symlink")
-    if not prefix.exists():
-        return None
+    root = cache_root if cache_root is not None else toolchain_cache_root()
+    prefix = store_prefix(pins, root)
+    try:
+        if prefix.is_symlink():
+            raise _broken("the aligner store directory is a symlink", cache_root=root)
+        if not prefix.exists():
+            return None
+    except OSError as exc:
+        raise _broken(f"the aligner store could not be inspected ({type(exc).__name__})", cache_root=root) from None
+    _require_private(root, "toolchain cache directory", root)
+    _require_private(prefix, "aligner store directory", root)
     receipt_path = prefix / RECEIPT_NAME
     try:
         receipt = AlignerReceipt.model_validate_json(receipt_path.read_bytes())
     except FileNotFoundError:
-        raise _broken("the aligner store exists but its install receipt is missing (interrupted install?)") from None
+        raise _broken(
+            "the aligner store exists but its install receipt is missing (interrupted install?)", cache_root=root
+        ) from None
     except (OSError, ValueError, ValidationError):
-        raise _broken("the aligner store's install receipt is unreadable or malformed") from None
+        raise _broken("the aligner store's install receipt is unreadable or malformed", cache_root=root) from None
+    _require_private(receipt_path, "aligner store receipt", root)
     expected = pinset_sha256(pins)
     if receipt.pinset_sha256 != expected or set(receipt.tools) != {pin.tool for pin in pins}:
-        raise _broken("the aligner store's receipt names another pin set", data={"expected_pinset_sha256": expected})
+        raise _broken(
+            "the aligner store's receipt names another pin set", cache_root=root,
+            data={"expected_pinset_sha256": expected},
+        )
     tools: dict[str, Tool] = {}
     for pin in pins:
         entry = receipt.tools[pin.tool]
+        data = {"tool": pin.tool}
         if entry.tarball_sha256 != pin.tarball_sha256 or entry.version != pin.version:
-            raise _broken(f"the receipt's {pin.tool} entry is not the pinned release", data={"tool": pin.tool})
-        binary = prefix / entry.binary_relpath
-        if binary.is_symlink() or not binary.is_file() or not os.access(binary, os.X_OK):
-            raise _broken(f"the pinned {pin.tool} binary is missing or not executable", data={"tool": pin.tool})
-        if sha256_file(binary) != entry.installed_binary_sha256:
+            raise _broken(f"the receipt's {pin.tool} entry is not the pinned release", cache_root=root, data=data)
+        if pin.binary_sha256 is not None and entry.installed_binary_sha256 != pin.binary_sha256:
             raise _broken(
-                f"the pinned {pin.tool} binary's sha256 differs from its install receipt", data={"tool": pin.tool}
+                f"the receipt's {pin.tool} binary sha256 is not the pinned release binary", cache_root=root, data=data
+            )
+        binary = prefix / entry.binary_relpath
+        try:
+            if binary.is_symlink() or not binary.is_file() or not os.access(binary, os.X_OK):
+                raise _broken(f"the pinned {pin.tool} binary is missing or not executable", cache_root=root, data=data)
+            _require_private(binary.parent, "aligner store bin directory", root)
+            _require_private(binary, f"pinned {pin.tool} binary", root)
+            digest = sha256_file(binary)
+        except OSError as exc:
+            raise _broken(
+                f"the pinned {pin.tool} binary could not be read ({type(exc).__name__})", cache_root=root, data=data
+            ) from None
+        if digest != entry.installed_binary_sha256:
+            raise _broken(
+                f"the pinned {pin.tool} binary's sha256 differs from its install receipt", cache_root=root, data=data
+            )
+        if probe and _version([str(binary), "--version"], _VERSION_PATTERNS[pin.tool]) != entry.reported_version:
+            raise _broken(
+                f"the pinned {pin.tool} binary does not run or report {entry.reported_version} "
+                "(a missing shared library?)",
+                cache_root=root, data=data,
             )
         tools[pin.tool] = Tool(
-            pin.tool, str(binary), entry.reported_version, provenance=PINNED, pin_sha256=pin.tarball_sha256
+            pin.tool, str(binary), entry.reported_version, provenance=PINNED, pin_sha256=pin.tarball_sha256,
+            binary_sha256=digest,
         )
     return PinnedAligners(tools["samtools"], tools["minimap2"], prefix, receipt)
 
@@ -235,12 +298,13 @@ def resolve_aligners(
     *,
     platform_name: str | None = None,
     cache_root: Path | None = None,
+    probe: bool = False,
 ) -> tuple[Tool, Tool]:
     """samtools and minimap2: the verified store first, else ``PATH`` (unpinned)."""
 
     from .tools import find_minimap2, find_samtools
 
-    pinned = resolve_pinned_aligners(platform_name=platform_name, cache_root=cache_root)
+    pinned = resolve_pinned_aligners(platform_name=platform_name, cache_root=cache_root, probe=probe)
     if pinned is not None:
         return pinned.samtools, pinned.minimap2
     return find_samtools(), find_minimap2()
@@ -260,10 +324,27 @@ def _problem(reason: str, summary: str, *, tool: str, cause: str, fix: str) -> T
     return ToolProblem(reason, summary, tool=tool, cause=cause, fix=fix)
 
 
+def _safe_members(tar: tarfile.TarFile) -> list[tarfile.TarInfo]:
+    """Regular files and directories under the extraction root only."""
+
+    members = []
+    for member in tar.getmembers():
+        parts = Path(member.name).parts
+        if member.name.startswith("/") or ".." in parts or not (member.isfile() or member.isdir()):
+            raise ValueError("unsafe tar member")
+        member.mode &= 0o755
+        members.append(member)
+    return members
+
+
 def _extract(archive: Path, into: Path, pin: AlignerPin) -> None:
     try:
         with tarfile.open(archive, "r:bz2") as tar:
-            tar.extractall(into, filter="data")  # noqa: S202 - digest-verified release tarball, data filter
+            members = _safe_members(tar)
+            if hasattr(tarfile, "data_filter"):  # Python >= 3.11.4
+                tar.extractall(into, members=members, filter="data")  # noqa: S202 - checked members
+            else:  # pragma: no cover - older 3.11 patch releases
+                tar.extractall(into, members=members)  # noqa: S202 - checked members
     except (tarfile.TarError, OSError, ValueError) as exc:
         raise _problem(
             TOOL_WRONG,
@@ -324,6 +405,82 @@ def _reported_version(pin: AlignerPin, binary: Path) -> str:
     return version
 
 
+def _install_io_problem(exc: OSError, what: str) -> ToolProblem:
+    return _problem(
+        TOOL_MISSING,
+        "The aligner install could not write the toolchain cache",
+        tool="aligners",
+        cause=f"{what} failed ({type(exc).__name__}, errno {exc.errno})",
+        fix="Check ownership and free space of the toolchain cache; if another "
+        "`traceback toolchain install aligners` is running, wait for it, then run the install again",
+    )
+
+
+def _stage_tool(pin: AlignerPin, staging: Path, src: Path, *, downloader: Downloader, runner: Runner,
+                log: Any, timeout: float) -> InstalledAligner:
+    archive = src / pin.archive_name
+    try:
+        downloader(pin.url, archive)
+    except Exception as exc:  # noqa: BLE001 - any transport failure is "missing, retryable"
+        raise _problem(
+            TOOL_MISSING,
+            f"Downloading {pin.tool} {pin.version} failed",
+            tool=pin.tool,
+            cause=f"{pin.archive_name} could not be fetched ({type(exc).__name__})",
+            fix="Check the network, then run the install again",
+        ) from exc
+    digest = sha256_file(archive)
+    if digest != pin.tarball_sha256:
+        raise _problem(
+            TOOL_WRONG,
+            f"The downloaded {pin.tool} release does not match its pinned digest",
+            tool=pin.tool,
+            cause=f"{pin.archive_name} sha256 {digest[:12]}… differs from the pinned {pin.tarball_sha256[:12]}…",
+            fix="Nothing was installed. Check the network path (proxy, mirror), then run the install again",
+        )
+    _extract(archive, src, pin)
+    binary = staging / "bin" / pin.tool
+    if pin.kind == "prebuilt":
+        member = src / pin.member
+        if member.is_symlink() or not member.is_file():
+            raise _problem(
+                TOOL_WRONG,
+                f"The {pin.tool} release tarball has no {pin.member}",
+                tool=pin.tool,
+                cause="the digest-verified tarball does not contain the pinned binary path",
+                fix="Run the install again; if it repeats, report the tarball name",
+            )
+        if pin.binary_sha256 is not None and sha256_file(member) != pin.binary_sha256:
+            raise _problem(
+                TOOL_WRONG,
+                f"The {pin.tool} release binary does not match its pinned digest",
+                tool=pin.tool,
+                cause=f"{pin.member} sha256 differs from the pinned {pin.binary_sha256[:12]}…",
+                fix="Nothing was installed. Run the install again; if it repeats, report the tarball name",
+            )
+        shutil.copyfile(member, binary)
+        binary.chmod(0o755)
+    else:
+        _build_source(pin, src / pin.member, staging, runner=runner, log=log, timeout=timeout)
+    if binary.is_symlink() or not binary.is_file() or not os.access(binary, os.X_OK):
+        raise _problem(
+            TOOL_MISSING,
+            f"The {pin.tool} install produced no executable",
+            tool=pin.tool,
+            cause=f"bin/{pin.tool} is missing after the build",
+            fix="See the install log next to the toolchain cache, then run the install again",
+        )
+    binary.chmod(0o755)
+    return InstalledAligner(
+        version=pin.version,
+        url=pin.url,
+        tarball_sha256=pin.tarball_sha256,
+        binary_relpath=f"bin/{pin.tool}",
+        installed_binary_sha256=sha256_file(binary),
+        reported_version=_reported_version(pin, binary),
+    )
+
+
 def install_aligners(
     pins: Sequence[AlignerPin],
     *,
@@ -335,96 +492,72 @@ def install_aligners(
 ) -> tuple[PinnedAligners, bool]:
     """Download, verify, build/extract and publish the store; ``(store, newly_installed)``.
 
-    A verified store is reused.  A prefix that does not verify (partial or
-    damaged) is replaced.  Everything is built under a sibling staging
-    directory and renamed into place after the receipt is written, so an
-    interrupted install never leaves a half store at the prefix.
+    A verified store is reused.  Everything is built under a sibling staging
+    directory; only a complete, receipted staging directory replaces the
+    prefix (the old one is moved aside first and deleted after the swap), so
+    an interrupted or failed install never removes a store or leaves a half
+    one.  A cache root another account could write is refused (TBX-LAB-033).
     """
+
+    from traceback_runner.references import ReferenceProblem
 
     pins = tuple(pins)
     try:
         existing = resolve_pinned_aligners(pins=pins, cache_root=cache_root)
-    except Exception:  # noqa: BLE001 - a damaged store is replaced
+    except ReferenceProblem:  # a damaged store is replaced below
         existing = None
     if existing is not None:
         return existing, False
     prefix = store_prefix(pins, cache_root)
     if prefix.parent != cache_root:
         raise RuntimeError("install prefix escaped the toolchain cache")
-    cache_root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    if prefix.is_symlink():
-        prefix.unlink()
-    elif prefix.exists():
-        shutil.rmtree(prefix)
-    staging = Path(tempfile.mkdtemp(prefix=f".{prefix.name}.staging-", dir=cache_root))
-    log_path = cache_root / f"{prefix.name}.install.log"
     try:
-        (staging / "bin").mkdir()
-        src = staging / "src"
-        src.mkdir()
-        installed: dict[str, InstalledAligner] = {}
-        with log_path.open("wb") as log:
-            for pin in pins:
-                archive = src / pin.archive_name
-                try:
-                    downloader(pin.url, archive)
-                except Exception as exc:  # noqa: BLE001 - any transport failure is "missing, retryable"
-                    raise _problem(
-                        TOOL_MISSING,
-                        f"Downloading {pin.tool} {pin.version} failed",
-                        tool=pin.tool,
-                        cause=f"{pin.archive_name} could not be fetched ({type(exc).__name__})",
-                        fix="Check the network, then run the install again",
-                    ) from exc
-                digest = sha256_file(archive)
-                if digest != pin.tarball_sha256:
-                    raise _problem(
-                        TOOL_WRONG,
-                        f"The downloaded {pin.tool} release does not match its pinned digest",
-                        tool=pin.tool,
-                        cause=f"{pin.archive_name} sha256 {digest[:12]}… differs from the pinned {pin.tarball_sha256[:12]}…",
-                        fix="Nothing was installed. Check the network path (proxy, mirror), then run the install again",
+        cache_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    except OSError as exc:
+        raise _install_io_problem(exc, "creating the toolchain cache") from exc
+    _require_private(cache_root, "toolchain cache directory", cache_root)
+    try:
+        staging = Path(tempfile.mkdtemp(prefix=f".{prefix.name}.staging-", dir=cache_root))
+    except OSError as exc:
+        raise _install_io_problem(exc, "creating the staging directory") from exc
+    log_path = cache_root / f"{prefix.name}.install.log"
+    retired: Path | None = None
+    try:
+        try:
+            (staging / "bin").mkdir(mode=0o755)
+            src = staging / "src"
+            src.mkdir()
+            installed: dict[str, InstalledAligner] = {}
+            with log_path.open("wb") as log:
+                for pin in pins:
+                    installed[pin.tool] = _stage_tool(
+                        pin, staging, src, downloader=downloader, runner=runner, log=log, timeout=timeout
                     )
-                _extract(archive, src, pin)
-                binary = staging / "bin" / pin.tool
-                if pin.kind == "prebuilt":
-                    member = src / pin.member
-                    if member.is_symlink() or not member.is_file():
-                        raise _problem(
-                            TOOL_WRONG,
-                            f"The {pin.tool} release tarball has no {pin.member}",
-                            tool=pin.tool,
-                            cause="the digest-verified tarball does not contain the pinned binary path",
-                            fix="Run the install again; if it repeats, report the tarball name",
-                        )
-                    shutil.copyfile(member, binary)
-                    binary.chmod(0o755)
-                else:
-                    _build_source(pin, src / pin.member, staging, runner=runner, log=log, timeout=timeout)
-                if binary.is_symlink() or not binary.is_file() or not os.access(binary, os.X_OK):
-                    raise _problem(
-                        TOOL_MISSING,
-                        f"The {pin.tool} install produced no executable",
-                        tool=pin.tool,
-                        cause=f"bin/{pin.tool} is missing after the build",
-                        fix="See the install log next to the toolchain cache, then run the install again",
-                    )
-                installed[pin.tool] = InstalledAligner(
-                    version=pin.version,
-                    url=pin.url,
-                    tarball_sha256=pin.tarball_sha256,
-                    binary_relpath=f"bin/{pin.tool}",
-                    installed_binary_sha256=sha256_file(binary),
-                    reported_version=_reported_version(pin, binary),
-                )
-        shutil.rmtree(src, ignore_errors=True)
-        receipt = AlignerReceipt(platform=platform_name, pinset_sha256=pinset_sha256(pins), tools=installed)
-        staged = staging / f".{RECEIPT_NAME}.tmp"
-        staged.write_bytes(receipt.model_dump_json().encode("utf-8"))
-        os.replace(staged, staging / RECEIPT_NAME)
-        os.replace(staging, prefix)
+            shutil.rmtree(src, ignore_errors=True)
+            receipt = AlignerReceipt(platform=platform_name, pinset_sha256=pinset_sha256(pins), tools=installed)
+            staged = staging / f".{RECEIPT_NAME}.tmp"
+            staged.write_bytes(receipt.model_dump_json().encode("utf-8"))
+            os.replace(staged, staging / RECEIPT_NAME)
+            staging.chmod(0o700)
+            if prefix.is_symlink() or prefix.exists():
+                retired = Path(tempfile.mkdtemp(prefix=f".{prefix.name}.old-", dir=cache_root))
+                os.replace(prefix, retired / "store")
+            os.replace(staging, prefix)
+        except OSError as exc:
+            if retired is not None and not prefix.exists() and (retired / "store").exists():
+                os.replace(retired / "store", prefix)  # put the old store back
+            # A concurrent install may have published the same store first.
+            try:
+                raced = resolve_pinned_aligners(pins=pins, cache_root=cache_root)
+            except ReferenceProblem:
+                raced = None
+            if raced is not None:
+                return raced, False
+            raise _install_io_problem(exc, "writing the aligner store") from exc
     finally:
         shutil.rmtree(staging, ignore_errors=True)
+        if retired is not None:
+            shutil.rmtree(retired, ignore_errors=True)
     resolved = resolve_pinned_aligners(pins=pins, cache_root=cache_root)
     if resolved is None:  # pragma: no cover - the rename just happened
         raise RuntimeError("the aligner store vanished after install")
@@ -455,6 +588,7 @@ def main_install(args: Any) -> int:
     """``traceback toolchain install aligners [--yes] [--json]``."""
 
     from traceback_runner.cli import ExitCode, _emit, _problem as _problem_payload, _result
+    from traceback_runner.references import ReferenceProblem
 
     command = "toolchain install"
     as_json = bool(args.as_json)
@@ -524,7 +658,7 @@ def main_install(args: Any) -> int:
         )
         _emit(payload, as_json=as_json)
         return int(ExitCode.OK)
-    except ToolProblem as problem:
+    except ReferenceProblem as problem:  # ToolProblem, or TBX-LAB-033 for an unsafe cache
         _emit(_problem_payload(command, problem), as_json=as_json)
         return int(problem.exit_code)
 

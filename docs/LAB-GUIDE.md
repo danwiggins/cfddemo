@@ -350,11 +350,20 @@ ROOT). Only this command uses the network.
 | not installed, or no pin for this platform | `samtools` / `minimap2` on `PATH` | `unpinned` |
 | present but fails verification | none: refused | TBX-LAB-033 |
 
-Verification re-hashes both binaries against the install receipt; nothing
-is downloaded and a damaged store never falls back to `PATH`. The run log
-records an `aligner_tools` event and the input's `manifest.json` records
-`tool_provenance` (provenance, version and pinned tarball digest per tool;
-never a path). `--dry-run` prints a `TOOLS` line. `lab doctor` shows one
+Verification checks that the cache directory, the store and every file in
+it are owned by you and not writable by group or other (the receipt alone
+only proves the store is self-consistent), that the receipt names exactly
+this pin set, and that each binary's sha256 matches the receipt; minimap2's
+must also equal the pinned release binary digest (samtools is built locally,
+so its binary has no fixed digest). Nothing is downloaded and a store that
+fails any check never falls back to `PATH`. Binaries are verified when the
+Lab resolves them, not again while they run. `lab doctor` additionally runs
+each pinned binary's `--version`, which catches a missing shared library.
+
+The run log records an `aligner_tools` event and the input's
+`manifest.json` records `tool_provenance` (provenance, version, pinned
+tarball digest and installed binary sha256 per tool; never a path).
+`--dry-run` prints a `TOOLS` line. `lab doctor` shows one
 `lab_aligner_provenance` check: pass when pinned, a warning with the install
 command when unpinned on a pinned platform, blocked on TBX-LAB-033.
 
@@ -362,10 +371,14 @@ Identity rule: an unpinned alignment's `input_id` is computed exactly as
 before pinning existed (versions reported by the `PATH` tools, no path), so
 an input aligned earlier keeps its `input_id` while the same versions are on
 `PATH`; a Homebrew upgrade still changes it (TBX-LAB-019). A pinned
-alignment's `input_id` adds the two release tarball digests (`tool_pins`),
-so every machine with the store computes the same `input_id` regardless of
-where the cache lives. Pinned and unpinned alignments of the same versions
-are different inputs: switching to the store realigns once.
+alignment's `input_id` adds the two release tarball digests (`tool_pins`):
+it names the pinned release *sources*, not the built binaries, so every
+machine with the store computes the same `input_id` regardless of where the
+cache lives or how its compiler built samtools. The installed binary sha256
+is recorded in `tool_provenance` only, outside the identity. Pinned and
+unpinned alignments of the same versions are different inputs: switching to
+the store realigns once, without a TBX-LAB-019 warning when the versions
+match (that warning compares versions only).
 
 Only Linux x86-64 is pinned. Neither tool publishes an upstream macOS
 release artefact (minimap2 ships a Linux x86-64 binary; Homebrew bottles are
@@ -1583,13 +1596,18 @@ symlink or a plain file is TBX-LAB-005 instead.
 ### TBX-LAB-033
 
 The pinned aligner store exists under the per-user toolchain cache but does
-not verify (exit 3): its install receipt is missing or malformed (an
-interrupted install), it names another pin set, or a binary is missing, not
-executable or no longer matches its recorded sha256. The Lab refuses rather
+not verify (exit 3): the cache directory, store or one of its files is owned
+by another user or writable by group or other, or cannot be inspected; its
+install receipt is missing or malformed (an interrupted install) or names
+another pin set; a binary is missing, not executable, no longer matches its
+recorded sha256, or (minimap2) is not the pinned release binary; or, in
+`lab doctor`, a pinned binary does not run (a missing shared library). The Lab refuses rather
 than silently aligning with `PATH` tools under a different identity. Run
-`traceback toolchain install aligners --yes` (it replaces the damaged store),
-or remove `~/.cache/traceback/toolchains/aligners-*` to go back to `PATH`
-(`unpinned`).
+`traceback toolchain install aligners --yes` (it builds a new store in
+staging and swaps it in; a failed install leaves the old one in place), or
+remove the `aligners-*` directory the FIX line names to go back to `PATH`
+(`unpinned`). Fix ownership or permissions first (`chmod go-w`) if that is
+the cause; the install refuses a cache directory others can write.
 
 ## Adding an algorithm
 

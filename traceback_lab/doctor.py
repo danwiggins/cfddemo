@@ -61,7 +61,7 @@ def _aligner_checks() -> list[dict[str, Any]]:
 
     install = "traceback toolchain install aligners --yes"
     try:
-        samtools, minimap2 = resolve_aligner_tools()
+        samtools, minimap2 = resolve_aligner_tools(probe=True)
     except LabProblem as problem:
         return [
             _check(
