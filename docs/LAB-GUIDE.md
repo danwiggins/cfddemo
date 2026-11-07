@@ -106,10 +106,14 @@ duration or resource needs for a full kit run.
 ## ROOT
 
 Every Lab command takes `--root R`. Without it the Lab uses
-`$TRACEBACK_ROOT`, else `.traceback` in the current directory (the signed
-default). The first line every command prints is the resolved absolute
-`ROOT  /…`; `--json` carries it as `data.root`. Set `TRACEBACK_ROOT` once so
-commands started in different directories share one store.
+`$TRACEBACK_ROOT`, else `.traceback` in the current directory. The signed CLI
+resolves ROOT identically (`--root`, else `$TRACEBACK_ROOT`, else
+`.traceback`; see [OPERATOR-GUIDE § ROOT](OPERATOR-GUIDE.md#root)), so one
+`TRACEBACK_ROOT` serves both surfaces. The first line every Lab command
+prints is the resolved absolute `ROOT  /…` (the signed CLI prints the same
+line after its status line); `--json` carries it as `data.root`. Set
+`TRACEBACK_ROOT` once so commands started in different directories share one
+store.
 
 Lab data lives under `ROOT/lab/` and never touches signed records:
 
@@ -137,6 +141,7 @@ traceback lab inventory DIR [--recursive] [--report PATH] [--no-hash] [--json]  
 traceback lab doctor [--json]              setup checks, each with a fix command
 traceback lab serve [--open] [--port N]    the local page (loopback only)
 traceback lab runs [RUN_ID] [--step S]     the run log, or one run's steps
+traceback lab gc [--apply] [--keep-attempts N] [--staging-only] [--json]   stale failed attempts and orphaned staging; dry-run unless --apply
 traceback lab identity sites add --file SITES.vcf.gz --sha256 SHA256 --source-label LABEL [--root R]
 traceback lab identity sites inspect [--root R]
 traceback lab identity compare SAMPLE_A SAMPLE_B [--force] [--json] [--root R]
@@ -1254,6 +1259,74 @@ copy-number on each. It measures sampling noise only, not a known answer.
 
 Both take the writer lock and rerun only what is missing.
 
+## Housekeeping
+
+```
+traceback lab gc [--keep-attempts N] [--staging-only] [--json] [--root R]          dry-run: list only
+traceback lab gc --apply [--keep-attempts N] [--staging-only] [--json] [--root R]  delete the listed items
+```
+
+`gc` reclaims bytes the store no longer needs. Without `--apply` it is a dry
+run: it lists every item it would delete, grouped by category, with a byte
+count per item and in total, exits 0 and deletes nothing. A dry run takes no
+lock and may run beside a writer. `--apply` takes the single Lab writer lock
+(TBX-LAB-012 while `lab run`, `simulate`, `cohort` or a registration holds
+it), re-plans under the lock and deletes exactly what it then lists. `--json`
+carries the same plan under `data` (`attempts`, `staging`, `interrupted`,
+`skipped_results`, `pon`, `total`, `held_reason`, and `removed` plus
+`freed_bytes` after `--apply`). Every item has one label form,
+`ROOT/lab`-relative with 64-hex ids shortened to ID12 (for example
+`results/<id12>/<algorithm>/<id12>/attempts/<attempt>`); no host path
+outside ROOT is printed.
+
+Categories:
+
+- **attempts** — failed attempts beyond the newest `--keep-attempts N`
+  (default 3, the store's own retention) per
+  `ROOT/lab/results/<input_id>/<algorithm>/<parameters_sha256>/`. The
+  attempt named by `selected.json` (and its recorded last success) and every
+  `ok` attempt are never candidates. A result directory whose
+  `selected.json` cannot be read or has no recognisable `attempt_id`, or
+  whose attempts cannot be ordered or read, is skipped whole and listed on
+  the `SKIPPED` line (`skipped_results` in JSON) with its reason: unknown
+  never triggers deletion. A result directory with no `selected.json` has no
+  selection (the store reports none and never falls back to the newest
+  attempt), so its failed attempts are ordinary candidates. `--staging-only`
+  skips this category entirely.
+- **staging** — orphaned `.staging-*` directories under `ROOT/lab` (the same
+  set `lab doctor` warns about: inputs, results, cohorts, assets). A dry run
+  leaves them unlisted, with a count, while a live writer heartbeat exists,
+  because that writer may still own them; `--apply` holds the lock, so every
+  remaining `.staging-*` directory is an orphan.
+- **interrupted** — `.staging-gc-<attempt>` directories: an attempt that an
+  earlier `--apply` renamed aside and then could not finish deleting. An
+  attempt is removed in two steps (rename to that sibling, then delete the
+  tree) so the store never sees a half-removed attempt; the store ignores
+  every `.staging-*` name, and a rerun always lists the leftover here.
+- **panels of normals** — not collected. A panel under
+  `ROOT/lab/assets/pon/` is referenced by cohort generations (the full panel
+  and each member's leave-one-out panel), by retained copy-number attempts
+  through their execution plans, and by a pending cohort transaction; the
+  store keeps no index of those references, so `gc` cannot give an
+  unambiguous "unused" answer and leaves every panel in place. The output
+  says so on its `PONS` line.
+
+While a cohort selection transaction is pending
+(`ROOT/lab/pending-cohort-selections.json` exists) every category is held: a
+dry run lists nothing and prints `HELD` with the reason. Every writer,
+`gc --apply` included, replays that transaction under the lock before it may
+change the store (and refuses with TBX-LAB-022 if it cannot), so `--apply`
+plans only after the replay and nothing from an in-flight transaction is ever
+deleted.
+
+Never deleted: aligned or derived inputs under `ROOT/lab/inputs/`, run logs
+under `ROOT/lab/runs/`, any attempt a `selected.json` names, any `ok`
+attempt, `selected.json` itself, cohort rosters and generations, registered
+assets and panels. `--apply` writes one `gc` run to the run log
+(`traceback lab runs`) and reports bytes measured after each deletion, not
+the planned size. A ROOT without a Lab store is TBX-LAB-017; `gc` never
+creates one. An item that cannot be removed is TBX-LAB-027.
+
 ## Exit codes
 
 | Code | Meaning |
@@ -1440,6 +1513,20 @@ different `--port`, stop that process, or omit `--port` for an ephemeral
 port. Without `--port`, no ephemeral loopback port could be bound; check that
 the loopback interface is up and retry. `--json` carries the requested `port`
 (`null` when ephemeral) and the OS `errno` name under `data`.
+### TBX-LAB-027
+
+`traceback lab gc --apply` could not remove one or more listed items (exit 3,
+retryable). The output first shows the apply report (each item marked
+removed or `NOT removed` with the bytes still held), then the problem block.
+The cause names how many were removed, the bytes actually freed and still
+held (measured after the attempt), and the first error; `data` carries the
+`removed` list and each failed item by label with its freed and remaining
+bytes and, for an attempt, the `.staging-gc-*` leftover a rerun will list
+under **interrupted** by that same label. Nothing selected was touched. Check
+ownership and permissions under `ROOT/lab`, then rerun the command the
+`FIX` line gives: it repeats your own scope (`--staging-only`, a non-default
+`--keep-attempts N`) with `--root <ROOT>`, so a rerun never prunes more than
+the refused run would have.
 
 ### TBX-LAB-031
 
@@ -1470,6 +1557,9 @@ symlink or a plain file is TBX-LAB-005 instead.
 
 - 2026-11-06: `lab inventory DIR` checks a chunk set before alignment; TBX-LAB-031.
 - 2026-11-06: `lab serve --port N` binds a fixed loopback port; TBX-LAB-026.
+- 2026-11-06: `lab gc` (dry-run by default; `--apply` deletes stale failed
+  attempts, orphaned staging and interrupted removals; `--staging-only`;
+  panels of normals are not collected); TBX-LAB-027.
 - 2026-10-17: documented the expanded registered catalog, platform-specific
   methods, input-scoped calibrations, and current Lab writer commands.
 - 2026-10-15: first slice: `lab run`, `lab runs`, `lab algorithms`,
