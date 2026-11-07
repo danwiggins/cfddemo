@@ -1,8 +1,8 @@
 # ADR 0002: reference-state labels are a Lab-only surface
 
-- Status: accepted; records an existing state, changes no behaviour
+- Status: accepted; records the existing split between the Lab and the signed surfaces and states, as rules going forward, the requirements marked "(rule)" below; changes no behaviour
 - Date: 2026-11-06
-- Scope: the Lab page's Findings lens versus every other surface
+- Scope: the Lab (`traceback_lab/`: page, CLI prints, exports, cohort names) versus every other surface
 - Line numbers in this ADR refer to this branch after this change (the
   commit that adds this file); see "How the anchors were taken" at the end.
 
@@ -117,11 +117,18 @@ The rule follows the component, not the framing on the page.
   - no biological grouping: operator categories stay the five in
     `traceback_runner/operator.py:21-26`, derived from job state and
     blockers;
-  - no sorting by value: no signed list, view or export orders jobs or
-    records by a measurement, a reference state, a severity, or a tier;
-  - no reference-state wording in exported bundle strings: the export guard
-    (`traceback_runner/export.py:115-119, 141-142`, quoted below) refuses
-    them; that guard, not a source grep, is what covers records and bundles;
+  - no sorting by value (rule): no signed list, view or export orders jobs
+    or records by a measurement, a reference state, a severity, or a tier.
+    No test verifies ordering today; `tests/test_operator.py` pins only the
+    five categories;
+  - no reference-state wording in exported bundle strings (rule): the
+    export guard (`traceback_runner/export.py:115-119, 141-142`, quoted
+    below) refuses `healthy` and `normal` (with `cancer`, `diagnos*`,
+    `disease`, `reassur*`, `screen*`, `treat*`, `clean`); it does NOT match
+    `abnormal` or any of the seven state labels. No check covers those in
+    records or bundles today; extending the guard's word list to the seven
+    labels and `abnormal`, with a test, is the open item recorded under
+    Consequences;
   - no Lab cohort as a signed reference: a Lab cohort generation is an
     exploratory distribution and is never cited by a signed record.
 - Vocabulary in source and guide text (`traceback_runner/` source and
@@ -129,9 +136,10 @@ The rule follows the component, not the framing on the page.
   `above_typical`, `markedly_above`, `below_typical`, `markedly_below`,
   `not_interpretable`, `no_reference`, `healthy`, `abnormal`, `healthy-v1`
   is used as a label in that text. As of this branch, the ten-term grep
-  recorded below found 3 lines, all about the export guard (the guard's own
-  regex and two comments saying "healthy" stays out of record text); no hit
-  is a label in output text. "normal" is not one of the ten terms because
+  recorded below (identifier forms only, `-w`; display forms such as
+  "Markedly above" or "No reference" were not searched) found 3 lines, all
+  about the export guard (the guard's own regex and two comments saying
+  "healthy" stays out of record text); no hit is a label in output text. "normal" is not one of the ten terms because
   it has uses on these surfaces that are not classificatory labels (listed
   below); the export guard still rejects it in exported strings.
 - Demo (`app.py`): personalized output; the `docs/EPICS.md:322` rule and the
@@ -140,6 +148,10 @@ The rule follows the component, not the framing on the page.
 
 ## Consequences
 
+- Open item: extend `_FORBIDDEN_CLAIM` in `traceback_runner/export.py` to
+  `abnormal` and the seven state labels, with a test in
+  `tests/test_bundle_v4.py`, so the bundle guard matches the Boundary's rule.
+  Until then the Boundary's bundle bullet is a rule, not a verified state.
 - Reviewers reading `DESIGN.md:63` against Lab code should not file the
   Findings sort as a violation; reviewers reading it against
   `traceback_runner/operator.py` or the operator site should. Reviewers
@@ -180,8 +192,9 @@ Signed surface:
   asserts a bundle report containing "healthy" is refused.
 - No test scans `traceback_runner/` source, the operator site templates or
   `docs/OPERATOR-GUIDE.md` for the ten-term vocabulary. The grep below is
-  that check, run by hand on this branch; a reviewer applying this ADR to a
-  signed-surface change should rerun it until a test exists.
+  the only check, run by hand on this branch over identifier forms; a
+  reviewer applying this ADR to a signed-surface change should rerun it,
+  and also search the display forms, until a test exists.
 
 Demo:
 
