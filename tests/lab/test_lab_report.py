@@ -588,7 +588,7 @@ def test_current_visible_metric_fixture_and_tenfold_scale() -> None:
         capture_output=True, text=True, check=True,
     )
     data = json.loads(result.stdout)
-    assert data["current"] == 182
+    assert data["current"] == 184  # every visible library metric (bam-qc v2 added two)
     # The fixture assigns 1.0 to every metric, including producers whose real
     # values are booleans, approved categories, or vectors.
     assert data["omitted"] == [
