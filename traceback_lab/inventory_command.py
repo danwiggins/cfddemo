@@ -1,26 +1,38 @@
-"""``traceback lab inventory DIR [--recursive] [--report PATH] [--json]``: is a kit run's chunk set whole?
+"""``traceback lab inventory DIR [--recursive] [--report PATH] [--no-hash] [--json]``: is a kit run's chunk set whole?
 
 A read-only check of a MinKNOW output directory *before* alignment (the
 spec's step S0: the chunk count, read count and basecaller/protocol provenance
 of the whole run, with checksums).  ``lab run`` refuses truncated and
 duplicate chunks only at ingest; this command finds a partial download first.
 
-For every ``*.bam`` chunk it records the size, whether the 28-byte BGZF EOF
-block is present and ``samtools quickcheck -u`` passes, the ``_<n>.bam``
+Chunks are grouped by their immediate directory: DIR itself, or with
+``--recursive`` every directory under it that holds ``*.bam`` files.  Index
+coverage and same-index duplicates are judged per group; ``bam_fail*`` (and
+``fastq_fail*``/``pod5_fail*``) directories are counted by file name only and
+never inventoried.  A group is labelled by its directory names only when every
+name is a MinKNOW one (``bam_pass``, ``barcodeNN``, ``unclassified`` ...);
+any other directory is shown as ``group N`` plus a digest, because MinKNOW's
+run layout carries the sample id in directory names.
+
+For every indexed ``<stem>_<n>.bam`` chunk it records the size, whether the
+28-byte BGZF EOF block is present and ``samtools quickcheck -u`` passes, the
 index, the header's provenance (``@RG`` basecall and modified-base models,
 ``@PG`` program versions; the run id and sample id are reported only as
 *present* plus a digest prefix, never as values), its sha256 (the Lab hash
-cache is read, never written) and its record count (exact from the cache or
-a whole read, otherwise an estimate from the first records extrapolated by
+cache is read, never written; ``--no-hash`` skips hashing and with it the
+duplicate-content check) and its record count (exact from the cache or a
+whole read, otherwise an estimate from the first records extrapolated by
 compressed size and labelled as such).
 
 A MinKNOW ``final_summary*.txt`` or ``sequencing_summary*.txt`` beside the
 chunks, in the parent run directory, or named with ``--report PATH`` supplies
-the run's declared BAM-file and read counts for comparison.  The verdict is
-``COMPLETE`` (a report agrees with the disk), ``INCOMPLETE`` (missing indices
-or a report declares more than is on disk), ``DAMAGED`` (truncated or
-duplicate chunks) or ``UNKNOWN`` (nothing to compare against).  Nothing
-beyond DIR as given, chunk names and report file names is ever printed.
+the run's declared BAM-file and read counts.  A report whose run id does not
+match the chunks' ``@RG`` run id is not compared.  The verdict is
+``COMPLETE`` (a comparable report agrees with the disk), ``INCOMPLETE``
+(missing indices, or a report declares more than is on disk), ``DAMAGED``
+(truncated chunks, duplicates, or files a report does not declare) or
+``UNKNOWN`` (nothing comparable).  Output names no host path beyond ROOT and
+DIR as given; chunk file names and report file names are printed as on disk.
 """
 
 from __future__ import annotations
@@ -61,7 +73,10 @@ SAMPLE_RECORDS_MAX = 20_000
 DIGEST_PREFIX = 12
 FINAL_SUMMARY_GLOB = "final_summary*.txt"
 SEQUENCING_SUMMARY_GLOB = "sequencing_summary*.txt"
-SIBLINGS = {"bam_pass": "bam_fail", "bam_fail": "bam_pass"}
+
+KNOWN_DIR = re.compile(r"^(?:(?:bam|fastq|pod5)_(?:pass|fail)|barcode\d+|unclassified)$")
+FAIL_DIR = re.compile(r"^(?:bam|fastq|pod5)_fail")
+CHUNK_NAME = re.compile(r"^[A-Za-z0-9._-]+\.bam$")
 
 VERDICT_COMPLETE = "COMPLETE"
 VERDICT_INCOMPLETE = "INCOMPLETE"
@@ -76,13 +91,17 @@ def add_inventory_parser(commands: Any, common: Callable[[argparse.ArgumentParse
         "inventory", help="check a MinKNOW chunk directory for completeness before alignment (read-only)"
     )
     inventory.add_argument("directory", metavar="DIR", help="directory of MinKNOW uBAM chunks (*.bam)")
-    inventory.add_argument("--recursive", action="store_true", help="also scan subdirectories")
+    inventory.add_argument("--recursive", action="store_true", help="also scan subdirectories (bam_pass/, barcodeNN/ ...)")
     inventory.add_argument(
         "--report",
         type=Path,
         default=None,
         metavar="PATH",
         help="a MinKNOW final_summary*.txt or sequencing_summary*.txt to compare against (auto-detected otherwise)",
+    )
+    inventory.add_argument(
+        "--no-hash", dest="hash", action="store_false",
+        help="skip sha256 hashing (and so the duplicate-content check); reads are still counted",
     )
     common(inventory)
     inventory.set_defaults(handler=inventory_command)
@@ -91,11 +110,12 @@ def add_inventory_parser(commands: Any, common: Callable[[argparse.ArgumentParse
 # -- chunks ---------------------------------------------------------------------------
 @dataclass
 class Entry:
-    """One ``*.bam`` file under DIR; ``name`` is relative to DIR."""
+    """One indexed ``*.bam`` chunk; ``name`` is its basename, ``group`` its directory group."""
 
     name: str
     path: Path
-    index: int | None
+    group: int
+    index: int
     size: int
     eof_marker: bool = False
     quickcheck: bool = False
@@ -114,6 +134,7 @@ class Entry:
     def public(self) -> dict[str, Any]:
         return {
             "name": self.name,
+            "group": self.group,
             "index": self.index,
             "bytes": self.size,
             "eof_marker": self.eof_marker,
@@ -129,10 +150,96 @@ class Entry:
         }
 
 
+def _digest_prefix(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:DIGEST_PREFIX]
+
+
+def group_label(number: int, parts: Sequence[str]) -> str:
+    """``DIR`` for the top level, the MinKNOW directory names when every name is one, else a digest."""
+
+    if not parts:
+        return "DIR"
+    if all(KNOWN_DIR.match(part) for part in parts):
+        return "/".join(parts)
+    return f"group {number} (sha256 {_digest_prefix('/'.join(parts))})"
+
+
+@dataclass
+class Group:
+    """One directory holding chunks; index coverage and same-index duplicates are judged here."""
+
+    id: int
+    parts: tuple[str, ...]
+    entries: list[Entry] = field(default_factory=list)
+    unindexed: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def known(self) -> bool:
+        return all(KNOWN_DIR.match(part) for part in self.parts)
+
+    @property
+    def label(self) -> str:
+        return group_label(self.id, self.parts)
+
+    @property
+    def indexes(self) -> list[int]:
+        return sorted(entry.index for entry in self.entries)
+
+    @property
+    def gaps(self) -> list[tuple[int, int]]:
+        return missing_ranges(self.indexes)
+
+    def public(self) -> dict[str, Any]:
+        indexes = self.indexes
+        gaps = self.gaps
+        return {
+            "id": self.id,
+            "label": self.label,
+            "known": self.known,
+            "depth": len(self.parts),
+            "path_sha256_12": _digest_prefix("/".join(self.parts)) if self.parts else None,
+            "chunks": len(self.entries),
+            "bytes": sum(entry.size for entry in self.entries),
+            "index_min": indexes[0] if indexes else None,
+            "index_max": indexes[-1] if indexes else None,
+            "missing_indexes": [list(gap) for gap in gaps],
+            "missing_index_count": sum(b - a + 1 for a, b in gaps),
+            "unindexed": list(self.unindexed),
+        }
+
+
+@dataclass(frozen=True)
+class FailGroup:
+    label: str
+    bam_files: int
+    where: str  # "DIR" | "sibling"
+
+    def public(self) -> dict[str, Any]:
+        return {"label": self.label, "bam_files": self.bam_files, "where": self.where}
+
+
 @dataclass(frozen=True)
 class Skipped:
-    name: str
+    label: str
+    name: str | None
     kind: str
+
+    def public(self) -> dict[str, Any]:
+        return {"group": self.label, "name": self.name, "kind": self.kind}
+
+    def text(self) -> str:
+        return f"{self.label}: {self.name} ({self.kind})" if self.name else f"{self.label} ({self.kind})"
+
+
+@dataclass
+class Scan:
+    groups: list[Group]
+    fail_groups: list[FailGroup]
+    skipped: list[Skipped]
+
+    @property
+    def entries(self) -> list[Entry]:
+        return [entry for group in self.groups for entry in group.entries]
 
 
 def _refuse_dir(kind: str, shown: str) -> LabProblem:
@@ -144,49 +251,78 @@ def _refuse_dir(kind: str, shown: str) -> LabProblem:
     )
 
 
-def list_chunks(directory: Path, *, recursive: bool) -> tuple[list[Entry], list[Skipped]]:
-    """Regular readable ``*.bam`` files under DIR; symlinks and the like are listed as skipped."""
+def scan_directory(directory: Path, *, recursive: bool) -> Scan:
+    """Group regular readable indexed ``*.bam`` files by directory; everything else is listed, not counted."""
 
-    entries: list[Entry] = []
+    groups: list[Group] = []
+    fails: list[FailGroup] = []
     skipped: list[Skipped] = []
+    counter = 0
 
-    def visit(folder: Path, prefix: str) -> None:
+    def visit(folder: Path, parts: tuple[str, ...]) -> None:
+        nonlocal counter
+        number = counter + 1
+        label = group_label(number, parts)
         try:
             names = sorted(os.listdir(folder))
         except OSError as exc:
-            raise _refuse_dir("unreadable", prefix or directory.name or str(directory)) from exc
+            if not parts:
+                raise _refuse_dir("unreadable", directory.name or str(directory)) from exc
+            skipped.append(Skipped(label, None, "unreadable directory"))
+            return
+        entries: list[Entry] = []
+        unindexed: list[dict[str, Any]] = []
+        subdirs: list[str] = []
         for name in names:
             if name.startswith("."):
                 continue
-            shown = f"{prefix}{name}"
             path = folder / name
             try:
                 info = os.lstat(path)
             except OSError:
-                skipped.append(Skipped(shown, "unreadable"))
+                skipped.append(Skipped(label, name if name.endswith(".bam") else None, "unreadable"))
+                continue
+            if stat.S_ISLNK(info.st_mode):
+                if name.endswith(".bam"):
+                    skipped.append(Skipped(label, name, "a symlink"))
+                elif recursive and path.is_dir():
+                    skipped.append(Skipped(group_label(number, (*parts, name)), None, "a symlink, not followed"))
                 continue
             if stat.S_ISDIR(info.st_mode):
                 if recursive:
-                    visit(path, f"{shown}/")
+                    subdirs.append(name)
                 continue
             if not name.endswith(".bam"):
                 continue
-            if stat.S_ISLNK(info.st_mode):
-                skipped.append(Skipped(shown, "a symlink"))
-            elif not stat.S_ISREG(info.st_mode):
-                skipped.append(Skipped(shown, "not a regular file"))
+            if not stat.S_ISREG(info.st_mode):
+                skipped.append(Skipped(label, name, "not a regular file"))
             elif not os.access(path, os.R_OK):
-                skipped.append(Skipped(shown, "unreadable"))
+                skipped.append(Skipped(label, name, "unreadable"))
+            elif (index := chunk_index(name)) is None:
+                unindexed.append({"name": name, "bytes": info.st_size})
             else:
-                entries.append(Entry(name=shown, path=path, index=chunk_index(name), size=info.st_size))
+                entries.append(Entry(name=name, path=path, group=number, index=index, size=info.st_size))
+        if entries or unindexed:
+            if parts and any(FAIL_DIR.match(part) for part in parts):
+                fails.append(FailGroup(label, len(entries) + len(unindexed), "DIR"))
+            else:
+                counter = number
+                entries.sort(key=lambda entry: _order_key(entry.path))
+                groups.append(Group(id=number, parts=parts, entries=entries, unindexed=unindexed))
+        for sub in subdirs:
+            visit(folder / sub, (*parts, sub))
 
-    visit(directory, "")
-    entries.sort(key=lambda entry: _order_key(entry.path))
-    return entries, skipped
-
-
-def _digest_prefix(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:DIGEST_PREFIX]
+    visit(directory, ())
+    if directory.name == "bam_pass":
+        sibling = directory.parent / "bam_fail"
+        if sibling.is_dir() and not sibling.is_symlink():
+            try:
+                count = sum(1 for name in os.listdir(sibling) if name.endswith(".bam") and not name.startswith("."))
+            except OSError:
+                count = -1
+            if count >= 0:
+                fails.append(FailGroup("bam_fail", count, "sibling"))
+    return Scan(groups=groups, fail_groups=fails, skipped=skipped)
 
 
 def _tags(line: str) -> dict[str, str]:
@@ -261,7 +397,8 @@ def estimate_records(path: Path, size: int) -> tuple[int, str]:
 
 
 def inspect_entries(
-    entries: Sequence[Entry], store: LabStore, *, progress: Callable[[str], None] | None = None
+    entries: Sequence[Entry], store: LabStore, *, hashing: bool = True,
+    progress: Callable[[str], None] | None = None,
 ) -> None:
     """Fill every entry in place: integrity, header provenance, sha256 (cache read-only) and records."""
 
@@ -277,7 +414,6 @@ def inspect_entries(
             entry.header_ok = True
             entry.aligned = bool(sq)
             entry.provenance = header_provenance(rg, pg)
-        cached = None
         try:
             cached = cache.get(store.hash_cache_key(entry.path))
         except OSError:
@@ -288,12 +424,13 @@ def inspect_entries(
             entry.records_kind = "exact"
             entry.cached = True
             continue
-        if progress is not None:
-            progress(f"inventory  hashing chunk {number}/{len(entries)}")
-        try:
-            entry.sha256 = _sha256_file(entry.path)
-        except OSError:
-            entry.sha256 = None
+        if hashing:
+            if progress is not None:
+                progress(f"inventory  hashing chunk {number}/{len(entries)}")
+            try:
+                entry.sha256 = _sha256_file(entry.path)
+            except OSError:
+                entry.sha256 = None
         if entry.truncated:
             continue
         try:
@@ -327,22 +464,30 @@ def format_ranges(ranges: Sequence[tuple[int, int]]) -> str:
     return ", ".join(f"{a}-{b}" if a != b else str(a) for a, b in ranges)
 
 
-def duplicates(entries: Sequence[Entry]) -> list[dict[str, Any]]:
+def _ref(entry: Entry, groups: Sequence[Group]) -> dict[str, Any]:
+    return {"group": entry.group, "name": entry.name}
+
+
+def duplicates(groups: Sequence[Group], *, hashing: bool = True) -> list[dict[str, Any]]:
+    """Same content anywhere (when hashed); the same index twice within one group."""
+
     found: list[dict[str, Any]] = []
     by_hash: dict[str, Entry] = {}
-    by_index: dict[int, Entry] = {}
-    for entry in entries:
-        if entry.sha256:
-            if entry.sha256 in by_hash:
-                found.append({"kind": "same_content", "names": [by_hash[entry.sha256].name, entry.name],
-                              "sha256_12": entry.sha256[:DIGEST_PREFIX]})
-            else:
-                by_hash[entry.sha256] = entry
-        if entry.index is not None:
-            other = by_index.get(entry.index)
-            if other is not None and other.sha256 != entry.sha256:
-                found.append({"kind": "same_index", "names": [other.name, entry.name], "index": entry.index})
-            by_index.setdefault(entry.index, entry)
+    for group in groups:
+        by_index: dict[int, Entry] = {}
+        for entry in group.entries:
+            if hashing and entry.sha256:
+                if entry.sha256 in by_hash:
+                    found.append({
+                        "kind": "same_content",
+                        "chunks": [_ref(by_hash[entry.sha256], groups), _ref(entry, groups)],
+                        "sha256_12": entry.sha256[:DIGEST_PREFIX],
+                    })
+                else:
+                    by_hash[entry.sha256] = entry
+            other = by_index.setdefault(entry.index, entry)
+            if other is not entry and not (hashing and entry.sha256 and other.sha256 == entry.sha256):
+                found.append({"kind": "same_index", "chunks": [_ref(other, groups), _ref(entry, groups)], "index": entry.index})
     return found
 
 
@@ -356,8 +501,15 @@ def _is_key_value(path: Path) -> bool:
     return "=" in first and "\t" not in first
 
 
+def sanitize_chunk_name(cell: str) -> str | None:
+    """A report cell as a chunk basename, or None when it is not shaped like one."""
+
+    name = cell.strip().replace("\\", "/").rsplit("/", 1)[-1]
+    return name if CHUNK_NAME.match(name) else None
+
+
 def parse_final_summary(path: Path) -> dict[str, Any]:
-    """``key=value`` lines: BAM-file counts only; identifiers are reported as present, never as values."""
+    """``key=value`` lines: BAM-file counts and run-id digests only; identifier values are never kept."""
 
     values: dict[str, str] = {}
     with path.open("r", encoding="utf-8", errors="replace") as stream:
@@ -374,49 +526,60 @@ def parse_final_summary(path: Path) -> dict[str, Any]:
 
     final = count("bam_files_in_final_dest")
     fallback = count("bam_files_in_fallback")
-    declared = None if final is None else final + (fallback or 0)
+    run_ids = {values[key] for key in ("acquisition_run_id", "protocol_run_id") if values.get(key)}
     return {
         "kind": "final_summary",
-        "declared_bam_files": declared,
+        "declared_bam_files": None if final is None else final + (fallback or 0),
         "declared_bam_files_in_fallback": fallback,
         "basecalling_enabled": values.get("basecalling_enabled"),
         "sample_id_present": bool(values.get("sample_id")),
-        "protocol_run_id_present": bool(values.get("protocol_run_id")),
+        "run_id": {"present": bool(run_ids), "sha256_12": sorted(_digest_prefix(v) for v in run_ids)},
         "keys": len(values),
     }
 
 
 def parse_sequencing_summary(path: Path) -> dict[str, Any]:
-    """One row per read: total and pass read counts, and the pass rows' BAM file names when listed."""
+    """One row per read: read totals, pass totals and pass chunk basenames when the columns exist."""
 
     total = passed = 0
     pass_files: set[str] = set()
     all_files: set[str] = set()
+    run_ids: set[str] = set()
+    unparseable = 0
     with path.open("r", encoding="utf-8", errors="replace") as stream:
         header = stream.readline().rstrip("\n").split("\t")
         columns = {name: position for position, name in enumerate(header)}
         file_column = columns.get("filename_bam")
         pass_column = columns.get("passes_filtering")
+        run_column = columns.get("run_id")
         for line in stream:
             if not line.strip():
                 continue
             cells = line.rstrip("\n").split("\t")
             total += 1
-            is_pass = pass_column is None or (len(cells) > pass_column and cells[pass_column].upper() == "TRUE")
+            if run_column is not None and len(cells) > run_column and cells[run_column]:
+                run_ids.add(cells[run_column])
             name = None
             if file_column is not None and len(cells) > file_column and cells[file_column]:
-                name = cells[file_column]
-                all_files.add(name)
-            if is_pass:
+                name = sanitize_chunk_name(cells[file_column])
+                if name is None:
+                    unparseable += 1
+                else:
+                    all_files.add(name)
+            if pass_column is not None and len(cells) > pass_column and cells[pass_column].upper() == "TRUE":
                 passed += 1
                 if name:
                     pass_files.add(name)
+    has_pass = pass_column is not None
     return {
         "kind": "sequencing_summary",
         "declared_reads": total,
-        "declared_pass_reads": passed if pass_column is not None else None,
+        "declared_pass_reads": passed if has_pass else None,
         "declared_bam_files": len(all_files) if file_column is not None else None,
-        "declared_pass_bam_files": sorted(pass_files) if file_column is not None else None,
+        "declared_pass_bam_files": sorted(pass_files) if (has_pass and file_column is not None) else None,
+        "unparseable_names": unparseable,
+        "passes_filtering_column": has_pass,
+        "run_id": {"present": bool(run_ids), "sha256_12": sorted(_digest_prefix(v) for v in run_ids)},
     }
 
 
@@ -450,83 +613,117 @@ def read_report(path: Path, where: str) -> dict[str, Any]:
     return {"name": name, "where": where, **parsed}
 
 
-def sibling_chunks(directory: Path) -> dict[str, Any] | None:
-    """MinKNOW writes ``bam_pass/`` and ``bam_fail/`` side by side; count the other one's files."""
-
-    other = SIBLINGS.get(directory.name)
-    if other is None:
-        return None
-    sibling = directory.parent / other
-    if not sibling.is_dir():
-        return None
-    try:
-        count = sum(1 for name in os.listdir(sibling) if name.endswith(".bam") and not name.startswith("."))
-    except OSError:
-        return None
-    return {"name": other, "bam_files": count}
-
-
-# -- verdict --------------------------------------------------------------------------------
+# -- comparison and verdict -------------------------------------------------------------------
 def compare_reports(
-    reports: Sequence[dict[str, Any]], entries: Sequence[Entry], sibling: dict[str, Any] | None
+    reports: Sequence[dict[str, Any]], scan: Scan, chunk_run_ids: set[str],
 ) -> list[dict[str, Any]]:
-    """Each report's declared counts against the disk; ``agrees`` is None when nothing is comparable."""
+    """Each report against the disk.
 
+    ``comparable`` is False when the report's run id does not match the chunks'
+    ``@RG`` run id or the report lacks what a comparison needs; ``agrees`` is
+    None then.  ``incomplete``/``damaged`` are verdict reasons, ``notes`` are not.
+    """
+
+    entries = scan.entries
     on_disk_names = {entry.name for entry in entries}
-    on_disk_files = len(entries) + (sibling["bam_files"] if sibling else 0)
+    on_disk_files = len(entries) + sum(group.bam_files for group in scan.fail_groups)
     results: list[dict[str, Any]] = []
     for report in reports:
-        comparison: dict[str, Any] = {"name": report["name"], "kind": report["kind"], "agrees": None, "reasons": []}
-        if report["kind"] == "final_summary" and report.get("declared_bam_files") is not None:
-            declared = report["declared_bam_files"]
-            comparison["declared_bam_files"] = declared
-            comparison["on_disk_bam_files"] = on_disk_files
-            comparison["agrees"] = declared == on_disk_files
-            if declared != on_disk_files:
-                comparison["reasons"].append(
-                    f"{report['name']} declares {declared} BAM file(s); {on_disk_files} on disk"
-                    + (f" (DIR plus {sibling['name']})" if sibling else "")
-                )
+        comparison: dict[str, Any] = {
+            "name": report["name"], "kind": report["kind"], "run_id_match": None,
+            "comparable": False, "agrees": None, "incomplete": [], "damaged": [], "notes": [],
+        }
+        report_ids = set(report.get("run_id", {}).get("sha256_12", ()))
+        if report_ids and chunk_run_ids:
+            comparison["run_id_match"] = bool(report_ids & chunk_run_ids)
+        if comparison["run_id_match"] is False:
+            comparison["notes"].append(f"{report['name']}: report run id does not match chunks")
+            results.append(comparison)
+            continue
+        if report["kind"] == "final_summary":
+            declared = report.get("declared_bam_files")
+            if declared is None:
+                comparison["notes"].append(f"{report['name']}: no bam_files_in_final_dest count; not comparable")
+            else:
+                comparison["comparable"] = True
+                comparison["declared_bam_files"] = declared
+                comparison["on_disk_bam_files"] = on_disk_files
+                comparison["agrees"] = declared == on_disk_files
+                where = " (indexed chunks plus fail output)" if scan.fail_groups else ""
+                if declared > on_disk_files:
+                    comparison["incomplete"].append(
+                        f"{report['name']} declares {declared} BAM file(s); {on_disk_files} on disk{where}"
+                    )
+                elif declared < on_disk_files:
+                    comparison["damaged"].append(
+                        f"{on_disk_files} BAM file(s) on disk{where}; {report['name']} declares {declared}"
+                    )
         elif report["kind"] == "sequencing_summary":
-            declared_names = report.get("declared_pass_bam_files")
-            if declared_names is not None:
-                missing = sorted(name for name in declared_names if name not in on_disk_names)
-                extra = sorted(name for name in on_disk_names if name not in set(declared_names))
+            comparison["declared_reads"] = report.get("declared_reads")
+            comparison["declared_pass_reads"] = report.get("declared_pass_reads")
+            if not report.get("passes_filtering_column"):
+                comparison["notes"].append(f"{report['name']}: no passes_filtering column; not comparable")
+            elif report.get("declared_pass_bam_files") is None:
+                comparison["notes"].append(f"{report['name']}: no filename_bam column; not comparable")
+            else:
+                declared_names = set(report["declared_pass_bam_files"])
+                missing = sorted(declared_names - on_disk_names)
+                extra = sorted(on_disk_names - declared_names)
+                comparison["comparable"] = True
                 comparison["declared_pass_bam_files"] = len(declared_names)
                 comparison["missing_on_disk"] = missing
                 comparison["not_declared"] = extra
-                comparison["agrees"] = not missing
                 if missing:
-                    comparison["reasons"].append(
-                        f"{report['name']} lists {len(missing)} pass chunk(s) not on disk"
-                    )
-            comparison["declared_reads"] = report.get("declared_reads")
-            comparison["declared_pass_reads"] = report.get("declared_pass_reads")
+                    comparison["incomplete"].append(f"{report['name']} lists {len(missing)} pass chunk(s) not on disk")
+                if extra:
+                    comparison["damaged"].append(f"{len(extra)} chunk(s) on disk that {report['name']} does not list")
+                if report.get("unparseable_names"):
+                    comparison["notes"].append(f"{report['name']}: {report['unparseable_names']} filename_bam cell(s) not chunk-shaped, ignored")
+                exact = entries and all(entry.records_kind == "exact" for entry in entries)
+                if exact and not missing and not extra:
+                    on_disk_reads = sum(entry.records or 0 for entry in entries)
+                    comparison["on_disk_reads"] = on_disk_reads
+                    if on_disk_reads != report["declared_pass_reads"]:
+                        comparison["incomplete"].append(
+                            f"{report['name']} declares {report['declared_pass_reads']:,} pass read(s); {on_disk_reads:,} in the chunks on disk"
+                        )
+                elif not exact:
+                    comparison["notes"].append("read totals not compared (some chunk counts are estimates)")
+                comparison["agrees"] = not comparison["incomplete"] and not comparison["damaged"]
+        else:
+            comparison["notes"].append(f"{report['name']}: unreadable")
         results.append(comparison)
     return results
 
 
-def verdict_for(
-    entries: Sequence[Entry], found_duplicates: Sequence[dict[str, Any]],
-    gaps: Sequence[tuple[int, int]], comparisons: Sequence[dict[str, Any]],
-) -> tuple[str, list[str]]:
-    reasons: list[str] = []
-    truncated = [entry.name for entry in entries if entry.truncated]
+def verdict_for(scan: Scan, found_duplicates: Sequence[dict[str, Any]] | None,
+                comparisons: Sequence[dict[str, Any]]) -> tuple[str, list[str]]:
+    damaged: list[str] = []
+    incomplete: list[str] = []
+    truncated = [entry for entry in scan.entries if entry.truncated]
     if truncated:
-        reasons.append(f"{len(truncated)} truncated chunk(s)")
+        damaged.append(f"{len(truncated)} truncated chunk(s)")
     if found_duplicates:
-        reasons.append(f"{len(found_duplicates)} duplicate(s)")
-    if reasons:
-        return VERDICT_DAMAGED, reasons
-    missing = sum(b - a + 1 for a, b in gaps)
-    if missing:
-        reasons.append(f"missing {missing} index(es): {format_ranges(gaps)}")
+        damaged.append(f"{len(found_duplicates)} duplicate(s)")
     for comparison in comparisons:
-        reasons.extend(comparison["reasons"])
-    if reasons:
-        return VERDICT_INCOMPLETE, reasons
+        damaged.extend(comparison["damaged"])
+    if damaged:
+        return VERDICT_DAMAGED, damaged
+    for group in scan.groups:
+        gaps = group.gaps
+        if gaps:
+            missing = sum(b - a + 1 for a, b in gaps)
+            prefix = f"{group.label}: " if len(scan.groups) > 1 or group.parts else ""
+            incomplete.append(f"{prefix}missing {missing} index(es): {format_ranges(gaps)}")
+    for comparison in comparisons:
+        incomplete.extend(comparison["incomplete"])
+    if incomplete:
+        return VERDICT_INCOMPLETE, incomplete
     if any(comparison["agrees"] for comparison in comparisons):
         return VERDICT_COMPLETE, ["a MinKNOW report agrees with the chunks on disk"]
+    notes = [note for comparison in comparisons for note in comparison["notes"]]
+    if notes:
+        return VERDICT_UNKNOWN, notes
     return VERDICT_UNKNOWN, ["no MinKNOW report to compare against (contiguous indices alone do not prove the run is whole)"]
 
 
@@ -563,11 +760,18 @@ def _fmt_ids(block: dict[str, Any]) -> str:
     return "present (sha256 " + ", ".join(block["sha256_12"]) + ")"
 
 
+def _chunk_text(ref: dict[str, Any], labels: dict[int, str]) -> str:
+    label = labels.get(ref["group"], "?")
+    return ref["name"] if label == "DIR" else f"{label}/{ref['name']}"
+
+
 def inventory_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str, Any]]:
     store.check_version()
     given = str(args.directory)
     directory = Path(os.path.abspath(Path(given).expanduser()))
     shown = Path(given).name or given
+    hashing = bool(getattr(args, "hash", True))
+    recursive = bool(args.recursive)
     try:
         info = os.lstat(directory)
     except FileNotFoundError:
@@ -579,49 +783,54 @@ def inventory_command(args: argparse.Namespace, store: LabStore) -> tuple[int, d
     if not stat.S_ISDIR(info.st_mode):
         raise _refuse_dir("not a directory", shown)
 
-    entries, skipped = list_chunks(directory, recursive=bool(args.recursive))
+    scan = scan_directory(directory, recursive=recursive)
+    entries = scan.entries
     if not entries:
         raise LabProblem(
             "TBX-LAB-031",
-            cause=f"DIR ({shown}) holds no readable .bam chunk" + (" (searched recursively)" if args.recursive else ""),
+            cause=f"DIR ({shown}) holds no readable indexed .bam chunk" + (" (searched recursively)" if recursive else ""),
             fix="Point at the MinKNOW bam_pass directory, or add --recursive for a run folder",
-            data={"dir": given, "skipped": [{"name": s.name, "kind": s.kind} for s in skipped]},
+            data={
+                "dir": given,
+                "skipped": [s.public() for s in scan.skipped],
+                "fail_groups": [g.public() for g in scan.fail_groups],
+                "unindexed": [u for g in scan.groups for u in g.unindexed],
+            },
         )
 
     def progress(text: str) -> None:
         print(text, file=sys.stderr, flush=True)
 
-    inspect_entries(entries, store, progress=progress)
-    found_duplicates = duplicates(entries)
-    gaps = missing_ranges(entry.index for entry in entries if entry.index is not None)
-    unindexed = [entry.name for entry in entries if entry.index is None]
-    sibling = sibling_chunks(directory)
+    inspect_entries(entries, store, hashing=hashing, progress=progress)
+    found_duplicates = duplicates(scan.groups, hashing=hashing)
+    provenance = _merge_provenance(entries)
     reports = [read_report(path, where) for path, where in find_reports(directory, args.report)]
-    comparisons = compare_reports(reports, entries, sibling)
-    verdict, reasons = verdict_for(entries, found_duplicates, gaps, comparisons)
+    comparisons = compare_reports(reports, scan, set(provenance["run_id"]["sha256_12"]))
+    verdict, reasons = verdict_for(scan, found_duplicates, comparisons)
 
     total_bytes = sum(entry.size for entry in entries)
     counted = [entry for entry in entries if entry.records is not None]
     estimated = any(entry.records_kind == "estimate" for entry in counted)
     total_records = sum(entry.records for entry in counted) if counted else None
-    provenance = _merge_provenance(entries)
-    indexes = sorted(entry.index for entry in entries if entry.index is not None)
+    labels = {group.id: group.label for group in scan.groups}
+    unindexed = [{"group": group.id, **item} for group in scan.groups for item in group.unindexed]
+    missing_total = sum(group.public()["missing_index_count"] for group in scan.groups)
 
     data: dict[str, Any] = {
         "root": str(store.root),
         "dir": given,
-        "recursive": bool(args.recursive),
+        "recursive": recursive,
+        "hashing": hashing,
         "verdict": verdict,
         "reasons": reasons,
         "chunks": len(entries),
         "total_bytes": total_bytes,
-        "index_min": indexes[0] if indexes else None,
-        "index_max": indexes[-1] if indexes else None,
-        "missing_indexes": [list(gap) for gap in gaps],
-        "missing_index_count": sum(b - a + 1 for a, b in gaps),
+        "groups": [group.public() for group in scan.groups],
+        "missing_index_count": missing_total,
         "unindexed": unindexed,
-        "truncated": [entry.name for entry in entries if entry.truncated],
+        "truncated": [_ref(entry, scan.groups) for entry in entries if entry.truncated],
         "duplicates": found_duplicates,
+        "duplicate_content_checked": hashing,
         "records": {
             "total": total_records,
             "kind": None if total_records is None else ("estimate" if estimated else "exact"),
@@ -630,40 +839,59 @@ def inventory_command(args: argparse.Namespace, store: LabStore) -> tuple[int, d
         },
         "provenance": provenance,
         "hash_cached_chunks": sum(entry.cached for entry in entries),
-        "sibling": sibling,
+        "fail_groups": [group.public() for group in scan.fail_groups],
         "reports": reports,
         "comparisons": comparisons,
-        "skipped": [{"name": s.name, "kind": s.kind} for s in skipped],
+        "skipped": [s.public() for s in scan.skipped],
         "entries": [entry.public() for entry in entries],
     }
 
     lines = [f"ROOT  {store.root}", f"DIR   {given}"]
-    first, last = entries[0].name, entries[-1].name
+    first, last = entries[0], entries[-1]
     lines.append(
-        f"CHUNKS      {len(entries)}  ({first}" + (f" … {last}" if len(entries) > 1 else "") + f")  {total_bytes:,} bytes"
+        f"CHUNKS      {len(entries)}  ({_chunk_text(_ref(first, scan.groups), labels)}"
+        + (f" … {_chunk_text(_ref(last, scan.groups), labels)}" if len(entries) > 1 else "")
+        + f")  {total_bytes:,} bytes"
+        + (f" in {len(scan.groups)} group(s)" if len(scan.groups) > 1 else "")
     )
-    if indexes:
-        coverage = f"{indexes[0]}-{indexes[-1]}"
+    for group in scan.groups:
+        public = group.public()
+        indexes = group.indexes
+        prefix = f"{group.label}: " if len(scan.groups) > 1 or group.parts else ""
+        if indexes:
+            text = f"{indexes[0]}-{indexes[-1]} " + (
+                "contiguous" if not group.gaps
+                else f"missing {format_ranges(group.gaps)} ({public['missing_index_count']} index(es))"
+            )
+        else:
+            text = "no indexed chunk"
+        lines.append(f"INDICES     {prefix}{text}")
+    if unindexed:
         lines.append(
-            f"INDICES     {coverage} "
-            + ("contiguous" if not gaps else f"missing {format_ranges(gaps)} ({data['missing_index_count']} index(es))")
-            + (f"; {len(unindexed)} file(s) without a _<n>.bam index" if unindexed else "")
+            "UNINDEXED   " + ", ".join(_chunk_text(item, labels) for item in unindexed)
+            + " (no _<n>.bam index; not counted)"
         )
-    else:
-        lines.append("INDICES     none of the files carries a _<n>.bam index")
     truncated = data["truncated"]
-    lines.append("TRUNCATED   " + (", ".join(truncated) if truncated else "none"))
-    lines.append(
-        "DUPLICATES  "
-        + ("; ".join(
-            f"{' = '.join(d['names'])} ({'same content, sha256 ' + d['sha256_12'] if d['kind'] == 'same_content' else 'same index ' + str(d['index']) + ', different content'})"
-            for d in found_duplicates
-        ) if found_duplicates else "none")
-    )
+    lines.append("TRUNCATED   " + (", ".join(_chunk_text(ref, labels) for ref in truncated) if truncated else "none"))
+    if not hashing:
+        lines.append("DUPLICATES  content not checked (--no-hash); the verdict cannot be DAMAGED by duplicate content"
+                     + (f"; same index twice: {len(found_duplicates)}" if found_duplicates else ""))
+    else:
+        lines.append(
+            "DUPLICATES  "
+            + ("; ".join(
+                f"{' = '.join(_chunk_text(ref, labels) for ref in d['chunks'])} ("
+                + (f"same content, sha256 {d['sha256_12']}" if d["kind"] == "same_content"
+                   else f"same index {d['index']}, different content")
+                + ")"
+                for d in found_duplicates
+            ) if found_duplicates else "none")
+        )
     if total_records is None:
         lines.append("READS       unavailable")
     else:
-        label = f"~{total_records:,} (estimate from the first {SAMPLE_RECORDS:,} records of each chunk" if estimated else f"{total_records:,} (exact"
+        label = (f"~{total_records:,} (estimate from the first {SAMPLE_RECORDS:,} records of each chunk"
+                 if estimated else f"{total_records:,} (exact")
         exact = sum(entry.records_kind == "exact" for entry in counted)
         if estimated and exact:
             label += f"; {exact} chunk(s) exact"
@@ -676,37 +904,18 @@ def inventory_command(args: argparse.Namespace, store: LabStore) -> tuple[int, d
     lines.append(f"            run id {_fmt_ids(provenance['run_id'])}; sample id {_fmt_ids(provenance['sample_id'])}")
     if data["hash_cached_chunks"]:
         lines.append(f"HASHES      {data['hash_cached_chunks']} of {len(entries)} chunk(s) from the Lab hash cache (read-only)")
-    if sibling:
-        lines.append(f"SIBLING     {sibling['name']}/: {sibling['bam_files']} .bam file(s) (names only)")
-    if skipped:
-        lines.append("SKIPPED     " + ", ".join(f"{s.name} ({s.kind})" for s in skipped) + "; lab run refuses these")
+    for group in scan.fail_groups:
+        lines.append(f"FAIL        {group.label}{' (sibling)' if group.where == 'sibling' else ''}: "
+                     f"{group.bam_files} .bam file(s), fail output, not inventoried")
+    if scan.skipped:
+        lines.append("SKIPPED     " + "; ".join(s.text() for s in scan.skipped) + "; lab run refuses these")
     if not reports:
         lines.append("REPORT      none found (final_summary*.txt or sequencing_summary*.txt in DIR or its parent; or --report PATH)")
     for report, comparison in zip(reports, comparisons):
-        if report["kind"] == "final_summary":
-            detail = (
-                f"declares {report['declared_bam_files']} BAM file(s); {comparison.get('on_disk_bam_files')} on disk"
-                if report.get("declared_bam_files") is not None
-                else "no bam_files_in_final_dest count"
-            )
-        elif report["kind"] == "sequencing_summary":
-            detail = f"declares {report['declared_reads']:,} read(s)"
-            if report.get("declared_pass_reads") is not None:
-                detail += f", {report['declared_pass_reads']:,} pass"
-            if report.get("declared_pass_bam_files") is not None:
-                detail += f", {len(report['declared_pass_bam_files'])} pass chunk(s)"
-                if comparison.get("missing_on_disk"):
-                    detail += f"; {len(comparison['missing_on_disk'])} not on disk"
-                elif comparison.get("not_declared"):
-                    detail += f"; {len(comparison['not_declared'])} on disk not listed"
-                else:
-                    detail += "; names match"
-        else:
-            detail = "unreadable"
-        lines.append(f"REPORT      {report['name']} ({report['where']}): {detail}")
+        lines.append(f"REPORT      {report['name']} ({report['where']}): {_report_detail(report, comparison)}")
     lines.append(f"VERDICT     {verdict}: " + "; ".join(reasons))
     lines.append("")
-    lines.append(_entries_table(entries))
+    lines.append(_entries_table(entries, labels))
 
     summary = f"inventory {verdict}: {len(entries)} chunk(s), " + "; ".join(reasons)
     if verdict in {VERDICT_COMPLETE, VERDICT_UNKNOWN}:
@@ -716,11 +925,39 @@ def inventory_command(args: argparse.Namespace, store: LabStore) -> tuple[int, d
     return EXIT_PARTIAL, _with_human(payload, lines, replace_data=True)
 
 
-def _entries_table(entries: Sequence[Entry]) -> str:
-    header = ("INDEX", "NAME", "BYTES", "EOF", "QUICKCHECK", "SHA256", "RECORDS")
+def _report_detail(report: dict[str, Any], comparison: dict[str, Any]) -> str:
+    if comparison["run_id_match"] is False:
+        return "run id does not match the chunks; not compared"
+    if report["kind"] == "final_summary":
+        if report.get("declared_bam_files") is None:
+            return "no bam_files_in_final_dest count; not comparable"
+        return f"declares {report['declared_bam_files']} BAM file(s); {comparison.get('on_disk_bam_files')} on disk"
+    if report["kind"] == "sequencing_summary":
+        detail = f"declares {report['declared_reads']:,} read(s)"
+        if not report.get("passes_filtering_column"):
+            return detail + "; no passes_filtering column; not comparable"
+        detail += f", {report['declared_pass_reads']:,} pass"
+        if report.get("declared_pass_bam_files") is None:
+            return detail + "; no filename_bam column; not comparable"
+        detail += f", {len(report['declared_pass_bam_files'])} pass chunk(s)"
+        if comparison.get("missing_on_disk"):
+            detail += f"; {len(comparison['missing_on_disk'])} not on disk"
+        elif comparison.get("not_declared"):
+            detail += f"; {len(comparison['not_declared'])} on disk not listed"
+        else:
+            detail += "; names match"
+        if "on_disk_reads" in comparison:
+            detail += f"; {comparison['on_disk_reads']:,} read(s) on disk"
+        return detail
+    return "unreadable"
+
+
+def _entries_table(entries: Sequence[Entry], labels: dict[int, str]) -> str:
+    header = ("GROUP", "INDEX", "NAME", "BYTES", "EOF", "QUICKCHECK", "SHA256", "RECORDS")
     rows = [
         (
-            "-" if entry.index is None else str(entry.index),
+            labels.get(entry.group, "?"),
+            str(entry.index),
             entry.name,
             f"{entry.size:,}",
             "yes" if entry.eof_marker else "NO",
@@ -739,8 +976,12 @@ def _entries_table(entries: Sequence[Entry]) -> str:
 
 __all__ = [
     "Entry",
+    "FailGroup",
+    "Group",
     "SAMPLE_BYTES",
     "SAMPLE_RECORDS",
+    "Scan",
+    "Skipped",
     "VERDICT_COMPLETE",
     "VERDICT_DAMAGED",
     "VERDICT_INCOMPLETE",
@@ -750,12 +991,14 @@ __all__ = [
     "duplicates",
     "estimate_records",
     "find_reports",
+    "group_label",
     "header_provenance",
     "inspect_entries",
     "inventory_command",
-    "list_chunks",
     "missing_ranges",
     "parse_final_summary",
     "parse_sequencing_summary",
+    "sanitize_chunk_name",
+    "scan_directory",
     "verdict_for",
 ]
