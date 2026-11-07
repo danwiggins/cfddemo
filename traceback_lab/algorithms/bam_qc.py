@@ -2,6 +2,12 @@
 
 Formulas follow Appendix A of the spec, computed from the read summary
 (primaries only; index statistics count secondary and supplementary records).
+
+Version 2 adds duplicate read-name detection: content-identical chunks are
+refused at ingest (TBX-LAB-007), but the same reads re-basecalled into a
+differently named chunk pass that check and would double-count every read
+they carry.  The read summary stores a 64-bit name hash per record and no
+read names, so duplicates are counted on the hash column.
 """
 
 from __future__ import annotations
@@ -132,6 +138,29 @@ def gc_bias_slope(summary: ReadSummary, rows: np.ndarray, fasta: str | None) -> 
     return slope, int(keep.sum())
 
 
+def duplicate_read_names(name_hash: np.ndarray, flag: np.ndarray) -> int:
+    """Primary records whose read-name hash appears more than once.
+
+    Every record of a repeated name counts (two copies of one read are two
+    duplicate records), so the share is the fraction of primary reads that
+    would be double-counted.  Paired-end mates share a name by design, so
+    hashes are keyed by mate class (``flag & 0xC0``: unpaired, first,
+    second) and never compared across mates.  A template with four or more
+    segments sets both 0x40 and 0x80 on its middle segments, so those land
+    in one class and could count as duplicates of each other; that never
+    arises for ONT single-end or Illumina paired-end input.  With a 64-bit
+    hash the expected number of falsely colliding pairs is about
+    N^2 / 2^65: about 3e-6 at 10 million reads, so a false duplicate is
+    negligible at ONT read counts.
+    """
+
+    if name_hash.size == 0:
+        return 0
+    keyed = np.column_stack((flag & 0xC0, name_hash)).astype(np.uint64, copy=False)
+    _, counts = np.unique(keyed, axis=0, return_counts=True)
+    return int(counts[counts > 1].sum())
+
+
 @dataclass
 class BamQc(Base):
     requires: Requirements = field(default_factory=lambda: Requirements(platforms=frozenset({"ont", "illumina"})))
@@ -140,6 +169,7 @@ class BamQc(Base):
         flag = summary.column("flag")
         rows = np.ones(summary.rows, dtype=bool) if mask is None else mask
         primary = rows & ((flag & 0x900) == 0)
+        duplicate_names = duplicate_read_names(summary.column("h_ds")[primary], flag[primary])
         mapped = primary & ((flag & 0x4) == 0)
         supplementary = rows & ((flag & 0x800) != 0) & ((flag & 0x4) == 0)
         mapq = summary.column("mapq")
@@ -166,8 +196,11 @@ class BamQc(Base):
                     unit="fraction",
                     n=n_primary if duplicates else None,
                 ),
+                metric("duplicate_read_name_count", duplicate_names, unit="reads", n=n_primary),
+                metric("duplicate_read_name_share", ratio(duplicate_names, n_primary), unit="fraction", n=n_primary),
             ]
         )
 
 
-BAM_QC = BamQc("bam-qc")
+# v2 adds duplicate_read_name_count/share; v1 results stay valid under their own identity.
+BAM_QC = BamQc("bam-qc", version="2")

@@ -7,7 +7,7 @@
 # original evidence (D4).  citation_checked records who confirmed that every
 # DOI resolves and every displayed number matches the source (D27); an entry
 # without it renders an "UNVERIFIED citation" badge.
-version: 0.6.6
+version: 0.6.7
 hidden_algorithms: [read-summary, meth-calls]
 # Method-level presentation copy is adapted from docs/LAB-ALGORITHM-EXPLAINER.md.
 # It is joined at read time, never included in execution or result identity.
@@ -385,6 +385,56 @@ entries:
     stability: {kind: proportion}
     citations: []
     citation_checked: {by: "lab build agent", date: "2026-10-15", note: "No citation displayed; QC measure."}
+
+  - algorithm_id: bam-qc
+    metric_id: duplicate_read_name_count
+    label: "Primary reads with a repeated read name"
+    value_kind: count
+    tier: PROVEN
+    origin_tier: PROVEN
+    origin_platform: "any"
+    min_depth_x: null
+    reference: {kind: none}
+    performance: null
+    performance_missing_reason: "none published"
+    meaning_high: "Primary records whose read name appears more than once (every copy counts). Content-identical chunk files are refused at ingest; the same reads re-basecalled into a differently named chunk pass that check and are counted here."
+    meaning_low: "No read name repeats among primary reads. Read names are compared as 64-bit hashes (no names are stored): about 3e-6 falsely colliding pairs are expected at 10 million reads, so a false duplicate is negligible at ONT read counts."
+    confounders: ["a re-basecalled chunk ingested beside its original", "paired-end mates share a name by design and are compared within one mate class only"]
+    next_steps:
+      analytical: ["Check the chunk list for a re-basecalled copy and rerun without it"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    headline: false
+    stability: {kind: scales_with_depth, tolerance: 0.10}
+    citations: []
+    citation_checked: {by: "lab build agent", date: "2026-11-06", note: "No citation displayed; QC count with no published range. Collision figure is N^2 / 2^65 for a 64-bit hash."}
+
+  - algorithm_id: bam-qc
+    metric_id: duplicate_read_name_share
+    label: "Share of primary reads with a repeated read name"
+    value_kind: proportion
+    tier: PROVEN
+    origin_tier: PROVEN
+    origin_platform: "any"
+    min_depth_x: null
+    reference: {kind: none}
+    qc_band: {direction: lower_is_better, pass: 0.000000000001, warn: 0.01}
+    performance: null
+    performance_missing_reason: "none published"
+    meaning_high: "A share of the primary reads would be double-counted: the same reads were likely re-basecalled into a differently named chunk, which biases every hash-derived downsample and split half."
+    meaning_low: "No read name repeats among primary reads. Read names are compared as 64-bit hashes (no names are stored): about 3e-6 falsely colliding pairs are expected at 10 million reads, so a false duplicate is negligible at ONT read counts."
+    confounders: ["a re-basecalled chunk ingested beside its original", "paired-end mates share a name by design and are compared within one mate class only"]
+    next_steps:
+      analytical: ["Check the chunk list for a re-basecalled copy and rerun without it"]
+      clinical_setting: null
+    license_ids: []
+    flags: []
+    nonzero_flag: "FLAG: duplicate read names — possible re-basecalled chunk"
+    headline: false
+    stability: {kind: proportion}
+    citations: []
+    citation_checked: {by: "lab build agent", date: "2026-11-06", note: "No citation displayed; QC share with no published range. The QC band is a provisional team default: only an exact zero passes."}
 
   # ----------------------------------------------------------------- depth
   - algorithm_id: depth
