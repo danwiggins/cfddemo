@@ -1167,21 +1167,29 @@ In the bundle, under `RUN_ID/`:
 - `versions.json`: the traceback package version, Python, platform, the first
   line of `samtools --version` and `minimap2 --version` (or `missing`), and
   the store version;
-- `failed/<step>/<attempt_id>/…`: for every step that failed in that run, the
-  text files of its retained attempt directory: `result.json` (with the
-  scrubbed `failure.stderr_tail`), `artifacts.json`, and any text artifact.
-  The newest three failed attempts per result are kept (D35); an older one is
-  listed in the manifest as not present;
+- `failed/<step>/<attempt_id>/result.json` and `artifacts.json`: for every
+  step that failed in that run, the envelope (with the scrubbed
+  `failure.stderr_tail`) and the artifact inventory of its retained attempt
+  directory. Nothing else from an attempt ships: a method's own artifacts
+  (tables, calls, logs) can carry read names or sample labels the scrubber
+  cannot know, so they are listed by name under `omitted` and left out. The
+  newest three failed attempts per result are kept (D35); an older one is
+  listed as `pruned`; an attempt directory that resolves outside `ROOT/lab`
+  (a symlink) is `outside_root` and left out;
 - `MANIFEST.json`: every member with its size and sha256, the failed steps,
-  and what was skipped.
+  and every omitted file with its reason.
 
-Every member passes through the same scrubber as stored stderr (D34), with
-the host name added: `ROOT` becomes `<ROOT>`, every other path `<path>`, and
-the home directory, login and host name `<redacted>`. The archive's entries
+Every member is JSON. Its string values pass through the same scrubber as
+stored stderr (D34): `ROOT` becomes `<ROOT>`, every other path `<path>`, and
+the home directory and login `<redacted>`. Free text (stderr lines, doctor
+messages, version strings) also has the host name and its first label
+redacted as whole words of three or more characters, case-insensitively;
+keys, identifiers and member names are never rewritten. The archive's entries
 carry no owner name. Not in the bundle: BAMs, aligned inputs, reference
-files, result artifacts of successful steps, binary files (listed as skipped),
-files over 8 MiB, source records, the hash cache, or anything from outside
-`ROOT/lab`. Open it before sending if you want to check.
+files, any method artifact (successful or failed), source records, the hash
+cache, or anything from outside `ROOT/lab`. A run log that exists but holds
+no events is refused (TBX-LAB-028): there is nothing to bundle. Open the
+archive before sending if you want to check.
 
 ## Exit codes
 
@@ -1363,15 +1371,18 @@ cannot be detected, the Lab omits this advisory rather than blocking the run.
 
 ### TBX-LAB-028
 
-`support-bundle` found no run with that id under this ROOT (exit 4). Nothing
-was written. `traceback lab runs` lists runs; pass the same `--root` (or
-`TRACEBACK_ROOT`) you ran with. The cause's `candidates` names up to ten
-runs.
+`support-bundle` found no run with that id under this ROOT, or the run log
+exists but holds no events (exit 4; `reason` is `unknown_run` or
+`empty_log`). Nothing was written. `traceback lab runs` lists runs; pass the
+same `--root` (or `TRACEBACK_ROOT`) you ran with. `candidates` names up to
+ten other runs.
 
 ### TBX-LAB-029
 
-The support bundle's output path already exists (exit 2). Nothing was
-written. Pass `--force` to replace it, or `--out PATH` for a new file.
+The support bundle's output path already exists, or is a directory (exit 2;
+`is_directory` says which). Nothing was written. Pass `--force` to replace an
+existing file, or `--out PATH` naming a new file; a directory is never
+replaced.
 
 ## Adding an algorithm
 

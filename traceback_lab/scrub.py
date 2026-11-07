@@ -52,8 +52,6 @@ class Scrubber:
     chunk_stems: Sequence[str] = ()
     home: str | None = field(default_factory=lambda: os.path.expanduser("~"))
     login: str | None = field(default_factory=_login_name)
-    # Opt-in (the support bundle): the host name and its first label, as words.
-    hostname: str | None = None
     max_line: int = MAX_LINE_CHARS
 
     def _roots(self) -> list[str]:
@@ -72,14 +70,7 @@ class Scrubber:
             values.add(self.home.rstrip("/"))
         if self.login and len(self.login) >= 2:
             values.add(self.login)
-        values.update(self._host_words())
         return sorted(values, key=len, reverse=True)
-
-    def _host_words(self) -> set[str]:
-        if not self.hostname:
-            return set()
-        label = self.hostname.split(".", 1)[0]
-        return {word for word in (self.hostname, label) if len(word) >= 3}
 
     def line(self, text: str) -> str:
         """Scrub one line (no newline handling)."""
@@ -91,8 +82,8 @@ class Scrubber:
         out = _PATH.sub(PATH_TOKEN, out)
         for secret in self._secrets():
             pattern = re.escape(secret)
-            # Login and host names are words; stems and home are literal substrings.
-            if secret == self.login or secret in self._host_words():
+            # Login names are words; stems and home are literal substrings.
+            if secret == self.login:
                 pattern = rf"(?<![A-Za-z0-9]){pattern}(?![A-Za-z0-9])"
             out = re.sub(pattern, REDACTED, out)
         if len(out) > self.max_line:
