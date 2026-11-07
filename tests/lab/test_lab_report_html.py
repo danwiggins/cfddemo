@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-import copy
+import dataclasses
+import errno
 import getpass
 import hashlib
+import html
 import http.server
 import json
+import os
 import re
 import shutil
 import socket
@@ -25,13 +28,15 @@ from traceback_lab.report_command import (
     FROZEN_FOOTER,
     RESEARCH_MARKS,
     RESTRICTION_FLAG_TEXT,
+    WITHHELD_TEXT,
     ReportRefused,
     build_html,
     project_report,
     report_scrubber,
 )
+from traceback_lab.interpretation.engine import Entry, Library, load_library
 from traceback_lab.store import LabStore
-from traceback_lab.web.api import LabApi
+from traceback_lab.web.api import LabApi, LibraryHolder
 from traceback_lab.web.server import clia_copy
 from traceback_runner import cli as signed_cli
 
@@ -93,7 +98,7 @@ def test_cli_writes_a_deterministic_self_contained_report(ran_root, tmp_path, ca
     assert data["size"] == len(document)
     assert data["sha256"] == hashlib.sha256(document).hexdigest()
     assert data["generated_at"] == FROZEN_AT and data["sample_id"] == id12
-    assert not list(tmp_path.glob("*.part-*"))
+    assert not list(tmp_path.glob("*part-*"))
 
     text = document.decode("utf-8")
     sample = LabApi(LabStore(ran_root)).sample(id12)
@@ -159,33 +164,45 @@ def test_human_output_existing_file_and_unknown_sample(ran_root, tmp_path, capsy
     assert not (tmp_path / "x.html").exists()
 
 
-def _expanded(rows: int, *, confounders: str | None = None) -> dict:
+def _expanded(rows: int) -> dict:
     sample = _reportable_sample()
     algorithm = next(row for row in sample["algorithms"] if row["algorithm_id"] == "bam-qc")
     metric = next(row for row in algorithm["metrics"] if row["metric_id"] == "total_reads")
-    if confounders is not None:
-        metric = copy.deepcopy(metric)
-        metric["entry"]["confounders"] = [confounders]
     for other in sample["algorithms"]:
         other["metrics"] = []
     algorithm["metrics"] = [metric] * rows
     return sample
 
 
+def _library(**changes) -> Library:
+    """The shipped library with entry fields (``{(alg, metric): {field: value}}``) or licenses replaced."""
+
+    library = load_library()
+    entries = dict(library.entries)
+    for key, fields in changes.get("entries", {}).items():
+        entries[key] = Entry(key[0], key[1], {**entries[key].raw, **fields})
+    licenses = {**library.licenses, **changes.get("licenses", {})}
+    return dataclasses.replace(library, entries=entries, licenses=licenses)
+
+
 @pytest.mark.parametrize("case", ("rows", "bytes"))
 def test_over_limit_report_is_refused_without_a_file(ran_root, tmp_path, capsys, monkeypatch, frozen, case) -> None:
-    sample = _expanded(5001) if case == "rows" else _expanded(4000, confounders="Long confounder text. " * 54)
+    sample = _expanded(5001 if case == "rows" else 4000)
+    library = load_library()
     if case == "bytes":
         # Under the row limit, over the 5 MiB byte limit.
+        library = _library(entries={("bam-qc", "total_reads"): {"confounders": ["Long confounder text. " * 60]}})
         with pytest.raises(ReportRefused, match="5 MiB"):
-            build_html(sample, FROZEN_AT, report_scrubber(tmp_path))
+            build_html(sample, FROZEN_AT, report_scrubber(tmp_path), library)
+        monkeypatch.setattr(report_command, "load_library", lambda: library)
+        monkeypatch.setattr(LibraryHolder, "get", lambda self: library)
     monkeypatch.setattr(LabApi, "sample", lambda self, id12: sample)
     out = tmp_path / "big.html"
     code, payload = _report(capsys, "--html", sample["id12"], "--root", str(ran_root), "--out", str(out))
     assert code == 3
     assert payload["data"]["code"] == "TBX-LAB-034"
     assert ("5,000 row" if case == "rows" else "5 MiB") in payload["data"]["cause"]
-    assert not out.exists() and not list(tmp_path.glob("*.part-*"))
+    assert not out.exists() and not list(tmp_path.glob("*part-*"))
 
 
 def test_exactly_the_row_limit_is_written() -> None:
@@ -202,18 +219,118 @@ def test_unavailable_or_empty_samples_are_refused() -> None:
         project_report(_expanded(0), FROZEN_AT, scrubber)
 
 
-def test_free_text_and_strings_pass_the_scrubber(tmp_path) -> None:
+def test_curated_text_is_scrubbed_not_filtered(tmp_path) -> None:
     sample = _reportable_sample()
     root = tmp_path / "root"
-    sample["catalog"][1]["question"] = f"What does {root}/lab/x show for {getpass.getuser()}?"
-    metric = next(row for row in sample["algorithms"] if row["metrics"])["metrics"][0]
-    metric["entry"]["confounders"] = ["read R0033892 ACGTACGTACGTACGTACGTACGTACGTACGT", "plain confounder"]
-    _, document = build_html(sample, FROZEN_AT, report_scrubber(root))
+    row = next(row for row in sample["catalog"] if row["algorithm_id"] == "bam-qc")
+    row["question"] = f"What does {root}/lab/x show for {getpass.getuser()}?"
+    row["limitations"] = [f"Curated limitation {n}: risk-adjusted, task-specific, tokenized." for n in range(15)]
+    row["requirements"] = ["Trade secret law in Slovakia applies to sk-adjacent prose."]
+    body = "A long curated license body. " * 70
+    library = _library(licenses={"gpl-copyleft": {**load_library().licenses["gpl-copyleft"], "body": body}})
+    for license in sample["licenses"]:
+        if license["license_id"] == "gpl-copyleft":
+            license["body"] = body
+    assert len(body) > 2000
+    _, document = build_html(sample, FROZEN_AT, report_scrubber(root), library)
     text = document.decode()
-    assert "/private/read-identifiers" not in text
-    assert str(root) not in text and "ACGTACGTACGT" not in text
+    assert str(root) not in text and "&lt;ROOT&gt;/lab/x" in text
     assert not re.search(rf"(?<![A-Za-z0-9]){re.escape(getpass.getuser())}(?![A-Za-z0-9])", text)
-    assert "plain confounder" in text
+    for n in range(15):
+        assert f"Curated limitation {n}: risk-adjusted, task-specific, tokenized." in text
+    assert "Trade secret law in Slovakia applies to sk-adjacent prose." in text
+    assert html.escape(body.strip()) in text
+    assert "withheld" not in text
+
+
+def test_library_free_text_is_withheld_only_when_it_looks_private(tmp_path) -> None:
+    prose = ["risk-adjusted", "task-specific", "Slovakia", "trade secret", "tokenized", "bearer of news"]
+    private = ["/Users/someone/run.bam", "AKIA" + "ABCDEFGHIJKLMNOP", "sk-" + "a1B2c3D4e5F6g7H8i9", "password=hunter2",
+               "read " + "ACGT" * 8, "f" * 40]
+    library = _library(entries={
+        ("bam-qc", "total_reads"): {"confounders": prose + private, "label": "Primary reads, risk-adjusted"},
+        ("bam-qc", "mapped_fraction"): {"label": "/Users/someone/label"},
+    })
+    report, document = build_html(_reportable_sample(), FROZEN_AT, report_scrubber(tmp_path), library)
+    text = document.decode()
+    row = next(row for row in report["metrics"] if row["metric_id"] == "total_reads")
+    assert row["label"] == "Primary reads, risk-adjusted"
+    assert row["confounders"] == "; ".join(prose) + f"; [{len(private)} items withheld]"
+    mapped = next(row for row in report["metrics"] if row["metric_id"] == "mapped_fraction")
+    assert mapped["label"] == "mapped_fraction [1 item withheld]"
+    assert WITHHELD_TEXT in report["limitations"]
+    for secret in private:
+        assert html.escape(secret) not in text
+    assert f"[{len(private)} items withheld]" in text
+
+
+def test_host_names_are_scrubbed_from_text_but_not_identifiers(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(report_command, "_hostname", lambda: "lab.example.org")
+    sample = _reportable_sample()
+    row = next(row for row in sample["catalog"] if row["algorithm_id"] == "bam-qc")
+    row["question"] = "Is the LAB host or lab.example.org named? Labels stay."
+    for algorithm in sample["algorithms"]:
+        algorithm["provenance"]["tool"] = "lab"
+    report, document = build_html(sample, FROZEN_AT, report_scrubber(tmp_path))
+    text = document.decode()
+    assert "Is the &lt;redacted&gt; host or &lt;redacted&gt; named? Labels stay." in text
+    assert "Tool: lab;" in text
+    assert all(row["tool"] == "lab" for row in report["metrics"])
+    assert report_command._host_pattern("ab") is None
+
+
+def test_minute_precision_instants_are_accepted_and_impossible_dates_refused() -> None:
+    scrubber = report_scrubber(Path("/nonexistent"))
+    sample = _reportable_sample()
+    sample["run_utc"] = sample["completed_utc"] = "2026-10-19T11:00Z"
+    assert project_report(sample, FROZEN_AT, scrubber)["recorded_utc_kind"] == "completion"
+    sample["run_utc"] = sample["completed_utc"] = "2026-10-19T11:00:00.250Z"
+    assert project_report(sample, FROZEN_AT, scrubber)["recorded_utc_kind"] == "completion"
+    for bad in ("2026-02-30T11:00:00Z", "2026-10-19T11:00.5Z", "2026-10-19T11:60Z", "2026-10-19 11:00Z"):
+        sample["run_utc"] = sample["completed_utc"] = bad
+        with pytest.raises(ReportRefused):
+            project_report(sample, FROZEN_AT, scrubber)
+
+
+def test_unreadable_clia_copy_is_refused(ran_root, tmp_path, capsys, monkeypatch, frozen) -> None:
+    from traceback_lab.web import server
+
+    def broken():
+        raise OSError("gone")
+
+    monkeypatch.setattr(server, "clia_copy", broken)
+    out = tmp_path / "r.html"
+    code, payload = _report(capsys, "--html", _id12(ran_root), "--root", str(ran_root), "--out", str(out))
+    assert code == 3 and payload["data"]["code"] == "TBX-LAB-034"
+    assert "CLIA explainer" in payload["data"]["cause"]
+    assert not out.exists()
+
+
+def test_a_file_that_appears_after_the_check_is_never_replaced(ran_root, tmp_path, capsys, monkeypatch, frozen) -> None:
+    out = tmp_path / "race.html"
+    real_link = os.link
+
+    def racing(source, target):
+        Path(target).write_text("someone else's file")
+        return real_link(source, target)
+
+    monkeypatch.setattr(report_command.os, "link", racing)
+    code, payload = _report(capsys, "--html", _id12(ran_root), "--root", str(ran_root), "--out", str(out))
+    assert code == 3 and payload["data"]["code"] == "TBX-LAB-034" and payload["data"]["exists"] is True
+    assert out.read_text() == "someone else's file"
+    assert not list(tmp_path.glob("*part-*"))
+
+
+def test_filesystems_without_hard_links_get_an_exclusive_create(ran_root, tmp_path, capsys, monkeypatch, frozen) -> None:
+    def unsupported(source, target):
+        raise OSError(errno.ENOTSUP, "Operation not supported")
+
+    monkeypatch.setattr(report_command.os, "link", unsupported)
+    out = tmp_path / "exfat.html"
+    code, payload = _report(capsys, "--html", _id12(ran_root), "--root", str(ran_root), "--out", str(out))
+    assert code == 0
+    assert hashlib.sha256(out.read_bytes()).hexdigest() == payload["data"]["sha256"]
+    assert not list(tmp_path.glob("*part-*"))
 
 
 def test_restriction_copy_matches_the_browser_export() -> None:
@@ -226,39 +343,130 @@ def test_restriction_copy_matches_the_browser_export() -> None:
     assert "const MAX_ROWS = 5000;" in source and "const MAX_BYTES = 5 * 1024 * 1024;" in source
 
 
+def _metric(sample: dict, algorithm_id: str, metric_id: str) -> dict:
+    algorithm = next(row for row in sample["algorithms"] if row["algorithm_id"] == algorithm_id)
+    return next(row for row in algorithm["metrics"] if row["metric_id"] == metric_id)
+
+
+def _algorithm(sample: dict, algorithm_id: str) -> dict:
+    return next(row for row in sample["algorithms"] if row["algorithm_id"] == algorithm_id)
+
+
+def _parity_cases() -> dict[str, tuple[dict, list[str]]]:
+    """Named samples, each with the ``algorithm/metric`` keys whose value becomes Infinity."""
+
+    cases: dict[str, tuple[dict, list[str]]] = {}
+    base = _reportable_sample()
+    base["completed_utc"] = base["run_utc"]
+    _metric(base, "sex-check", "call")["value"] = "female"
+    _metric(base, "copy-number", "pon_policy")["value"] = "unlisted-policy"
+    _metric(base, "copy-number", "identifiable")["value"] = True
+    cases["base"] = (base, [])
+
+    licenses = copy_of(base)
+    licenses["licenses"] = [row for row in licenses["licenses"] if row["license_id"] != "gpl-copyleft"]
+    licenses["licenses"][0] = {**licenses["licenses"][0], "body": "changed body"}
+    licenses["licenses"].append({"license_id": "unknown-license", "headline": "x", "body": "y"})
+    licenses["licenses"].append(dict(licenses["licenses"][1]))
+    _metric(licenses, "bam-qc", "total_reads")["entry"]["flags"] = ["CLIA"]
+    cell = _algorithm(licenses, "cell-origin")
+    cell["algorithm_version"] = "1"
+    cases["licenses"] = (licenses, [])
+
+    no_licenses = copy_of(base)
+    del no_licenses["licenses"]
+    cases["no_licenses"] = (no_licenses, [])
+
+    selection = copy_of(base)
+    selection["unreadable_results"] = ["bam-qc", "not-a-method"]
+    selection["ambiguous_results"] = ["copy-number", "bam-qc"]
+    next(row for row in selection["catalog"] if row["algorithm_id"] == "sex-check")["status"] = "not run"
+    selection["malformed_result_selections"] = True
+    cases["selection"] = (selection, [])
+
+    missing_selection = copy_of(base)
+    for key in ("unreadable_results", "ambiguous_results", "malformed_result_selections", "excluded_chunks",
+                "completed_utc"):
+        missing_selection.pop(key, None)
+    cases["missing_selection"] = (missing_selection, [])
+
+    methods = copy_of(base)
+    skipped = _algorithm(methods, "copy-number")
+    skipped.update(status="skipped", skip_reason="depth")
+    failed = _algorithm(methods, "sex-check")
+    failed.update(status="failed")
+    odd = _algorithm(methods, "fragment-size")
+    odd.update(status="skipped", skip_reason="private reason text")
+    _algorithm(methods, "bam-qc")["provenance"]["tool"] = "/private/tool"
+    methods["algorithms"] = [row for row in methods["algorithms"] if row["algorithm_id"] != "cell-origin"]
+    catalog_cell = next(row for row in methods["catalog"] if row["algorithm_id"] == "cell-origin")
+    catalog_cell.update(status="skipped", skip_reason="missing_asset")
+    cases["methods"] = (methods, [])
+
+    values = copy_of(base)
+    _metric(values, "bam-qc", "total_reads")["unit"] = "furlongs"
+    _metric(values, "bam-qc", "mapped_fraction")["state"] = "bogus_state"
+    _metric(values, "bam-qc", "mapq_ge20_fraction").update(state="in_range", reason="no_pon")
+    _metric(values, "bam-qc", "mean_read_q").update(state="not_interpretable", reason="no_pon", n=-1)
+    _metric(values, "bam-qc", "duplicate_fraction")["n"] = 12
+    _metric(values, "bam-qc", "gc_bias_slope")["value"] = "text"
+    _algorithm(values, "bam-qc")["metrics"].append({"metric_id": "not_registered", "value": 1, "unit": "reads"})
+    values["excluded_chunks"] = [3, -1, "x", True]
+    cases["values"] = (values, ["bam-qc/genome_ge1x_fraction", "copy-number/tumor_fraction"])
+
+    excluded = copy_of(base)
+    excluded["excluded_chunks"] = [4, 7]
+    excluded["run_utc"] = excluded["completed_utc"] = "2026-10-19T11:00Z"
+    cases["excluded"] = (excluded, [])
+    return cases
+
+
+def copy_of(sample: dict) -> dict:
+    return json.loads(json.dumps(sample))
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js unavailable")
 def test_rows_and_limitations_match_the_browser_projection() -> None:
-    sample = _reportable_sample()
-    sample["completed_utc"] = sample["run_utc"]
-    for algorithm in sample["algorithms"]:
-        for metric in algorithm["metrics"]:
-            if (algorithm["algorithm_id"], metric["metric_id"]) == ("sex-check", "call"):
-                metric["value"] = "female"
-            if (algorithm["algorithm_id"], metric["metric_id"]) == ("copy-number", "pon_policy"):
-                metric["value"] = "unlisted-policy"
-            if (algorithm["algorithm_id"], metric["metric_id"]) == ("copy-number", "identifiable"):
-                metric["value"] = True
+    cases = _parity_cases()
     script = r"""
       require(process.argv[1]);
       let input = '';
       process.stdin.on('data', (chunk) => { input += chunk; });
       process.stdin.on('end', () => {
-        const model = globalThis.TracebackLabReport.project(JSON.parse(input), '2026-11-07T12:00:00Z',
-          (m) => ({displayValue: m.value == null ? 'unavailable' : String(m.value), displayUnit: m.unit}));
-        process.stdout.write(JSON.stringify(model));
+        const out = {};
+        for (const [name, [sample, infinite]] of Object.entries(JSON.parse(input))) {
+          for (const key of infinite) {
+            const [algorithmId, metricId] = key.split('/');
+            const algorithm = sample.algorithms.find((row) => row.algorithm_id === algorithmId);
+            algorithm.metrics.find((row) => row.metric_id === metricId).value = Infinity;
+          }
+          try {
+            out[name] = globalThis.TracebackLabReport.project(sample, '2026-11-07T12:00:00Z',
+              (m) => ({displayValue: m.value == null ? 'unavailable' : String(m.value), displayUnit: m.unit}));
+          } catch (error) { out[name] = {error: error.code}; }
+        }
+        process.stdout.write(JSON.stringify(out));
       });
     """
-    js = json.loads(subprocess.run(["node", "-e", script, str(REPORT_JS)], input=json.dumps(sample),
-                                   capture_output=True, text=True, check=True).stdout)
-    py = project_report(sample, FROZEN_AT, report_scrubber(Path("/nonexistent")))
-    keys = ("algorithm_id", "metric_id", "label", "raw_value", "raw_unit", "recorded_support_n",
-            "interpretation_state", "interpretation_reason")
-    assert [[row[key] for key in keys] for row in py["metrics"]] == [[row[key] for key in keys] for row in js["metrics"]]
-    assert py["limitations"] == js["limitations"]
-    for key in ("schema_version", "sample_id", "source_id", "full_input_id", "recorded_utc", "recorded_utc_kind",
-                "interpretation_version", "cohort_version", "example"):
-        assert py[key] == js[key], key
-    exported = {(row["algorithm_id"], row["metric_id"]) for row in py["metrics"]}
+    js_all = json.loads(subprocess.run(["node", "-e", script, str(REPORT_JS)], input=json.dumps(cases),
+                                       capture_output=True, text=True, check=True).stdout)
+    keys = ("algorithm_id", "metric_id", "label", "raw_value", "raw_unit", "recorded_support_n", "status",
+            "skip_reason", "interpretation_state", "interpretation_reason", "tool", "tool_version",
+            "parameters_sha256", "attempt_id", "reference_id", "computed_at")
+    for name, (sample, infinite) in cases.items():
+        for key in infinite:
+            _metric(sample, *key.split("/"))["value"] = float("inf")
+        js = js_all[name]
+        assert "error" not in js, (name, js)
+        py = project_report(sample, FROZEN_AT, report_scrubber(Path("/nonexistent")))
+        assert [[row[key] for key in keys] for row in py["metrics"]] == \
+            [[row[key] for key in keys] for row in js["metrics"]], name
+        assert py["limitations"] == js["limitations"], name
+        for key in ("schema_version", "sample_id", "source_id", "full_input_id", "recorded_utc",
+                    "recorded_utc_kind", "interpretation_version", "cohort_version", "example"):
+            assert py[key] == js[key], (name, key)
+    base = project_report(cases["base"][0], FROZEN_AT, report_scrubber(Path("/nonexistent")))
+    exported = {(row["algorithm_id"], row["metric_id"]) for row in base["metrics"]}
     assert ("sex-check", "call") in exported and ("copy-number", "identifiable") in exported
     assert ("copy-number", "pon_policy") not in exported
 

@@ -1165,13 +1165,22 @@ intended use before sharing it.
 The file has no scripts, no inline event handlers, no links and no external
 resources; one inline `<style>` block styles it, and it renders with
 JavaScript disabled. Nothing the page does not show enters it: no host paths,
-read names, cohort member identities, artifacts or taxon detail. Every string
-passes the Lab scrubber (ROOT, home directory, login and host name), and free
-text that looks like a path, a credential, a long hexadecimal identifier or a
-read sequence is dropped. The same 5,000-row and 5 MiB limits as the browser
-export apply. An over-limit or unreportable sample, an existing `--out` file
-(never overwritten) or an unwritable destination is refused with TBX-LAB-034
-and no partial file. Without `--out` the file is
+read names, cohort member identities, artifacts or taxon detail. Metric
+identities, labels, value kinds, flags and license terms come from the
+interpretation library, as in the browser export. Identifiers, hashes and
+numbers are pattern-checked and shown as recorded. Curated text (method
+questions, requirements and limitations, license terms, the CLIA explainer)
+is shown in full after the Lab scrubber replaces ROOT, the home directory,
+the login name and the host name (whole words of three or more characters).
+Library free text (labels, confounders, next steps, references) is scrubbed
+the same way, and an item that looks like a path, a credential, a long
+hexadecimal identifier or a read sequence is withheld; the file marks it in
+place (`[1 item withheld]`) and says so under limitations. The same 5,000-row
+and 5 MiB limits as the browser export apply, to both the report projection
+and the HTML file. An over-limit or unreportable sample, an unreadable CLIA
+explainer, an existing `--out` file (never overwritten, even if it appears
+while the report is written) or an unwritable destination is refused with
+TBX-LAB-034 and no partial file. Without `--out` the file is
 `traceback-research-<id12>-<UTC>Z.html` in the current directory. The human
 output and `--json` (`data.path`, `data.size`, `data.sha256`, `data.rows`,
 `data.generated_at`) name the written file; the same sample and capture time
@@ -1594,7 +1603,8 @@ symlink or a plain file is TBX-LAB-005 instead.
 `lab report --html` could not write the report file (exit 3). The cause says
 why: the sample's report exceeds the 5,000-row or 5 MiB export limit, its
 recorded result is unavailable, its identity or completion metadata is
-invalid, it has no eligible scalar metrics, the `--out` file already exists
+invalid, it has no eligible scalar metrics, the CLIA explainer copy could not
+be read, the `--out` file already exists
 (it is never overwritten), or the destination could not be written. No
 partial file is left. Pass a new `--out PATH` in a writable directory, or
 open the Lab page and use **Export / print** for the live view. An unknown or
