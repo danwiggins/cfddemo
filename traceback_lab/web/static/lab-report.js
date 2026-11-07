@@ -63,6 +63,8 @@
     },
     "bam-qc": {
       "duplicate_fraction": ["Duplicate-marked share", "fraction", "proportion"],
+      "duplicate_read_name_count": ["Primary reads with a repeated read name", "reads", "count"],
+      "duplicate_read_name_share": ["Share of primary reads with a repeated read name", "fraction", "proportion"],
       "gc_bias_slope": ["GC bias (slope of log2 coverage on GC)", "log2/GC", "signed"],
       "genome_ge1x_fraction": ["Sampled chr1-22 bases covered at least once", "fraction", "proportion"],
       "mapped_fraction": ["Mapped share of primary reads", "fraction", "proportion"],
