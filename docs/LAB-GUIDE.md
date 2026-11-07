@@ -85,7 +85,7 @@ traceback lab simulate cna <id12|latest> [--tf 0.03,0.10,0.30] [--cohort ID] [--
 traceback lab simulate split <id12|latest> [--cohort ID] [--verbose]                         split-half pseudo-replicate
 traceback lab algorithms [--json]          registered algorithms (id, tier, min depth, licenses, footnote)
 traceback lab doctor [--json]              setup checks, each with a fix command
-traceback lab serve [--open]               the local page (loopback only)
+traceback lab serve [--open] [--port N]    the local page (loopback only)
 traceback lab runs [RUN_ID] [--step S]     the run log, or one run's steps
 traceback lab identity sites add --file SITES.vcf.gz --sha256 SHA256 --source-label LABEL [--root R]
 traceback lab identity sites inspect [--root R]
@@ -747,12 +747,19 @@ signed fragment metric; the Lab's 1-bp counter is parity-tested against it.
 
 ## Opening the page
 
-`traceback lab serve [--open] [--root R]` starts a server on 127.0.0.1 only
-and prints ROOT, then a one-use link
+`traceback lab serve [--open] [--port N] [--root R]` starts a server on
+127.0.0.1 only and prints ROOT, then a one-use link
 (`http://127.0.0.1:<port>/#bootstrap=<code>`). Open it within 60 seconds on
 this machine; `--open` opens it for you. Press Enter for a fresh link;
 Ctrl-C stops the server. Pass the same `--root` (or `TRACEBACK_ROOT`) you
 used for `lab run`; on an empty ROOT the server says so.
+
+The port is ephemeral (chosen by the operating system) unless `--port N`
+names one in 1024-65535; the link carries whichever port was bound. `--port`
+changes the port only: the server still binds 127.0.0.1 and nothing else, and
+the Host, Origin and session rules are the same as for an ephemeral port. A
+port that is busy or cannot be bound is refused with TBX-LAB-026 before any
+link is printed; a value outside 1024-65535 is a usage error (exit 2).
 
 Bare `#/` opens the primary input from the most recently completed `lab run`
 (`ok` or `partial_failure`). An active or interrupted rerun does not replace
@@ -1156,6 +1163,15 @@ for full hg38 alignment. The run continues, but alignment may fail or be slow.
 Use a machine with at least 16 GiB RAM for a full alignment. If physical RAM
 cannot be detected, the Lab omits this advisory rather than blocking the run.
 
+### TBX-LAB-026
+
+`lab serve` could not bind the loopback port (exit 3, retryable). With
+`--port N`, another process is usually listening on 127.0.0.1:N: pass a
+different `--port`, stop that process, or omit `--port` for an ephemeral
+port. Without `--port`, no ephemeral loopback port could be bound; check that
+the loopback interface is up and retry. `--json` carries the requested `port`
+(`null` when ephemeral) and the OS `errno` name under `data`.
+
 ## Adding an algorithm
 
 1. Add a module under `traceback_lab/algorithms/` exposing an instance of the
@@ -1173,6 +1189,7 @@ cannot be detected, the Lab omits this advisory rather than blocking the run.
 
 ## Changes
 
+- 2026-11-06: `lab serve --port N` binds a fixed loopback port; TBX-LAB-026.
 - 2026-10-17: documented the expanded registered catalog, platform-specific
   methods, input-scoped calibrations, and current Lab writer commands.
 - 2026-10-15: first slice: `lab run`, `lab runs`, `lab algorithms`,
