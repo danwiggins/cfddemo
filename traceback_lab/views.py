@@ -173,12 +173,6 @@ class InputView:
                 return envelope.depth.approx_depth_x
         return None
 
-    def eligible_reads(self) -> int | None:
-        for envelope in self.results.values():
-            if envelope.depth is not None:
-                return envelope.depth.eligible_reads
-        return None
-
 
 @dataclass
 class SampleView:

@@ -967,6 +967,20 @@ the scroll controls are hidden.
   panels (short version, "Read the full explainer" expands in place, full text
   at `#/about/clia`), followed by the samples table and license callouts. The
   research-use notice is shown in the page header on every route.
+
+  The samples table also shows each sample's **kit columns**: flow-cell
+  type, library kit, basecall model and the sequencer/basecaller software
+  versions. They come from the BAM header provenance recorded in the input
+  manifest at ingest (`@RG DS` `flow_cell_product_code`/`flow_cell_type`,
+  `sequencing_kit`/`library_kit`/`kit` and `basecall_model` keys; `@PG` program
+  name and version), never from re-reading the BAM when the page loads. Only
+  bare product codes, model names and versions are kept: read-group IDs,
+  flow-cell IDs (`PU`), device (`PM`), sample and library names (`SM`, `LB`),
+  run IDs, dates and `@PG` command lines are not stored or shown. A field the
+  header did not carry, or an input ingested before this was recorded, reads
+  "not recorded" (older inputs still show the manifest's basecall model). Rows
+  keep the run-date order; nothing is sorted by these values. A full Kit lens
+  is a follow-up.
 - **Findings**: only above/below-reference results are cards (sorted by tier,
   then severity); not-interpretable, no-reference and in-range metrics are
   counted, collapsible rows. Before the kit cohort exists (n < 10) most
@@ -1555,6 +1569,8 @@ symlink or a plain file is TBX-LAB-005 instead.
 
 ## Changes
 
+- 2026-11-07: the landing samples table shows kit columns (flow cell, library
+  kit, basecall model, software) from the stored header provenance.
 - 2026-11-06: `lab inventory DIR` checks a chunk set before alignment; TBX-LAB-031.
 - 2026-11-06: `lab serve --port N` binds a fixed loopback port; TBX-LAB-026.
 - 2026-11-06: `lab gc` (dry-run by default; `--apply` deletes stale failed

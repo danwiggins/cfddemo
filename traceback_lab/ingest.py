@@ -279,20 +279,29 @@ def header_provenance(header_text: str) -> dict[str, Any]:
 def stored_header_provenance(manifest: Any) -> dict[str, Any] | None:
     """Re-validate a stored input manifest's header provenance before it is shown.
 
-    Manifests written before this field existed have none (``None``); a
-    hand-edited value is filtered through the same value rule as ingest.
+    Manifests written before this field existed show every field as absent
+    (``None``) except the basecall model; a hand-edited value is filtered
+    through the same value rule as ingest.
     """
 
-    value = manifest.get("header_provenance") if isinstance(manifest, Mapping) else None
-    if not isinstance(value, Mapping):
+    if not isinstance(manifest, Mapping):
         return None
+    value = manifest.get("header_provenance")
+    value = value if isinstance(value, Mapping) else {}
     software: list[dict[str, str | None]] = []
     entries = value.get("software")
     for entry in (entries if isinstance(entries, list) else [])[:_MAX_SOFTWARE]:
         program = _provenance_value(entry.get("program")) if isinstance(entry, Mapping) else None
         if program is not None:
             software.append({"program": program, "version": _provenance_value(entry.get("version"))})
-    return {**{key: _provenance_value(value.get(key)) for key in _PROVENANCE_FIELDS}, "software": software}
+    result = {**{key: _provenance_value(value.get(key)) for key in _PROVENANCE_FIELDS}, "software": software}
+    # The manifest's own basecall_model ("a|b" when read groups differ) predates
+    # this field, so older inputs still show their model.
+    models = manifest.get("basecall_model")
+    parts = models.split("|") if isinstance(models, str) else []
+    if parts and all(_provenance_value(part) for part in parts):
+        result["basecall_model"] = " | ".join(parts)
+    return result
 
 
 BGZF_EOF = bytes.fromhex("1f8b08040000000000ff0600424302001b0003000000000000000000")
