@@ -183,8 +183,8 @@ method_catalog:
   griffin:
     description: "GC-corrected coverage profiles around registered transcription-factor sites."
     question: "How do local DNA-packaging patterns compare between suitable samples?"
-    limitations: "Requires paired-end Illumina data and does not produce a tissue-origin or disease call."
-    requirements: ["Registered Griffin assets and tested toolchain", "At least five million eligible autosomal pairs"]
+    limitations: "Illumina paired-end input runs the pinned upstream workflow. ONT single-end input runs the Lab's port of the same arithmetic on aligned spans; it is speculative, has no published ONT performance and is not comparable with Illumina profiles. Neither produces a tissue-origin or disease call."
+    requirements: ["Registered Griffin assets and tested toolchain", "At least five million eligible autosomal pairs", "ONT: at least five million D21-eligible autosomal reads"]
   epi-clock:
     description: "Three-site Weidner age arithmetic using ONT modification calls."
     question: "Is this transferred age-associated signal reproducible in cfDNA?"
@@ -3141,14 +3141,14 @@ entries:
     value_kind: positive
     tier: SPECULATIVE
     origin_tier: NEWER
-    origin_platform: "paired-end cfDNA WGS, hg38"
+    origin_platform: "paired-end cfDNA WGS, hg38; ONT single-end Lab port unvalidated"
     min_depth_x: null
     reference: {kind: none}
     performance: null
-    performance_missing_reason: "No validated performance or reference range for this TF-site list and sample"
+    performance_missing_reason: "No validated performance or reference range for this TF-site list and sample; no published ONT performance for the single-end port"
     meaning_high: "More corrected nucleosome protection at the registered primary TF-site list; this is not a TF expression call."
     meaning_low: "Less corrected nucleosome protection at the registered primary TF-site list; this is not a TF expression call."
-    confounders: ["TF binding-site selection", "GC correction and mappability filtering", "cell-type mixture", "sequencing depth", "fragment-size selection"]
+    confounders: ["TF binding-site selection", "GC correction and mappability filtering", "cell-type mixture", "sequencing depth", "fragment-size selection", "platform: ONT aligned span versus Illumina TLEN"]
     next_steps:
       analytical: ["Inspect the full site-centered profile and registered TF-site list", "Compare only against protocol-matched samples"]
       clinical_setting: null

@@ -104,3 +104,36 @@ execute in the timed worker after the lightweight preflight. A derived
 downsample or split selection is counted from its temporary selected BAM;
 insufficient pairs yield a depth skip. This synthetic proof does not measure
 the runtime or memory of a full-depth gate.
+
+## Single-end ONT port cross-check
+
+The ONT path (`traceback_lab/adapters/griffin_ont.py`) does not run upstream
+code, because upstream reads fragments only from paired records.
+`ont_port_crosscheck.py` checks that the port reproduces the pinned scripts'
+arithmetic. Its `lab` step, run from the repository root in the Lab
+environment, writes the synthetic world of `tests/lab/test_griffin_ont.py`
+(a 120 kb toy chr1, seven stranded sites and 152,380 planted spans) and the
+port's output. Its `upstream` step, run in a proof environment with pandas
+1.5.3, numpy 1.26.4, scipy 1.11.4, matplotlib, pysam, pyBigWig and PyYAML,
+presents each span as a proper pair and runs the pinned
+`griffin_GC_counts.py`, `griffin_GC_bias.py`, `griffin_coverage.py` and
+`griffin_merge_sites.py` with the Lab's settings. A pandas stand-in replaces
+the pybedtools sort, merge and concatenate calls, so no bedtools binary is
+needed.
+
+```sh
+uv run python docs/proofs/griffin/ont_port_crosscheck.py lab --work-dir "$WORK"
+"$PROOF_PYTHON" docs/proofs/griffin/ont_port_crosscheck.py upstream --work-dir "$WORK" --upstream "$UPSTREAM"
+```
+
+On 2026-11-07, at commit `b624c7a2ea7b8758b6eebd424066c815bfeece61`, both
+smoothed GC-bias tables had 125,631 rows with the same NaN pattern and a
+largest absolute difference of 7.1e-15. The corrected-profile TSVs were
+identical except for the sample label. Upstream's GC table counted 304,760
+fragments, two per pair (one per mate); its per-length normalisation cancels
+that factor. The upstream TSV is checked in as
+`tests/lab/fixtures/griffin/OntPortUpstream.GC_corrected.coverage.tsv`
+(SHA-256 `e02a40abeafa45a02827a9cd24aa5a960db4e45e00a4b2ba7919986368655db9`),
+and a Lab test compares the port's output with it. This shows that the
+arithmetic matches. It does not show that ONT aligned spans are a valid
+substitute for Illumina fragments.
