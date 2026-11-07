@@ -1,12 +1,14 @@
 """Per-input algorithm execution: preflight, run or skip, publish (D19, D20, D22, D35).
 
 Each algorithm runs in a worker process in its own process group with a
-timeout, so a failure is isolated and nothing it started outlives it.  A
-failure is written as ``status: failed`` with the last 50 scrubbed stderr
-lines; there is no automatic retry. A rerun recomputes missing or failed
-results and dependents whose selected upstream attempt changed, even when
-the D19 execution identity is unchanged. ``force`` recomputes all results;
-skipped results are preflighted again every time, because depth can change.
+timeout and a per-algorithm memory cap (``memory_cap.MemoryCapPolicy``), so
+a failure is isolated and nothing it started outlives it.  A failure is
+written as ``status: failed`` with the last 50 scrubbed stderr lines (reason
+``memory`` when the cap killed it); there is no automatic retry. A rerun
+recomputes missing or failed results and dependents whose selected upstream
+attempt changed, even when the D19 execution identity is unchanged.
+``force`` recomputes all results; skipped results are preflighted again every
+time, because depth can change.
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ from traceback_runner.serialization import canonical_json_bytes
 
 from .envelope import Depth, Failure, ResultEnvelope, provenance
 from .ingest import resolve_reference
+from .memory_cap import MemoryCap, MemoryCapPolicy, format_bytes, looks_like_allocation_failure
 from .pipeline import Stage, run_pipeline
 from .problems import LabProblem
 from .reference_integrity import verify_reference_source
@@ -120,6 +123,8 @@ class StepResult:
     artifacts_dir: str | None = None
     input_id: str | None = None
     attempt_id: str | None = None
+    failure_reason: str | None = None  # "memory" when the cap killed the step
+    memory_cap_bytes: int | None = None
 
     def public(self) -> dict[str, Any]:
         return {
@@ -128,6 +133,7 @@ class StepResult:
             "upstream_only": self.upstream_only,
             "skip_reason": self.skip_reason,
             "first_line": self.first_line,
+            "failure_reason": self.failure_reason,
             "duration_s": self.duration_s,
             "peak_rss_bytes": self.peak_rss_bytes,
             "peak_tree_rss_bytes": self.peak_tree_rss_bytes,
@@ -252,8 +258,13 @@ def run_plan(
     progress: Callable[[str], None] | None = None,
     echo: Callable[[str], None] | None = None,
     upstream_results: dict[str, StepResult] | None = None,
+    memory_cap: MemoryCapPolicy | None = None,
 ) -> list[StepResult]:
-    """Run ``items`` (registry order) against ``target``; returns one result each."""
+    """Run ``items`` (registry order) against ``target``; returns one result each.
+
+    ``memory_cap`` (``lab run``) caps each worker; without it no cap applies
+    and the run log carries no cap fields.
+    """
 
     results: list[StepResult] = []
     done: dict[str, StepResult] = dict(upstream_results or {})
@@ -434,7 +445,11 @@ def run_plan(
         # Ready: run it in a worker process group.
         if lock is not None:
             lock.set_step(step)
-        log.append("step_start", step=step, parameters_sha256=identity)
+        cap: MemoryCap | None = memory_cap.for_algorithm(algorithm.id) if memory_cap is not None else None
+        log.append(
+            "step_start", step=step, parameters_sha256=identity,
+            **(cap.log_fields() if cap is not None else {}),
+        )
         if progress:
             progress(f"{step:<24} running{' (upstream)' if item.upstream_only else ''}")
         scratch = scratch_root / f"{algorithm.id}-{target.label}"
@@ -454,6 +469,7 @@ def run_plan(
                 cwd=scratch,
                 echo=echo,
                 disk_path=scratch,
+                memory_cap_bytes=cap.bytes if cap is not None else None,
             )
             if outcome.ok:
                 try:
@@ -547,7 +563,17 @@ def run_plan(
                 stage = outcome.stages[0]
                 tail = stage.stderr.scrubbed(scrubber, last=50)
                 lines = [line for line in tail if line.strip()]
-                first = "timed out" if outcome.timed_out else (lines[-1] if lines else f"exited {stage.returncode}")
+                capped = cap is not None and cap.bytes is not None
+                memory_killed = capped and (
+                    outcome.memory_exceeded or looks_like_allocation_failure(stage.returncode, tail)
+                )
+                if outcome.timed_out:
+                    first = "timed out"
+                elif memory_killed:
+                    assert cap is not None and cap.bytes is not None
+                    first = f"memory cap exceeded ({format_bytes(cap.bytes)})"
+                else:
+                    first = lines[-1] if lines else f"exited {stage.returncode}"
                 result = _publish_failure(
                     store, algorithm, target, identity, item, log, step,
                     first_line=scrubber.line(first), tail=tail, exit_code=stage.returncode,
@@ -555,6 +581,8 @@ def run_plan(
                     peak_rss=outcome.peak_rss_bytes,
                     peak_tree_rss=outcome.sampled_tree_peak_rss_bytes,
                     peak_disk=outcome.peak_disk_bytes,
+                    reason="memory" if memory_killed else None,
+                    memory_cap_bytes=cap.bytes if memory_killed and cap is not None else None,
                 )
         finally:
             shutil.rmtree(scratch, ignore_errors=True)
@@ -619,12 +647,15 @@ def _publish_failure(
     peak_rss: int | None,
     peak_disk: int | None,
     peak_tree_rss: int | None = None,
+    reason: str | None = None,
+    memory_cap_bytes: int | None = None,
 ) -> StepResult:
     failure = Failure(
         first_line=first_line[:300] or "failed",
         stderr_tail=[line[:300] for line in tail[-50:]],
         exit_code=exit_code,
         timed_out=timed_out,
+        reason=reason,
     )
     attempt_id = store.publish_result(
         _envelope(algorithm, target, identity, status="failed", failure=failure, duration_s=duration_s),
@@ -640,6 +671,8 @@ def _publish_failure(
         peak_tree_rss_bytes=peak_tree_rss,
         peak_disk_bytes=peak_disk,
         timed_out=timed_out,
+        failure_reason=reason,
+        memory_cap_bytes=memory_cap_bytes,
         parameters_sha256=identity,
         input_id=target.input_id,
         attempt_id=attempt_id,
@@ -657,6 +690,8 @@ def _publish_failure(
         input_label=target.label,
         input_id=target.input_id,
         attempt_id=attempt_id,
+        failure_reason=reason,
+        memory_cap_bytes=memory_cap_bytes,
     )
 
 

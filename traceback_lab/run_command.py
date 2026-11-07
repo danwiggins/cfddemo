@@ -19,6 +19,7 @@ from . import registry
 from .cohort_command import _cohort_id
 from .completed_runs import record_completion
 from .identity import SHA256_PATTERN, aligned_input_id, prealigned_input_id
+from .memory_cap import MemoryCapPolicy, format_bytes, parse_memory_cap
 from .ingest import (
     EXAMPLE_REFERENCE_ID,
     GIB,
@@ -95,6 +96,8 @@ def add_run_parser(commands: Any, common: Callable[[argparse.ArgumentParser], No
     run.add_argument("--sex", choices=("M", "F"), help="operator assertion for a pre-analytic comparison; not a diagnostic sex or gender determination")
     run.add_argument("--force", action="store_true", help="recompute every result")
     run.add_argument("--timeout-s", type=float, default=DEFAULT_TIMEOUT_S, metavar="S")
+    run.add_argument("--memory-cap", type=_memory_cap, metavar="BYTES", help="cap every algorithm at this much memory (e.g. 4GiB, 512MiB); default max(2GiB, 2x its recorded peak)")
+    run.add_argument("--no-memory-cap", action="store_true", help="run algorithms without a memory cap")
     run.add_argument("--threads", type=_threads, metavar="N", help="alignment threads (default min(8, cores-2))")
     run.add_argument("--sort-mem", type=_sort_mem, default="1G", metavar="MEM", help="samtools sort memory per thread (e.g. 768M, 2G)")
     run.add_argument("--mmi", type=Path, metavar="PATH", help="reuse an existing minimap2 index")
@@ -113,6 +116,13 @@ def _sort_mem(value: str) -> str:
     if not re.fullmatch(r"[1-9][0-9]{0,5}[KMG]?", value):
         raise argparse.ArgumentTypeError("--sort-mem is a size such as 768M or 2G")
     return value
+
+
+def _memory_cap(value: str) -> int:
+    try:
+        return parse_memory_cap(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
 
 
 def _threads(value: str) -> int:
@@ -197,6 +207,8 @@ def _flags(args: argparse.Namespace) -> dict[str, Any]:
         "skip_bad_chunks": args.skip_bad_chunks,
         "force": args.force,
         "timeout_s": args.timeout_s,
+        "memory_cap_bytes": getattr(args, "memory_cap", None),
+        "no_memory_cap": bool(getattr(args, "no_memory_cap", False)),
         "threads": args.threads,
         "sort_mem": args.sort_mem,
         "mmi_override": args.mmi is not None,
@@ -739,6 +751,13 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
         args.reference_id = EXAMPLE_REFERENCE_ID
     if not args.inputs:
         return _usage_quickstart(store)
+    if getattr(args, "memory_cap", None) is not None and getattr(args, "no_memory_cap", False):
+        raise LabProblem(
+            "TBX-LAB-002",
+            cause="--memory-cap and --no-memory-cap were both given",
+            fix="Pass one of them: a cap for every algorithm, or no cap",
+            data={"argument": "--memory-cap"},
+        )
     from .simulate_command import parse_fractions
 
     fractions = () if args.no_downsample else parse_fractions(args.downsample, "--downsample")
@@ -935,6 +954,10 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                 from .pon_consumer import bind_target
 
                 items = bind_target(store, items, target, aligned.manifest, cohort_id=args.cohort)
+                memory_cap = MemoryCapPolicy.for_store(
+                    store, override_bytes=getattr(args, "memory_cap", None),
+                    disabled=bool(getattr(args, "no_memory_cap", False)),
+                )
                 results = run_plan(
                     store,
                     lock,
@@ -948,16 +971,19 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     scrubber=scrubber,
                     progress=progress,
                     echo=_echo(args.verbose),
+                    memory_cap=memory_cap,
                 )
                 controls = _derived_phase(
                     store, lock, log, target, items, by_id, results, args,
                     run_id=run_id, fractions=fractions, tfs=tfs, scrubber=scrubber, progress=progress,
+                    memory_cap=memory_cap,
                 )
                 results = [*results, *controls["results"]]
                 code, payload = _summary(
                     store, run_id, aligned, id12, chunkset, results, warnings, time.monotonic() - started,
                     depth=target.depth.model_dump() if target.depth is not None else None,
                     controls=controls["summary"], platform=target.platform,
+                    memory_cap=memory_cap,
                 )
                 log.append("run_end", status=payload["status"], exit_code=code)
             except KeyboardInterrupt:
@@ -1016,6 +1042,7 @@ def _derived_phase(
     tfs: tuple[float, ...],
     scrubber: Scrubber,
     progress: Callable[[str], None],
+    memory_cap: MemoryCapPolicy | None = None,
 ) -> dict[str, Any]:
     """Default downsample curve and positive controls (D24, D25, D36)."""
 
@@ -1046,6 +1073,7 @@ def _derived_phase(
         force=args.force, timeout_s=args.timeout_s, scrubber=scrubber, progress=progress,
         echo=_echo(args.verbose),
         parent_upstream=_parent_intermediates(items, results),
+        memory_cap=memory_cap,
     )
     summary["cna"] = synthetic_summary(store, runs)
     return {"results": [r for run in runs for r in run.results], "summary": summary}
@@ -1128,6 +1156,7 @@ def _summary(
     depth: dict[str, Any] | None = None,
     controls: dict[str, Any] | None = None,
     platform: str = "ont",
+    memory_cap: MemoryCapPolicy | None = None,
 ) -> tuple[int, dict[str, Any]]:
     ok = sum(result.status == "ok" for result in results)
     skipped: dict[str, int] = {}
@@ -1166,6 +1195,7 @@ def _summary(
         "excluded_chunks": aligned.manifest.get("excluded_chunks", []),
         "warnings": warnings,
         "remediations": remedies,
+        "memory_cap": _memory_cap_data(memory_cap, failed, run_id),
         "next": next_argv,
     }
     skipped_text = ", ".join(
@@ -1231,6 +1261,9 @@ def _summary(
             ),
         )
         lines.extend(problem_lines(partial_problem))
+    for exceeded in data["memory_cap"]["exceeded"]:
+        lines.append(f"MEMORY  {exceeded['algorithm_id']}: exceeded its cap of {format_bytes(exceeded['cap_bytes'])}")
+        lines.extend(problem_lines(_memory_cap_problem(exceeded, run_id)))
     for remedy in remedies:
         lines.append(
             f"SKIP    {remedy['algorithm_id']} skipped ({remedy['reason']}): "
@@ -1245,6 +1278,48 @@ def _summary(
         return EXIT_PARTIAL, _bare(_with_human(payload, lines, replace_data=True))
     payload = _local_envelope(_result("lab run", "ok", summary, data=data))
     return EXIT_OK, _bare(_with_human(payload, lines, replace_data=True))
+
+
+def _memory_cap_problem(exceeded: dict[str, Any], run_id: str) -> LabProblem:
+    """``TBX-LAB-030`` for one algorithm the per-algorithm memory cap killed."""
+
+    cap_bytes = exceeded["cap_bytes"]
+    higher = max(2 * cap_bytes, 1 << 30)
+    return LabProblem(
+        "TBX-LAB-030",
+        cause=(
+            f"{exceeded['algorithm_id']} exceeded its memory cap of {format_bytes(cap_bytes)} "
+            f"({cap_bytes} bytes, basis: {exceeded['basis']}) and was stopped"
+        ),
+        fix=(
+            f"Rerun with `--memory-cap {format_bytes(higher).replace(' ', '')}` (or higher) "
+            "or `--no-memory-cap`; only the failed result recomputes"
+        ),
+        data={"algorithm_id": exceeded["algorithm_id"], "cap_bytes": cap_bytes, "run_id": run_id},
+    )
+
+
+def _memory_cap_data(
+    memory_cap: MemoryCapPolicy | None, failed: list[StepResult], run_id: str,
+) -> dict[str, Any]:
+    """The run's cap flags plus every step the cap stopped (``--json``)."""
+
+    flags = memory_cap.flags() if memory_cap is not None else {"memory_cap_bytes": None, "no_memory_cap": False}
+    exceeded: list[dict[str, Any]] = []
+    for result in failed:
+        if result.failure_reason != "memory" or result.memory_cap_bytes is None:
+            continue
+        cap = memory_cap.for_algorithm(result.algorithm_id) if memory_cap is not None else None
+        row = {
+            "algorithm_id": result.algorithm_id,
+            "input": result.input_label,
+            "cap_bytes": result.memory_cap_bytes,
+            "basis": cap.basis if cap is not None else None,
+        }
+        problem = _memory_cap_problem(row, run_id)
+        exceeded.append({**row, "code": problem.code, "cause": problem.cause, "fix": problem.fix,
+                         "docs": problem.docs})
+    return {"override_bytes": flags["memory_cap_bytes"], "disabled": flags["no_memory_cap"], "exceeded": exceeded}
 
 
 def _bare(payload: dict[str, Any]) -> dict[str, Any]:

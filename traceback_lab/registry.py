@@ -79,6 +79,12 @@ ALGORITHMS: tuple[str, ...] = (
     "epi_clock:EPI_CLOCK",
 )
 
+# Per-algorithm memory floors in bytes for ``lab run``'s cap (memory_cap.py).
+# An algorithm absent here starts at the 2 GiB default; a floor replaces that
+# default and the cap still grows to 2x the algorithm's recorded peak RSS.
+# Declare one only with a measured reason, as a comment on the entry.
+MEMORY_FLOOR_BYTES: dict[str, int] = {}
+
 
 @dataclass(frozen=True)
 class Requirements:
@@ -360,6 +366,7 @@ __all__ = [
     "CONSUMES",
     "COSTS",
     "FAMILIES",
+    "MEMORY_FLOOR_BYTES",
     "Algorithm",
     "AlgorithmOutput",
     "InputContext",

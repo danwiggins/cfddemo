@@ -14,6 +14,12 @@ operator's own terminal (``--verbose``); that text is never stored.
 
 Per-process peak RSS comes from ``os.wait4``; the caller may pass a directory
 whose size is sampled for peak disk.
+
+``memory_cap_bytes`` caps the pipeline (Lab algorithm workers only; the
+aligner never passes one): every stage sets the platform's address-space
+rlimit in the child before ``exec`` where the kernel enforces one (Linux),
+and on every platform the tree-RSS sampler terminates the group as soon as
+a sample exceeds the cap (``PipelineResult.memory_exceeded``).
 """
 
 from __future__ import annotations
@@ -31,6 +37,7 @@ from typing import IO, Any
 
 from traceback_runner.toolchain import kill_process_group
 
+from .memory_cap import apply_memory_limit, select_memory_limit
 from .scrub import BoundedStderr, Scrubber
 
 GRACE_S = 5.0
@@ -69,12 +76,15 @@ class PipelineResult:
     timed_out: bool = False
     interrupted: bool = False
     sampled_tree_peak_rss_bytes: int | None = None
+    memory_exceeded: bool = False  # the RSS sampler killed the group at the cap
+    memory_limit: str | None = None  # the rlimit set in the children, if any
 
     @property
     def ok(self) -> bool:
         return (
             not self.timed_out
             and not self.interrupted
+            and not self.memory_exceeded
             and all(stage.returncode == 0 for stage in self.stages)
         )
 
@@ -108,6 +118,8 @@ class PipelineResult:
         stage = self.failed_stage
         if self.timed_out:
             return "timed out"
+        if self.memory_exceeded:
+            return "memory cap exceeded"
         if stage is None:
             return ""
         lines = [line for line in stage.stderr.scrubbed(scrubber) if line.strip()]
@@ -319,24 +331,40 @@ def run_pipeline(
     disk_path: Path | None = None,
     disk_usage: Callable[[], int] | None = None,
     on_tick: Callable[[float], None] | None = None,
+    memory_cap_bytes: int | None = None,
 ) -> PipelineResult:
     """Run ``stages`` as one pipeline in one process group.
 
     ``KeyboardInterrupt`` kills the group and is re-raised.  ``stdout_path``
     (absolute, new) receives the last stage's stdout; otherwise it is
-    discarded.
+    discarded.  ``memory_cap_bytes`` applies the per-algorithm memory cap
+    (rlimit before exec where enforced, plus the RSS sampler on every
+    platform).
     """
 
     if not stages:
         raise ValueError("a pipeline needs at least one stage")
     if timeout_s <= 0:
         raise ValueError("timeout must be positive")
+    if memory_cap_bytes is not None and memory_cap_bytes <= 0:
+        raise ValueError("memory cap must be positive")
+    memory_limit = select_memory_limit() if memory_cap_bytes is not None else None
+    preexec: Callable[[], None] | None = None
+    if memory_cap_bytes is not None and memory_limit is not None:
+        cap, limit_name = memory_cap_bytes, memory_limit
+
+        def _limit_child() -> None:
+            # Between fork and exec: only the rlimit call, nothing that takes a lock.
+            apply_memory_limit(cap, limit_name)
+
+        preexec = _limit_child
     outcomes = [StageOutcome(stage.name) for stage in stages]
     processes: list[subprocess.Popen[bytes]] = []
     threads: list[threading.Thread] = []
     started = time.monotonic()
     timed_out = False
     interrupted = False
+    memory_exceeded = False
     peak_disk: int | None = None
     peak_tree_rss: int | None = None
     rss_samples: SimpleQueue[int | None] = SimpleQueue()
@@ -374,6 +402,7 @@ def run_pipeline(
                 env=dict(env) if env is not None else None,
                 process_group=0 if leader is None else leader.pid,
                 close_fds=True,
+                preexec_fn=preexec,
             )
             if previous_stdout is not None:
                 previous_stdout.close()  # the child holds its own copy
@@ -412,6 +441,12 @@ def run_pipeline(
                     next_rss = time.monotonic() + RSS_SAMPLE_S
             except Empty:
                 pass
+            if (memory_cap_bytes is not None and peak_tree_rss is not None
+                    and peak_tree_rss > memory_cap_bytes
+                    and any(process.returncode is None for process in processes)):
+                memory_exceeded = True
+                _terminate(leader, processes, outcomes)
+                break
             if now >= next_rss and (rss_thread is None or not rss_thread.is_alive()):
                 def sample_rss() -> None:
                     try:
@@ -503,6 +538,8 @@ def run_pipeline(
         sampled_tree_peak_rss_bytes=peak_tree_rss,
         timed_out=timed_out,
         interrupted=interrupted,
+        memory_exceeded=memory_exceeded,
+        memory_limit=memory_limit,
     )
 
 
