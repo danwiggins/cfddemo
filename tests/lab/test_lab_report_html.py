@@ -15,6 +15,7 @@ import shutil
 import socket
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -718,13 +719,13 @@ def test_report_renders_its_metrics_table_with_javascript_disabled(tmp_path) -> 
                 footer: document.querySelector('#frozen').innerText,
                 scripts: document.scripts.length};
             })()""")
-            command("Page.enable")
             command("Page.navigate", {"url": f"{base}/probe.html"})
-            for _ in range(50):
-                if evaluate("document.readyState === 'complete' && !!document.querySelector('#probe')"):
-                    break
-                command("Runtime.evaluate", {"expression": "new Promise(r => setTimeout(r, 100))",
-                                             "awaitPromise": True})
+            # Wait from Python: with scripts disabled, page timers never fire, so a
+            # DevTools-side setTimeout promise would hang until the socket timeout.
+            deadline = time.monotonic() + 30
+            while not evaluate("document.readyState === 'complete' && !!document.querySelector('#probe')"):
+                assert time.monotonic() < deadline, "the probe page did not load"
+                time.sleep(0.1)
             observed["probe_ran"] = evaluate("document.body.dataset.ran || null")
 
         _dom_cdp(
