@@ -1044,7 +1044,9 @@ the scroll controls are hidden.
 - **Findings**: only above/below-reference results are cards (sorted by tier,
   then severity); not-interpretable, no-reference and in-range metrics are
   counted, collapsible rows. Before the kit cohort exists (n < 10) most
-  metrics read "no reference".
+  metrics read "no reference". This grouping is a Lab-only surface; the
+  signed operator surface never groups or sorts by biological value
+  ([ADR 0002](adr/0002-e10-reference-labels-lab-only.md)).
 - **Compare**: choose a published Lab cohort generation and read finite scalar
   metrics against compatible, status-ok members. This is an exploratory
   selected-cohort distribution, not a healthy or clinical reference. The
@@ -1695,6 +1697,9 @@ symlink or a plain file is TBX-LAB-005 instead.
   `ingest.volume_full`, the `keep_staging` run-start flag and `--json`
   field, `staging_kept` in the problem data, the `FIX` text and a failed
   `align` `step_end` event. No new TBX code.
+- 2026-11-07: the Lab's worker and alignment pipelines run through the shared
+  `traceback_runner.contained_process.run_contained_pipeline` (`traceback_lab/pipeline.py`
+  removed); no operator-facing change.
 - 2026-11-06: `bam-qc` method version 2 adds `duplicate_read_name_count` and
   `duplicate_read_name_share` (repeated read names among primary reads, from
   the read summary's 64-bit name hashes); a non-zero share shows a FLAG pill

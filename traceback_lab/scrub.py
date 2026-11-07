@@ -18,10 +18,11 @@ from __future__ import annotations
 import getpass
 import os
 import re
-from collections import deque
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from traceback_runner.contained_process import BoundedStderr
 
 MAX_LINE_CHARS = 300
 ROOT_TOKEN = "<ROOT>"
@@ -97,39 +98,6 @@ class Scrubber:
 
     def lines(self, lines: Iterable[str]) -> list[str]:
         return [self.line(line) for line in lines]
-
-
-class BoundedStderr:
-    """Keep the head and tail of a stream's lines, bounded in memory.
-
-    Raw lines live only in memory; callers persist ``scrubbed()`` only.
-    """
-
-    def __init__(self, *, head: int = 20, tail: int = 50) -> None:
-        self._head_limit = head
-        self._head: list[str] = []
-        self._tail: deque[str] = deque(maxlen=tail)
-        self.dropped = 0
-        self.total = 0
-
-    def add(self, line: str) -> None:
-        self.total += 1
-        line = line.rstrip("\n")
-        if len(self._head) < self._head_limit:
-            self._head.append(line)
-            return
-        if len(self._tail) == self._tail.maxlen:
-            self.dropped += 1
-        self._tail.append(line)
-
-    def raw_lines(self) -> list[str]:
-        if self.dropped:
-            return [*self._head, f"… {self.dropped} lines omitted …", *self._tail]
-        return [*self._head, *self._tail]
-
-    def scrubbed(self, scrubber: Scrubber, *, last: int | None = None) -> list[str]:
-        lines = scrubber.lines(self.raw_lines())
-        return lines[-last:] if last else lines
 
 
 __all__ = [

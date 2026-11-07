@@ -36,6 +36,7 @@ from typing import Any
 
 import pysam
 
+from traceback_runner.contained_process import Stage, run_contained_pipeline as run_pipeline
 from traceback_runner.references import (
     LoadedReference,
     ReferenceProblem,
@@ -52,7 +53,6 @@ from .identity import (
     source_id_for_aligned_bam,
     source_id_for_chunks,
 )
-from .pipeline import Stage, run_pipeline
 from .problems import EXIT_USAGE, LabProblem
 from .scrub import Scrubber
 from .sample_metadata import with_sex_assertion
