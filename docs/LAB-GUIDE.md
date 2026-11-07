@@ -175,15 +175,20 @@ every directory under DIR that holds `*.bam` files (`bam_pass/`,
 `bam_pass/barcode01/`, `unclassified/`). Index coverage and the same-index
 check are judged per group, so `barcode01/…_0.bam` and `barcode02/…_0.bam`
 never collide. `bam_fail*` (and `fastq_fail*`/`pod5_fail*`) directories are
-fail output: their `.bam` files are counted by name for the report
-comparison and never inventoried; a `bam_fail/` beside a `bam_pass/` DIR is
-counted the same way. A group is printed by its directory names only when
-every name is a MinKNOW one (`bam_pass`, `bam_fail`, `barcodeNN`,
-`unclassified`); any other directory is shown as `group N (sha256 …)`,
-because a MinKNOW run folder carries the sample id in its directory names.
-Chunk file names are printed as on disk (they carry the operator-local run
-id, as `lab run` already prints chunk indexes); report files by basename;
-nothing else beyond ROOT and DIR as given names a host path.
+fail output: they are walked the same way (a `bam_fail/` beside a
+`bam_pass/` DIR included, recursively, so barcoded `bam_fail/barcodeNN/`
+counts) and their indexed regular `.bam` files are counted for the report
+comparison, never inventoried; pass and fail both exclude unindexed and
+skipped files. Every directory visited takes a number from one counter. A
+group is printed by its directory names only when every name is a MinKNOW
+one (`bam_pass`, `bam_fail`, `barcodeNN`, `unclassified`); any other
+directory is shown as `group N (sha256 …)`, because a MinKNOW run folder
+carries the sample id in its directory names. Printed names are limited to
+ROOT, DIR as given, those MinKNOW directory names, indexed chunk basenames
+(they carry the operator-local run id, as `lab run` already prints chunk
+indexes) and a report basename only when it has MinKNOW's
+`final_summary_….txt` / `sequencing_summary_….txt` shape; any other file
+(an unindexed `.bam`, an operator-named report) appears as a sha256 prefix.
 
 For each indexed `<stem>_<n>.bam` chunk the inventory records: size,
 whether the 28-byte BGZF EOF block is present and `samtools quickcheck -u`
@@ -191,16 +196,22 @@ passes, the index, the header's `@RG` basecall and modified-base models and
 `@PG` program versions, its sha256 (the Lab hash cache under ROOT is read
 when the same chunks were ingested before, never written) and its record
 count. A chunk is counted exactly when the cache holds it or the whole file
-is read; otherwise the count is an estimate from the first 2,000 records
-extrapolated by compressed size and is labelled `~` / `estimate` wherever
-it appears. The run id and sample id are reported only as present plus a
-sha256 prefix; their values are never printed. `--no-hash` skips the
-sha256 pass (a cold inventory of a ~44 GB run otherwise reads every byte);
-duplicate content is then not checked and the verdict cannot be DAMAGED by
-it, which the output says. `.bam` files without a `_<n>.bam` index (a
-merged BAM, for instance) are listed under `UNINDEXED` and excluded from
-every count. Symlinked or unreadable files and directories are listed as
-skipped and not counted; `lab run` refuses them.
+is read; otherwise the count is an estimate: the chunk's first records (at
+least 2,000, spanning at least 1 MiB of compressed data; the number read is
+printed and in `data.entries[].sampled_records`) extrapolated by compressed
+size, labelled `~` / `estimate` wherever it appears. Hashing streams the
+compressed bytes and cannot count records; an exact count would decompress
+every record, several times slower than the hash, so it is not attempted
+unless the Lab hash cache already holds it. The run id and sample id are
+reported only as present plus a sha256 prefix; their values are never
+printed. `--no-hash` skips the sha256 pass (a cold inventory of a ~44 GB run
+otherwise reads every byte); duplicate content is then not checked and the
+verdict cannot be DAMAGED by it, which the output says; the same applies,
+with the count, when some chunks could not be hashed. `.bam` files without a
+`_<n>.bam` index (a merged BAM, for instance) are counted under
+`UNINDEXED` with a sha256 prefix of each name and excluded from every
+count. Symlinked or unreadable files and directories are listed as skipped
+and not counted; `lab run` refuses them.
 
 The report then gives: chunk count and total bytes; per-group index
 coverage with missing indices as ranges (`missing 2, 5-6`); truncated
@@ -208,29 +219,35 @@ chunks; duplicate content (same sha256, anywhere) or one index with two
 contents (within a group); the estimated or exact total reads; the merged
 provenance; and any MinKNOW report it can compare against. A
 `final_summary*.txt` or `sequencing_summary*.txt` is auto-detected in DIR,
-then in its parent (MinKNOW writes them beside `bam_pass/`), or named with
-`--report PATH`. A report whose run id (`acquisition_run_id` /
-`protocol_run_id`, or the `run_id` column) does not match the chunks'
-`@RG` run id is not compared. `final_summary` declares the BAM-file total
-(pass plus fail); `sequencing_summary` declares the read and pass-read
-totals and, when it has `filename_bam` and `passes_filtering` columns, the
-pass chunk basenames, which are checked against the inventoried groups.
-Without `passes_filtering` the rows are not classified and the report is
-not comparable. When every chunk count is exact, the pass-read total is
-compared too. Report cells are reduced to chunk-shaped basenames before
-they are echoed anywhere.
+then in its parent (MinKNOW writes them beside `bam_pass/`): symlinks are
+ignored, and a pattern with several matches is reported as ambiguous and
+not compared. `--report PATH` names one explicitly; a PATH that is missing,
+a symlink, not a regular file or unreadable is refused with TBX-LAB-005. A
+report is compared only when its run id (`acquisition_run_id` /
+`protocol_run_id`, or the `run_id` column) matches the chunks' `@RG` run
+id; when either side declares none, an auto-detected report is not compared
+("run id not declared on …") and only an explicit `--report` is, marked "run
+id not verified". `final_summary` declares the BAM-file total (pass plus
+fail); `sequencing_summary` declares the read and pass-read totals and,
+when it has `filename_bam` and `passes_filtering` columns, the pass chunk
+basenames, which are checked against the inventoried groups. Without
+`passes_filtering` the rows are not classified and the report is not
+comparable. When every chunk count is exact, the pass-read total is
+compared too; with estimates or unreadable chunks the output says which.
+Report cells are reduced to chunk-shaped basenames before they are echoed
+anywhere.
 
 The last line is the verdict:
 
 | Verdict | Meaning | Exit |
 |---|---|---:|
 | `COMPLETE` | no gaps, nothing truncated or duplicated, and a comparable MinKNOW report agrees with the disk | 0 |
-| `UNKNOWN` | no gaps or damage, but nothing to compare against: no report, a report from another run, or one without the needed columns (contiguous indices alone do not prove the run is whole) | 0 |
+| `UNKNOWN` | no gaps or damage, but nothing to compare against: no report, an ambiguous one, a report from another run or with no run id to match, or one without the needed columns (contiguous indices alone do not prove the run is whole) | 0 |
 | `INCOMPLETE` | missing indices, a report declares more BAM files or pass chunks than are on disk, or (all counts exact) more pass reads than the chunks hold | 8 |
 | `DAMAGED` | a truncated chunk (no EOF block or quickcheck failure), duplicate content, one index with two contents, or chunks on disk that the report does not declare (extra files) | 8 |
 
 A DIR with no readable indexed `.bam` chunk is TBX-LAB-031; a missing DIR,
-a symlink or a file is TBX-LAB-005. `--json` carries the verdict, the
+a symlink or a file is TBX-LAB-005, as is a bad `--report PATH`. `--json` carries the verdict, the
 reasons, every group, every per-chunk row and each report comparison
 (`run_id_match`, `comparable`, `agrees`, `incomplete`, `damaged`, `notes`)
 under `data`. The inventory writes nothing, takes no lock and makes no

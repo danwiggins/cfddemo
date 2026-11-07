@@ -233,10 +233,10 @@ def test_final_summary_counts_the_bam_fail_sibling(run_dir: Path, tmp_path: Path
     assert code == 0
     data = payload["data"]
     assert data["verdict"] == "COMPLETE"
-    assert data["fail_groups"] == [{"label": "bam_fail", "bam_files": 1, "where": "sibling"}]
-    assert data["comparisons"][0]["on_disk_bam_files"] == 5
+    assert data["fail_groups"] == [{"id": 2, "label": "bam_fail", "bam_files": 1, "unindexed": 0, "where": "sibling"}]
+    assert data["comparisons"][0]["on_disk_bam_files"] == 5 and data["on_disk_bam_files"] == 5
     code, out = _run(capsys, str(run_dir / "bam_pass"), "--root", str(tmp_path / "root"))
-    assert "FAIL        bam_fail (sibling): 1 .bam file(s), fail output, not inventoried" in out
+    assert "FAIL        bam_fail (sibling): 1 indexed .bam file(s), fail output, not inventoried" in out
 
 
 def test_report_from_another_run_is_not_compared(run_dir: Path, tmp_path: Path, capsys) -> None:
@@ -245,7 +245,7 @@ def test_report_from_another_run_is_not_compared(run_dir: Path, tmp_path: Path, 
     assert code == 0
     data = payload["data"]
     assert data["verdict"] == "UNKNOWN"
-    assert data["reasons"] == ["final_summary_SYNTH_abcdef.txt: report run id does not match chunks"]
+    assert data["reasons"] == ["final_summary_SYNTH_abcdef.txt: report run id does not match chunks; not compared"]
     comparison = data["comparisons"][0]
     assert comparison["run_id_match"] is False and comparison["comparable"] is False and comparison["agrees"] is None
     code, out = _run(capsys, str(run_dir / "bam_pass"), "--root", str(tmp_path / "root"))
@@ -304,7 +304,7 @@ def test_sequencing_summary_read_totals_not_compared_when_estimated(run_dir: Pat
     assert code == 0 and payload["data"]["verdict"] == "COMPLETE"
     comparison = payload["data"]["comparisons"][0]
     assert "on_disk_reads" not in comparison
-    assert comparison["notes"] == ["read totals not compared (some chunk counts are estimates)"]
+    assert comparison["notes"] == ["read totals not compared (1 chunk count(s) are estimates)"]
 
 
 def test_sequencing_summary_extra_chunks_on_disk_are_damaged(run_dir: Path, tmp_path: Path, capsys) -> None:
@@ -374,10 +374,15 @@ def test_json_shape(run_dir: Path, tmp_path: Path, capsys) -> None:
     assert data["root"] == str(tmp_path / "root") and data["dir"] == str(run_dir / "bam_pass")
     assert set(data) == {
         "root", "dir", "recursive", "hashing", "verdict", "reasons", "chunks", "total_bytes", "groups",
-        "missing_index_count", "unindexed", "truncated", "duplicates", "duplicate_content_checked", "records",
-        "provenance", "hash_cached_chunks", "fail_groups", "reports", "comparisons", "skipped", "entries",
+        "missing_index_count", "unindexed", "truncated", "duplicates", "duplicate_content_checked", "hash_failures",
+        "records", "provenance", "hash_cached_chunks", "fail_groups", "on_disk_bam_files", "reports", "comparisons",
+        "skipped", "entries",
     }
-    assert data["records"] == {"total": 200, "kind": "exact", "counted_chunks": 4, "sample_records": 2000}
+    assert data["records"] == {
+        "total": 200, "kind": "exact", "counted_chunks": 4, "unreadable_chunks": 0,
+        "sample_records": 2000, "sample_bytes": 1024 * 1024,
+    }
+    assert data["hash_failures"] == 0 and data["duplicate_content_checked"] is True
     assert data["total_bytes"] == sum(entry["bytes"] for entry in data["entries"])
     [group] = data["groups"]
     assert set(group) == {
@@ -388,8 +393,11 @@ def test_json_shape(run_dir: Path, tmp_path: Path, capsys) -> None:
     entry = data["entries"][0]
     assert set(entry) == {
         "name", "group", "index", "bytes", "eof_marker", "quickcheck", "header_ok", "truncated", "aligned",
-        "sha256", "records", "records_kind", "hash_cached", "provenance",
+        "sha256", "hash_failed", "records", "records_kind", "sampled_records", "hash_cached", "provenance",
     }
+    report = data["reports"][0]
+    assert report["name"] == "final_summary_SYNTH_abcdef.txt" and report["explicit"] is False
+    assert report["name_sha256_12"] == hashlib.sha256(b"final_summary_SYNTH_abcdef.txt").hexdigest()[:12]
     assert len(entry["sha256"]) == 64 and entry["aligned"] is False and entry["group"] == 1
     assert "/" not in entry["name"]
     prov = data["provenance"]
@@ -413,7 +421,7 @@ def test_empty_dir_is_tbx_lab_031(tmp_path: Path, capsys) -> None:
     assert payload["status"] == "blocked" and payload["data"]["code"] == "TBX-LAB-031"
     assert payload["data"]["docs"] == "docs/LAB-GUIDE.md#tbx-lab-031"
     assert payload["data"]["dir"] == str(empty) and payload["data"]["skipped"] == []
-    assert payload["data"]["unindexed"] == [{"name": "merged.bam", "bytes": 0}]
+    assert payload["data"]["unindexed"] == [{"group": 1, "name_sha256_12": hashlib.sha256(b"merged.bam").hexdigest()[:12], "bytes": 0}]
     code, out = _run(capsys, str(empty), "--root", str(tmp_path / "root"))
     assert code == 3 and "CODE       TBX-LAB-031" in out
     assert "CAUSE      DIR (empty) holds no readable indexed .bam chunk" in out
@@ -449,12 +457,16 @@ def test_unindexed_bams_are_listed_and_excluded_from_totals(run_dir: Path, tmp_p
     assert code == 0, payload
     data = payload["data"]
     assert data["verdict"] == "COMPLETE" and data["chunks"] == 4
-    assert data["unindexed"] == [{"group": 1, "name": "merged.bam", "bytes": (chunks / "merged.bam").stat().st_size}]
+    digest = hashlib.sha256(b"merged.bam").hexdigest()[:12]
+    assert data["unindexed"] == [{"group": 1, "name_sha256_12": digest, "bytes": (chunks / "merged.bam").stat().st_size}]
+    assert data["groups"][0]["unindexed"] == [{"name_sha256_12": digest, "bytes": (chunks / "merged.bam").stat().st_size}]
+    assert "merged" not in _public(payload)
     assert data["total_bytes"] == sum(e["bytes"] for e in data["entries"])
     assert data["records"]["total"] == 200 and data["comparisons"][0]["on_disk_bam_files"] == 4
     assert data["duplicates"] == []
     code, out = _run(capsys, str(chunks), "--root", str(tmp_path / "root"))
-    assert "UNINDEXED   merged.bam (no _<n>.bam index; not counted)" in out
+    assert f"UNINDEXED   1 .bam file(s) without a _<n>.bam index, not counted (sha256 {digest})" in out
+    assert "merged" not in out
 
 
 def test_recursive_groups_pass_fail_and_barcodes(run_dir: Path, tmp_path: Path, capsys, reference) -> None:
@@ -471,10 +483,12 @@ def test_recursive_groups_pass_fail_and_barcodes(run_dir: Path, tmp_path: Path, 
     assert code == 0, payload
     data = payload["data"]
     assert data["recursive"] is True and data["chunks"] == 7 and data["verdict"] == "COMPLETE"
-    assert [(g["id"], g["label"], g["known"], g["chunks"], g["missing_indexes"]) for g in data["groups"]] == [
-        (1, "bam_pass", True, 4, []), (2, "bam_pass/barcode01", True, 3, []),
+    assert [(g["label"], g["known"], g["chunks"], g["missing_indexes"]) for g in data["groups"]] == [
+        ("bam_pass", True, 4, []), ("bam_pass/barcode01", True, 3, []),
     ]
-    assert data["fail_groups"] == [{"label": "bam_fail", "bam_files": 2, "where": "DIR"}]
+    assert [(g["label"], g["bam_files"], g["unindexed"], g["where"]) for g in data["fail_groups"]] == [("bam_fail", 2, 0, "DIR")]
+    ids = [g["id"] for g in data["groups"]] + [g["id"] for g in data["fail_groups"]]
+    assert len(set(ids)) == len(ids) == 3  # one counter across pass and fail groups
     assert data["duplicates"] == []  # index 0-2 exist in both groups: not a collision
     assert data["records"]["total"] == 200 + 15
     assert data["comparisons"][0]["on_disk_bam_files"] == 9
@@ -482,7 +496,7 @@ def test_recursive_groups_pass_fail_and_barcodes(run_dir: Path, tmp_path: Path, 
     assert data["reports"][0]["where"] == "DIR"
     code, out = _run(capsys, str(run_dir), "--recursive", "--root", str(tmp_path / "root"))
     assert "INDICES     bam_pass: 0-3 contiguous" in out and "INDICES     bam_pass/barcode01: 0-2 contiguous" in out
-    assert "FAIL        bam_fail: 2 .bam file(s), fail output, not inventoried" in out
+    assert "FAIL        bam_fail: 2 indexed .bam file(s), fail output, not inventoried" in out
     assert f"CHUNKS      7  (bam_pass/{STEM}_0.bam … bam_pass/barcode01/SYNTH0001_pass_barcode01_2.bam)" in out
     assert " in 2 group(s)" in out
 
@@ -563,12 +577,12 @@ def test_hash_cache_is_read_but_never_written(run_dir: Path, tmp_path: Path, cap
 
 def test_estimate_extrapolates_from_the_first_records(tmp_path: Path, reference, monkeypatch) -> None:
     [chunk] = write_chunks(tmp_path / "big", reference, chunks=1, reads_per_chunk=1_500)
-    exact, kind = estimate_records(chunk, chunk.stat().st_size)
-    assert (exact, kind) == (1_500, "exact")
+    exact, kind, sampled = estimate_records(chunk, chunk.stat().st_size)
+    assert (exact, kind, sampled) == (1_500, "exact", 1_500)
     monkeypatch.setattr(inventory_command, "SAMPLE_RECORDS", 300)
     monkeypatch.setattr(inventory_command, "SAMPLE_BYTES", 1)
-    estimate, kind = estimate_records(chunk, chunk.stat().st_size)
-    assert kind == "estimate"
+    estimate, kind, sampled = estimate_records(chunk, chunk.stat().st_size)
+    assert kind == "estimate" and 300 <= sampled < 1_500
     assert 1_500 * 0.6 <= estimate <= 1_500 * 1.4, estimate
 
 
@@ -583,7 +597,10 @@ def test_estimated_total_is_labelled_in_both_outputs(run_dir: Path, tmp_path: Pa
     assert records["kind"] == "estimate" and records["counted_chunks"] == 5
     assert 200 + 900 <= records["total"] <= 200 + 2_100
     code, out = _run(capsys, str(run_dir / "bam_pass"), "--root", str(tmp_path / "root"))
-    assert "READS       ~" in out and "(estimate from the first 300 records of each chunk; 4 chunk(s) exact)" in out
+    sampled = min(e["sampled_records"] for e in payload["data"]["entries"] if e["records_kind"] == "estimate")
+    assert sampled >= 300
+    assert "READS       ~" in out
+    assert f"(estimate: each estimated chunk's first records, at least {sampled:,}, extrapolated by compressed size; 4 chunk(s) exact)" in out
 
 
 def test_missing_ranges() -> None:
@@ -629,6 +646,141 @@ def test_report_parsers(tmp_path: Path) -> None:
     parsed = parse_sequencing_summary(bare)
     assert parsed["declared_pass_bam_files"] is None and parsed["declared_reads"] == 2
     assert parsed["passes_filtering_column"] is False and parsed["run_id"] == {"present": False, "sha256_12": []}
+
+
+def test_report_without_run_id_is_compared_only_when_explicit(run_dir: Path, tmp_path: Path, capsys) -> None:
+    report = run_dir / "final_summary_SYNTH_abcdef.txt"
+    report.write_text("bam_files_in_final_dest=4\nbam_files_in_fallback=0\n")
+    code, payload = _json(capsys, str(run_dir / "bam_pass"), "--root", str(tmp_path / "root"))
+    assert code == 0
+    data = payload["data"]
+    assert data["verdict"] == "UNKNOWN"
+    assert data["reasons"] == ["final_summary_SYNTH_abcdef.txt: run id not declared on report; not compared"]
+    comparison = data["comparisons"][0]
+    assert comparison["run_id_match"] is None and comparison["comparable"] is False and comparison["agrees"] is None
+    code, out = _run(capsys, str(run_dir / "bam_pass"), "--root", str(tmp_path / "root"))
+    assert "REPORT      final_summary_SYNTH_abcdef.txt (parent directory): run id not declared on report; not compared" in out
+    code, payload = _json(capsys, str(run_dir / "bam_pass"), "--report", str(report), "--root", str(tmp_path / "root"))
+    assert code == 0, payload
+    data = payload["data"]
+    assert data["verdict"] == "COMPLETE" and data["reports"][0]["explicit"] is True
+    comparison = data["comparisons"][0]
+    assert comparison["run_id_match"] is None and comparison["comparable"] is True and comparison["agrees"] is True
+    assert comparison["notes"] == ["final_summary_SYNTH_abcdef.txt: run id not verified (explicit --report)"]
+    code, out = _run(capsys, str(run_dir / "bam_pass"), "--report", str(report), "--root", str(tmp_path / "root"))
+    assert "declares 4 BAM file(s); 4 on disk; run id not verified (explicit --report)" in out
+
+
+def test_chunks_without_run_id_are_not_compared_unless_explicit(tmp_path: Path, capsys, reference) -> None:
+    run = tmp_path / "run"
+    rg = {"ID": "bare", "DS": "basecall_model=modelX modbase_models=modX", "PL": "ONT"}
+    write_chunks(run / "bam_pass", reference, chunks=2, reads_per_chunk=5, rg=rg)
+    report = _final_summary(run, 2)
+    code, payload = _json(capsys, str(run / "bam_pass"), "--root", str(tmp_path / "root"))
+    assert code == 0 and payload["data"]["verdict"] == "UNKNOWN"
+    assert payload["data"]["provenance"]["run_id"] == {"present": False, "sha256_12": []}
+    assert payload["data"]["reasons"] == ["final_summary_SYNTH_abcdef.txt: run id not declared on chunks; not compared"]
+    code, payload = _json(capsys, str(run / "bam_pass"), "--report", str(report), "--root", str(tmp_path / "root"))
+    assert code == 0 and payload["data"]["verdict"] == "COMPLETE"
+
+
+def test_barcoded_bam_fail_sibling_is_counted_recursively(run_dir: Path, tmp_path: Path, capsys, reference) -> None:
+    write_chunks(run_dir / "bam_fail" / "barcode01", reference, chunks=2, reads_per_chunk=5, stem="SYNTH0001_fail_barcode01", seed=9)
+    (run_dir / "bam_fail" / "merged_fail.bam").write_bytes(b"unindexed, not counted")
+    (run_dir / "bam_fail" / "barcode01" / "SYNTH0001_fail_barcode01_9.bam").symlink_to(
+        run_dir / "bam_fail" / "barcode01" / "SYNTH0001_fail_barcode01_0.bam"
+    )
+    _final_summary(run_dir, 6)
+    code, payload = _json(capsys, str(run_dir / "bam_pass"), "--root", str(tmp_path / "root"))
+    assert code == 0, payload
+    data = payload["data"]
+    assert data["verdict"] == "COMPLETE" and data["on_disk_bam_files"] == 6
+    assert [(g["label"], g["bam_files"], g["unindexed"], g["where"]) for g in data["fail_groups"]] == [
+        ("bam_fail", 0, 1, "sibling"), ("bam_fail/barcode01", 2, 0, "sibling"),
+    ]
+    assert {(s["group"], s["name"], s["kind"]) for s in data["skipped"]} == {
+        ("bam_fail/barcode01", "SYNTH0001_fail_barcode01_9.bam", "a symlink"),
+    }
+    assert "merged_fail" not in _public(payload)
+    code, out = _run(capsys, str(run_dir / "bam_pass"), "--root", str(tmp_path / "root"))
+    assert "FAIL        bam_fail (sibling): 0 indexed .bam file(s), fail output, not inventoried; 1 unindexed not counted" in out
+    assert "FAIL        bam_fail/barcode01 (sibling): 2 indexed .bam file(s), fail output, not inventoried" in out
+
+
+def test_operator_named_report_is_printed_as_a_digest(run_dir: Path, tmp_path: Path, capsys) -> None:
+    report = tmp_path / "donor notes final.txt"
+    report.write_text(f"acquisition_run_id={RUN_ID}\nbam_files_in_final_dest=4\n")
+    code, payload = _json(capsys, str(run_dir / "bam_pass"), "--report", str(report), "--root", str(tmp_path / "root"))
+    assert code == 0, payload
+    digest = hashlib.sha256(report.name.encode()).hexdigest()[:12]
+    entry = payload["data"]["reports"][0]
+    assert entry["name"] == f"final_summary (sha256 {digest})" and entry["name_sha256_12"] == digest
+    assert payload["data"]["verdict"] == "COMPLETE"
+    assert "donor" not in _public(payload)
+    code, out = _run(capsys, str(run_dir / "bam_pass"), "--report", str(report), "--root", str(tmp_path / "root"))
+    assert f"REPORT      final_summary (sha256 {digest}) (--report): declares 4 BAM file(s); 4 on disk" in out
+    assert "donor" not in out
+    assert inventory_command.report_label("sequencing_summary_FAX12345_abc.txt", "sequencing_summary") == "sequencing_summary_FAX12345_abc.txt"
+    assert inventory_command.report_label("final_summary.txt", "final_summary").startswith("final_summary (sha256 ")
+
+
+def test_hash_failure_marks_duplicate_check_incomplete(run_dir: Path, tmp_path: Path, capsys, monkeypatch) -> None:
+    real = inventory_command._sha256_file
+
+    def flaky(path: Path) -> str:
+        if path.name.endswith("_1.bam"):
+            raise OSError(5, "input/output error")
+        return real(path)
+
+    monkeypatch.setattr(inventory_command, "_sha256_file", flaky)
+    _final_summary(run_dir, 4)
+    code, payload = _json(capsys, str(run_dir / "bam_pass"), "--root", str(tmp_path / "root"))
+    assert code == 0
+    data = payload["data"]
+    assert data["hashing"] is True and data["duplicate_content_checked"] is False and data["hash_failures"] == 1
+    failed = next(e for e in data["entries"] if e["index"] == 1)
+    assert failed["sha256"] is None and failed["hash_failed"] is True and failed["records"] == 50
+    code, out = _run(capsys, str(run_dir / "bam_pass"), "--root", str(tmp_path / "root"))
+    assert "DUPLICATES  1 chunk(s) could not be hashed; duplicate content not fully checked" in out
+    assert "  FAILED  " in out
+
+
+def test_report_discovery_ignores_symlinks_and_refuses_ambiguity(run_dir: Path, tmp_path: Path, capsys) -> None:
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    real = _final_summary(elsewhere, 4)
+    (run_dir / "final_summary_SYNTH_link.txt").symlink_to(real)
+    code, payload = _json(capsys, str(run_dir / "bam_pass"), "--root", str(tmp_path / "root"))
+    assert code == 0 and payload["data"]["reports"] == [] and payload["data"]["verdict"] == "UNKNOWN"
+    (run_dir / "final_summary_SYNTH_link.txt").unlink()
+    _final_summary(run_dir, 4)
+    shutil.copyfile(run_dir / "final_summary_SYNTH_abcdef.txt", run_dir / "final_summary_SYNTH_second.txt")
+    code, payload = _json(capsys, str(run_dir / "bam_pass"), "--root", str(tmp_path / "root"))
+    assert code == 0
+    data = payload["data"]
+    assert data["verdict"] == "UNKNOWN"
+    [report] = data["reports"]
+    assert report["kind"] == "ambiguous" and report["candidates"] == 2 and report["pattern"] == "final_summary"
+    assert report["name"] == "final_summary (ambiguous)" and report["where"] == "parent directory"
+    comparison = data["comparisons"][0]
+    assert comparison["comparable"] is False and comparison["agrees"] is None
+    assert data["reasons"] == ["ambiguous reports: 2 final_summary files in parent directory; not compared"]
+    code, out = _run(capsys, str(run_dir / "bam_pass"), "--root", str(tmp_path / "root"))
+    assert "REPORT      final_summary (ambiguous) (parent directory): 2 final_summary files; ambiguous, not compared" in out
+
+
+def test_mistyped_report_is_tbx_lab_005(run_dir: Path, tmp_path: Path, capsys) -> None:
+    code, payload = _json(capsys, str(run_dir / "bam_pass"), "--report", str(tmp_path / "final_sumary.txt"), "--root", str(tmp_path / "root"))
+    assert code == 3 and payload["data"]["code"] == "TBX-LAB-005"
+    assert payload["data"]["argument"] == "--report" and payload["data"]["kind"] == "missing"
+    assert str(tmp_path) not in _public(payload)
+    real = _final_summary(tmp_path, 4)
+    link = tmp_path / "final_summary_link.txt"
+    link.symlink_to(real)
+    code, payload = _json(capsys, str(run_dir / "bam_pass"), "--report", str(link), "--root", str(tmp_path / "root"))
+    assert code == 3 and payload["data"]["kind"] == "a symlink"
+    code, payload = _json(capsys, str(run_dir / "bam_pass"), "--report", str(tmp_path), "--root", str(tmp_path / "root"))
+    assert code == 3 and payload["data"]["kind"] == "not a regular file"
 
 
 def test_help_and_guide_list_the_command(capsys) -> None:
