@@ -794,6 +794,11 @@ def run_contained_pipeline(
                     next_rss = time.monotonic() + RSS_SAMPLE_S
             except Empty:
                 pass
+            if stop:
+                # The sample came from live members; reap again before deciding,
+                # so a group that finished meanwhile keeps its own exit codes.
+                for position in range(len(processes)):
+                    _reap(processes[position], outcomes[position], block=False)
             if stop and any(process.returncode is None for process in processes):
                 aborted = True
                 _terminate(leader, processes, outcomes)
