@@ -240,15 +240,24 @@ def doctor_command(args: Any, store: LabStore) -> tuple[int, dict[str, Any]]:
     )
     real = str(store.root)
     quoted_root = shlex.quote(real)
+    from traceback_runner.toolchain import toolchain_cache_root
+
+    from .aligner_toolchain import TOOLCHAIN_CACHE_TOKEN
+
+    cache = shlex.quote(str(toolchain_cache_root()))
+
+    def _human(text: str) -> str:
+        return text.replace("<ROOT>", quoted_root).replace(TOOLCHAIN_CACHE_TOKEN, cache)
+
     lines = [f"ROOT  {real}"]
     for check in checks:
         label = {"pass": "PASS", "warn": "WARN", "blocked": "BLOCKED"}.get(check["status"], check["status"].upper())
         lines.append(f"{label:<8} {check['name']:<16} {check['detail']}")
         if check["status"] != "pass":
-            lines.append(f"{'':<8} {'':<16} fix: {check['fix'].replace('<ROOT>', quoted_root)}")
+            lines.append(f"{'':<8} {'':<16} fix: {_human(check['fix'])}")
     if steps:
         lines.append("Missing setup steps, in order:")
-        lines.extend(f"  {number}. {step.replace('<ROOT>', quoted_root)}" for number, step in enumerate(steps, start=1))
+        lines.extend(f"  {number}. {_human(step)}" for number, step in enumerate(steps, start=1))
     return (EXIT_BLOCKED if blocked else EXIT_OK), _with_human(payload, lines, replace_data=True)
 
 

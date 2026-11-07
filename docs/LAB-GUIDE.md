@@ -351,15 +351,31 @@ ROOT). Only this command uses the network.
 | not installed, or no pin for this platform | `samtools` / `minimap2` on `PATH` | `unpinned` |
 | present but fails verification | none: refused | TBX-LAB-033 |
 
-Verification checks that the cache directory, the store and every file in
-it are owned by you and not writable by group or other (the receipt alone
-only proves the store is self-consistent), that the receipt names exactly
-this pin set, and that each binary's sha256 matches the receipt; minimap2's
-must also equal the pinned release binary digest (samtools is built locally,
-so its binary has no fixed digest). Nothing is downloaded and a store that
-fails any check never falls back to `PATH`. Binaries are verified when the
-Lab resolves them, not again while they run. `lab doctor` additionally runs
-each pinned binary's `--version`, which catches a missing shared library.
+Before using a store, the Lab checks exactly this, and refuses with
+TBX-LAB-033 (never falling back to `PATH`) if any check fails:
+
+1. The cache directory, the store directory, its `bin/` directory, the
+   install receipt and both binaries are not symlinks, are owned by you, and
+   are not writable by group or other. (The receipt alone only proves the
+   store is self-consistent; this proves only you could have written it.)
+2. The receipt parses and names exactly this pin set: tools, versions, URLs
+   and tarball digests.
+3. Each binary exists, is executable, and its sha256 equals the receipt's.
+4. minimap2's sha256 also equals the pinned release binary digest. samtools
+   is built locally, so its binary has no fixed digest; check 1 covers it.
+5. `lab doctor` only: each binary's `--version` runs and reports the
+   receipt's version (catches a missing shared library).
+
+Nothing is downloaded. Binaries are verified when the Lab resolves them, not
+again while they run. The install writes the receipt mode 0600, runs check
+1 on the staged store before publishing it, and swaps it in under
+`<TOOLCHAIN_CACHE>/aligners.lock`; resolution waits on that lock, so a
+concurrent `lab run` never sees the moment between stores. The samtools
+build runs with only `PATH=/usr/bin:/bin LC_ALL=C` (no `CC`, `CFLAGS`,
+`LDFLAGS`, `LD_LIBRARY_PATH` or `MAKEFLAGS` from your shell), recorded as
+`build_env` in the receipt. `<TOOLCHAIN_CACHE>` is the per-user toolchain
+cache (`~/.cache/traceback/toolchains`): `--json` output carries the token,
+the terminal shows the real directory.
 
 The run log records an `aligner_tools` event and the input's
 `manifest.json` records `tool_provenance` (provenance, version, pinned
@@ -1645,8 +1661,10 @@ symlink or a plain file is TBX-LAB-005 instead.
 ### TBX-LAB-033
 
 The pinned aligner store exists under the per-user toolchain cache but does
-not verify (exit 3): the cache directory, store or one of its files is owned
-by another user or writable by group or other, or cannot be inspected; its
+not verify (exit 3); the checks are listed under
+[Pinned aligners](#pinned-aligners). The cause names which: the cache
+directory, store or one of its files is a symlink, owned by another user,
+writable by group or other, or cannot be inspected; its
 install receipt is missing or malformed (an interrupted install) or names
 another pin set; a binary is missing, not executable, no longer matches its
 recorded sha256, or (minimap2) is not the pinned release binary; or, in
@@ -1654,7 +1672,7 @@ recorded sha256, or (minimap2) is not the pinned release binary; or, in
 than silently aligning with `PATH` tools under a different identity. Run
 `traceback toolchain install aligners --yes` (it builds a new store in
 staging and swaps it in; a failed install leaves the old one in place), or
-remove the `aligners-*` directory the FIX line names to go back to `PATH`
+remove `<TOOLCHAIN_CACHE>/aligners-*` (the FIX line shows the real path) to go back to `PATH`
 (`unpinned`). Fix ownership or permissions first (`chmod go-w`) if that is
 the cause; the install refuses a cache directory others can write.
 

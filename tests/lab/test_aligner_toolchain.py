@@ -11,9 +11,12 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import re
 import shutil
+import stat
 import tarfile
+import threading
 import urllib.request
 from pathlib import Path
 
@@ -155,6 +158,56 @@ def test_install_refuses_a_tarball_that_misses_its_digest(tmp_path, fake_release
     assert at.resolve_pinned_aligners(pins=fake_release["pins"], cache_root=cache) is None
 
 
+def test_install_under_a_group_umask_publishes_a_store_that_verifies(tmp_path, fake_release) -> None:
+    cache = tmp_path / "toolchains"
+    previous = os.umask(0o002)  # Ubuntu/RHEL user-private groups
+    try:
+        store = _install(fake_release, cache)
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE((store.prefix / at.RECEIPT_NAME).stat().st_mode) == 0o600
+    assert at.resolve_pinned_aligners(pins=fake_release["pins"], cache_root=cache) is not None
+
+
+def test_a_staged_store_that_fails_the_checks_is_never_published(pinned_host, fake_release, monkeypatch) -> None:
+    store = _install(fake_release, pinned_host)
+    (store.prefix / "bin" / "minimap2").write_bytes(b"#!/bin/sh\n")  # damaged: the install will replace it
+    monkeypatch.setattr(at, "RECEIPT_MODE", 0o664)
+    with pytest.raises(LabProblem) as caught:
+        at.install_aligners(
+            fake_release["pins"], cache_root=pinned_host, platform_name=FAKE_PLATFORM,
+            downloader=fake_release["downloader"],
+        )
+    assert caught.value.code == "TBX-LAB-033" and "receipt is writable by group or other" in caught.value.cause
+    assert (store.prefix / "bin" / "minimap2").read_bytes() == b"#!/bin/sh\n"  # old store untouched
+    assert not [p for p in pinned_host.iterdir() if p.name.startswith(".")]
+
+
+def test_resolution_waits_for_the_install_swap(pinned_host, fake_release) -> None:
+    store = _install(fake_release, pinned_host)
+    result: dict[str, object] = {}
+    aside = pinned_host / "aside"
+    with at._store_lock(pinned_host, exclusive=True):
+        os.replace(store.prefix, aside)  # the gap an install's swap opens
+        worker = threading.Thread(target=lambda: result.setdefault("tools", resolve_aligner_tools()))
+        worker.start()
+        worker.join(0.5)
+        assert worker.is_alive()  # waiting, not falling back to PATH
+        os.replace(aside, store.prefix)
+    worker.join(10)
+    assert result["tools"][0].provenance == PINNED
+
+
+def test_a_symlinked_cache_root_is_refused_as_a_symlink(tmp_path, fake_release) -> None:
+    real = tmp_path / "real-cache"
+    _install(fake_release, real)
+    link = tmp_path / "linked-cache"
+    link.symlink_to(real)
+    with pytest.raises(LabProblem) as caught:
+        at.resolve_pinned_aligners(pins=fake_release["pins"], cache_root=link)
+    assert caught.value.cause == "the toolchain cache directory is a symlink"
+
+
 def test_source_pin_runs_configure_make_install_into_staging(tmp_path, fake_release) -> None:
     releases = tmp_path / "src-release"
     releases.mkdir()
@@ -170,6 +223,7 @@ def test_source_pin_runs_configure_make_install_into_staging(tmp_path, fake_rele
 
     def runner(argv, **kwargs):
         calls.append(list(argv))
+        assert kwargs["env"] == at.BUILD_ENV  # nothing inherited from the caller
         if argv[:1] == ["./configure"]:
             runner.prefix = Path(argv[1].removeprefix("--prefix="))
         if argv == ["make", "install"]:
@@ -186,6 +240,7 @@ def test_source_pin_runs_configure_make_install_into_staging(tmp_path, fake_rele
     )
     assert [argv[0] for argv in calls] == ["./configure", "make", "make"]
     assert store.samtools.pin_sha256 == digest
+    assert store.receipt.build_env == {"PATH": "/usr/bin:/bin", "LC_ALL": "C"}
 
 
 # -- resolution ---------------------------------------------------------------------------
@@ -231,7 +286,11 @@ def test_a_damaged_store_is_tbx_lab_033_never_path(pinned_host, fake_release, da
     assert caught.value.code == "TBX-LAB-033"
     assert caught.value.exit_code == 3
     assert "traceback toolchain install aligners --yes" in caught.value.fix
-    assert f"remove {pinned_host / 'aligners-*'}" in caught.value.fix
+    assert "remove <TOOLCHAIN_CACHE>/aligners-*" in caught.value.fix  # a token: --json carries no host path
+    assert str(pinned_host) not in caught.value.fix
+    from traceback_lab.problems import problem_lines
+
+    assert "<TOOLCHAIN_CACHE>" not in "\n".join(problem_lines(caught.value))  # the terminal gets the real path
     assert str(pinned_host) not in json.dumps(caught.value.data)
 
 
@@ -393,6 +452,7 @@ def test_doctor_shows_pinned_unpinned_and_damaged(pinned_host, fake_release, tmp
     assert check["status"] == "blocked" and check["blocks_example"]
     assert check["detail"].startswith("TBX-LAB-033: ")
     assert "traceback toolchain install aligners --yes" in check["fix"]
+    assert "<TOOLCHAIN_CACHE>/aligners-*" in check["fix"] and str(pinned_host) not in check["fix"]
 
 
 def test_doctor_on_an_unpinned_platform_passes_without_a_fix(monkeypatch, tmp_path) -> None:

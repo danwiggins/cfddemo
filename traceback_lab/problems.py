@@ -144,10 +144,15 @@ def problem_payload(command: str, problem: LabProblem, *, root: str | None = Non
 def problem_lines(problem: LabProblem) -> list[str]:
     """Human lines: CODE, CAUSE, FIX, RETRYABLE, DOCS (always in this order)."""
 
+    fix = problem.fix
+    if "<TOOLCHAIN_CACHE>" in fix:  # --json keeps the token; the terminal gets the real cache
+        from traceback_runner.toolchain import toolchain_cache_root
+
+        fix = fix.replace("<TOOLCHAIN_CACHE>", str(toolchain_cache_root()))
     return [
         f"CODE       {problem.code}",
         f"CAUSE      {problem.cause}",
-        f"FIX        {problem.fix}",
+        f"FIX        {fix}",
         f"RETRYABLE  {'yes' if problem.retryable else 'no'}",
         f"DOCS       {problem.docs}",
     ]
