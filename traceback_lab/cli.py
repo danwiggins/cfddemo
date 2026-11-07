@@ -111,6 +111,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     add_gc_parser(commands, _common)
 
+    from .inventory_command import add_inventory_parser
+
+    add_inventory_parser(commands, _common)
+
     from .support_bundle_command import add_support_bundle_parser
 
     add_support_bundle_parser(commands, _common)

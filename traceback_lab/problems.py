@@ -79,6 +79,7 @@ PROBLEMS: dict[str, ProblemSpec] = {
     "TBX-LAB-027": ProblemSpec(EXIT_BLOCKED, "Garbage collection could not remove an item", retryable=True),
     "TBX-LAB-028": ProblemSpec(EXIT_NOT_FOUND, "No Lab run with that id to bundle"),
     "TBX-LAB-029": ProblemSpec(EXIT_USAGE, "The support bundle path already exists"),
+    "TBX-LAB-031": ProblemSpec(EXIT_BLOCKED, "The inventory directory holds no .bam chunks"),
 }
 
 
