@@ -126,7 +126,7 @@ def test_sample_switcher_round_trips_through_home_deep_link(tmp_path) -> None:
     first = _sample()
     second = copy.deepcopy(first)
     second["id12"] = second_id
-    second["source_id"] = "a" * 64
+    second["source_id"] = second_id + "a" * 52
     samples = {ID12: first, second_id: second}
     observed = {}
     with _server(tmp_path, first) as server:

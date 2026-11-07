@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 from types import SimpleNamespace
 
 import numpy as np
@@ -207,8 +207,9 @@ def test_positive_agreement_renders_three_plots_with_flags(tmp_path, monkeypatch
     assert dom.count("Data table") == 3
     assert dom.count("FLAG: FDA") >= 3 and "FLAG: CLIA" in dom
     assert "2 covered markers, 20 CpG calls" in dom
-    assert ("condition number 1. Unnormalized weight-fit residual RMS 0. "
+    assert ("condition number 1. Unnormalized weight-fit residual RMS 0 percentage points. "
             "With two covered markers, an interior fit is exactly determined") in dom
+    assert "zero residual does not establish fit quality" in dom
     assert "10 compatible paired cohort sources" in dom
     assert "not independent confirmation" in dom and "whole-genome doubling" in dom
     assert "aggregate score" not in dom.lower()

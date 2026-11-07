@@ -9,6 +9,11 @@ signature. The signed `traceback run` path has its own methods and records.
 
 **Research use only. Not CLIA-validated. Not a diagnosis.**
 
+From a repository checkout, run `uv sync` once, then run the `traceback`
+commands below with `uv run` as shown in the first-run steps. If the CLI is
+already installed, the bare `traceback` commands used elsewhere in this guide
+are equivalent.
+
 ## First five minutes
 
 On a Mac with only `uv`, samtools and minimap2 (`brew install samtools
@@ -32,18 +37,62 @@ M-series Mac. Copy-number is skipped (`example_reference`): it needs
 hg38-scale assets. The sample carries an **EXAMPLE (synthetic)** pill.
 `lab serve --open` prints the one-use link and opens it.
 
+If an already-open Lab page says there are no runs, use the ROOT printed by
+the serving process for `lab doctor --root R` and `lab run --example --root R`.
+Reload the page after the example completes. Its landing starts with an
+overview; choose **Explore signals** for the result lenses and **Check
+reliability** before interpreting a result. The example is synthetic and
+does not establish scientific or clinical qualification.
+
 Measured time to the page on a clean Mac by a teammate: not yet measured
 (target ≤ 5 minutes).
+
+### Read the three guided signals
+
+On a selected sample, choose **Explore signals** from the landing. Signals
+starts with three recorded measurements; each card shows its denominator or
+filter, recorded support count when available, provisional QC band, stability
+state, interpretation limit, and links to Trust/QC, Stability, and the method's
+source and provenance. A skipped, failed, missing, or unreadable result stays
+unavailable instead of becoming a made-up value.
+
+- **Fragment length** (`fragment-size/mode_bp`) is the most frequent 100–250 bp
+  aligned reference span (reference end minus start) on primary mapped
+  canonical-contig reads at MAPQ ≥ 20, excluding duplicate and QC-failed
+  reads. It is not a directly observed physical molecule length; library and handling effects
+  can shift it.
+- **Genome-wide 5mC fraction** (`global-5mc/cpg_5mc_fraction`) counts CpG C+m
+  calls assigned to 5mC among eligible CpG C+m calls on primary mapped
+  canonical-contig reads at MAPQ ≥ 20, excluding duplicate and QC-failed
+  reads. CpG context comes from the read sequence; both bases must align to
+  adjacent reference positions, so unaligned calls are excluded.
+  Its interpretation depends on the basecaller modification model, call
+  quality, and cell mixture; the card supplies no validated reference.
+- **Mapped-read share** (`bam-qc/mapped_fraction`) is mapped primary read rows
+  divided by all primary read rows in the read summary. It is an input and
+  alignment quality measure, not a cfDNA tissue or disease result. Its guided
+  card links to Trust/QC; it is not one of the three signal-family tabs.
+
+The synthetic example plants inputs to illustrate this workflow; the shown
+values are computed from its run. None of these three values alone establishes
+a biological finding. Continue to the full signal families and method source
+before interpreting any exploratory pattern.
 
 ## One-time setup for real kits
 
 1. `brew install samtools minimap2` (samtools ≥ 1.20, minimap2 ≥ 2.28).
-2. Register hg38: `traceback reference register --fasta hg38.fa --id hg38 --root R`.
-3. For copy-number: `traceback toolchain install ichor`, then
-   `traceback method-asset register --from-toolchain copy-number --root R`.
-4. `traceback lab doctor --root R` shows setup checks and recovery commands;
+2. Register hg38: `uv run traceback reference register --fasta hg38.fa --id hg38 --root R`.
+3. For copy-number: `uv run traceback toolchain install ichor`, then
+   `uv run traceback method-asset register --from-toolchain copy-number --root R`.
+4. `uv run traceback lab doctor --root R` shows setup checks and recovery commands;
    inspect readiness for the methods you intend to run. Other methods have
    additional optional tools, assets, or input-scoped calibrations below.
+
+Before running a real chunk directory, confirm the platform, basecall and
+modification channels, depth, and method-specific assets required for your
+intended methods. Use the same ROOT for reference registration, the run, and
+the local page. An environment check does not make a result available or
+validate its interpretation.
 
 ## Duration and disk for a real run
 
@@ -781,17 +830,33 @@ The run-status banner follows the latest Lab writer; a later cohort update or
 other writer can supersede an earlier interrupted-run banner. It does not
 serve as a history of every interrupted run.
 
+On a narrow screen, **Previous views** and **More views** move the lens list by
+one visible navigation width without changing the selected view. The active
+view is brought into sight after a link or browser Back/Forward navigation;
+the lens links remain keyboard reachable. On wider screens the links wrap and
+the scroll controls are hidden.
+
 ## What the page shows
 
-- **Landing (`#/`)**: the CLIA explainer (short version, "Read the full
-  explainer" expands in place, full text at `#/about/clia`), one computed
-  headline sentence, the **defended results** (headline metrics that are
+- **Landing (`#/`)**: a selected-sample overview names the ID, built-in
+  synthetic-example status, recorded UTC date, approximate depth,
+  visible method states, hidden intermediate failures and result-selection
+  problems. The date is the completed run's terminal date when recorded, or
+  the latest input-use date otherwise; live work is reported in the header.
+  One-link actions open
+  Signals, Trust/QC, and Methods. The selected-sample status stays outside the
+  switcher across lenses; the header separately reports live run status. The
+  overview is followed by one computed headline sentence and the **defended
+  results** (headline metrics that are
   usable at half depth, stable across split halves, PROVEN or NEWER,
   citation-checked and, for copy-number, whose synthetic spike at TF 0.10 was
   recovered), the **depth → utility curve** (one row per algorithm; cells at
   10/25/50/100% of the reads; literature minimums drawn as "literature, not
-  measured"), the **positive controls** (SYNTHETIC, REPEATABILITY,
-  KNOWN-STATUS), the samples table and the license callouts.
+  measured"), and the **positive controls** (SYNTHETIC, REPEATABILITY,
+  KNOWN-STATUS). The CLIA explainer remains on the landing after those result
+  panels (short version, "Read the full explainer" expands in place, full text
+  at `#/about/clia`), followed by the samples table and license callouts. The
+  research-use notice is shown in the page header on every route.
 - **Findings**: only above/below-reference results are cards (sorted by tier,
   then severity); not-interpretable, no-reference and in-range metrics are
   counted, collapsible rows. Before the kit cohort exists (n < 10) most
@@ -844,6 +909,112 @@ serve as a history of every interrupted run.
   algorithm without inventing a metric-level panel from damaged data.
   When a metric lacks a stability rule or numeric values, the downsample cell
   says no stability verdict instead of calling it unstable.
+- **Methods**: search or filter the 35 currently visible methods by recorded
+  result and family, review research questions and limits, and open the
+  provenance table. The visible count is generated from the registry; the two
+  shared processing steps are described separately. The readiness summary
+  explains recorded skips, failures and absent results without interpreting
+  any of them as a negative biological finding.
+
+Methods links can carry `algorithm`, `metric` (with an algorithm), or `family`
+in the existing hash query, for example
+`#/sample/<ID12>/methods?algorithm=epi-clock`. The selected sample validates
+the target. An unavailable method or family shows all methods with an
+explanation; an unavailable metric shows its method. Browser Back and reload
+restore the link context.
+
+### Readiness for a recorded run
+
+The Methods summary describes the selected input and the results published for
+that run. It groups recorded skip reasons such as missing or malformed assets,
+platform mismatch, insufficient support, missing modification channels and
+upstream failures. The labels do not certify that the toolchain or assets are
+ready now. Current environment readiness and its checked-at time stay unknown
+on the page; run `traceback lab doctor --root <ROOT>` locally for a current
+setup check. Replace `<ROOT>` with your local root. After correcting a recorded
+issue, `traceback lab run <FILE> --root <ROOT>` is a template for rerunning the
+intended input; a stored sample can instead be rerun by its id12 as described
+above. The page never runs these commands or downloads assets.
+
+**Refresh recorded run** requests one current authenticated sample projection
+with a 10-second deadline. It does not run doctor or scientific preflight.
+A failed refresh keeps the previous projection visibly stale and keeps current
+environment readiness unknown. If you navigate to another sample or view while
+the request is in flight, that response is discarded.
+
+Ordinary browser reads have a 10-second deadline, including the initial sample
+list, sample navigation, selected refresh, report preparation, Compare and
+cohort requests, artifact reads, and run-log lines. A timed-out read shows a
+visible failure or retry path; retrying starts a new request. Response time on
+a large ROOT has not been qualified by this deadline.
+
+### Prepare, download, or print a research report
+
+On an available selected sample, use **Prepare Export / Print** in the sample
+page's **Export / print** panel. It makes one fresh authenticated request for
+that sample, with a 10-second deadline. The captured preview names its UTC
+capture time, sample, input and included scalar-row count, and lists
+limitations. Values may differ from the page you viewed earlier. If the
+session expires, the sample changes while preparation is in flight, or the
+selected result is unavailable, no report is prepared; use a fresh Lab link
+or select an available sample and try again.
+
+After inspecting the preview, **Download JSON**, **Download CSV**, and **Print
+captured report** use that same captured model. They do not fetch another
+sample or artifact. Changing samples or leaving sample routes clears the
+capture. The JSON v2 download
+keeps raw scalar values and declared raw units alongside formatted display
+values, method status, interpretation state and validated provenance. Each
+metric also includes `recorded_support_n`, the recorded nonnegative support
+count or `null` when unavailable. This count is not necessarily a denominator;
+read the method's measurement and filter definition before interpreting it.
+The report pairs `recorded_utc` with `recorded_utc_kind`: `completion` means a
+matching recorded completion, `input_use` means latest input use without a
+recorded completion, and `unknown` means its kind could not be established.
+Missing completion metadata is disclosed; conflicting or malformed completion
+metadata prevents export. A date alone is not proof of a completed run.
+Per-metric `computed_at` retains that result's own timestamp. The nullable
+`interpretation_reason` preserves fixed, state-matched reasons such as
+`no_pon` or `cohort_too_small`; unknown or mismatched reasons are omitted and
+disclosed in limitations. It describes interpretation, not measurement absence.
+The 30-column CSV places the support field immediately after `raw_unit`, the
+date kind after `recorded_utc`, and the reason after `interpretation_state`. CSV
+repeats report identity and general limitations for each row, adds that row's
+audited flags and license terms, and quotes textual cells
+with spreadsheet-formula protection. Spreadsheet software may still interpret
+types on import; use JSON for authoritative scalar types. Filenames begin
+`traceback-research-` and include the sample ID and UTC capture time. A
+"Download started" message confirms only that the browser action was
+dispatched; check the browser for the saved file.
+
+For each included metric, JSON and CSV limitations retain its audited CLIA,
+FDA, privacy, legal and PII flags and applicable curated license restrictions.
+Unknown, missing or inconsistent restriction metadata is disclosed as
+incomplete without copying untrusted API text or paths. Print places fixed
+license callouts beside the method and flags beside the displayed value.
+Analytical and clinical-setting next steps are separate, each accompanied by
+the clinical-advice warning.
+Successful stored cell-origin results with algorithm version `1` or an empty
+version also retain the modkit research-only license disclosure; version 2 and
+later results use the Lab decoder and do not carry that legacy callout.
+
+Only visible registered scalar metrics enter these downloads. Hidden
+processing steps, vector values, unsupplied artifacts and taxon detail are
+excluded; skipped, failed, unreadable, ambiguous or not-run methods appear in
+limitations rather than as invented numeric rows. Reports preserve a
+provisional-input warning when truncated chunks were excluded, and disclose
+malformed or unavailable selection details without copying private filenames
+or error diagnostics. A report with no eligible scalar rows is refused.
+Exports are limited to 5,000 rows and 5 MiB per file; an over-limit report is
+refused without a partial download. The print view shows the schema version
+once, then adds recorded method questions, requirements, support counts,
+literature references and signal definitions where available. Each metric also
+prints its validated tool, tool version, full parameters SHA-256, attempt ID,
+reference asset ID and computed UTC from the captured report. The reference
+asset ID is provenance, distinct from the literature reference; an absent
+attempt ID, denominator or source context is shown as unavailable.
+Research-use and synthetic-example markings stay with the printed report.
+No export or printout establishes scientific or clinical qualification.
 
 ## Building a Lab cohort
 

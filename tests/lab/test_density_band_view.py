@@ -62,7 +62,8 @@ def test_normalized_density_band_and_fresh_unusable_vectors(tmp_path, monkeypatc
 
     assert "descriptive, not a reference interval" in ready
     assert "Exclusions: self 1 · incompatible 2" in ready or "Exclusions: incompatible 2 · self 1" in ready
-    assert "fraction of 50–1000 bp molecules" in ready and "<td>0.6</td>" in ready
+    assert "% of 50–1000 bp molecules" in ready and '>60%</span>' in ready
+    assert "Raw value" in ready and "0.6 fraction" in ready
     assert "167 bp marked" in ready
     assert "zero eligible 50–1000 bp molecules" in unavailable and "missing pinned vector 10" in unavailable
     assert "predates pinned" not in unavailable and "rebuild the cohort" not in unavailable

@@ -1,0 +1,601 @@
+"""Pure report projection preserves scalar provenance and excludes unsafe payloads."""
+
+from __future__ import annotations
+
+import ast
+import csv
+import io
+import json
+import re
+import shutil
+import subprocess
+from pathlib import Path
+
+import pytest
+
+REPORT = Path(__file__).resolve().parents[2] / "traceback_lab/web/static/lab-report.js"
+
+
+def _node(script: str) -> dict:
+    result = subprocess.run(
+        ["node", "-e", script, str(REPORT)], capture_output=True, text=True, check=True,
+    )
+    return json.loads(result.stdout)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js unavailable")
+def test_report_shape_csv_protection_and_private_diagnostics() -> None:
+    data = _node(r"""
+      require(process.argv[1]);
+      const report = globalThis.TracebackLabReport;
+      const source = 'a'.repeat(64), input = 'b'.repeat(64);
+      const sample = {
+        found: true, id12: source.slice(0, 12), source_id: source, full_input_id: input,
+        example: false, run_utc: '', completed_utc: null,
+        interpretation_version: 'v1', cohort_version: null,
+        catalog: [{algorithm_id: 'sex-check'}, {algorithm_id: 'copy-number'},
+          {algorithm_id: 'bam-qc'}, {algorithm_id: 'fragment-size'}, {algorithm_id: 'hidden-step'}],
+        algorithms: [
+          {algorithm_id: 'sex-check', status: 'ok', hidden: false, skip_message: '/private/read-id',
+            failure: {stderr_tail: ['/private/stderr']}, metrics: [
+              {metric_id: 'call', label: 'Plausible read ID R0033892', value: 'female', unit: null, state: 'no_reference'},
+              {metric_id: 'unsafe', label: 'Looks like a valid metric', value: 42, unit: 'reads'},
+              {metric_id: 'chry_chrx_ratio', label: 'Object', value: {sequence: 'ACGT'}, unit: 'ratio'}],
+            provenance: {tool: 'lab', tool_version: '1.0', parameters_sha256: 'c'.repeat(64),
+              input_id: input, source_id: source, reference_id: 'reference-v1',
+              attempt_id: null, timestamp_utc: '2026-10-19T12:00:00Z'}},
+          {algorithm_id: 'bam-qc', status: 'ok', metrics: [
+              {metric_id: 'total_reads', label: 'Private credential credential123', value: Infinity, unit: 'reads'},
+              {metric_id: 'gc_bias_slope', label: 'Private read R9988', value: -0.2, unit: 'log2/GC'}],
+            provenance: {tool: 'lab', tool_version: '1.0', parameters_sha256: 'c'.repeat(64),
+              input_id: input, source_id: source, reference_id: 'reference-v1',
+              timestamp_utc: '2026-10-19T12:00:00Z'}},
+          {algorithm_id: 'copy-number', status: 'skipped', skip_reason: 'depth',
+            skip_message: '/private/skip', metrics: []},
+          {algorithm_id: 'fragment-size', status: 'ok', metrics: [
+              {metric_id: 'mode_bp', label: 'Mode', value: 167, unit: 'bp'}],
+            provenance: {tool: '/private/tool'}},
+          {algorithm_id: 'hidden-step', hidden: true, status: 'ok', metrics: [
+              {metric_id: 'secret', label: 'Secret', value: 42, unit: 'reads'}]},
+        ],
+        artifacts: {read_id: '/private/artifact'},
+      };
+      const format = (metric) => ({displayValue: metric.value == null ? 'unavailable' : String(metric.value),
+        displayUnit: metric.unit});
+      const model = report.project(sample, '2026-10-19T16:00:00Z', format);
+      const csv = report.csv(model), json = report.json(model);
+      process.stdout.write(JSON.stringify({model, csv, json, filename: report.filename(model, 'csv')}));
+    """)
+    model = data["model"]
+    assert model["schema_version"] == "2"
+    assert list(model) == [
+        "schema_version", "generated_at", "research_use_only", "example", "sample_id",
+        "source_id", "full_input_id", "recorded_utc", "recorded_utc_kind",
+        "interpretation_version", "cohort_version",
+        "limitations", "metrics",
+    ]
+    assert len(model["metrics"]) == 3
+    assert model["metrics"][0]["label"] == "Sex call (male / female / indeterminate)"
+    assert model["metrics"][1]["raw_value"] is None
+    assert model["metrics"][2]["raw_value"] == -0.2
+    assert model["metrics"][0]["computed_at"] == "2026-10-19T12:00:00Z"
+    assert model["recorded_utc"] is None and model["recorded_utc_kind"] == "unknown"
+    assert model["metrics"][0]["raw_value"] == "female"
+    assert "No recorded completion or input-use timestamp" in " ".join(model["limitations"])
+    assert "nonfinite" in " ".join(model["limitations"])
+    assert "Method copy-number: skipped (depth)" in " ".join(model["limitations"])
+    assert data["csv"].startswith("schema_version,generated_at,")
+    csv_rows = list(csv.DictReader(io.StringIO(data["csv"])))
+    assert len(csv_rows) == 3
+    assert len(csv_rows[0]) == 30
+    assert "recorded_utc" in csv_rows[0] and "run_utc" not in csv_rows[0]
+    assert csv_rows[0]["recorded_utc_kind"] == "unknown"
+    assert list(csv_rows[0]).index("recorded_support_n") == list(csv_rows[0]).index("raw_unit") + 1
+    assert all(row["schema_version"] == "2" for row in csv_rows)
+    assert "\r\n" in data["csv"] and "'\"-0.2\"" not in data["csv"]
+    assert "\"'-0.2\"" in data["csv"]  # display text is formula-protected
+    assert data["filename"] == "traceback-research-aaaaaaaaaaaa-20261019T160000Z.csv"
+    for private in ("/private", "Plausible read ID R0033892", "credential123", "R9988",
+                    "Looks like a valid metric", "ACGT", "hidden-step"):
+        assert private not in data["json"] and private not in data["csv"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js unavailable")
+def test_report_discloses_partial_input_selection_omissions_and_recorded_support() -> None:
+    data = _node(r"""
+      require(process.argv[1]);
+      const report = globalThis.TracebackLabReport;
+      const source = 'a'.repeat(64), input = 'b'.repeat(64);
+      const provenance = {tool: 'lab', tool_version: '1', parameters_sha256: 'c'.repeat(64),
+        input_id: input, source_id: source, reference_id: 'ref',
+        timestamp_utc: '2026-10-19T12:00:00Z'};
+      const envelope = (algorithm_id, metric_id, value, unit, n) => ({
+        algorithm_id, status: 'ok', provenance,
+        metrics: [{metric_id, value, unit, n}],
+      });
+      const sample = {
+        found: true, id12: source.slice(0, 12), source_id: source, full_input_id: input,
+        example: false, run_utc: '2026-10-19T11:00:00Z', completed_utc: null,
+        interpretation_version: 'v1', cohort_version: null,
+        excluded_chunks: [-1, 9], unreadable_results: ['bam-qc', '/private/unreadable'],
+        ambiguous_results: ['sex-check'], malformed_result_selections: true,
+        catalog: [
+          {algorithm_id: 'depth', status: 'ok'},
+          {algorithm_id: 'bam-qc', status: 'unreadable', error: '/private/catalog'},
+          {algorithm_id: 'sex-check', status: 'ambiguous'},
+          {algorithm_id: 'fragment-size', status: 'not run'},
+          {algorithm_id: 'copy-number', status: 'skipped', skip_reason: 'depth'},
+          {algorithm_id: 'mtdna', status: 'failed', failure: '/private/failure'},
+        ],
+        algorithms: [
+          {...envelope('depth', 'eligible_reads', 21, 'reads', 0),
+            metrics: [
+              {metric_id: 'eligible_reads', value: 21, unit: 'reads', n: 0},
+              {metric_id: 'eligible_reads', value: 22, unit: 'reads', n: 29},
+              {metric_id: 'eligible_reads', value: 23, unit: 'reads', n: null},
+              {metric_id: 'eligible_reads', value: 24, unit: 'reads', n: '/private/support'},
+            ]},
+          envelope('bam-qc', 'mapped_fraction', 0.75, 'fraction', 42),
+          envelope('sex-check', 'call', 'female', null, 42),
+          envelope('fragment-size', 'mode_bp', 167, 'bp', 42),
+        ],
+      };
+      const format = (metric) => ({displayValue: String(metric.value), displayUnit: metric.unit});
+      const model = report.project(sample, '2026-10-19T16:00:00Z', format);
+      process.stdout.write(JSON.stringify({model, csv: report.csv(model), json: report.json(model)}));
+    """)
+    model = data["model"]
+    assert model["schema_version"] == "2"
+    assert model["recorded_utc"] == "2026-10-19T11:00:00Z"
+    assert model["recorded_utc_kind"] == "input_use"
+    assert "run_utc" not in model
+    assert [row["algorithm_id"] for row in model["metrics"]] == ["depth"] * 4
+    assert [row["recorded_support_n"] for row in model["metrics"]] == [0, 29, None, None]
+    limitations = " | ".join(model["limitations"])
+    assert "Provisional input: 2 truncated chunks were excluded" in limitations
+    assert "Input-exclusion detail was invalid" not in limitations
+    assert "Method bam-qc: selected result unreadable; no scalar rows." in limitations
+    assert "Method sex-check: selected result ambiguous; no scalar rows." in limitations
+    assert "Method fragment-size: not run; no scalar rows." in limitations
+    assert "Method copy-number: skipped (depth); no scalar rows." in limitations
+    assert "Method mtdna: failed; no scalar rows." in limitations
+    assert "Malformed result selections were detected" in limitations
+    assert "Some recorded support counts were invalid" in limitations
+    csv_rows = list(csv.DictReader(io.StringIO(data["csv"])))
+    assert len(csv_rows) == 4
+    assert len(csv_rows[0]) == 30
+    assert all(row["recorded_utc"] == "2026-10-19T11:00:00Z" for row in csv_rows)
+    assert all(row["recorded_utc_kind"] == "input_use" for row in csv_rows)
+    assert [row["recorded_support_n"] for row in csv_rows] == ["0", "29", "", ""]
+    for private in ("/private/unreadable", "/private/catalog", "/private/failure",
+                    "/private/support"):
+        assert private not in data["json"] and private not in data["csv"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js unavailable")
+def test_report_date_kind_and_interpretation_reason_roundtrip() -> None:
+    data = _node(r"""
+      require(process.argv[1]);
+      const core = globalThis.TracebackLabReport;
+      const source = 'a'.repeat(64), input = 'b'.repeat(64);
+      const metrics = [
+        {metric_id: 'tumor_fraction', value: 0.2, unit: 'fraction',
+          state: 'not_interpretable', reason: 'no_pon'},
+        {metric_id: 'tumor_fraction', value: 0.2, unit: 'fraction',
+          state: 'no_reference', reason: 'cohort_too_small'},
+        {metric_id: 'tumor_fraction', value: 0.2, unit: 'fraction',
+          state: 'above_typical', reason: 'no_pon'},
+        {metric_id: 'tumor_fraction', value: 0.2, unit: 'fraction',
+          state: 'not_interpretable', reason: 'cohort_too_small'},
+        {metric_id: 'tumor_fraction', value: 0.2, unit: 'fraction',
+          state: 'not_interpretable', reason: '/private/secret-read'},
+      ];
+      const sample = {found: true, id12: source.slice(0, 12), source_id: source,
+        full_input_id: input, example: false, run_utc: '2026-10-19T11:00:00Z',
+        completed_utc: '2026-10-19T11:00:00Z', interpretation_version: 'v1',
+        cohort_version: 'cohort-v7', catalog: [{algorithm_id: 'copy-number'}],
+        algorithms: [{algorithm_id: 'copy-number', status: 'ok', metrics,
+          provenance: {tool: 'lab', tool_version: '1', parameters_sha256: 'c'.repeat(64),
+            input_id: input, source_id: source, reference_id: 'ref',
+            timestamp_utc: '2026-10-19T12:00:00Z'}}]};
+      const formatterReasons = [];
+      const format = (metric, options) => {
+        formatterReasons.push(options.reason);
+        return {displayValue: '20', displayUnit: '%'};
+      };
+      const report = core.project(sample, '2026-10-19T16:00:00Z', format);
+      const code = (value) => { try { core.project(value, '2026-10-19T16:00:00Z', format); return null; }
+        catch (error) { return error.code; } };
+      const missing = {...sample}; delete missing.completed_utc;
+      process.stdout.write(JSON.stringify({model: report, json: JSON.parse(core.json(report)),
+        csv: core.csv(report), formatterReasons,
+        inputUse: core.project({...sample, completed_utc: null}, '2026-10-19T16:00:00Z', format),
+        unknownMissing: core.project(missing, '2026-10-19T16:00:00Z', format),
+        unknownEmpty: core.project({...sample, completed_utc: null, run_utc: ''},
+          '2026-10-19T16:00:00Z', format),
+        malformed: code({...sample, completed_utc: '/private/time'}),
+        mismatch: code({...sample, completed_utc: '2026-10-19T10:00:00Z'})}));
+    """)
+    model = data["model"]
+    assert model["recorded_utc"] == "2026-10-19T11:00:00Z"
+    assert model["recorded_utc_kind"] == "completion"
+    assert model["cohort_version"] == "cohort-v7"
+    assert data["inputUse"]["recorded_utc_kind"] == "input_use"
+    assert data["unknownMissing"]["recorded_utc_kind"] == "unknown"
+    assert "Completion metadata was absent" in " ".join(data["unknownMissing"]["limitations"])
+    assert data["unknownEmpty"]["recorded_utc"] is None
+    assert data["unknownEmpty"]["recorded_utc_kind"] == "unknown"
+    assert data["malformed"] == data["mismatch"] == "invalid_report_identity"
+    reasons = [row["interpretation_reason"] for row in model["metrics"]]
+    assert reasons == ["no_pon", "cohort_too_small", None, None, None]
+    assert all(row["raw_value"] == 0.2 for row in model["metrics"])
+    assert data["formatterReasons"] and set(data["formatterReasons"]) == {None}
+    assert "Some interpretation reasons were omitted" in " ".join(model["limitations"])
+    assert "/private/secret-read" not in json.dumps(data["json"]) and "/private/secret-read" not in data["csv"]
+    assert data["json"] == model
+    csv_rows = list(csv.DictReader(io.StringIO(data["csv"])))
+    assert len(csv_rows[0]) == 30
+    assert all(row["recorded_utc_kind"] == "completion" for row in csv_rows)
+    for row in csv_rows:
+        for key, value in model.items():
+            if key == "metrics":
+                continue
+            if key == "limitations":
+                for limitation in value:
+                    assert limitation in row[key]
+                continue
+            expected = " | ".join(value) if key == "limitations" else (
+                "" if value is None else str(value).lower() if isinstance(value, bool) else str(value)
+            )
+            assert row[key] == expected, key
+    assert [row["interpretation_reason"] for row in csv_rows] == [
+        "no_pon", "cohort_too_small", "", "", "",
+    ]
+
+
+def test_report_interpretation_reason_allowlists_match_engine() -> None:
+    from traceback_lab.interpretation.engine import (
+        NO_REFERENCE_REASONS,
+        NOT_INTERPRETABLE_REASONS,
+    )
+
+    source = REPORT.read_text()
+
+    def js_reason_set(name: str) -> set[str]:
+        body = source.split(f"const {name} = new Set([", 1)[1].split("]);", 1)[0]
+        return set(re.findall(r'"([^"]+)"', body))
+
+    assert js_reason_set("notInterpretableReasons") == set(NOT_INTERPRETABLE_REASONS)
+    assert js_reason_set("noReferenceReasons") == set(NO_REFERENCE_REASONS)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js unavailable")
+def test_missing_provenance_fields_and_unit_mismatch_omit_only_bad_rows() -> None:
+    data = _node(r"""
+      require(process.argv[1]);
+      const report = globalThis.TracebackLabReport, source = 'a'.repeat(64), input = 'b'.repeat(64);
+      const provenance = {tool: 'lab', tool_version: '1', parameters_sha256: 'c'.repeat(64),
+        input_id: input, source_id: source, reference_id: 'ref',
+        timestamp_utc: '2026-10-19T12:00:00Z'};
+      const good = {algorithm_id: 'sex-check', status: 'ok', metrics: [
+        {metric_id: 'call', label: 'Untrusted label', value: 'female', unit: null}], provenance};
+      const bad = {algorithm_id: 'fragment-size', status: 'ok', metrics: [
+        {metric_id: 'mode_bp', label: 'Untrusted label', value: 167, unit: 'bp'}], provenance};
+      const sample = {found: true, id12: source.slice(0, 12), source_id: source,
+        full_input_id: input, example: true, run_utc: '', interpretation_version: 'v1',
+        cohort_version: null, catalog: [{algorithm_id: 'sex-check'},
+          {algorithm_id: 'fragment-size'}], algorithms: [good, bad]};
+      const format = (m) => ({displayValue: String(m.value), displayUnit: m.unit});
+      const outcomes = {};
+      for (const key of ['tool', 'tool_version', 'reference_id']) {
+        const missing = {...provenance}; delete missing[key];
+        const model = report.project({...sample, algorithms: [good, {...bad, provenance: missing}]},
+          '2026-10-19T16:00:00Z', format);
+        outcomes[key] = {rows: model.metrics.length, limitations: model.limitations.join(' | ')};
+      }
+      const mismatch = report.project({...sample, algorithms: [good, {...bad, metrics: [
+        {...bad.metrics[0], unit: 'reads'}]}]}, '2026-10-19T16:00:00Z', format);
+      process.stdout.write(JSON.stringify({outcomes, mismatch: {rows: mismatch.metrics.length,
+        limitations: mismatch.limitations.join(' | ')}}));
+    """)
+    for key in ("tool", "tool_version", "reference_id"):
+        assert data["outcomes"][key]["rows"] == 1
+        assert "provenance was unavailable or invalid" in data["outcomes"][key]["limitations"]
+        assert key not in data["outcomes"][key]["limitations"]
+    assert data["mismatch"]["rows"] == 1
+    assert "did not match audited producer metadata" in data["mismatch"]["limitations"]
+
+
+def test_audited_metric_metadata_matches_library_and_static_producers() -> None:
+    from traceback_lab.interpretation.engine import load_library
+    from traceback_lab.registry import load_registry
+
+    source = REPORT.read_text()
+    audited = json.loads(source.split("  const audited = ", 1)[1].split(";\n  // Fixed, audited restrictions", 1)[0])
+    library = load_library()
+    visible = {row.id for row in load_registry() if row.id not in library.hidden_algorithms}
+    expected = {(algorithm, metric): entry for (algorithm, metric), entry in library.entries.items()
+                if algorithm in visible}
+    actual = {(algorithm, metric): definition for algorithm, metrics in audited.items()
+              for metric, definition in metrics.items()}
+    assert set(actual) == set(expected)
+    for key, definition in actual.items():
+        assert definition[0] == expected[key]["label"]
+        assert definition[2] == expected[key].get("value_kind")
+
+    root = REPORT.parents[2] / "algorithms"
+    for path in root.glob("*.py"):
+        algorithm = path.stem.replace("_", "-")
+        for node in ast.walk(ast.parse(path.read_text())):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                    and node.func.id == "metric" and node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and isinstance(node.args[0].value, str)):
+                continue
+            key = (algorithm, node.args[0].value)
+            if key not in actual:
+                continue
+            unit = next((kw.value for kw in node.keywords if kw.arg == "unit"), None)
+            if unit is None or isinstance(unit, ast.Constant):
+                assert actual[key][1] == (unit.value if unit is not None else None), key
+
+
+def test_fixed_report_restrictions_match_library() -> None:
+    from traceback_lab.interpretation.engine import load_library
+
+    source = REPORT.read_text()
+    restrictions = json.loads(source.split("  const auditedRestrictions = ", 1)[1].split(";\n  // Curated license copy", 1)[0].replace(",\n  }", "\n  }"))
+    licenses = json.loads(source.split("  const licenseRestrictions = ", 1)[1].split(";\n  const restrictionFlagText", 1)[0].replace(",\n  }", "\n  }"))
+    library = load_library()
+    expected = {f"{algorithm}/{metric}": [entry.get("flags") or [], entry.get("license_ids") or []]
+                for (algorithm, metric), entry in library.entries.items()
+                if entry.get("flags") or entry.get("license_ids")}
+    assert restrictions == expected
+    assert licenses == {license_id: [entry["headline"], entry["body"], entry.get("url")]
+                        for license_id, entry in library.licenses.items()}
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js unavailable")
+def test_report_restriction_warning_copy_matches_finding_cards() -> None:
+    views = (REPORT.parent / "lab-views.js").read_text()
+    source = REPORT.read_text()
+    for flag in ("CLIA", "FDA", "PRIVACY", "LEGAL", "PII"):
+        expected = re.search(rf"^    {flag}: (\"[^\n]+\"),$", views, re.MULTILINE)
+        assert expected
+        assert f"    {flag}: {expected.group(1)}," in source
+    for key, metric in (("copy-number", "tumor_fraction"), ("viral-reads", "ebv_rpm")):
+        data = _node(f"require(process.argv[1]); process.stdout.write(JSON.stringify("
+                     f"globalThis.TracebackLabReport.restrictionsForMetric({json.dumps(key)}, {json.dumps(metric)})))")
+        if key == "viral-reads":
+            assert "FLAG: PRIVACY — viral-read signals can reveal sensitive infection-related information." in data["flags"]
+            assert data["flags"][1] in views
+    assert "FLAG: CLIA — reads as clinical advice if a donor or clinician sees it." in source
+    assert "FLAG: CLIA — reads as clinical advice if a donor or clinician sees it." in views
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js unavailable")
+def test_restrictions_omit_untrusted_metadata_and_roundtrip_fixed_warnings() -> None:
+    data = _node(r"""
+      require(process.argv[1]);
+      const report = globalThis.TracebackLabReport;
+      const source = 'a'.repeat(64), input = 'b'.repeat(64);
+      const sample = {
+        found: true, id12: source.slice(0, 12), source_id: source, full_input_id: input,
+        example: false, run_utc: '2026-10-19T11:00:00Z', completed_utc: null,
+        interpretation_version: 'v1', cohort_version: null,
+        catalog: [{algorithm_id: 'copy-number'}],
+        licenses: [{license_id: 'gpl-copyleft', headline: '/private/license', body: 'secret-token', url: '/private/url'},
+          {license_id: 'unknown-private-license', headline: 'private'}],
+        algorithms: [{algorithm_id: 'copy-number', status: 'ok', provenance: {
+          tool: 'lab', tool_version: '1', parameters_sha256: 'c'.repeat(64),
+          input_id: input, source_id: source, reference_id: 'ref',
+          timestamp_utc: '2026-10-19T12:00:00Z'},
+          metrics: [{metric_id: 'tumor_fraction', value: 0.1, unit: 'fraction',
+            entry: {flags: ['SECRET_UNKNOWN'], license_ids: ['unknown-private-license']}}]}],
+      };
+      const format = (metric) => ({displayValue: String(metric.value), displayUnit: metric.unit});
+      const model = report.project(sample, '2026-10-19T16:00:00Z', format);
+      process.stdout.write(JSON.stringify({model, json: report.json(model), csv: report.csv(model),
+        fixed: report.restrictionsForMetric('copy-number', 'tumor_fraction')}));
+    """)
+    assert len(data["model"]["metrics"]) == 1
+    limitations = " | ".join(data["model"]["limitations"])
+    assert "Some restriction metadata was absent, unknown, or inconsistent" in limitations
+    for flag in data["fixed"]["flags"]:
+        assert flag in limitations
+    for license in data["fixed"]["licenses"]:
+        assert license["headline"] in limitations and license["body"] in limitations
+    assert "Some restriction metadata" in data["csv"]
+    for output in (data["json"], data["csv"]):
+        for secret in ("/private", "secret-token", "SECRET_UNKNOWN", "unknown-private-license"):
+            assert secret not in output
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js unavailable")
+def test_stored_cell_origin_v1_adds_modkit_restriction_but_v2_does_not() -> None:
+    from traceback_lab.interpretation.engine import load_library
+
+    library = load_library()
+    liver = library.entry("cell-origin", "fraction_liver_hep")
+    sex = library.entry("sex-check", "chry_chrx_ratio")
+    fixture = {
+        "licenses": {key: {"license_id": key, **library.licenses[key]}
+                     for key in [*liver["license_ids"], "modkit-ont-public"]},
+        "liver": {"flags": liver["flags"], "license_ids": liver["license_ids"]},
+        "sex": {"flags": sex["flags"], "license_ids": sex.get("license_ids") or []},
+    }
+    script = r"""
+      require(process.argv[1]);
+      const report = globalThis.TracebackLabReport;
+      const fixture = __FIXTURE__;
+      const source = 'a'.repeat(64), input = 'b'.repeat(64);
+      const provenance = {tool: 'lab', tool_version: '1', parameters_sha256: 'c'.repeat(64),
+        input_id: input, source_id: source, reference_id: 'ref',
+        timestamp_utc: '2026-10-19T12:00:00Z'};
+      const output = {};
+      for (const [name, version] of [['empty', ''], ['1', '1'], ['2', '2'], ['3', '3'], ['missing', '1']]) {
+        const legacy = version === '' || version === '1';
+        const sample = {found: true, id12: source.slice(0, 12), source_id: source,
+          full_input_id: input, example: false, run_utc: '2026-10-19T11:00:00Z',
+          completed_utc: null, interpretation_version: 'v1', cohort_version: null,
+          catalog: [{algorithm_id: 'cell-origin'}, {algorithm_id: 'sex-check'}],
+          licenses: [fixture.licenses['yissum-uxm'], fixture.licenses['loyfer-atlas-terms-unknown'],
+            ...(legacy && name !== 'missing' ? [fixture.licenses['modkit-ont-public']] : [])],
+          algorithms: [
+            {algorithm_id: 'cell-origin', algorithm_version: version, status: 'ok', provenance,
+              metrics: [{metric_id: 'fraction_liver_hep', value: 0.2, unit: 'fraction',
+                entry: {...fixture.liver, license_ids: [...fixture.liver.license_ids,
+                  ...(legacy ? ['modkit-ont-public'] : [])]}}]},
+            {algorithm_id: 'sex-check', algorithm_version: '2', status: 'ok', provenance,
+              metrics: [{metric_id: 'chry_chrx_ratio', value: 0.5, unit: 'ratio', entry: fixture.sex}]},
+          ]};
+        const model = report.project(sample, '2026-10-19T16:00:00Z',
+          (metric) => ({displayValue: String(metric.value), displayUnit: metric.unit}));
+        output[name] = {limitations: model.limitations,
+          csv: report.csv(model), licenseIds: report.restrictionsForMetric('cell-origin',
+            'fraction_liver_hep', version).licenseIds};
+      }
+      process.stdout.write(JSON.stringify(output));
+    """.replace("__FIXTURE__", json.dumps(fixture))
+    result = _node(script)
+    for version in ("empty", "1", "2", "3"):
+        data = result[version]
+        has_modkit = version in {"empty", "1"}
+        assert ("modkit-ont-public" in data["licenseIds"]) is has_modkit
+        assert (any("License modkit-ont-public:" in item for item in data["limitations"])) is has_modkit
+        assert not any("Some restriction metadata was absent" in item for item in data["limitations"])
+        rows = list(csv.DictReader(io.StringIO(data["csv"])))
+        cell = next(row for row in rows if row["algorithm_id"] == "cell-origin")
+        sex_row = next(row for row in rows if row["algorithm_id"] == "sex-check")
+        assert ("License modkit-ont-public:" in cell["limitations"]) is has_modkit
+        assert "License modkit-ont-public:" not in sex_row["limitations"]
+    missing = result["missing"]
+    assert any("License modkit-ont-public:" in item for item in missing["limitations"])
+    assert any("Some restriction metadata was absent" in item for item in missing["limitations"])
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js unavailable")
+def test_report_rejects_identity_empty_model_and_row_or_byte_limits() -> None:
+    data = _node(r"""
+      require(process.argv[1]);
+      const report = globalThis.TracebackLabReport;
+      const source = 'a'.repeat(64), input = 'b'.repeat(64);
+      const metric = {metric_id: 'eligible_reads', label: 'Count', value: 1, unit: 'reads', state: null};
+      const algorithm = {algorithm_id: 'depth', status: 'ok', hidden: false, metrics: [metric],
+        provenance: {tool: 'lab', tool_version: '1', parameters_sha256: 'c'.repeat(64),
+          input_id: input, source_id: source, reference_id: 'ref', attempt_id: null,
+          timestamp_utc: '2026-10-19T12:00:00Z'}};
+      const sample = {found: true, id12: source.slice(0, 12), source_id: source,
+        full_input_id: input, example: true, run_utc: '', interpretation_version: 'v1',
+        cohort_version: null, catalog: [{algorithm_id: 'depth'}], algorithms: [algorithm]};
+      const format = (m) => ({displayValue: String(m.value), displayUnit: m.unit});
+      const code = (fn) => { try { fn(); return null; } catch (error) { return error.code; } };
+      const invalid = code(() => report.project({...sample, full_input_id: '/private'},
+        '2026-10-19T16:00:00Z', format));
+      const missingVersion = code(() => report.project({...sample, interpretation_version: undefined},
+        '2026-10-19T16:00:00Z', format));
+      const numericVersion = code(() => report.project({...sample, interpretation_version: 123},
+        '2026-10-19T16:00:00Z', format));
+      const numericCohort = code(() => report.project({...sample, cohort_version: 123},
+        '2026-10-19T16:00:00Z', format));
+      const empty = code(() => report.project({...sample, algorithms: []},
+        '2026-10-19T16:00:00Z', format));
+      const boundary = report.project({...sample, algorithms: [{...algorithm,
+        metrics: Array.from({length: 5000}, () => metric)}]}, '2026-10-19T16:00:00Z', format);
+      const rowLimit = code(() => report.project({...sample, algorithms: [{...algorithm,
+        metrics: Array.from({length: 5001}, () => metric)}]}, '2026-10-19T16:00:00Z', format));
+      const large = report.project(sample, '2026-10-19T16:00:00Z',
+        () => ({displayValue: 'x'.repeat(119), displayUnit: 'reads'}));
+      const fake = code(() => report.csv({...large}));
+      process.stdout.write(JSON.stringify({invalid, missingVersion, numericVersion,
+        numericCohort, empty, boundary: boundary.metrics.length,
+        rowLimit, fake, frozen: Object.isFrozen(large.metrics[0])}));
+    """)
+    assert data == {
+        "invalid": "invalid_report_identity", "missingVersion": "invalid_report_identity",
+        "numericVersion": "invalid_report_identity", "numericCohort": "invalid_report_identity",
+        "empty": "no_report_rows", "boundary": 5000,
+        "rowLimit": "report_too_many_rows", "fake": "invalid_report_model", "frozen": True,
+    }
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js unavailable")
+def test_tenfold_fixture_and_serialized_byte_limits() -> None:
+    data = _node(r"""
+      require(process.argv[1]);
+      const report = globalThis.TracebackLabReport;
+      const source = 'a'.repeat(64), input = 'b'.repeat(64);
+      const metric = {metric_id: 'microbial_rpm_primary', label: 'Untrusted label',
+        value: 1, unit: 'estimated reads/million'};
+      const provenance = {tool: 't'.repeat(120), tool_version: 'v'.repeat(40),
+        parameters_sha256: 'c'.repeat(64), input_id: input, source_id: source,
+        reference_id: 'r'.repeat(128), timestamp_utc: '2026-10-19T12:00:00Z'};
+      const algorithm = {algorithm_id: 'microbial', status: 'ok',
+        metrics: Array.from({length: 10}, () => metric), provenance};
+      const sample = {found: true, id12: source.slice(0, 12), source_id: source,
+        full_input_id: input, example: true, run_utc: '', interpretation_version: 'v1',
+        cohort_version: null, catalog: [{algorithm_id: 'microbial'}], algorithms: [algorithm]};
+      const format = (m) => ({displayValue: String(m.value), displayUnit: m.unit});
+      const small = report.project(sample, '2026-10-19T16:00:00Z', format);
+      const bigSample = {...sample, algorithms: [{...algorithm,
+        metrics: Array.from({length: 5000}, () => metric)}]};
+      const large = report.project(bigSample, '2026-10-19T16:00:00Z',
+        () => ({displayValue: 'é'.repeat(6) + 'x'.repeat(114),
+          displayUnit: 'estimated reads/million'}));
+      const code = (fn) => { try { fn(); return null; } catch (error) { return error.code; } };
+      process.stdout.write(JSON.stringify({rows: small.metrics.length,
+        json: code(() => report.json(large)), csv: code(() => report.csv(large)),
+        compactBytes: new TextEncoder().encode(JSON.stringify(large)).length}));
+    """)
+    assert data["rows"] == 10
+    assert data["compactBytes"] < 5 * 1024 * 1024
+    assert data["json"] == data["csv"] == "report_too_large"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js unavailable")
+def test_current_visible_metric_fixture_and_tenfold_scale() -> None:
+    from tests.lab.test_acceptance_synthetic_routes import _sample
+
+    sample = _sample()
+    # The view fixture uses a presentation-only ID12 unrelated to its SHA source.
+    sample["id12"] = sample["source_id"][:12]
+    script = r"""
+      require(process.argv[1]);
+      let input = '';
+      process.stdin.on('data', (chunk) => { input += chunk; });
+      process.stdin.on('end', () => {
+        const sample = JSON.parse(input), report = globalThis.TracebackLabReport;
+        const format = (m) => ({displayValue: m.value == null ? 'unavailable' : String(m.value),
+          displayUnit: m.unit});
+        const current = report.project(sample, '2026-10-19T16:00:00Z', format);
+        const all = sample.algorithms.filter((algorithm) => !algorithm.hidden)
+          .flatMap((algorithm) => algorithm.metrics.map((metric) =>
+            `${algorithm.algorithm_id}/${metric.metric_id}`));
+        const exported = new Set(current.metrics.map((metric) =>
+          `${metric.algorithm_id}/${metric.metric_id}`));
+        const omitted = all.filter((identity) => !exported.has(identity)).sort();
+        const expanded = {...sample, algorithms: sample.algorithms.map((algorithm) => ({
+          ...algorithm, metrics: Array.from({length: 10}, () => algorithm.metrics).flat(),
+        }))};
+        const tenfold = report.project(expanded, '2026-10-19T16:00:00Z', format);
+        process.stdout.write(JSON.stringify({current: current.metrics.length, omitted,
+          tenfold: tenfold.metrics.length, jsonBytes: new TextEncoder().encode(report.json(tenfold)).length,
+          csvBytes: new TextEncoder().encode(report.csv(tenfold)).length}));
+      });
+    """
+    result = subprocess.run(
+        ["node", "-e", script, str(REPORT)], input=json.dumps(sample),
+        capture_output=True, text=True, check=True,
+    )
+    data = json.loads(result.stdout)
+    assert data["current"] == 182
+    # The fixture assigns 1.0 to every metric, including producers whose real
+    # values are booleans, approved categories, or vectors.
+    assert data["omitted"] == [
+        "copy-number/identifiable", "copy-number/pon_policy",
+        "hypometh-reads/u_x_m_counts", "meth-tf/identifiable",
+        "modbase-qc/mod_codes", "sex-check/call",
+    ]
+    assert data["tenfold"] == data["current"] * 10
+    assert data["jsonBytes"] < 5 * 1024 * 1024
+    assert data["csvBytes"] < 5 * 1024 * 1024

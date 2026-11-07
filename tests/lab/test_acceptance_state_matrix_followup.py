@@ -92,6 +92,7 @@ def test_every_sample_surface_has_loading_copy_while_listing_is_pending(route, t
         def inspect(_command, evaluate) -> None:
             observed.update(evaluate("""(() => ({
               status: document.querySelector('#status').textContent.trim(),
+              context: document.querySelector('#sample-context').textContent.trim(),
               sections: [...document.querySelectorAll('#main section')].map((section) => ({
                 loading: section.textContent.includes('Loading…'),
                 height: section.getBoundingClientRect().height,
@@ -110,11 +111,15 @@ def test_every_sample_surface_has_loading_copy_while_listing_is_pending(route, t
             release_listing.set()
     assert "Loading Lab results…" in dom
     assert observed["status"] == "Loading Lab results…"
+    assert observed["context"] == "Loading sample…"
     assert all(section["loading"] for section in observed["sections"])
     if route == "home":
-        assert len(observed["sections"]) == 4
-        assert observed["sections"][0]["height"] == 320
-        assert all(section["height"] >= 160 for section in observed["sections"][1:])
+        assert len(observed["sections"]) == 5
+        assert [section["classes"].split()[-1] for section in observed["sections"]] == [
+            "loading-intro", "loading-defended", "loading-curve", "loading-controls", "loading-clia",
+        ]
+        assert all(section["height"] >= 160 for section in observed["sections"])
+        assert observed["sections"][-1]["height"] >= 320
     else:
         assert len(observed["sections"]) == 1
         assert observed["sections"][0]["height"] >= 160

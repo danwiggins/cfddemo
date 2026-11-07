@@ -100,9 +100,10 @@ def test_end_motif_and_delfi_plots_equal_their_adjacent_tables(tmp_path, monkeyp
     assert len(ratio_rows) == len(bins)
     assert [[row[0], int(row[1]), int(row[2]), int(row[3])] for row in ratio_rows] == [
         [row["contig"], row["start"], row["short"], row["long"]] for row in bins]
-    assert [None if row[4] == "—" else float(row[4]) for row in ratio_rows] == [
+    assert ratio_rows[1][4:] == ["unavailable", "unavailable"]
+    assert [None if row[4] == "unavailable" else float(row[4]) for row in ratio_rows] == [
         row["ratio"] for row in bins]
-    assert [None if row[5] == "—" else float(row[5]) for row in ratio_rows] == [
+    assert [None if row[5] == "unavailable" else float(row[5]) for row in ratio_rows] == [
         row["centred"] for row in bins]
     assert ratio_chart["categories"] == [
         f'{row["contig"]}:{row["start"] // 1_000_000} Mb' for row in bins]

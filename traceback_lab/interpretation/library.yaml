@@ -7,8 +7,189 @@
 # original evidence (D4).  citation_checked records who confirmed that every
 # DOI resolves and every displayed number matches the source (D27); an entry
 # without it renders an "UNVERIFIED citation" badge.
-version: 0.6.5
+version: 0.6.6
 hidden_algorithms: [read-summary, meth-calls]
+# Method-level presentation copy is adapted from docs/LAB-ALGORITHM-EXPLAINER.md.
+# It is joined at read time, never included in execution or result identity.
+# Requirements here explain prerequisites; they do not certify current readiness.
+method_catalog:
+  bam-qc:
+    description: "Mapping, read quality, coverage and other sequencing-quality summaries."
+    question: "Could preparation, sequencing or alignment explain an unusual result?"
+    limitations: "Good QC improves interpretability but does not validate a downstream biological claim."
+    requirements: []
+  depth:
+    description: "Eligible-read count and approximate aligned-base coverage."
+    question: "Which analyses have enough observed data to attempt?"
+    limitations: "Total reads do not establish support at every methylation marker or genomic region."
+    requirements: []
+  fragment-size:
+    description: "ONT aligned-span distribution, short-fragment share, peaks and periodicity."
+    question: "Do fragmentation patterns differ between compatible samples?"
+    limitations: "Collection, preparation and alignment also change the distribution; this is not a standalone cancer test."
+    requirements: []
+  lionheart:
+    description: "Raw chromatin-accessibility correlation scores from the LIONHEART extraction workflow."
+    question: "Does the coverage pattern resemble a registered accessibility reference?"
+    limitations: "The Lab does not run LIONHEART cancer prediction; ONT use remains experimental."
+    requirements:
+      - "Experimental ONT single-end mode requires TRACEBACK_LIONHEART_ENABLE_ONT=1 opt-in"
+      - "Verified LIONHEART v003 resources and matching toolchain"
+  short-read-fragment-size:
+    description: "Paired-end template-length distribution from an Illumina-declared BAM."
+    question: "How do short-read fragment lengths vary across compatible inputs?"
+    limitations: "Template length and ONT aligned span differ and must not be pooled automatically."
+    requirements: ["Paired-end Illumina-declared input"]
+  copy-number:
+    description: "Genomic gains, losses, segments, ploidy and fitted tumour fraction from ichorCNA."
+    question: "Does the input support broad copy-number structure?"
+    limitations: "Low signal, model ambiguity and whole-genome doubling complicate estimates; no signal does not rule out cancer."
+    requirements: ["Registered ichorCNA method assets and toolchain", "Protocol-matched panel of normals for a PoN-corrected result"]
+  instability:
+    description: "Variation across the selected copy-number segments."
+    question: "Is the segment profile more uneven than compatible controls?"
+    limitations: "Noise and coverage affect unevenness; there is no validated ONT clinical cutoff."
+    requirements: ["Selected copy-number result"]
+  arm-summary:
+    description: "Copy-number summaries across autosomal p and q arms."
+    question: "Which broad chromosome arms contribute to a copy-number pattern?"
+    limitations: "Centromere definitions and supported bins affect results; these summaries are exploratory."
+    requirements: ["Registered ichorCNA centromere asset", "Selected protocol-matched panel of normals"]
+  long-tail:
+    description: "Share of unusually long aligned molecules."
+    question: "Is there a long-fragment pattern worth checking for handling effects?"
+    limitations: "A long-fragment signal is a preparation-quality clue, not a diagnosis or unique cause."
+    requirements: []
+  sex-check:
+    description: "Relative chromosome X and Y read density."
+    question: "Is the chromosomal pattern consistent with recorded sample information?"
+    limitations: "This is not a diagnostic sex or gender determination; mixed DNA sources and unusual biology complicate interpretation."
+    requirements: []
+  dd-cfdna-chry:
+    description: "Input-calibrated chrY-based donor fraction for a male donor and female recipient."
+    question: "Does estimated donor-derived contribution differ across compatible samples?"
+    limitations: "This is not a general donor-fraction method or evidence of rejection or injury."
+    requirements: ["Operator-verified input-scoped transplant calibration"]
+  identity:
+    description: "Somalier genetic fingerprint and optional paired relatedness comparison."
+    question: "Could samples share a genetic source or have been swapped?"
+    limitations: "This is not a public identity lookup or a replacement for chain-of-custody records."
+    requirements: ["Registered hg38 Somalier sites and toolchain"]
+  mtdna:
+    description: "Mitochondrial read share and fragment size."
+    question: "Does mitochondrial representation change alongside other signals?"
+    limitations: "Handling, platelet contribution and alignment ambiguity affect this; it is not mitochondrial function."
+    requirements: []
+  microbial:
+    description: "Kraken2/Bracken classifications from human-unmapped ONT reads."
+    question: "Which microbial sequence patterns appear or recur across controls and batches?"
+    limitations: "Database errors and contamination are alternatives; this is not an infection diagnosis."
+    requirements: ["Pinned Kraken2/Bracken database and tools"]
+  viral-reads:
+    description: "EBV, HPV and HBV alignments from human-unmapped reads against a separate viral reference."
+    question: "Does viral sequence evidence merit follow-up and contamination checks?"
+    limitations: "Sequence detection does not prove active infection, viral load, causation or cancer."
+    requirements: ["Registered viral FASTA and targets", "minimap2 side-alignment tool"]
+  cell-origin:
+    description: "Estimated mixture of reference cell types from cfDNA methylation."
+    question: "Which reference cell types may contribute shed DNA to this sample?"
+    limitations: "This estimates a DNA mixture, not body cell proportions; small components are uncertain."
+    requirements: ["Registered Loyfer atlas", "Single header-declared modified-base model"]
+  end-motifs:
+    description: "Reference sequence motifs at aligned fragment ends."
+    question: "Does end-pattern composition differ between compatible samples?"
+    limitations: "Aligned ends and reference bases are proxies for physical cleavage events."
+    requirements: []
+  finaletoolkit-xcheck:
+    description: "Agreement between FinaleToolkit and independent motif and fragment-ratio counters."
+    question: "Do the implementations agree under declared settings?"
+    limitations: "This is an engineering cross-check on paired-end Illumina input, not independent biological evidence."
+    requirements: ["Paired-end Illumina BAM", "FinaleToolkit toolchain"]
+  breakpoint-motifs:
+    description: "Aligned-end motifs and their proximity to reference CpG sites."
+    question: "Do observed endpoints occur in different sequence contexts?"
+    limitations: "The output does not prove methylation causes cleavage or that an aligned endpoint is physical."
+    requirements: []
+  aligned-end-structure:
+    description: "Orientation-aware aligned endpoints near registered open-chromatin and preferred-end sites."
+    question: "Is directional endpoint structure reproducible around these sites?"
+    limitations: "This is an exploratory aligned-span proxy; tissue-origin calibration is unestablished."
+    requirements: ["Verified open-chromatin and preferred-end catalogues", "At least 10x observed eligible depth"]
+  delfi-ratio:
+    description: "Short-to-long fragment ratios across genomic bins."
+    question: "Are fragmentation differences concentrated in particular regions?"
+    limitations: "This exploratory cohort-relative measure is not the published DELFI classifier."
+    requirements: []
+  wps:
+    description: "Fragments spanning a window versus fragments ending inside it."
+    question: "Are fine-scale protection patterns visible in eligible fragments?"
+    limitations: "Raw averages are coverage-sensitive; this is not a validated nucleosome or health score."
+    requirements: ["At least 10x approximate autosomal depth", "Space for an exact per-base track"]
+  tss-profile:
+    description: "Aggregate fragment coverage around transcription start sites."
+    question: "Do DNA-packaging footprints differ around a registered gene set?"
+    limitations: "This does not directly measure gene expression."
+    requirements: ["Pinned GENCODE v46 transcription-start annotation"]
+  modbase-qc:
+    description: "Modification channels, tagged-read support and call confidence."
+    question: "Can the modification calls support the requested methylation analyses?"
+    limitations: "A missing 5hmC channel is unavailable data, not a zero 5hmC measurement."
+    requirements: []
+  global-5mc:
+    description: "Share of eligible CpG calls classified as 5-methylcytosine."
+    question: "Is a broad methylation difference worth regional or mixture analysis?"
+    limitations: "A global shift is not specific to cancer, aging or one tissue; models must match for comparison."
+    requirements: []
+  global-5hmc:
+    description: "Share of eligible CpG calls classified as 5-hydroxymethylcytosine."
+    question: "Is a second DNA-modification channel present and different?"
+    limitations: "Missing-channel skips are not zero measurements; biological claims need calibration."
+    requirements: ["Basecaller model with a supported 5hmC channel"]
+  pmd-score:
+    description: "Methylation inside versus outside registered partially methylated domains."
+    question: "Does broad regional methylation organization differ from a compatible reference group?"
+    limitations: "A difference alone does not identify its biological cause."
+    requirements: ["Pinned hg38 PMD interval asset"]
+  methylbert:
+    description: "Aggregate tumour/normal fractions from private read-level model classifications."
+    question: "Does a more complex pattern model capture information beyond simple summaries?"
+    limitations: "No bundled checkpoint or ONT cfDNA clinical accuracy is established; read-level predictions stay private."
+    requirements: ["Trusted compatible fine-tuned checkpoint and code digest", "Usable CUDA GPU and runtime"]
+  hypometh-reads:
+    description: "Counts of sufficiently observed molecules with low methylation and related categories."
+    question: "Does the distribution of molecule-level methylation states differ?"
+    limitations: "A low-methylation molecule is not necessarily tumour-derived."
+    requirements: []
+  frag-x-meth:
+    description: "Joint distribution of aligned fragment length and molecule-level methylation."
+    question: "Do short and long fragments carry different methylation patterns?"
+    limitations: "A relationship between these signals does not prove independent biological processes."
+    requirements: []
+  fetal-fraction:
+    description: "Exploratory NIPTeR chromosome 13/18/21 dosage statistics against controls."
+    question: "Does chromosome representation differ from a compatible control set?"
+    limitations: "The fetal-fraction metric remains null; this is not clinical prenatal screening."
+    requirements: ["Registered input-scoped prenatal control", "NIPTeR 1.0.2 toolchain"]
+  fetal-fraction-chry:
+    description: "chrY-based fraction under input-specific calibration for a supported male-fetus scenario."
+    question: "What exploratory fetal contribution is estimated in that scenario?"
+    limitations: "This does not apply to female or unknown fetal sex or replace a sex-independent model."
+    requirements: ["Operator-verified input-scoped fetal chrY calibration"]
+  meth-tf:
+    description: "Two-component fit to registered healthy and tumour methylation markers."
+    question: "Is the observed pattern better represented by a mixture of those references?"
+    limitations: "The fitted share depends on its references, not a universal tumour percentage."
+    requirements: ["Compatible registered meth-TF marker reference and model metadata"]
+  griffin:
+    description: "GC-corrected coverage profiles around registered transcription-factor sites."
+    question: "How do local DNA-packaging patterns compare between suitable samples?"
+    limitations: "Requires paired-end Illumina data and does not produce a tissue-origin or disease call."
+    requirements: ["Registered Griffin assets and tested toolchain", "At least five million eligible autosomal pairs"]
+  epi-clock:
+    description: "Three-site Weidner age arithmetic using ONT modification calls."
+    question: "Is this transferred age-associated signal reproducible in cfDNA?"
+    limitations: "Not a validated biological-age or longevity measurement for ONT cfDNA."
+    requirements: ["Operator-verified hg38 Weidner assay-site map and sufficient site support"]
 entries:
   # ---------------------------------------------------------------- bam-qc
   - algorithm_id: bam-qc

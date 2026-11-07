@@ -14,7 +14,7 @@ from traceback_lab.web.server import RunningLabServer
 
 
 @pytest.mark.skipif(_chrome() is None, reason="no Chrome/Chromium for TSS DOM check")
-@pytest.mark.parametrize(("ratio", "rendered"), [(0.75, "0.750"), (None, "—")])
+@pytest.mark.parametrize(("ratio", "rendered"), [(0.75, "0.75 ratio"), (None, "unavailable")])
 def test_tss_profile_chart_and_table(tmp_path, monkeypatch, ratio, rendered) -> None:
     source_id = "a" * 64
     sample = {

@@ -62,9 +62,13 @@ def test_latest_completed_primary_survives_newer_active_and_blocked_runs(tmp_pat
     assert listing["samples"][0]["id12"] == source_b[:12]
     assert listing["default_sample_id12"] == source_a[:12]
     assert next(row for row in listing["samples"] if row["id12"] == source_a[:12])["run_utc"] == "2026-10-17T10:00:00Z"
+    assert next(row for row in listing["samples"] if row["id12"] == source_a[:12])["completed_utc"] == "2026-10-17T10:00:00Z"
+    assert next(row for row in listing["samples"] if row["id12"] == source_b[:12])["completed_utc"] is None
     assert api.sample(source_a[:12])["full_input_id"] == old_a
     assert api.sample(source_a[:12])["run_utc"] == "2026-10-17T10:00:00Z"
+    assert api.sample(source_a[:12])["completed_utc"] == "2026-10-17T10:00:00Z"
     assert api.sample(source_b[:12])["full_input_id"] == input_b  # explicit active fallback
+    assert api.sample(source_b[:12])["completed_utc"] is None
 
     second = "r-20261018-1300-abcd"
     _run(store, second, source_a, new_a, "2026-10-18T13:00:00Z")
@@ -464,7 +468,7 @@ def test_listing_retries_when_source_inputs_change_after_snapshot(tmp_path, monk
     ("history_unavailable", "Completion history unavailable"),
 ))
 @pytest.mark.parametrize("route_kind", ("bare", "explicit"))
-def test_recovery_home_keeps_clia_panel_first_and_disclosures(tmp_path, state, title, route_kind) -> None:
+def test_recovery_home_keeps_clia_disclosures_with_sample_overview(tmp_path, state, title, route_kind) -> None:
     store = LabStore(tmp_path / "root")
     store.ensure()
     source, input_id = "a" * 64, "8" * 64
@@ -491,8 +495,14 @@ def test_recovery_home_keeps_clia_panel_first_and_disclosures(tmp_path, state, t
     assert main is not None
     content = main.group(1)
     assert content.index("<h1") < content.index('<section class="clia-panel"')
-    assert content.index('<section class="clia-panel"') == content.index("<section")
+    if route_kind == "explicit" and state == "no_completed":
+        assert content.index('<section class="panel landing-intro"') == content.index("<section")
+        assert content.index('<section class="panel landing-intro"') < content.index('<section class="clia-panel"')
+    else:
+        assert content.index('<section class="clia-panel"') == content.index("<section")
     assert content.count('<section class="clia-panel"') == 1
+    if route_kind == "explicit" and state == "no_completed":
+        assert f"Sample {source[:12]}" in dom and "no completion recorded for this sample" in dom
     assert "What CLIA means for this demo" in content
     assert 'aria-expanded="false"' in content
     assert 'aria-controls="clia-full"' in content
@@ -537,15 +547,23 @@ def test_unavailable_lens_does_not_gain_landing_panel(tmp_path, state) -> None:
         (store.runs_dir / f"{run_id}.jsonl").unlink()
 
     with RunningLabServer(store) as server:
+        original_listing = server.app.api.samples
+        server.app.api.samples = lambda: {**original_listing(), "samples": []}
         dom = _dom(server, tmp_path / "browser", route=f"/sample/{source[:12]}/findings",
                    want=lambda page: f"Sample {source[:12]} exists" in page)
     main = re.search(r"<main\b[^>]*>(.*?)</main>", dom, re.DOTALL)
     assert main is not None
     assert '<section class="clia-panel"' not in main.group(1)
+    context = re.search(r'<p id="sample-context"[^>]*>(.*?)</p>', dom, re.DOTALL)
+    assert context is not None
+    assert f"Sample {source[:12]}" in context.group(1)
+    assert "Synthetic status unavailable" in context.group(1)
+    assert ("completed input unavailable" if state == "input_unavailable"
+            else "completion history unavailable") in context.group(1)
 
 
 @needs_chrome
-def test_provisional_home_keeps_clia_before_excluded_chunk_notice(tmp_path) -> None:
+def test_provisional_home_keeps_excluded_chunk_notice_beside_overview(tmp_path) -> None:
     store = LabStore(tmp_path / "root")
     store.ensure()
     source, input_id = "a" * 64, "8" * 64
@@ -567,5 +585,6 @@ def test_provisional_home_keeps_clia_before_excluded_chunk_notice(tmp_path) -> N
     main = re.search(r"<main\b[^>]*>(.*?)</main>", dom, re.DOTALL)
     assert main is not None
     content = main.group(1)
-    assert content.index('<section class="clia-panel"') < content.index('<div class="status-line"')
+    assert content.index('class="panel landing-intro"') < content.index('<div class="status-line"')
     assert content.index('<div class="status-line"') < content.index('class="headline"')
+    assert content.index('class="headline"') < content.index('<section class="clia-panel"')

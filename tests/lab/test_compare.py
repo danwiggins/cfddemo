@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import shlex
 from types import SimpleNamespace
 
 import pytest
@@ -88,6 +87,7 @@ def test_compare_pins_one_generation_and_gates_after_leave_one_out(
 
     assert reads == ["healthy"]
     assert payload["cohort_version"] == "healthy:7"
+    assert payload["input_id"] == f"{101:064x}"
     assert payload["member_n"] == member_n
     assert payload["metrics"][0]["eligible_n"] == eligible_n
     assert len(payload["metrics"][0]["cohort_values"]) == eligible_n
@@ -250,8 +250,38 @@ def test_compare_cohort_unavailable_has_no_metrics(tmp_path, monkeypatch, cohort
     assert payload["problem"]["code"] == ("TBX-LAB-022" if cohort_failure == "damaged" else "TBX-LAB-017")
     assert "fix" in payload["problem"] and "docs" in payload["problem"]
     if cohort_failure == "unbuilt":
-        assert f"--root {shlex.quote(str(root))}" in payload["problem"]["fix"]
-        assert "--root R" not in payload["problem"]["fix"]
+        assert "--root '<ROOT>'" in payload["problem"]["fix"]
+        assert str(root) not in payload["problem"]["fix"]
+
+
+def test_compare_recovery_problem_scrubs_local_paths() -> None:
+    problem = LabProblem(
+        "TBX-LAB-017", cause="Selected record at /Users/alice/private/cohort.json is unreadable",
+        fix="Retry with --root /tmp/local-root after restoring the file",
+    )
+
+    projected = web_api._recovery_problem(problem)
+
+    assert projected["code"] == "TBX-LAB-017" and projected["docs"].endswith("#tbx-lab-017")
+    assert "selected Lab record" in projected["cause"]
+    assert "known-good backup" in projected["fix"]
+    assert "/Users/" not in str(projected) and "/tmp/" not in str(projected)
+
+
+def test_missing_pointer_recovery_keeps_safe_rebuild_command(tmp_path) -> None:
+    root = tmp_path / "private root"
+    store = LabStore(root)
+    (store.lab / "cohorts" / "healthy" / "generations" / "1").mkdir(parents=True)
+
+    payload = web_api.LabApi(store).cohorts()
+
+    assert payload["cohorts"] == []
+    assert len(payload["unavailable"]) == 1
+    problem = payload["unavailable"][0]["problem"]
+    assert problem["code"] == "TBX-LAB-022"
+    assert "traceback lab cohort build --cohort <COHORT> --root <ROOT>" in problem["fix"]
+    assert "same Lab root" in problem["fix"] and "known-good backup" in problem["fix"]
+    assert str(root) not in json.dumps(payload)
 
 
 def test_compare_target_unavailable_has_no_metrics(tmp_path, monkeypatch) -> None:
@@ -380,7 +410,9 @@ def test_compare_pinned_input_disappearing_after_view_has_specific_recovery(
 def test_example_is_explicitly_unscorable(tmp_path, monkeypatch) -> None:
     generation = CohortGeneration(cohort_id="healthy", version=1, members=())
     monkeypatch.setattr(web_api, "read_current", lambda store, cohort_id: generation)
-    monkeypatch.setattr(web_api.views, "load_sample", lambda store, source_id: SimpleNamespace(example=True))
+    monkeypatch.setattr(web_api.views, "load_sample", lambda store, source_id: SimpleNamespace(
+        example=True, full=SimpleNamespace(input_id="b" * 64),
+    ))
     api = web_api.LabApi(LabStore(tmp_path))
     monkeypatch.setattr(api, "_resolve", lambda id12: (_TARGET, []))
     monkeypatch.setattr(api, "_id12s", lambda: {_TARGET: _TARGET[:12]})
@@ -435,6 +467,7 @@ def test_compare_and_joint_panel_render_in_native_tables(tmp_path, monkeypatch) 
     }]})
     monkeypatch.setattr(web_api.LabApi, "compare", lambda self, value, cohort: {
         "found": True, "id12": id12, "cohort_id": "healthy", "cohort_version": "healthy:7",
+        "input_id": f"{101:064x}",
         "kind": "internal_cohort", "member_n": 11, "pon_n": 0, "state": "ready",
         "target_aligner": "minimap2 2.28; samtools 1.20", "aligner_counts": {"minimap2 2.28; samtools 1.20": 11},
         "metrics": [{
@@ -524,7 +557,10 @@ def test_compare_and_joint_panel_render_in_native_tables(tmp_path, monkeypatch) 
 
     assert "FLAG: CLIA" in compare
     assert "No reference yet (cohort n = 9 of 10)" in compare
-    assert "missing metric: 1" in compare and "minimap2 2.28; samtools 1.20: 9" in compare
+    input_id = f"{101:064x}"
+    assert f"input ID (abbrev.) {input_id[:12]}…{input_id[-6:]}" in compare
+    assert "at least 10 are required for a cohort comparison" in compare
+    assert "member has no value for this metric: 1" in compare and "minimap2 2.28; samtools 1.20: 9" in compare
     assert "Eligible values (9)" in compare and "Original library reference" in compare
     assert 'aria-label="Comparison metrics"' in compare and 'aria-label="Generation aligner counts"' in compare
     assert compare.count('tabindex="0" role="region"') >= 2
@@ -552,7 +588,7 @@ def test_compare_and_joint_panel_render_in_native_tables(tmp_path, monkeypatch) 
     assert 'aria-label="Cohort generation"' not in root_unavailable
     assert 'data-csp-violations="0"' in root_unavailable
     assert "1001+ bp" in signals and "75–100% (inclusive)" in signals
-    assert "Short group n = 0, mean = —" in signals
+    assert "Short group n = 0, mean = unavailable" in signals
     assert "A missing mean is not zero" in signals
     assert 'data-csp-violations="0"' in signals
     assert "physical cleavage sites are not established" in motif_dom

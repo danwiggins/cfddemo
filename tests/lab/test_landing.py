@@ -117,7 +117,7 @@ def page_root(tmp_path_factory, synthetic_world) -> Path:
     return root
 
 
-def _dom(server, tmp_path, *, size="1280,800", route=None, want=None) -> str:
+def _dom(server, tmp_path, *, size="1280,800", route=None, want=None, interact=None) -> str:
     """Inspect one page with a fresh link and bounded readiness wait."""
 
     from tests.lab.test_lab_server import _dom_cdp
@@ -134,6 +134,7 @@ def _dom(server, tmp_path, *, size="1280,800", route=None, want=None) -> str:
          f"--user-data-dir={profile}", f"--window-size={size}", link],
         profile, ok=good, timeout=90,
         viewport=tuple(map(int, size.split(","))),
+        interact=interact,
     )
 
 
@@ -148,8 +149,15 @@ needs_chrome = pytest.mark.skipif(_chrome() is None, reason="no Chrome/Chromium 
 
 @needs_chrome
 def test_landing_pixel_budget_at_1280x800(page_root, tmp_path) -> None:
+    def inspect_visibility(_command, evaluate) -> None:
+        assert evaluate("(() => { const r = document.getElementById('banner').getBoundingClientRect(); return r.top >= 0 && r.bottom <= innerHeight && r.left >= 0 && r.right <= innerWidth; })()")
+        assert evaluate("(() => { const p = document.querySelector('.clia-panel'); return p.scrollHeight <= p.clientHeight + 1; })()")
+        evaluate("document.querySelector('.clia-panel').scrollIntoView({block: 'start'})")
+        panel = evaluate("(() => { const r = document.querySelector('.clia-panel').getBoundingClientRect(); return {top: r.top, bottom: r.bottom, viewport: innerHeight}; })()")
+        assert panel["top"] >= -1 and panel["bottom"] <= panel["viewport"] + 1, panel
+
     with RunningLabServer(LabStore(page_root)) as server:
-        dom = _dom(server, tmp_path)
+        dom = _dom(server, tmp_path, interact=inspect_visibility)
     body = _body(dom)
     assert body["csp-violations"] == "0"
     assert int(body["banner-height"]) <= 40
@@ -163,7 +171,9 @@ def test_landing_pixel_budget_at_1280x800(page_root, tmp_path) -> None:
         assert int(body["defended-visible"]) >= 1
     else:
         assert int(body["defended-visible"]) >= min(3, total) and total >= 1
-    assert body["clia-fully-visible"] == "true"
+    main = dom.split("<main", 1)[1].split("</main>", 1)[0]
+    assert main.index('class="panel landing-intro"') < main.index('class="landing-band"') < main.index('class="clia-panel"')
+    assert all(f'href="#/sample/{_id12(page_root)}/{lens}"' in main for lens in ("signals", "trust-qc", "methods"))
     assert body["page-scroll-x"] == "false"
     for text in (
         "What CLIA means for this demo", "FLAG: LEGAL — verify", "Defended results", "Depth → utility",
@@ -198,13 +208,17 @@ def test_navigation_order_with_compare(page_root, tmp_path) -> None:
 
 
 @needs_chrome
-def test_stability_names_both_halves_without_a_numeric_verdict(page_root, tmp_path, monkeypatch) -> None:
-    from traceback_lab import views
+@pytest.mark.parametrize("relative,shown", [(5 / 102.5, "4.88%"), (None, "unavailable")])
+def test_stability_names_both_halves_without_a_numeric_verdict(
+    page_root, tmp_path, monkeypatch, relative, shown,
+) -> None:
+    from traceback_lab.web.api import LabApi
 
-    original = views.stability_panels
+    real_sample = LabApi.sample
 
-    def panels_with_missing_halves(sample, library=None):
-        panels = original(sample, library)
+    def sample_with_missing_halves(api, id12):
+        payload = real_sample(api, id12)
+        panels = payload["stability"]
         states = [
             (("skipped", "depth"), ("failed", "algorithm failed")),
             (("unavailable", "selected result unavailable"), ("not_interpretable", "metric value unavailable")),
@@ -218,7 +232,7 @@ def test_stability_names_both_halves_without_a_numeric_verdict(page_root, tmp_pa
         assert len(panels) >= 3
         panels[2]["split"] = {"a": 100, "b": 105, "absolute_diff": 5,
                                "deviation_a": None, "deviation_b": None,
-                               "relative_abs_diff": 5 / 102.5, "stable": None}
+                               "relative_abs_diff": relative, "stable": None}
         panels[2]["split_status"] = {
             half: {"state": "ok", "reason": None, "value": value, "deviation": None}
             for half, value in (("A", 100), ("B", 105))
@@ -226,17 +240,23 @@ def test_stability_names_both_halves_without_a_numeric_verdict(page_root, tmp_pa
         panels[2]["split_warning"] = "an unrecognized split label is present"
         for point in panels[2]["points"]:
             point.update({"state": "not_interpretable", "unit": "none", "deviation": None, "band": None})
-        return panels
+        return payload
 
-    monkeypatch.setattr(views, "stability_panels", panels_with_missing_halves)
+    monkeypatch.setattr(LabApi, "sample", sample_with_missing_halves)
     with RunningLabServer(LabStore(page_root)) as server:
         dom = _dom(server, tmp_path, route=f"/sample/{_id12(page_root)}/stability",
                    want=lambda page: "Split halves: split A skipped" in page)
     assert "split A skipped (depth); split B failed (algorithm failed)" in dom
     assert "split A unavailable (selected result unavailable); split B not interpretable (metric value unavailable)" in dom
     assert "No split-half stability verdict." in dom
-    assert "100 / 105" in dom and "|A−B| = 5" in dom
-    assert "relative difference 4.9%" in dom
+    altered = [figure for figure in re.findall(r'<figure class="multiple">(.*?)</figure>', dom, re.S)
+               if "an unrecognized split label is present" in figure]
+    assert len(altered) == 1
+    assert "split A ok (100 bp); split B ok (105 bp)" in altered[0]
+    assert "|A−B| = 5 bp" in altered[0]
+    assert f"relative difference {shown}" in altered[0]
+    if relative is None:
+        assert "relative difference 0%" not in altered[0]
     assert "no split-half stability verdict; an unrecognized split label is present" in dom
     assert "No validated stability deviation scale" in dom
 
@@ -264,7 +284,7 @@ def test_home_names_unavailable_split_comparisons(page_root, tmp_path, comparabl
         dom = _dom(server, tmp_path, want=lambda page: expected in page)
     assert expected in dom
     if comparable:
-        assert "Median split-half |A−B|: 5.0%" in dom
+        assert "Median split-half |A−B|: 5%" in dom
     else:
         assert "no comparable pair is available" in dom
         assert "See Stability" in dom
@@ -320,7 +340,7 @@ def test_unchecked_library_entries_keep_their_badges_without_citations(page_root
         evidence = _dom(server, tmp_path / "evidence", route=f"/sample/{sample_id}/evidence",
                         want=lambda dom: "Unchecked catalog probe" in dom)
 
-    rows = re.findall(r"<tr>(.*?)</tr>", methods, re.S)
+    rows = re.findall(r"<tr(?:\s[^>]*)?>(.*?)</tr>", methods, re.S)
     cards = re.findall(r'<article class="evidence-card"[^>]*>(.*?)</article>', evidence, re.S)
     for blocks, label, expected in (
         (rows, "Unchecked metric probe", 1), (rows, "Checked metric probe", 0),
@@ -447,6 +467,13 @@ def test_evidence_lists_every_algorithm_by_tier_with_exclusions(page_root, tmp_p
 def test_methods_shows_provenance_for_every_number(page_root, tmp_path) -> None:
     with RunningLabServer(LabStore(page_root)) as server:
         dom = _dom(server, tmp_path, route=f"/sample/{_id12(page_root)}/methods")
+    from traceback_lab.interpretation.engine import load_library
+    from traceback_lab.registry import load_registry
+
+    registered = load_registry()
+    hidden = load_library().hidden_algorithms
+    assert f"{len(registered) - len(hidden)} visible methods from {len(registered)} registered steps" in dom
+    assert "Current environment readiness is unknown" in dom
     assert "Every number with its provenance" in dom
     assert "Interpretation library v" in dom and "provenance stamp only" in dom
     assert "FLAG: PII" in dom

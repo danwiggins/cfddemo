@@ -94,6 +94,7 @@ class Library:
     entries: Mapping[tuple[str, str], Entry]
     licenses: Mapping[str, Mapping[str, str]]
     hidden_algorithms: frozenset[str] = frozenset()
+    method_catalog: Mapping[str, Mapping[str, Any]] = field(default_factory=dict)
 
     def entry(self, algorithm_id: str, metric_id: str) -> Entry | None:
         return self.entries.get((algorithm_id, metric_id))
@@ -209,11 +210,33 @@ def parse_library(library_text: str, licenses_text: str) -> Library:
         headlines[alg] = headlines.get(alg, 0) + int(entry.headline)
     for alg, count in headlines.items():
         _require(count == 1, alg, f"exactly one headline metric is required, found {count}")
+    hidden = frozenset(library.get("hidden_algorithms") or ())
+    raw_methods = library.get("method_catalog", {})
+    _require(isinstance(raw_methods, Mapping), "method_catalog", "must be a mapping")
+    methods: dict[str, dict[str, Any]] = {}
+    required_fields = {"description", "question", "limitations", "requirements"}
+    for algorithm_id, raw in raw_methods.items():
+        _require(isinstance(algorithm_id, str) and algorithm_id in headlines and algorithm_id not in hidden,
+                 "method_catalog", f"unknown or hidden algorithm {algorithm_id!r}")
+        _require(isinstance(raw, Mapping) and set(raw) == required_fields,
+                 f"method_catalog/{algorithm_id}", "requires description, question, limitations and requirements")
+        for key in ("description", "question", "limitations"):
+            _require(isinstance(raw[key], str) and bool(raw[key].strip()),
+                     f"method_catalog/{algorithm_id}", f"{key} must be nonempty text")
+        requirements = raw["requirements"]
+        _require(isinstance(requirements, list) and all(isinstance(item, str) and item.strip() for item in requirements)
+                 and len(requirements) == len(set(requirements)),
+                 f"method_catalog/{algorithm_id}", "requirements must be a list of distinct nonempty text")
+        methods[algorithm_id] = {
+            "description": raw["description"], "question": raw["question"],
+            "limitations": raw["limitations"], "requirements": tuple(requirements),
+        }
     return Library(
         version=version,
         entries=entries,
         licenses=licenses,
-        hidden_algorithms=frozenset(library.get("hidden_algorithms") or ()),
+        hidden_algorithms=hidden,
+        method_catalog=methods,
     )
 
 

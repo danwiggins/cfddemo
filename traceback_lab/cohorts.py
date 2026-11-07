@@ -997,7 +997,9 @@ def read_current(store: LabStore, cohort_id: str) -> CohortGeneration | None:
         if versions and not set(versions).issubset(_aborted_generation_versions(directory, cohort_id)):
             raise _storage_problem(
                 cohort_id, "current.json",
-                fix="If the member roster is intact, run lab cohort build with the same --root to publish a new generation; otherwise restore current.json from a known-good backup",
+                fix=("If the member roster is intact, run `traceback lab cohort build --cohort <COHORT> "
+                     "--root <ROOT>` using the same Lab root to publish a new generation; otherwise "
+                     "restore current.json from a known-good backup"),
             )
         return None
     version = pointer.get("version")
