@@ -20,7 +20,7 @@ from traceback_lab.algorithms import viral_reads
 from traceback_lab.algorithms.viral_reads import VIRAL_READS, _count_hits, _derived_keep, _write_queries
 from traceback_lab.registry import InputContext, PlanItem, Ready, Skip
 from traceback_lab.read_summary import DS_SALT, SPLIT_SALT, downsample_mask, h64, split_mask
-from traceback_lab.pipeline import Stage, run_pipeline
+from traceback_runner.contained_process import Stage, run_contained_pipeline as run_pipeline
 from traceback_lab.runner import RunTarget, run_plan
 from traceback_lab.scrub import Scrubber
 from traceback_lab.store import LabStore, new_run_id

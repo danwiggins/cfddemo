@@ -23,7 +23,7 @@ from .file_access import open_regular_no_follow
 from .identity import SHA256_PATTERN, canonical_sha256, resolve_prefix
 from .identity_sites import IdentitySitesError, inspect_sites
 from .ingest import id12_for, resolve_reference, source_ids
-from .pipeline import Stage, run_pipeline
+from traceback_runner.contained_process import Stage, run_contained_pipeline as run_pipeline
 from .registry import execution_identity
 from .store import LabStore, new_attempt_id, write_atomic
 from . import views

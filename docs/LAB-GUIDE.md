@@ -1447,6 +1447,9 @@ the refused run would have.
 
 ## Changes
 
+- 2026-11-07: the Lab's worker and alignment pipelines run through the shared
+  `traceback_runner.contained_process.run_contained_pipeline` (`traceback_lab/pipeline.py`
+  removed); no operator-facing change.
 - 2026-11-06: `lab serve --port N` binds a fixed loopback port; TBX-LAB-026.
 - 2026-11-06: `lab gc` (dry-run by default; `--apply` deletes stale failed
   attempts, orphaned staging and interrupted removals; `--staging-only`;
