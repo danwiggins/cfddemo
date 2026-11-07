@@ -156,7 +156,7 @@ def test_problem_table_exit_codes() -> None:
     assert PROBLEMS["TBX-LAB-024"].exit_code == 3
     assert PROBLEMS["TBX-LAB-025"].exit_code == 0
     assert PROBLEMS["TBX-LAB-026"].exit_code == 3 and PROBLEMS["TBX-LAB-026"].retryable
-    assert PROBLEMS["TBX-LAB-030"].exit_code == 3
+    assert PROBLEMS["TBX-LAB-031"].exit_code == 3
     assert len(PROBLEMS) == 27
 
 

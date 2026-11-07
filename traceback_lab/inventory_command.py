@@ -582,7 +582,7 @@ def inventory_command(args: argparse.Namespace, store: LabStore) -> tuple[int, d
     entries, skipped = list_chunks(directory, recursive=bool(args.recursive))
     if not entries:
         raise LabProblem(
-            "TBX-LAB-030",
+            "TBX-LAB-031",
             cause=f"DIR ({shown}) holds no readable .bam chunk" + (" (searched recursively)" if args.recursive else ""),
             fix="Point at the MinKNOW bam_pass directory, or add --recursive for a run folder",
             data={"dir": given, "skipped": [{"name": s.name, "kind": s.kind} for s in skipped]},

@@ -203,7 +203,7 @@ The last line is the verdict:
 | `INCOMPLETE` | missing indices, or a report declares more chunks than are on disk | 8 |
 | `DAMAGED` | a truncated chunk (no EOF block or quickcheck failure) or duplicate content | 8 |
 
-A DIR with no readable `.bam` chunk is TBX-LAB-030; a missing DIR, a
+A DIR with no readable `.bam` chunk is TBX-LAB-031; a missing DIR, a
 symlink or a file is TBX-LAB-005. Symlinked or unreadable chunks are listed
 as skipped and not counted; `lab run` refuses them. `--json` carries the
 verdict, the reasons, every per-chunk row and the report comparison under
@@ -1398,7 +1398,7 @@ port. Without `--port`, no ephemeral loopback port could be bound; check that
 the loopback interface is up and retry. `--json` carries the requested `port`
 (`null` when ephemeral) and the OS `errno` name under `data`.
 
-### TBX-LAB-030
+### TBX-LAB-031
 
 `lab inventory DIR` found no readable `.bam` chunk in DIR (exit 3). Point
 it at the MinKNOW `bam_pass` directory (the chunks are `<run>_pass_<hash>_<hash>_<n>.bam`),
@@ -1423,7 +1423,7 @@ symlink or a plain file is TBX-LAB-005 instead.
 
 ## Changes
 
-- 2026-11-06: `lab inventory DIR` checks a chunk set before alignment; TBX-LAB-030.
+- 2026-11-06: `lab inventory DIR` checks a chunk set before alignment; TBX-LAB-031.
 - 2026-11-06: `lab serve --port N` binds a fixed loopback port; TBX-LAB-026.
 - 2026-10-17: documented the expanded registered catalog, platform-specific
   methods, input-scoped calibrations, and current Lab writer commands.

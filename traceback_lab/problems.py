@@ -76,7 +76,7 @@ PROBLEMS: dict[str, ProblemSpec] = {
     "TBX-LAB-026": ProblemSpec(
         EXIT_BLOCKED, "The requested loopback port cannot be bound", retryable=True
     ),
-    "TBX-LAB-030": ProblemSpec(EXIT_BLOCKED, "The inventory directory holds no .bam chunks"),
+    "TBX-LAB-031": ProblemSpec(EXIT_BLOCKED, "The inventory directory holds no .bam chunks"),
 }
 
 

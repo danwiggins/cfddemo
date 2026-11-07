@@ -1,4 +1,4 @@
-"""``traceback lab inventory DIR``: chunk-set completeness before alignment (TBX-LAB-030)."""
+"""``traceback lab inventory DIR``: chunk-set completeness before alignment (TBX-LAB-031)."""
 
 from __future__ import annotations
 
@@ -257,11 +257,11 @@ def test_empty_dir_is_tbx_lab_030(tmp_path: Path, capsys) -> None:
     (empty / "notes.txt").write_text("not a chunk\n")
     code, payload = _json(capsys, str(empty), "--root", str(tmp_path / "root"))
     assert code == 3
-    assert payload["status"] == "blocked" and payload["data"]["code"] == "TBX-LAB-030"
-    assert payload["data"]["docs"] == "docs/LAB-GUIDE.md#tbx-lab-030"
+    assert payload["status"] == "blocked" and payload["data"]["code"] == "TBX-LAB-031"
+    assert payload["data"]["docs"] == "docs/LAB-GUIDE.md#tbx-lab-031"
     assert payload["data"]["dir"] == str(empty) and payload["data"]["skipped"] == []
     code, out = _run(capsys, str(empty), "--root", str(tmp_path / "root"))
-    assert code == 3 and "CODE       TBX-LAB-030" in out and "CAUSE      DIR (empty) holds no readable .bam chunk" in out
+    assert code == 3 and "CODE       TBX-LAB-031" in out and "CAUSE      DIR (empty) holds no readable .bam chunk" in out
     assert str(tmp_path) not in out.replace(str(tmp_path / "root"), "")
 
 
@@ -289,7 +289,7 @@ def test_symlinked_chunks_are_skipped_not_counted(run_dir: Path, tmp_path: Path,
 def test_recursive_scans_subdirectories_with_relative_names(run_dir: Path, tmp_path: Path, capsys) -> None:
     _final_summary(run_dir, 4)
     code, payload = _json(capsys, str(run_dir), "--root", str(tmp_path / "root"))
-    assert code == 3 and payload["data"]["code"] == "TBX-LAB-030"
+    assert code == 3 and payload["data"]["code"] == "TBX-LAB-031"
     assert "searched recursively" not in payload["data"]["cause"]
     code, payload = _json(capsys, str(run_dir), "--recursive", "--root", str(tmp_path / "root"))
     assert code == 0, payload
