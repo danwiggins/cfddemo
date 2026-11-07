@@ -964,7 +964,7 @@ def test_hash_cache_key_changes_when_a_same_size_same_mtime_replacement_has_a_ne
     assert key.startswith("chunk-v2\0")
     replacement = tmp_path / "chunk_0.bam.restored"
     replacement.write_bytes(b"bbbb")
-    os.utime(replacement, ns=(old.st_atime_ns, old.st_mtime_ns))
+    restore_mtime_past_ctime(replacement, old)
     assert replacement.stat().st_ino != old.st_ino
     os.replace(replacement, chunk)
     new = chunk.stat()

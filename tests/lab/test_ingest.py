@@ -14,6 +14,7 @@ from traceback_lab import ingest
 from traceback_lab.problems import LabProblem
 from traceback_lab.store import LabStore
 from traceback_lab.synthetic import rg_line, write_chunks, write_reference
+from tests.lab.conftest import restore_mtime_past_ctime
 
 
 def _problem(callable_, *args, **kwargs) -> LabProblem:
@@ -186,7 +187,7 @@ def test_same_size_same_mtime_replacement_on_a_new_inode_is_rehashed(lab_world, 
 
     restored = lab_world["tmp"] / "restored.bam"
     _rewrite_uncompressed(target, restored, flip_first_base=True)
-    os.utime(restored, ns=(before.st_atime_ns, before.st_mtime_ns))
+    restore_mtime_past_ctime(restored, before)
     os.replace(restored, target)
     after = target.stat()
     assert (after.st_size, after.st_mtime_ns) == (before.st_size, before.st_mtime_ns)
@@ -223,7 +224,7 @@ def test_in_place_rewrite_with_restored_mtime_is_rehashed_without_the_flag(lab_w
     source = lab_world["tmp"] / "edited.bam"
     _rewrite_uncompressed(target, source, flip_first_base=True)
     target.write_bytes(source.read_bytes())
-    os.utime(target, ns=(before.st_atime_ns, before.st_mtime_ns))
+    restore_mtime_past_ctime(target, before)
     after = target.stat()
     assert after.st_ino == before.st_ino
     assert (after.st_size, after.st_mtime_ns) == (before.st_size, before.st_mtime_ns)
