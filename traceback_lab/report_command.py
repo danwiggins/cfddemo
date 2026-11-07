@@ -19,9 +19,10 @@ view).
 
 Text handling has three classes.  Identifiers, hashes, numbers and
 enumerations are validated by pattern and only HTML-escaped.  Curated repo
-text (method catalogue, license copy, the CLIA explainer) has ROOT and home
-replaced and is never filtered or word-redacted.  Library free text (labels,
-confounders, next steps, references) also loses the login and host name, and
+text (labels, the library's method catalogue, license copy, the CLIA
+explainer) has ROOT and home replaced and is never filtered or word-redacted.
+Library free text (confounders, next steps, references) also loses the login
+and host name, and
 is withheld when it looks like a path, a credential or a read name; a
 withheld item is marked in place and in the limitations.  The same 5,000-row and 5 MiB limits as the browser export
 apply; an over-limit report is refused (TBX-LAB-034) without writing a
@@ -181,7 +182,8 @@ def _host_pattern(hostname: str | None) -> re.Pattern[str] | None:
     if not words:
         return None
     alternatives = "|".join(re.escape(word) for word in sorted(words, key=len, reverse=True))
-    return re.compile(rf"(?<![A-Za-z0-9])(?:{alternatives})(?![A-Za-z0-9])", re.IGNORECASE)
+    # ``_`` counts as a word character so ``lab`` never rewrites ``lab_loo_v1``.
+    return re.compile(rf"(?<![A-Za-z0-9_])(?:{alternatives})(?![A-Za-z0-9_])", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -204,9 +206,12 @@ class ReportScrubber:
     host: re.Pattern[str] | None = None
 
     def _literal(self, text: str) -> str:
-        for root in self.roots:
-            text = text.replace(root, ROOT_TOKEN)
-        return text.replace(self.home, REDACTED) if self.home else text
+        """Replace ROOT and home only as whole path prefixes: ``/data/lab`` never matches
+        ``/data/lab2`` and ``/data`` never matches ``input/data``."""
+
+        for prefix, token in [*((root, ROOT_TOKEN) for root in self.roots), *([(self.home, REDACTED)] if self.home else [])]:
+            text = re.sub(rf"(?<![A-Za-z0-9._~/-]){re.escape(prefix)}(?=/|$|[^A-Za-z0-9._~-])", token, text)
+        return text
 
     def curated(self, text: str) -> str:
         """Scrub repo-curated text, without truncation or content filtering."""
@@ -217,7 +222,7 @@ class ReportScrubber:
         """Login and host-name redaction outside the scrubber tokens."""
 
         patterns = [pattern for pattern in (
-            re.compile(rf"(?<![A-Za-z0-9]){re.escape(self.login)}(?![A-Za-z0-9])") if self.login else None,
+            re.compile(rf"(?<![A-Za-z0-9_]){re.escape(self.login)}(?![A-Za-z0-9_])") if self.login else None,
             self.host,
         ) if pattern is not None]
         if not patterns:
@@ -314,9 +319,9 @@ def _free_text(value: Any, scrub: ReportScrubber, note: _Notes) -> str | None:
 
 
 def _curated(value: Any, scrub: ReportScrubber) -> str | None:
-    if value is None or value == "" or value == []:
+    if value is None or value == "" or value == [] or value == ():
         return None
-    items = value if isinstance(value, list) else [value]
+    items = list(value) if isinstance(value, (list, tuple)) else [value]
     kept = [scrub.curated(item) for item in items if isinstance(item, str) and item]
     if len(kept) != len(items):
         kept.append(f"[{len(items) - len(kept)} malformed item{'s' if len(items) - len(kept) != 1 else ''} omitted]")
@@ -606,13 +611,23 @@ def project_report(sample: dict[str, Any], generated_at: str, scrub: ReportScrub
             if len(rows) >= MAX_ROWS:
                 raise ReportRefused(f"the report exceeds the {MAX_ROWS:,} row export limit", rows=len(rows) + 1)
             if algorithm_id not in methods:
-                source = catalog_by_id.get(algorithm_id, {})
+                # Catalogue text comes from the library's method catalogue, as the API
+                # builds it; the payload's copy is only compared.
+                # A difference is shown with the method, not in the limitations, so the
+                # limitations stay identical to the browser export's.
+                source = dict(library.method_catalog.get(algorithm_id) or {})
+                served = catalog_by_id.get(algorithm_id, {})
+                expected_requirements = list(source.get("requirements") or ())
+                catalog_differs = any(
+                    served.get(key) != (expected_requirements if key == "requirements" else source.get(key))
+                    for key in ("question", "description", "limitations", "requirements"))
                 methods[algorithm_id] = {
                     "question": _curated(source.get("question"), scrub),
                     "description": _curated(source.get("description"), scrub),
                     "limitations": _curated(source.get("limitations"), scrub),
                     "requirements": _curated(source.get("requirements"), scrub),
                     "licenses": [],
+                    "catalog_differs": catalog_differs,
                     "provenance": {
                         "tool": provenance["tool"], "tool_version": provenance["tool_version"],
                         "parameters_sha256": provenance["parameters_sha256"],
@@ -629,13 +644,10 @@ def project_report(sample: dict[str, Any], generated_at: str, scrub: ReportScrub
                 parts = [part for part in (reference.get("kind"), reference.get("source")) if part]
                 reference_text = _free_text(": ".join(map(str, parts)), scrub, note) if parts else None
             next_steps = entry.get("next_steps") if isinstance(entry.get("next_steps"), dict) else {}
+            # Labels are curated library text: ROOT/home only, never word-redacted.
             raw_label = entry.get("label")
-            label = scrub.free_text(raw_label)
-            if not isinstance(raw_label, str) or not raw_label:
-                label = f"{metric_id} (label not recorded)"
-            elif label is None:
-                note(WITHHELD_TEXT)
-                label = f"{metric_id} {_withheld(1)}"
+            label = (scrub.curated(raw_label) if isinstance(raw_label, str) and raw_label
+                     else f"{metric_id} (label not recorded)")
             rows.append({
                 "algorithm_id": algorithm_id, "metric_id": metric_id, "label": label,
                 "raw_value": value, "raw_unit": unit, "recorded_support_n": support,
@@ -804,6 +816,9 @@ def render_html(report: dict[str, Any], clia_short: str) -> str:
         push(field("Requirements", method["requirements"]))
         push(field("Limitations", method["limitations"]))
         push("</dl>\n")
+        if method["catalog_differs"]:
+            push('<p class="detail catalog-differs">The served method text differed from the curated '
+                 "method catalogue; the curated text is shown.</p>\n")
         for license_id in method["licenses"]:
             license = report["licenses"][license_id]
             push(f'<div class="license"><p><strong>License restriction ({e(license_id)}): '
@@ -861,6 +876,8 @@ def build_html(sample: dict[str, Any], generated_at: str, scrub: ReportScrubber,
                             bytes=projection, rows=len(report["metrics"]))
     try:
         clia_short = clia_copy()["short"]
+        if not isinstance(clia_short, str) or not clia_short.strip():
+            raise ValueError("empty")
     except (OSError, IndexError, KeyError, ValueError, TypeError, AttributeError) as error:
         raise ReportRefused(f"the CLIA explainer copy could not be read ({type(error).__name__})") from None
     document = render_html(report, scrub.curated(clia_short)).encode("utf-8")
@@ -987,7 +1004,16 @@ def run_report(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[str
         fix="pass a new --out PATH, or move the existing file aside",
         data={"sample_id": report["sample_id"], "exists": True},
     )
-    if out.exists() or out.is_symlink():
+    try:
+        present = out.exists() or out.is_symlink()
+    except OSError as error:
+        raise LabProblem(
+            "TBX-LAB-034",
+            cause=f"the output path could not be checked ({type(error).__name__}: {error.strerror or 'error'})",
+            fix="pass an --out PATH inside a readable, writable existing directory",
+            data={"sample_id": report["sample_id"], "errno": error.errno},
+        ) from None
+    if present:
         raise exists
     try:
         _write_new(out, document)

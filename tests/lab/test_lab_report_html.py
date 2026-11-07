@@ -182,7 +182,10 @@ def _library(**changes) -> Library:
     for key, fields in changes.get("entries", {}).items():
         entries[key] = Entry(key[0], key[1], {**entries[key].raw, **fields})
     licenses = {**library.licenses, **changes.get("licenses", {})}
-    return dataclasses.replace(library, entries=entries, licenses=licenses)
+    catalog = {key: dict(value) for key, value in library.method_catalog.items()}
+    for key, fields in changes.get("catalog", {}).items():
+        catalog[key] = {**catalog[key], **fields}
+    return dataclasses.replace(library, entries=entries, licenses=licenses, method_catalog=catalog)
 
 
 @pytest.mark.parametrize("case", ("rows", "bytes"))
@@ -222,12 +225,16 @@ def test_unavailable_or_empty_samples_are_refused() -> None:
 def test_curated_text_is_scrubbed_not_filtered(tmp_path) -> None:
     sample = _reportable_sample()
     root = tmp_path / "root"
-    row = next(row for row in sample["catalog"] if row["algorithm_id"] == "bam-qc")
-    row["question"] = f"What does {root}/lab/x show?"
-    row["limitations"] = [f"Curated limitation {n}: risk-adjusted, task-specific, tokenized." for n in range(15)]
-    row["requirements"] = ["Trade secret law in Slovakia applies to sk-adjacent prose."]
     body = "A long curated license body. " * 70
-    library = _library(licenses={"gpl-copyleft": {**load_library().licenses["gpl-copyleft"], "body": body}})
+    library = _library(
+        licenses={"gpl-copyleft": {**load_library().licenses["gpl-copyleft"], "body": body}},
+        catalog={"bam-qc": {
+            "question": f"What does {root}/lab/x show?",
+            "limitations": "Trade secret law in Slovakia applies to sk-adjacent prose.",
+            "requirements": tuple(f"Curated requirement {n}: risk-adjusted, task-specific, tokenized."
+                                  for n in range(15)),
+        }},
+    )
     for license in sample["licenses"]:
         if license["license_id"] == "gpl-copyleft":
             license["body"] = body
@@ -236,7 +243,7 @@ def test_curated_text_is_scrubbed_not_filtered(tmp_path) -> None:
     text = document.decode()
     assert str(root) not in text and "&lt;ROOT&gt;/lab/x" in text
     for n in range(15):
-        assert f"Curated limitation {n}: risk-adjusted, task-specific, tokenized." in text
+        assert f"Curated requirement {n}: risk-adjusted, task-specific, tokenized." in text
     assert "Trade secret law in Slovakia applies to sk-adjacent prose." in text
     assert html.escape(body.strip()) in text
     assert "withheld" not in text
@@ -251,7 +258,7 @@ def test_library_free_text_is_withheld_only_when_it_looks_private(tmp_path) -> N
                "file:///tmp/x.bam", "FILE://host/share", "read 3f9a1c2b-7e04-4c1d-9a2b-0123456789ab"]
     library = _library(entries={
         ("bam-qc", "total_reads"): {"confounders": prose + private, "label": "Primary reads, risk-adjusted"},
-        ("bam-qc", "mapped_fraction"): {"label": "/Users/someone/label"},
+        ("bam-qc", "mapped_fraction"): {"label": "Mapped share (lab_loo_v1 policy, Lab-curated)"},
         ("bam-qc", "mean_read_q"): {"label": ""},
     })
     report, document = build_html(_reportable_sample(), FROZEN_AT, report_scrubber(tmp_path), library)
@@ -260,7 +267,8 @@ def test_library_free_text_is_withheld_only_when_it_looks_private(tmp_path) -> N
     assert row["label"] == "Primary reads, risk-adjusted"
     assert row["confounders"] == "; ".join(prose) + f"; [{len(private)} items withheld]"
     mapped = next(row for row in report["metrics"] if row["metric_id"] == "mapped_fraction")
-    assert mapped["label"] == "mapped_fraction [1 item withheld]"
+    # Labels are curated: shown as recorded, never filtered or word-redacted.
+    assert mapped["label"] == "Mapped share (lab_loo_v1 policy, Lab-curated)"
     unlabelled = next(row for row in report["metrics"] if row["metric_id"] == "mean_read_q")
     assert unlabelled["label"] == "mean_read_q (label not recorded)"
     assert WITHHELD_TEXT in report["limitations"]
@@ -275,12 +283,15 @@ def test_host_names_are_scrubbed_from_library_text_only(tmp_path, monkeypatch, h
     word = host.split(".")[0]
     root = tmp_path / "root"
     sample = _reportable_sample()
-    row = next(row for row in sample["catalog"] if row["algorithm_id"] == "bam-qc")
-    row["question"] = f"Curated: {word.upper()} and {word} stay; {root}/lab/x is ROOT."
     for algorithm in sample["algorithms"]:
         algorithm["provenance"]["tool"] = word
-    library = _library(entries={("bam-qc", "total_reads"): {
-        "confounders": [f"Library {word.upper()} note for {getpass.getuser()}", "Labels stay"]}})
+    library = _library(
+        entries={("bam-qc", "total_reads"): {
+            "confounders": [f"Library {word.upper()} note for {getpass.getuser()}", "Labels stay",
+                            f"{word}_loo_v1 stays"],
+            "label": f"Primary reads ({word.upper()} {word} label)"}},
+        catalog={"bam-qc": {"question": f"Curated: {word.upper()} and {word} stay; {root}/lab/x is ROOT."}},
+    )
     report, document = build_html(sample, FROZEN_AT, report_scrubber(root), library)
     text = document.decode()
     # Curated repo text and the CLIA explainer are never word-redacted.
@@ -289,12 +300,54 @@ def test_host_names_are_scrubbed_from_library_text_only(tmp_path, monkeypatch, h
     assert '<p class="flag">FLAG: CLIA</p>' in text
     # Library free text loses the host word and the login.
     total = next(row for row in report["metrics"] if row["metric_id"] == "total_reads")
-    assert total["confounders"] == "Library <redacted> note for <redacted>; Labels stay"
+    assert total["confounders"] == f"Library <redacted> note for <redacted>; Labels stay; {word}_loo_v1 stays"
+    assert total["label"] == f"Primary reads ({word.upper()} {word} label)"
     # Validated identifiers are never rewritten.
     assert f"Tool: {word};" in text and all(row["tool"] == word for row in report["metrics"])
     scrub = report_scrubber(root)
     assert scrub.redact_words(f"<ROOT> <path> <redacted> {word}") == "<ROOT> <path> <redacted> <redacted>"
     assert report_command._host_pattern("ab") is None
+
+
+def test_root_and_home_are_replaced_only_as_whole_path_prefixes(tmp_path, monkeypatch) -> None:
+    scrub = dataclasses.replace(report_scrubber(Path("/data/lab")), home="/data", login=None, host=None)
+    assert scrub.curated("/data/lab/x and /data/lab") == "<ROOT>/x and <ROOT>"
+    assert scrub.curated("/data/lab2/Smith_J") == "<redacted>/lab2/Smith_J"
+    assert scrub.curated("input/data and my/data/lab and data.lab") == "input/data and my/data/lab and data.lab"
+    assert scrub.curated("(/data/lab), '/data'") == "(<ROOT>), '<redacted>'"
+    assert scrub.curated("/database/x") == "/database/x"
+
+
+def test_served_catalogue_text_is_replaced_by_the_curated_catalogue() -> None:
+    sample = _reportable_sample()
+    row = next(row for row in sample["catalog"] if row["algorithm_id"] == "bam-qc")
+    row["question"] = "Served /private/donor/question"
+    report, document = build_html(sample, FROZEN_AT, report_scrubber(Path("/nonexistent")))
+    text = document.decode()
+    curated = load_library().method_catalog["bam-qc"]["question"]
+    assert report["methods"]["bam-qc"]["question"] == curated and html.escape(curated) in text
+    assert "/private/donor" not in text and report["methods"]["bam-qc"]["catalog_differs"] is True
+    assert "differed from the curated method catalogue" in text
+
+
+def test_empty_clia_copy_and_unreadable_out_parent_are_refused(ran_root, tmp_path, capsys, monkeypatch, frozen) -> None:
+    from traceback_lab.web import server
+
+    original = server.clia_copy
+    monkeypatch.setattr(server, "clia_copy", lambda: {**original(), "short": "  \n"})
+    code, payload = _report(capsys, "--html", _id12(ran_root), "--root", str(ran_root), "--out", str(tmp_path / "a.html"))
+    assert code == 3 and "CLIA explainer" in payload["data"]["cause"]
+    monkeypatch.setattr(server, "clia_copy", original)
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o000)
+    try:
+        code, payload = _report(capsys, "--html", _id12(ran_root), "--root", str(ran_root),
+                                "--out", str(locked / "inner" / "r.html"))
+    finally:
+        locked.chmod(0o700)
+    assert code == 3 and payload["data"]["code"] == "TBX-LAB-034"
+    assert "could not be" in payload["data"]["cause"]
 
 
 def test_minute_precision_instants_are_accepted_and_impossible_dates_refused() -> None:

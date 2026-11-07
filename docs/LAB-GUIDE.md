@@ -1219,11 +1219,13 @@ identities, labels, value kinds, flags and license terms come from the
 interpretation library, as in the browser export. Identifiers, hashes and
 numbers are pattern-checked and shown as recorded, and each metric's unit
 must be its producer's audited unit, as in the browser. Curated repo text
-(method questions, requirements and limitations, license terms, the CLIA
-explainer) is shown in full with ROOT and the home directory replaced; it is
-never filtered or word-redacted. Library free text (labels, confounders, next
-steps, references) also loses the login name and the host name (whole words
-of three or more characters), and an item that looks like a path (POSIX,
+(metric labels, method questions, requirements and limitations from the
+library's method catalogue, license terms, the CLIA explainer) is shown in
+full with ROOT and the home directory replaced as whole path prefixes; it is
+never filtered or word-redacted. If the served method text differs from the
+curated catalogue, the method section says so and shows the curated text.
+Library free text (confounders, next steps, references) also loses the login
+name and the host name (whole words of three or more characters), and an item that looks like a path (POSIX,
 home, Windows drive or `file:` URL), a credential, a read sequence, a long
 hexadecimal identifier or a UUID is withheld; the file marks it in place
 (`[1 item withheld]`) and says so under limitations. A metric without a
@@ -1653,13 +1655,15 @@ symlink or a plain file is TBX-LAB-005 instead.
 ### TBX-LAB-034
 
 `lab report --html` could not write the report file (exit 3). The cause says
-why: the sample's report exceeds the 5,000-row or 5 MiB export limit, its
-recorded result is unavailable, its identity or completion metadata is
-invalid, it has no eligible scalar metrics, the CLIA explainer copy could not
-be read, the `--out` file already exists
-(it is never overwritten), or the destination could not be written. No
-partial file is left. Pass a new `--out PATH` in a writable directory, or
-open the Lab page and use **Export / print** for the live view. An unknown or
+why: the sample's report exceeds the 5,000-row or 5 MiB export limit, or it
+holds more than 100,000 metric records to scan (the browser's processing
+limit); its recorded result is unavailable; its identity or completion
+metadata is invalid; it has no eligible scalar metrics; the CLIA explainer
+copy or the audited producer units could not be read; the `--out` file
+already exists (it is never overwritten); or the destination could not be
+checked or written. No partial file is left. Pass a new `--out PATH` in a
+writable directory, or open the Lab page and use **Export / print** for the
+live view. An unknown or
 ambiguous ID12 is TBX-LAB-017 instead.
 
 ## Adding an algorithm
