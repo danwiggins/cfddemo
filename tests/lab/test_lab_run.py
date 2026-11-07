@@ -1507,6 +1507,76 @@ def test_prealigned_cold_hash_once_then_reuses_under_low_disk(lab_world, capsys,
     assert hashed == first_hashes
 
 
+def test_rehash_flag_ignores_the_chunk_cache_and_is_recorded(lab_world, capsys, monkeypatch) -> None:
+    from traceback_lab import ingest
+
+    _registry(monkeypatch, "SUMMARY")
+    store = LabStore(lab_world["root"])
+    bam = _tiny_aligned_bam(lab_world)
+    original_hash = ingest._sha256_file
+    hashed = []
+
+    def counted(path):
+        hashed.append(path)
+        return original_hash(path)
+
+    monkeypatch.setattr(ingest, "_sha256_file", counted)
+    argv = ("run", str(bam), "--root", str(lab_world["root"]))
+    code, first = _json(capsys, *argv)
+    assert code == 0, first
+    assert hashed.count(bam) == 1
+    assert first["data"]["rehash"] is False and first["data"]["rehash_requested"] is False
+    cached_file = store.hash_cache_file.read_bytes()
+
+    code, second = _json(capsys, *argv)
+    assert code == 0, second
+    assert hashed.count(bam) == 1
+    assert second["data"]["rehash"] is False
+
+    code, third = _json(capsys, *argv, "--rehash")
+    assert code == 0, third
+    assert hashed.count(bam) == 2
+    assert third["data"]["rehash"] is True and third["data"]["rehash_requested"] is True
+    assert third["data"]["sample"] == first["data"]["sample"]
+    assert store.hash_cache_file.read_bytes() == cached_file
+    start = next(
+        event for event in store.run_log(third["data"]["run_id"]).events() if event["event"] == "run_start"
+    )
+    assert start["flags"]["rehash"] is True and start["flags"]["rehash_requested"] is True
+    first_start = next(
+        event for event in store.run_log(first["data"]["run_id"]).events() if event["event"] == "run_start"
+    )
+    assert first_start["flags"]["rehash"] is False
+
+    ingest_end = next(
+        event for event in store.run_log(third["data"]["run_id"]).events()
+        if event["event"] == "step_end" and event["step"] == "ingest"
+    )
+    assert ingest_end["rehash"] is True
+
+    code, dry = _json(capsys, *argv, "--rehash", "--dry-run")
+    assert code == 0, dry
+    assert dry["data"]["dry_run"] and dry["data"]["rehash"] is True
+    assert hashed.count(bam) == 3
+    assert store.hash_cache_file.read_bytes() == cached_file
+
+    # A stored sample has no chunks to rehash: the flag is recorded as not applied.
+    code, out, err = _lab(capsys, "run", "latest", "--root", str(lab_world["root"]), "--rehash", "--json")
+    assert code == 0, out
+    stored = json.loads(out)
+    assert "--rehash: a stored sample has no chunks to rehash" in err
+    assert stored["data"]["rehash"] is False and stored["data"]["rehash_requested"] is True
+    assert hashed.count(bam) == 3
+    stored_start = next(
+        event for event in store.run_log(stored["data"]["run_id"]).events() if event["event"] == "run_start"
+    )
+    assert stored_start["flags"]["rehash"] is False and stored_start["flags"]["rehash_requested"] is True
+    assert stored_start["flags"]["stored_sample"] is True
+    code, stored_dry = _json(capsys, "run", "latest", "--root", str(lab_world["root"]), "--rehash", "--dry-run")
+    assert code == 0, stored_dry
+    assert stored_dry["data"]["rehash"] is False and stored_dry["data"]["rehash_requested"] is True
+
+
 def test_prealigned_middle_capacity_does_not_hash_and_count_twice(lab_world, capsys, monkeypatch) -> None:
     """A valid aligned BAM's cheap budget should use the aligned formula."""
     from traceback_lab import ingest
