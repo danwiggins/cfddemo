@@ -77,6 +77,22 @@ def _reference_id_argument(value: str) -> str:
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
+def _port_argument(value: str) -> int:
+    """``serve --port N``: an integer in 1024-65535 (argparse reports anything else)."""
+
+    from .web.server import PORT_MAX, PORT_MIN
+
+    try:
+        port = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"expected an integer port in {PORT_MIN}-{PORT_MAX}, got {value!r}"
+        ) from None
+    if not PORT_MIN <= port <= PORT_MAX:
+        raise argparse.ArgumentTypeError(f"port must be in {PORT_MIN}-{PORT_MAX}, got {port}")
+    return port
+
+
 def _assembly_argument(value: str) -> str:
     import re
 
@@ -332,6 +348,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     _root_argument(serve)
     serve.add_argument("--ipv6", action="store_true", help="bind ::1 instead of 127.0.0.1")
+    serve.add_argument(
+        "--port",
+        type=_port_argument,
+        default=0,
+        metavar="N",
+        help="bind loopback port N (1024-65535) instead of an ephemeral port",
+    )
 
     inspect = commands.add_parser("inspect", help="inspect an unverified local bundle")
     inspect.add_argument("bundle", type=Path)
@@ -3481,7 +3504,27 @@ def _label(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
 
 
 class ServeProblem(ReferenceProblem):
-    """A ``traceback serve`` refusal with the six operator fields; no listener started."""
+    """A ``traceback serve`` refusal with the six operator fields; no listener started.
+
+    ``data`` adds measured facts (for example the requested port); it never
+    carries a host path.
+    """
+
+    def __init__(
+        self,
+        code: str,
+        summary: str,
+        *,
+        cause: str,
+        fix: str,
+        exit_code: int = 3,
+        retryable: bool = False,
+        data: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(
+            code, summary, cause=cause, fix=fix, exit_code=exit_code, retryable=retryable
+        )
+        self.data = dict(data or {})
 
 
 def _no_catalog() -> ServeProblem:
@@ -3527,8 +3570,25 @@ def _serve_material(root: Path) -> Path:
 
 
 def _serve_start_problem(exc: Exception) -> ServeProblem:
-    """Map a listener start failure; its message is a fixed string with no path."""
+    """Map a listener start failure; its message is a fixed string with no path.
 
+    An operator-chosen port (``--port N``) that cannot be bound is
+    ``TBX-SERVE-005``; every other start failure keeps ``TBX-SERVE-003``.
+    """
+
+    from .web.server import LocalListenerUnavailable
+
+    if isinstance(exc, LocalListenerUnavailable) and exc.port:
+        return ServeProblem(
+            "TBX-SERVE-005",
+            "The requested loopback port could not be bound; nothing was served",
+            cause=f"loopback port {exc.port} cannot be bound ({exc.reason}); "
+            "another process may be listening on it",
+            fix="Pass a different --port, stop the process using that port, "
+            "or omit --port for an ephemeral one",
+            retryable=True,
+            data={"port": exc.port, "errno": exc.reason},
+        )
     message = str(exc)
     busy = message == "local web startup lock is busy"
     return ServeProblem(
@@ -3590,6 +3650,7 @@ def _serve(
                     ipv6=args.ipv6,
                     explorer=explorer.source,
                     records=LocalRecordSource(root=root, catalog=explorer.catalog, store=store),
+                    port=int(getattr(args, "port", 0) or 0),
                 )
             except LocalWebServerError as exc:
                 raise _serve_start_problem(exc) from None

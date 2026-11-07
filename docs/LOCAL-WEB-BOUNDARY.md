@@ -5,14 +5,19 @@ authorize real provider operation or satisfy E14.
 
 `traceback_runner.web` freezes the security and projection interface and exposes
 a standard-library HTTP adapter on an operating-system-selected random loopback
-port. The adapter reads the authoritative `JobStore` through the existing
+port (or, with `traceback serve --port N`, an operator-chosen unprivileged
+loopback port). The adapter reads the authoritative `JobStore` through the existing
 operator projection; it does not create a browser-owned or in-memory production
 job database. The preserved Streamlit demo is not this service.
 
 ## Packaged runtime
 
 - `RunningLocalWebService.start` binds literal `127.0.0.1` or `::1` with port
-  zero, then derives the one accepted Host and Origin from the actual port.
+  zero (or the `port` the operator chose, 1024-65535; any other value is
+  refused before binding), then derives the one accepted Host and Origin from
+  the actual port. A port that cannot be bound is `LocalListenerUnavailable`
+  (`traceback serve --port N` reports it as TBX-SERVE-005); the bind host is
+  never anything but loopback.
 - The launch URL carries the bootstrap code only in the fragment. The packaged
   script clears the fragment before exchange, retains the CSRF token only in
   page memory, and uses an HttpOnly SameSite=Strict session cookie.
