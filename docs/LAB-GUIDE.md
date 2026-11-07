@@ -299,13 +299,20 @@ the failure names it on its `align ... failed · staging kept <label>` line,
 at the end of the `FIX` text and as `staging_kept` in `--json` and in the
 run log's `step_end` event (`traceback lab runs RUN_ID --step align`). The
 label is `ROOT/lab`-relative (`inputs/.staging-<hex>`), the form `lab gc`
-lists it under; no host path is printed. A full volume (TBX-LAB-011) still
-removes the staging, as does an interruption. The kept directory is an
-ordinary orphan: `lab doctor` warns about it and
+lists it under; no host path is printed. A full volume still removes the
+staging so a rerun has its bytes back: TBX-LAB-011, and any failure whose
+error is `ENOSPC` or carries "No space left on device" (a TBX-LAB-014 from
+`samtools sort` or `index` on a full disk); an interruption removes it too.
+The kept directory is an ordinary orphan: `lab doctor` warns about it and
 `traceback lab gc --staging-only --apply --root <ROOT>` removes it. A
 successful run never keeps staging; for a stored sample (`latest`, `<id12>`)
 nothing is aligned, so the flag is recorded as not applicable with one
-notice line.
+notice line. Recorded fields: the `run_start` event's `flags.keep_staging`
+and `--json` `data.keep_staging` (run and dry run, `--example` included)
+hold the flag as it applied (`false` for a stored sample, with or without
+the flag); `staging_kept` appears only when a directory was kept, in the
+problem's `data` and in the failed `align` step's `step_end` event (that
+event is written only then; without the flag the run log is unchanged).
 
 **Output.** The run ends with a summary block (`ROOT`, `RUN`, `SAMPLE`,
 `DONE`, any `FAILED` lines, `NEXT`). With `--json`, stdout is one
@@ -1466,8 +1473,11 @@ the refused run would have.
 ## Changes
 
 - 2026-11-07: `lab run --keep-staging` keeps a failed alignment's staging
-  directory for inspection, named on the failure line, in `FIX`, `--json`
-  and the run log; `lab gc --staging-only` removes it. No new code.
+  directory for inspection; `lab gc --staging-only` removes it. New:
+  `LabStore.publish_directory(keep_staging=)`, `ingest.publish_input` and
+  `ingest.volume_full`, the `keep_staging` run-start flag and `--json`
+  field, `staging_kept` in the problem data, the `FIX` text and a failed
+  `align` `step_end` event. No new TBX code.
 - 2026-11-06: `lab serve --port N` binds a fixed loopback port; TBX-LAB-026.
 - 2026-11-06: `lab gc` (dry-run by default; `--apply` deletes stale failed
   attempts, orphaned staging and interrupted removals; `--staging-only`;

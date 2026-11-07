@@ -665,7 +665,31 @@ STAGING_KEPT_FIX = (
     "staging kept for inspection at ROOT/lab/{label}; "
     "`traceback lab gc --staging-only --apply --root <ROOT>` removes it"
 )
-_STAGING_NOT_KEPT = frozenset({"TBX-LAB-011"})  # a full volume gets its bytes back
+
+
+def volume_full(problem: BaseException) -> bool:
+    """True when the failure is a full volume, under any code.
+
+    TBX-LAB-011 names it; so does ``errno.ENOSPC`` on any ``OSError`` in the
+    cause/context chain, or samtools' "No space left on device" in a problem's
+    cause, first stderr line or any chained message (a TBX-LAB-014 from
+    ``samtools sort``/``index`` on a full disk).
+    """
+
+    seen: set[int] = set()
+    exc: BaseException | None = problem
+    while exc is not None and id(exc) not in seen:
+        seen.add(id(exc))
+        if isinstance(exc, OSError) and exc.errno == errno.ENOSPC:
+            return True
+        if isinstance(exc, LabProblem):
+            first_line = exc.data.get("first_line") if isinstance(exc.data, dict) else None
+            if exc.code == "TBX-LAB-011" or _no_space([exc.cause, str(first_line or "")]):
+                return True
+        if _no_space([str(exc)]):
+            return True
+        exc = exc.__cause__ or exc.__context__
+    return False
 
 
 def publish_input(
@@ -673,12 +697,14 @@ def publish_input(
 ) -> Path:
     """``publish_directory`` under ``inputs/``; with ``keep_staging`` a failed build's staging is kept and named.
 
-    The staging is kept only for a Lab refusal other than TBX-LAB-011 (the
-    volume is full): an interrupt, an unexpected error or a full volume
-    removes it exactly as without the flag.  A kept directory is named by its
-    ``ROOT/lab``-relative label (``inputs/.staging-<hex>``, the form ``lab gc``
-    lists it under, never a host path) in ``problem.data["staging_kept"]`` and
-    at the end of the problem's FIX text.
+    The staging is kept only for a Lab refusal that is not a full volume
+    (``volume_full``: TBX-LAB-011, ENOSPC or "No space left on device" under
+    any code): an interrupt, an unexpected error or a full volume removes it
+    exactly as without the flag, so a rerun has its bytes back.  A kept
+    directory is named by its ``ROOT/lab``-relative label
+    (``inputs/.staging-<hex>``, the form ``lab gc`` lists it under, never a
+    host path) in ``problem.data["staging_kept"]`` and at the end of the
+    problem's FIX text.
     """
 
     staged: dict[str, Path] = {}
@@ -692,8 +718,10 @@ def publish_input(
     except BaseException as problem:
         staging = staged.get("path")
         if keep_staging and staging is not None:
-            if isinstance(problem, LabProblem) and problem.code not in _STAGING_NOT_KEPT:
+            if isinstance(problem, LabProblem) and not volume_full(problem):
                 label = staging.relative_to(store.lab).as_posix()
+                if not isinstance(problem.data, dict):  # RunProblem always builds a dict; never trust it blindly
+                    problem.data = {}
                 problem.data["staging_kept"] = label
                 problem.fix = f"{problem.fix}; {STAGING_KEPT_FIX.format(label=label)}"
             else:
@@ -1138,6 +1166,7 @@ __all__ = [
     "mmi_path",
     "publish_input",
     "require_budget",
+    "volume_full",
     "resolve_reference",
     "resolve_sample",
     "source_ids",

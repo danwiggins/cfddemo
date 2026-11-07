@@ -730,6 +730,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
             payload = _local_envelope(
                 _result("lab run", "ok", "dry run: nothing written", data={
                     "root": str(store.root), "dry_run": True, "example": True,
+                    "keep_staging": args.keep_staging,  # the example run aligns, so the flag applies
                     "alignment": "example not generated yet: generated and aligned on first run (~200k reads, under a minute)",
                     "warnings": [memory_warning] if memory_warning else [],
                 })
@@ -978,7 +979,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     data={"step": current, "run_id": run_id},
                 ) from None
             except LabProblem as problem:
-                kept = problem.data.get("staging_kept")
+                kept = problem.data.get("staging_kept") if isinstance(problem.data, dict) else None
                 if kept is not None:
                     # --keep-staging: the failed step's staging stays; name it where
                     # `lab runs RUN_ID --step align` and the operator will look.

@@ -945,7 +945,13 @@ def test_minimap2_failing_mid_stream_with_keep_staging_keeps_it_for_gc(
         **{key: align_end[0][key] for key in ("run_id", "utc")},
         "event": "step_end", "step": "align", "status": "failed", "code": "TBX-LAB-014", "staging_kept": label,
     }]
+    # The step_end pairs with the step_start the lock transition logged; nothing is left open.
+    kinds = [(event["event"], event.get("step")) for event in events]
+    assert kinds.index(("step_start", "align")) < kinds.index(("step_end", "align"))
     assert events[-1]["event"] == "run_end" and events[-1]["code"] == "TBX-LAB-014"
+    from traceback_lab.store import summarize_run
+
+    assert summarize_run(events, store)["open_step"] is None
     # The run exited: no heartbeat holds the kept directory, so doctor and gc both see an orphan.
     assert store.read_active() is None
     from traceback_lab.doctor import lab_checks
@@ -989,6 +995,73 @@ def test_keep_staging_is_byte_identical_without_the_flag_and_never_keeps_on_succ
     code, out, _ = _lab(capsys, "run", "latest", "--root", str(root), "--json")
     assert code == 0 and "keep-staging" not in out
     assert _no_staging(root)
+
+
+@pytest.mark.parametrize(
+    ("problem", "kept"),
+    [
+        ("plain", True),  # data=None: RunProblem builds an empty dict; the label still lands
+        ("tbx_011", False),
+        ("enospc_chained", False),  # a TBX-LAB-014 whose cause is an OSError(ENOSPC)
+        ("no_space_first_line", False),  # samtools' message under TBX-LAB-014
+        ("interrupt", False),
+    ],
+)
+def test_publish_input_keeps_staging_only_for_a_refusal_that_is_not_a_full_volume(
+    tmp_path, problem: str, kept: bool,
+) -> None:
+    import errno
+
+    from traceback_lab.ingest import publish_input
+    from traceback_lab.problems import LabProblem
+
+    store = LabStore(tmp_path / "root")
+    store.ensure()
+
+    def build(staging: Path) -> None:
+        (staging / "aligned.bam").write_bytes(b"partial")
+        if problem == "plain":
+            raise LabProblem("TBX-LAB-014", cause="alignment failed: x", fix="Rerun", data=None)
+        if problem == "tbx_011":
+            raise LabProblem("TBX-LAB-011", cause="the volume filled up", fix="Free space")
+        if problem == "enospc_chained":
+            try:
+                raise OSError(errno.ENOSPC, "No space left on device")
+            except OSError as exc:
+                raise LabProblem("TBX-LAB-014", cause="alignment failed: index", fix="Rerun") from exc
+        if problem == "no_space_first_line":
+            raise LabProblem(
+                "TBX-LAB-014", cause="alignment failed: samtools sort", fix="Rerun",
+                data={"first_line": "samtools sort: No space left on device"},
+            )
+        raise KeyboardInterrupt
+
+    expected = LabProblem if problem != "interrupt" else KeyboardInterrupt
+    with pytest.raises(expected) as raised:
+        publish_input(store, "a" * 64, build, keep_staging=True)
+    orphans = store.orphaned_staging()
+    assert not (store.inputs_dir / ("a" * 64)).exists()
+    if kept:
+        (staging,) = orphans
+        label = raised.value.data["staging_kept"]
+        assert label == f"inputs/{staging.name}" and (staging / "aligned.bam").read_bytes() == b"partial"
+        assert raised.value.fix.startswith("Rerun; staging kept for inspection at ROOT/lab/inputs/.staging-")
+    else:
+        assert orphans == []
+        if problem != "interrupt":
+            assert "staging_kept" not in raised.value.data and "staging kept" not in raised.value.fix
+    # Without the flag nothing is kept, whatever the failure.
+    with pytest.raises(expected):
+        publish_input(store, "b" * 64, build, keep_staging=False)
+    assert store.orphaned_staging() == orphans
+
+
+def test_example_dry_run_reports_keep_staging_like_the_live_example_run(tmp_path, capsys) -> None:
+    root = tmp_path / "root"
+    for flag, expected in ((("--keep-staging",), True), ((), False)):
+        code, dry = _json(capsys, "run", "--example", "--dry-run", "--root", str(root), *flag)
+        assert code == 0 and dry["data"]["example"] is True and dry["data"]["keep_staging"] is expected
+    assert not root.exists()
 
 
 def test_sort_enospc_is_tbx_lab_011_and_removes_staging(lab_world, capsys, monkeypatch, shared_mmi) -> None:
