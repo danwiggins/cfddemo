@@ -25,6 +25,7 @@ import pytest
 from traceback_lab import aligner_toolchain as at
 from traceback_lab import doctor
 from traceback_lab.identity import aligned_input_id
+from traceback_lab.ingest import aligned_input_id_for_manifest
 from traceback_lab.problems import LabProblem
 from traceback_lab.store import LabStore
 from traceback_lab.tools import PINNED, UNPINNED, aligner_provenance, pins_of, resolve_aligner_tools
@@ -206,6 +207,13 @@ def test_a_symlinked_cache_root_is_refused_as_a_symlink(tmp_path, fake_release) 
     with pytest.raises(LabProblem) as caught:
         at.resolve_pinned_aligners(pins=fake_release["pins"], cache_root=link)
     assert caught.value.cause == "the toolchain cache directory is a symlink"
+    assert caught.value.fix.startswith("Replace the symlink <TOOLCHAIN_CACHE> with a real directory")
+    # The install refuses it too, with the same fix (never "run the install").
+    with pytest.raises(LabProblem) as install:
+        at.install_aligners(
+            fake_release["pins"], cache_root=link, platform_name=FAKE_PLATFORM, downloader=fake_release["downloader"]
+        )
+    assert install.value.fix == caught.value.fix
 
 
 def test_source_pin_runs_configure_make_install_into_staging(tmp_path, fake_release) -> None:
@@ -313,6 +321,11 @@ def test_a_store_others_can_write_is_tbx_lab_033(pinned_host, fake_release, wher
     with pytest.raises(LabProblem) as caught:
         resolve_aligner_tools()
     assert caught.value.code == "TBX-LAB-033" and "writable by group or other" in caught.value.cause
+    if where == "cache_root":
+        assert caught.value.fix.startswith("chmod go-w <TOOLCHAIN_CACHE> ")
+    else:
+        assert caught.value.fix == "chmod -R go-w <TOOLCHAIN_CACHE>/aligners-*"
+    assert "--yes`" not in caught.value.fix.split("(")[0]  # the first step is never the refusing install
 
 
 def test_a_store_owned_by_another_user_is_tbx_lab_033(pinned_host, fake_release, monkeypatch) -> None:
@@ -321,6 +334,17 @@ def test_a_store_owned_by_another_user_is_tbx_lab_033(pinned_host, fake_release,
     with pytest.raises(LabProblem) as caught:
         resolve_aligner_tools()
     assert caught.value.code == "TBX-LAB-033" and "not owned by this user" in caught.value.cause
+    assert caught.value.cause.startswith("the toolchain cache directory")
+    assert caught.value.fix == 'sudo chown "$USER" <TOOLCHAIN_CACHE> && chmod 0700 <TOOLCHAIN_CACHE>'
+    with pytest.raises(LabProblem) as inner:
+        at._require_private(pinned_host, "aligner store directory")
+    assert inner.value.fix == 'sudo chown -R "$USER" <TOOLCHAIN_CACHE>/aligners-*'
+    with pytest.raises(LabProblem) as install:
+        at.install_aligners(
+            fake_release["pins"], cache_root=pinned_host, platform_name=FAKE_PLATFORM,
+            downloader=fake_release["downloader"],
+        )
+    assert install.value.fix == caught.value.fix
 
 
 def test_an_unreadable_store_is_tbx_lab_033(pinned_host, fake_release, monkeypatch) -> None:
@@ -338,16 +362,50 @@ def test_an_unreadable_store_is_tbx_lab_033(pinned_host, fake_release, monkeypat
     assert caught.value.code == "TBX-LAB-033" and "PermissionError" in caught.value.cause
 
 
-def test_install_refuses_a_shared_cache_root(tmp_path, fake_release) -> None:
+def test_install_tightens_a_group_writable_cache_root_it_owns(tmp_path, fake_release) -> None:
     cache = tmp_path / "toolchains"
     cache.mkdir(mode=0o700)
-    cache.chmod(0o777)
+    cache.chmod(0o775)  # e.g. created by hand under umask 0002
+    _install(fake_release, cache)
+    assert stat.S_IMODE(cache.stat().st_mode) == 0o700
+    assert at.resolve_pinned_aligners(pins=fake_release["pins"], cache_root=cache) is not None
+
+
+@pytest.mark.parametrize("damage", ["binary", "receipt_missing"])
+def test_damage_fixes_say_reinstall(pinned_host, fake_release, damage) -> None:
+    store = _install(fake_release, pinned_host)
+    if damage == "binary":
+        (store.prefix / "bin" / "samtools").write_bytes(b"#!/bin/sh\n")
+    else:
+        (store.prefix / at.RECEIPT_NAME).unlink()
     with pytest.raises(LabProblem) as caught:
-        at.install_aligners(
-            fake_release["pins"], cache_root=cache, platform_name=FAKE_PLATFORM, downloader=fake_release["downloader"]
-        )
-    assert caught.value.code == "TBX-LAB-033"
-    assert not at.store_prefix(fake_release["pins"], cache).exists()
+        resolve_aligner_tools()
+    assert caught.value.fix.startswith("Run `traceback toolchain install aligners --yes`")
+    at.install_aligners(  # and that fix works
+        fake_release["pins"], cache_root=pinned_host, platform_name=FAKE_PLATFORM,
+        downloader=fake_release["downloader"],
+    )
+    assert resolve_aligner_tools()[0].provenance == PINNED
+
+
+def test_an_install_racing_a_published_store_keeps_it(pinned_host, fake_release, monkeypatch) -> None:
+    store = _install(fake_release, pinned_host)
+    inode = store.prefix.stat().st_ino
+    real = at.resolve_pinned_aligners
+    calls = {"n": 0}
+
+    def first_sees_nothing(**kwargs):
+        calls["n"] += 1
+        return None if calls["n"] == 1 else real(**kwargs)  # the other install publishes in between
+
+    monkeypatch.setattr(at, "resolve_pinned_aligners", first_sees_nothing)
+    again, installed = at.install_aligners(
+        fake_release["pins"], cache_root=pinned_host, platform_name=FAKE_PLATFORM,
+        downloader=fake_release["downloader"],
+    )
+    assert not installed
+    assert store.prefix.stat().st_ino == inode  # not swapped under a run that resolved it
+    assert not [p for p in pinned_host.iterdir() if p.name.startswith(".")]
 
 
 def test_install_maps_a_cache_write_failure_to_a_tool_problem(tmp_path, fake_release, monkeypatch) -> None:
@@ -514,6 +572,10 @@ def test_lab_run_records_provenance_and_keeps_existing_input_ids(
     unpinned_id = first["data"]["sample"]["input_id"]
     manifest = json.loads((lab.inputs_dir / unpinned_id / "manifest.json").read_bytes())
     assert manifest["tool_provenance"]["provenance"] == UNPINNED
+    assert manifest["tool_pins"] is None
+    assert aligned_input_id_for_manifest(manifest) == unpinned_id
+    legacy = {key: value for key, value in manifest.items() if key not in {"tool_pins", "tool_provenance"}}
+    assert aligned_input_id_for_manifest(legacy) == unpinned_id  # a manifest written before pinning
     assert manifest["tool_provenance"]["samtools"]["version"] == manifest["tools"]["samtools"]
     event = _aligner_event(root, first)
     assert event["provenance"] == UNPINNED and event["minimap2"]["version"] == manifest["tools"]["minimap2"]
@@ -527,6 +589,8 @@ def test_lab_run_records_provenance_and_keeps_existing_input_ids(
     assert manifest["tool_provenance"]["provenance"] == PINNED
     assert manifest["tool_provenance"]["minimap2"]["pin_sha256"] == fake_release["pins"][1].tarball_sha256
     assert manifest["tool_provenance"]["minimap2"]["installed_binary_sha256"] == fake_release["pins"][1].binary_sha256
+    assert manifest["tool_pins"] == at.tool_pins(fake_release["pins"])
+    assert aligned_input_id_for_manifest(manifest) == pinned_id
     event = _aligner_event(root, pinned)
     assert event["provenance"] == PINNED
     for log in (root / "lab" / "runs").glob("*.jsonl"):

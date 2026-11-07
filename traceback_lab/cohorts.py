@@ -394,10 +394,16 @@ def _aligner(manifest: dict[str, Any], input_id: str) -> tuple[str, dict[str, An
         )
     tools = manifest["tools"]
     label = f"minimap2 {tools['minimap2']}; samtools {tools['samtools']}"
-    return label, {
+    aligner = {
         "kind": "aligned", "tools": tools, "mmi_sha256": manifest["mmi_sha256"],
         "aligner_argv": manifest["aligner_argv"],
     }
+    if manifest.get("tool_pins") is not None:
+        # Pinned and unpinned alignments are different inputs (input_id); keep
+        # them apart here too.  Unpinned manifests add nothing (unchanged key).
+        aligner["tool_pins"] = manifest["tool_pins"]
+        label += " (pinned)"
+    return label, aligner
 
 
 def _execution_plan(attempt: Path) -> dict[str, Any] | None:

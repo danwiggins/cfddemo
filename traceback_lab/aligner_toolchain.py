@@ -185,43 +185,65 @@ def tool_pins(pins: Sequence[AlignerPin]) -> dict[str, str]:
     return {pin.tool: pin.tarball_sha256 for pin in pins}
 
 
-def _broken(cause: str, *, data: dict[str, Any] | None = None):
+_T = TOOLCHAIN_CACHE_TOKEN
+_STORES = f"{_T}/aligners-*"
+FIX_REINSTALL = (
+    "Run `traceback toolchain install aligners --yes` (builds a new store and swaps it in), "
+    f"or remove {_STORES} to fall back to PATH"
+)
+FIX_INSPECT = f"Check access with `ls -ld {_T} {_STORES}`, fix ownership or permissions, then rerun"
+# Cause-specific fixes for the ownership/permission checks: for the cache
+# directory itself the install would refuse too, so it is never the fix there
+# (except for mode, which the install tightens on a directory you own).
+_FIX_PRIVATE = {
+    ("root", "symlink"): f"Replace the symlink {_T} with a real directory you own "
+    f"(mode 0700), then run `traceback toolchain install aligners --yes`",
+    ("root", "owner"): f'sudo chown "$USER" {_T} && chmod 0700 {_T}',
+    ("root", "mode"): f"chmod go-w {_T} (or run `traceback toolchain install aligners --yes`, "
+    "which tightens a cache directory you own)",
+    ("store", "symlink"): FIX_REINSTALL,
+    ("store", "owner"): f'sudo chown -R "$USER" {_STORES}',
+    ("store", "mode"): f"chmod -R go-w {_STORES}",
+}
+
+
+def _broken(cause: str, *, fix: str = FIX_REINSTALL, data: dict[str, Any] | None = None):
     """TBX-LAB-033.  The FIX names the cache as ``<TOOLCHAIN_CACHE>``: --json
     output never carries a host path; human output substitutes the real one
     (``problems.problem_lines``, ``lab doctor``)."""
 
     from .problems import LabProblem
 
-    return LabProblem(
-        "TBX-LAB-033",
-        cause=cause,
-        fix="Run `traceback toolchain install aligners --yes` (replaces the damaged store), "
-        f"or remove {TOOLCHAIN_CACHE_TOKEN}/aligners-* to fall back to PATH",
-        data={"store": "aligners", **(data or {})},
-    )
+    return LabProblem("TBX-LAB-033", cause=cause, fix=fix, data={"store": "aligners", **(data or {})})
 
 
 def _current_uid() -> int:
     return os.getuid()
 
 
-def _require_private(path: Path, what: str) -> None:
+def _require_private(path: Path, what: str, *, root: bool = False) -> None:
     """Refuse a store path another account could have written (TBX-LAB-033).
 
     The receipt only proves the store is self-consistent; this proves that
-    only this user could have put it there.
+    only this user could have put it there.  ``root`` marks the cache
+    directory itself, whose fixes differ.
     """
 
+    scope = "root" if root else "store"
     try:
         info = path.lstat()
     except OSError as exc:
-        raise _broken(f"the {what} could not be inspected ({type(exc).__name__})") from None
+        raise _broken(f"the {what} could not be inspected ({type(exc).__name__})", fix=FIX_INSPECT) from None
     if stat.S_ISLNK(info.st_mode):
-        raise _broken(f"the {what} is a symlink", data={"refused": what})
+        raise _broken(f"the {what} is a symlink", fix=_FIX_PRIVATE[scope, "symlink"], data={"refused": what})
     if info.st_uid != _current_uid():
-        raise _broken(f"the {what} is not owned by this user", data={"refused": what})
+        raise _broken(
+            f"the {what} is not owned by this user", fix=_FIX_PRIVATE[scope, "owner"], data={"refused": what}
+        )
     if info.st_mode & 0o022:
-        raise _broken(f"the {what} is writable by group or other", data={"refused": what})
+        raise _broken(
+            f"the {what} is writable by group or other", fix=_FIX_PRIVATE[scope, "mode"], data={"refused": what}
+        )
 
 
 @contextlib.contextmanager
@@ -275,7 +297,7 @@ def resolve_pinned_aligners(
         with _store_lock(root, exclusive=False):
             return _verify_store(tuple(pins), root, probe=probe)
     except OSError as exc:  # the lock, or any store read the checks did not map
-        raise _broken(f"the aligner store could not be inspected ({type(exc).__name__})") from None
+        raise _broken(f"the aligner store could not be inspected ({type(exc).__name__})", fix=FIX_INSPECT) from None
 
 
 def _verify_store(pins: tuple[AlignerPin, ...], root: Path, *, probe: bool) -> PinnedAligners | None:
@@ -286,8 +308,8 @@ def _verify_store(pins: tuple[AlignerPin, ...], root: Path, *, probe: bool) -> P
         if not prefix.exists():
             return None
     except OSError as exc:
-        raise _broken(f"the aligner store could not be inspected ({type(exc).__name__})") from None
-    _require_private(root, "toolchain cache directory")
+        raise _broken(f"the aligner store could not be inspected ({type(exc).__name__})", fix=FIX_INSPECT) from None
+    _require_private(root, "toolchain cache directory", root=True)
     _require_private(prefix, "aligner store directory")
     receipt_path = prefix / RECEIPT_NAME
     try:
@@ -529,6 +551,22 @@ def _stage_tool(pin: AlignerPin, staging: Path, src: Path, *, downloader: Downlo
     )
 
 
+def _tighten_owned_root(cache_root: Path) -> None:
+    """chmod 0700 a cache directory this user owns but others can write.
+
+    A parent created under umask 0002 (Ubuntu/RHEL user-private groups) or by
+    hand can be 0775; tightening one's own directory is safe.  A symlink or a
+    directory owned by someone else is left alone and refused afterwards.
+    """
+
+    try:
+        info = cache_root.lstat()
+        if stat.S_ISDIR(info.st_mode) and info.st_uid == _current_uid() and info.st_mode & 0o022:
+            cache_root.chmod(0o700)
+    except OSError as exc:
+        raise _install_io_problem(exc, "tightening the toolchain cache permissions") from exc
+
+
 def install_aligners(
     pins: Sequence[AlignerPin],
     *,
@@ -563,7 +601,8 @@ def install_aligners(
         cache_root.mkdir(parents=True, exist_ok=True, mode=0o700)
     except OSError as exc:
         raise _install_io_problem(exc, "creating the toolchain cache") from exc
-    _require_private(cache_root, "toolchain cache directory")
+    _tighten_owned_root(cache_root)
+    _require_private(cache_root, "toolchain cache directory", root=True)
     try:
         staging = Path(tempfile.mkdtemp(prefix=f".{prefix.name}.staging-", dir=cache_root))
     except OSError as exc:
@@ -606,6 +645,14 @@ def install_aligners(
         swap_error: OSError | None = None
         try:
             with _store_lock(cache_root, exclusive=True):
+                # A concurrent install may have published a verified store since
+                # the check above, and a run may already be using it: keep it.
+                try:
+                    published = _verify_store(pins, cache_root, probe=False)
+                except ReferenceProblem:
+                    published = None
+                if published is not None:
+                    return published, False
                 try:
                     if prefix.is_symlink() or prefix.exists():
                         retired = Path(tempfile.mkdtemp(prefix=f".{prefix.name}.old-", dir=cache_root))

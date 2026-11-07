@@ -762,6 +762,24 @@ class AlignedInput:
         return self.directory / "aligned.bam"
 
 
+def aligned_input_id_for_manifest(manifest: dict[str, Any]) -> str:
+    """Recompute an aligned input's ``input_id`` from its stored manifest.
+
+    ``tool_pins`` must be passed through: a pinned input's identity includes
+    it.  Manifests written before pinning have no key and recompute as before.
+    """
+
+    return aligned_input_id(
+        source_id=manifest["source_id"],
+        reference_sha256=manifest["reference_sha256"],
+        mmi_sha256=manifest["mmi_sha256"],
+        minimap2_version=str(manifest["tools"]["minimap2"]),
+        samtools_version=str(manifest["tools"]["samtools"]),
+        aligner_argv=manifest["aligner_argv"],
+        tool_pins=manifest.get("tool_pins"),
+    )
+
+
 def input_manifest(store: LabStore, input_id: str) -> dict[str, Any] | None:
     import json
 
@@ -852,6 +870,7 @@ def align(
 
     source_id = chunkset.source_id
     argv_identity = aligner_argv_identity(chunkset.rg_lines)
+    tool_pins = pins_of(samtools, minimap2)
     input_id = aligned_input_id(
         source_id=source_id,
         reference_sha256=reference.sha256,
@@ -859,7 +878,7 @@ def align(
         minimap2_version=str(minimap2.version),
         samtools_version=str(samtools.version),
         aligner_argv=argv_identity,
-        tool_pins=pins_of(samtools, minimap2),
+        tool_pins=tool_pins,
     )
     existing = input_manifest(store, input_id)
     if existing is not None:
@@ -949,6 +968,8 @@ def align(
             "reference_sha256": reference.sha256,
             "mmi_sha256": mmi_sha256,
             "tools": {"samtools": samtools.version, "minimap2": minimap2.version},
+            # The identity term itself (null when unpinned): recompute with it.
+            "tool_pins": tool_pins,
             "tool_provenance": aligner_provenance(samtools, minimap2),
             "aligner_argv": argv_identity,
             "basecall_model": chunkset.basecall_model,
@@ -1191,6 +1212,7 @@ __all__ = [
     "EXAMPLE_REFERENCE_ID",
     "Reference",
     "align",
+    "aligned_input_id_for_manifest",
     "aligner_argv_identity",
     "alignment_stages",
     "check_sq",

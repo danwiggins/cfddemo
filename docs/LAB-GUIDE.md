@@ -367,7 +367,9 @@ TBX-LAB-033 (never falling back to `PATH`) if any check fails:
    receipt's version (catches a missing shared library).
 
 Nothing is downloaded. Binaries are verified when the Lab resolves them, not
-again while they run. The install writes the receipt mode 0600, runs check
+again while they run. The install tightens a cache directory you own to
+0700 (a symlink or another user's directory is refused), writes the receipt
+mode 0600, runs check
 1 on the staged store before publishing it, and swaps it in under
 `<TOOLCHAIN_CACHE>/aligners.lock`; resolution waits on that lock, so a
 concurrent `lab run` never sees the moment between stores. The samtools
@@ -378,8 +380,9 @@ cache (`~/.cache/traceback/toolchains`): `--json` output carries the token,
 the terminal shows the real directory.
 
 The run log records an `aligner_tools` event and the input's
-`manifest.json` records `tool_provenance` (provenance, version, pinned
-tarball digest and installed binary sha256 per tool; never a path).
+`manifest.json` records `tool_pins` (the identity term below; `null` when
+unpinned) and `tool_provenance` (provenance, version, pinned tarball digest
+and installed binary sha256 per tool; never a path).
 `--dry-run` prints a `TOOLS` line. `lab doctor` shows one
 `lab_aligner_provenance` check: pass when pinned, a warning with the install
 command when unpinned on a pinned platform, blocked on TBX-LAB-033.
@@ -393,7 +396,8 @@ it names the pinned release *sources*, not the built binaries, so every
 machine with the store computes the same `input_id` regardless of where the
 cache lives or how its compiler built samtools. The installed binary sha256
 is recorded in `tool_provenance` only, outside the identity. Pinned and
-unpinned alignments of the same versions are different inputs: switching to
+unpinned alignments of the same versions are different inputs (and a
+cohort keeps them apart by aligner): switching to
 the store realigns once, without a TBX-LAB-019 warning when the versions
 match (that warning compares versions only).
 
@@ -1662,19 +1666,20 @@ symlink or a plain file is TBX-LAB-005 instead.
 
 The pinned aligner store exists under the per-user toolchain cache but does
 not verify (exit 3); the checks are listed under
-[Pinned aligners](#pinned-aligners). The cause names which: the cache
-directory, store or one of its files is a symlink, owned by another user,
-writable by group or other, or cannot be inspected; its
-install receipt is missing or malformed (an interrupted install) or names
-another pin set; a binary is missing, not executable, no longer matches its
-recorded sha256, or (minimap2) is not the pinned release binary; or, in
-`lab doctor`, a pinned binary does not run (a missing shared library). The Lab refuses rather
-than silently aligning with `PATH` tools under a different identity. Run
-`traceback toolchain install aligners --yes` (it builds a new store in
-staging and swaps it in; a failed install leaves the old one in place), or
-remove `<TOOLCHAIN_CACHE>/aligners-*` (the FIX line shows the real path) to go back to `PATH`
-(`unpinned`). Fix ownership or permissions first (`chmod go-w`) if that is
-the cause; the install refuses a cache directory others can write.
+[Pinned aligners](#pinned-aligners). The Lab refuses rather than silently
+aligning with `PATH` tools under a different identity. The CAUSE names the
+failed check and the FIX is specific to it (`<TOOLCHAIN_CACHE>` is the real
+directory in terminal output):
+
+| Cause | FIX |
+|---|---|
+| the cache directory is a symlink | replace it with a real directory you own (mode 0700), then install |
+| the cache directory is owned by another user | `sudo chown "$USER" <TOOLCHAIN_CACHE> && chmod 0700 <TOOLCHAIN_CACHE>` |
+| the cache directory is writable by group or other | `chmod go-w <TOOLCHAIN_CACHE>`, or run the install, which tightens a cache directory you own to 0700 |
+| a store path is owned by another user | `sudo chown -R "$USER" <TOOLCHAIN_CACHE>/aligners-*` |
+| a store path is writable by group or other | `chmod -R go-w <TOOLCHAIN_CACHE>/aligners-*` |
+| a store path cannot be inspected | check access with `ls -ld`, fix ownership or permissions, rerun |
+| receipt missing, malformed or another pin set; a store path is a symlink; a binary missing, not executable, changed, not the pinned minimap2 release binary, or (doctor) not running | `traceback toolchain install aligners --yes` (builds a new store in staging and swaps it in; a failed install leaves the old one in place), or remove `<TOOLCHAIN_CACHE>/aligners-*` to go back to `PATH` (`unpinned`) |
 
 ## Adding an algorithm
 
