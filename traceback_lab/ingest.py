@@ -21,6 +21,8 @@ from __future__ import annotations
 import errno
 import hashlib
 import os
+import sys
+import subprocess
 import re
 import shutil
 import stat
@@ -271,9 +273,15 @@ def inspect_chunks(
     *,
     skip_bad_chunks: bool = False,
     write_cache: bool = True,
+    rehash: bool = False,
     progress: Callable[[str], None] | None = None,
 ) -> ChunkSet:
-    """Quickcheck, order, hash (cached), count (cached) and cross-check chunks."""
+    """Quickcheck, order, hash (cached), count (cached) and cross-check chunks.
+
+    ``rehash`` ignores every cached chunk entry for this call (each chunk is
+    hashed and counted again) and, with ``write_cache``, records the fresh
+    entries under the current keys.
+    """
 
     ordered = sorted(paths, key=_order_key)
     chunks: list[Chunk] = []
@@ -304,10 +312,24 @@ def inspect_chunks(
             data={"chunk_indexes": [chunk.index for chunk in bad]},
         )
     cache = store.load_hash_cache()
+    if progress is not None:
+        if store.hash_cache_notice:
+            progress(f"ingest  {store.hash_cache_notice}")
+        if store.legacy_hash_cache_entries_dropped:
+            progress(
+                f"ingest  hash cache written by an older version "
+                f"({store.legacy_hash_cache_entries_dropped} chunk entries dropped): every chunk is hashed once"
+            )
+        blind = cache_blind_filesystem(chunks[0].path) if chunks else None
+        if blind is not None:
+            progress(
+                f"ingest  inputs are on {blind}: the hash cache cannot detect an in-place rewrite there; "
+                "rerun with --rehash after any timestamp-preserving copy"
+            )
     changed = False
     for number, chunk in enumerate(chunks, start=1):
         key = store.hash_cache_key(chunk.path)
-        cached = cache.get(key)
+        cached = None if rehash else cache.get(key)
         if cached and isinstance(cached.get("sha256"), str) and isinstance(cached.get("records"), int):
             chunk.sha256 = cached["sha256"]
             chunk.records = cached["records"]
@@ -332,6 +354,69 @@ def inspect_chunks(
             data={"aligned": sum(chunk.aligned for chunk in chunks), "unaligned": sum(not chunk.aligned for chunk in chunks)},
         )
     return ChunkSet(chunks=chunks, excluded=bad)
+
+
+# -- filesystems without a kernel-maintained change time ---------------------------
+# exFAT/FAT keep no independent ctime and synthesise inode numbers from the
+# directory slot; SMB lets a client set every timestamp. The chunk cache key
+# cannot see an in-place rewrite there, so ingest says so once.
+CACHE_BLIND_FILESYSTEMS = frozenset({"exfat", "msdos", "fat", "vfat", "fat32", "smbfs", "cifs", "smb3"})
+
+
+def _mounts_from_darwin(output: str) -> list[tuple[str, str]]:
+    """``/sbin/mount`` lines: ``<dev> on <point> (<type>, <options>)`` -> (point, type)."""
+
+    mounts: list[tuple[str, str]] = []
+    for line in output.splitlines():
+        match = re.match(r"^.+ on (.+) \((\w+)[,)]", line)
+        if match:
+            mounts.append((match.group(1), match.group(2).lower()))
+    return mounts
+
+
+def _mounts_from_proc(text: str) -> list[tuple[str, str]]:
+    """``/proc/mounts`` lines: ``<dev> <point> <type> ...`` -> (point, type)."""
+
+    mounts: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) >= 3:
+            mounts.append((parts[1].replace("\\040", " "), parts[2].lower()))
+    return mounts
+
+
+def _mount_type(real: str, mounts: Sequence[tuple[str, str]]) -> str | None:
+    best: tuple[str, str] | None = None
+    for point, kind in mounts:
+        if real == point or real.startswith(point.rstrip("/") + "/"):
+            if best is None or len(point) > len(best[0]):
+                best = (point, kind)
+    return best[1] if best is not None else None
+
+
+def filesystem_type(path: Path) -> str | None:
+    """Best effort: the mounted filesystem type under ``path`` (lowercase), else ``None``."""
+
+    try:
+        real = os.path.realpath(path)
+        if sys.platform == "darwin":
+            output = subprocess.run(
+                ["/sbin/mount"], capture_output=True, text=True, timeout=10, check=False,
+            ).stdout
+            return _mount_type(real, _mounts_from_darwin(output))
+        if sys.platform.startswith("linux"):
+            with open("/proc/mounts", encoding="utf-8", errors="replace") as stream:
+                return _mount_type(real, _mounts_from_proc(stream.read()))
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    return None
+
+
+def cache_blind_filesystem(path: Path) -> str | None:
+    """The filesystem type when the hash cache cannot detect in-place rewrites there."""
+
+    kind = filesystem_type(path)
+    return kind if kind in CACHE_BLIND_FILESYSTEMS else None
 
 
 def require_unchanged(chunkset: ChunkSet) -> None:
@@ -551,10 +636,12 @@ def mmi_path(store: LabStore, reference: Reference) -> Path:
     return store.lab / "refs" / f"{reference.sha256}.mmi"
 
 
-def cached_sha256(store: LabStore, path: Path, *, write_cache: bool = True) -> str:
+def cached_sha256(store: LabStore, path: Path, *, write_cache: bool = True, rehash: bool = False) -> str:
+    """The index digest, cached under the strong key; ``rehash`` reads the bytes again."""
+
     cache = store.load_hash_cache()
     key = store.strong_hash_cache_key(path)
-    if key in cache and isinstance(cache[key].get("sha256"), str):
+    if not rehash and key in cache and isinstance(cache[key].get("sha256"), str):
         if store.strong_hash_cache_key(path) == key:
             return cache[key]["sha256"]
     digest = _sha256_file(path)
