@@ -132,6 +132,42 @@ class Waits(_Base):
 
 
 @dataclass
+class Hogs(_Base):
+    """Touches LAB_TEST_HOG_BYTES of memory, then holds it for a few seconds.
+
+    Under a cap below that size the allocation is refused (Linux rlimit) or
+    the runner's RSS sampler kills the worker; without one it completes.
+    """
+
+    def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
+        size = int(os.environ.get("LAB_TEST_HOG_BYTES", str(256 << 20)))
+        block = bytearray(size)
+        for offset in range(0, size, 4096):
+            block[offset] = 1
+        time.sleep(float(os.environ.get("LAB_TEST_HOG_HOLD_S", "4")))
+        marker = os.environ.get("LAB_TEST_MARKER")
+        if marker:
+            with open(marker, "a", encoding="ascii") as stream:
+                stream.write(self.id + "\n")
+        return AlgorithmOutput(metrics=[{"metric_id": "held_bytes", "value": len(block), "unit": "bytes"}])
+
+
+@dataclass
+class UsesNumpy(_Base):
+    """Imports numpy (OpenBLAS thread pool) and reports the pinned thread count."""
+
+    def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
+        import numpy
+
+        total = float(numpy.ones(1000).sum())
+        threads = int(os.environ.get("OPENBLAS_NUM_THREADS", "0"))
+        return AlgorithmOutput(metrics=[
+            {"metric_id": "ones", "value": total, "unit": "count"},
+            {"metric_id": "blas_threads", "value": threads, "unit": "threads"},
+        ])
+
+
+@dataclass
 class SkipsDepth(_Base):
     def preflight(self, ctx: InputContext) -> Ready | Skip:
         return Skip("depth", "needs 2,000,000 eligible reads")
@@ -169,6 +205,8 @@ FAILS = Fails("copy-number", cost="slow")
 HANGS = Hangs("cell-origin", cost="slow")
 WAITS = Waits("cell-origin", cost="slow")
 SKIPS = SkipsDepth("instability", cost="slow")
+HOGS = Hogs("copy-number", cost="slow")
+USES_NUMPY = UsesNumpy("bam-qc")
 BAD_PANEL = BadPanel("mtdna")
 ASSET_PROBE = AssetProbe("asset-probe", tools=(ToolPin("probe", "2.2.0"),))
 DEPENDS_ON_FAILURE = Counter("tf-concordance", family="composite", upstream=("copy-number",))

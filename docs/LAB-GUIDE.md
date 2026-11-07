@@ -81,6 +81,8 @@ before interpreting any exploratory pattern.
 ## One-time setup for real kits
 
 1. `brew install samtools minimap2` (samtools ≥ 1.20, minimap2 ≥ 2.28).
+   On Linux x86-64, `uv run traceback toolchain install aligners --yes` pins
+   them instead (see [Pinned aligners](#pinned-aligners)).
 2. Register hg38: `uv run traceback reference register --fasta hg38.fa --id hg38 --root R`.
 3. For copy-number: `uv run traceback toolchain install ichor`, then
    `uv run traceback method-asset register --from-toolchain copy-number --root R`.
@@ -133,6 +135,8 @@ traceback lab run (<BAM|uBAM|chunk dir>... | <id12> | latest | --example)
     [--downsample 0.5,0.25,0.1 | --no-downsample]
     [--controls | --no-controls] [--tf 0.03,0.10,0.30]
     [--skip-bad-chunks] [--sex M|F] [--force] [--rehash] [--timeout-s 3600]
+    [--threads N] [--sort-mem 1G] [--mmi PATH] [--keep-staging]
+    [--memory-cap BYTES | --no-memory-cap]
     [--threads N] [--sort-mem 1G] [--mmi PATH]
     [--dry-run] [--verbose] [--json] [--root R]
 traceback lab simulate cna <id12|latest> [--tf 0.03,0.10,0.30] [--cohort ID] [--verbose]   synthetic CNA spike, copy-number recovery
@@ -320,7 +324,7 @@ of MinKNOW chunks (`*.bam`, not recursive). It:
 5. checks that every uBAM record came back (primary + unmapped), then
    publishes the aligned BAM and its index together;
 6. runs every registered algorithm, each in its own process group with a
-   timeout (`--timeout-s`, default 3600 s);
+   timeout (`--timeout-s`, default 3600 s) and a memory cap (below);
 7. by default, reruns the summary algorithms and copy-number on nested
    downsamples (0.5, 0.25, 0.1 of the reads) for the depth curve, and runs
    the positive controls (synthetic CNA spike, split halves). These are row
@@ -333,8 +337,134 @@ minimap2`). The minimap2 index of the reference is built once under
 you already have. Measure alignment speed on the operator's workstation and
 keep input-specific results private.
 
+### Pinned aligners
+
+`traceback toolchain install aligners` (a dry run; add `--yes` to install)
+downloads samtools 1.21 and minimap2 2.28 from the same upstream release
+URLs, with the same sha256 digests, as CI, verifies each tarball before use,
+builds samtools from source (needs a C compiler, make and the zlib, bzip2,
+xz and curl headers) and places both under the per-user toolchain cache
+(`~/.cache/traceback/toolchains/aligners-<pin set sha256>/`, shared by every
+ROOT). Only this command uses the network.
+
+`lab run` (and `--dry-run`) resolves the aligners in this order:
+
+| Store | Tools used | Provenance |
+|---|---|---|
+| installed and verified | the store's binaries | `pinned` |
+| not installed, or no pin for this platform | `samtools` / `minimap2` on `PATH` | `unpinned` |
+| present but fails verification | none: refused | TBX-LAB-033 |
+
+Before using a store, the Lab checks exactly this, and refuses with
+TBX-LAB-033 (never falling back to `PATH`) if any check fails:
+
+1. The cache directory, the store directory, its `bin/` directory, the
+   install receipt and both binaries are not symlinks, are owned by you, and
+   are not writable by group or other. (The receipt alone only proves the
+   store is self-consistent; this proves only you could have written it.)
+2. The receipt parses and names exactly this pin set: tools, versions, URLs
+   and tarball digests.
+3. Each binary exists, is executable, and its sha256 equals the receipt's.
+4. minimap2's sha256 also equals the pinned release binary digest. samtools
+   is built locally, so its binary has no fixed digest; check 1 covers it.
+5. `lab doctor` only: each binary's `--version` runs and reports the
+   receipt's version (catches a missing shared library).
+
+Nothing is downloaded. Binaries are verified when the Lab resolves them, not
+again while they run. The install tightens a cache directory you own to
+0700 (a symlink or another user's directory is refused), writes the receipt
+mode 0600, runs check
+1 on the staged store before publishing it, and swaps it in under
+`<TOOLCHAIN_CACHE>/aligners.lock`; resolution waits on that lock, so a
+concurrent `lab run` never sees the moment between stores. The samtools
+build runs with only `PATH=/usr/bin:/bin LC_ALL=C` (no `CC`, `CFLAGS`,
+`LDFLAGS`, `LD_LIBRARY_PATH` or `MAKEFLAGS` from your shell), recorded as
+`build_env` in the receipt. `<TOOLCHAIN_CACHE>` is the per-user toolchain
+cache (`~/.cache/traceback/toolchains`): `--json` output carries the token,
+the terminal shows the real directory.
+
+The run log records an `aligner_tools` event and the input's
+`manifest.json` records `tool_pins` (the identity term below; `null` when
+unpinned) and `tool_provenance` (provenance, version, pinned tarball digest
+and installed binary sha256 per tool; never a path).
+`--dry-run` prints a `TOOLS` line. `lab doctor` shows one
+`lab_aligner_provenance` check: pass when pinned, a warning with the install
+command when unpinned on a pinned platform, blocked on TBX-LAB-033.
+
+Identity rule: an unpinned alignment's `input_id` is computed exactly as
+before pinning existed (versions reported by the `PATH` tools, no path), so
+an input aligned earlier keeps its `input_id` while the same versions are on
+`PATH`; a Homebrew upgrade still changes it (TBX-LAB-019). A pinned
+alignment's `input_id` adds the two release tarball digests (`tool_pins`):
+it names the pinned release *sources*, not the built binaries, so every
+machine with the store computes the same `input_id` regardless of where the
+cache lives or how its compiler built samtools. The installed binary sha256
+is recorded in `tool_provenance` only, outside the identity. Pinned and
+unpinned alignments of the same versions are different inputs (and a
+cohort keeps them apart by aligner): switching to
+the store realigns once, without a TBX-LAB-019 warning when the versions
+match (that warning compares versions only).
+
+Only Linux x86-64 is pinned. Neither tool publishes an upstream macOS
+release artefact (minimap2 ships a Linux x86-64 binary; Homebrew bottles are
+rebuilt by Homebrew), so on macOS the install command says so and changes
+nothing, and the Lab keeps `PATH` tools recorded as `unpinned`.
+
 The reference is the one registered under ROOT (`traceback reference
 register`); with several, pass `--reference ID`.
+
+**Memory cap.** Each algorithm worker runs under a per-algorithm memory
+cap so that one runaway algorithm is stopped at a known size instead of
+consuming the workstation. The default cap is `min(max(floor, 2 x the
+algorithm's highest recorded peak RSS from steps that ended ok), ceiling)`:
+the floor is the registry's entry for the algorithm (`MEMORY_FLOOR_BYTES` in
+`traceback_lab/registry.py`, declared only with a measured reason) or 2 GiB,
+and the ceiling is `0.8 x physical RAM`, never above 64 GiB. Only `ok` steps
+feed the history: a step that failed, timed out, was stopped by the cap or
+ran uncapped and failed does not raise the next cap, so a runaway cannot
+escalate its own cap by being rerun. The history is kept in
+`ROOT/lab/memory-history.json` (`{algorithm: highest ok peak}`), updated at
+the end of each run under the writer lock and rebuilt once from the run logs
+when it is missing or damaged (an unreadable run log is skipped with a
+`NOTE` line, never a refusal). Each step's `step_start` event records
+`memory_cap_bytes`, `memory_cap_basis` (`history`, `floor`, `default`,
+`ceiling`, `override` or `disabled`), `memory_cap_observed_bytes`,
+`memory_rlimit_bytes` and `blas_threads`. `--memory-cap BYTES` (at least
+256 MiB; suffixes `KiB`, `MiB`, `GiB`, `TiB`; for example
+`--memory-cap 4GiB`) caps every algorithm in the run at that value and is
+not bounded by the ceiling; `--no-memory-cap` runs without one. Both are
+recorded in the run log's `run_start` flags and under `data.memory_cap` in
+`--json`.
+
+Enforcement is honest about what each kernel offers. On every platform the
+runner samples the worker's process-tree resident set every 0.5 s and stops
+the group (SIGTERM, then SIGKILL after 5 s) as soon as a sample exceeds the
+cap while the group is still alive; an allocation burst faster than one
+sample interval can therefore exceed the cap before the kill lands. On
+Linux the worker additionally sets `RLIMIT_AS` (`RLIMIT_DATA` where
+`RLIMIT_AS` is unavailable) in the child before `exec`, so an allocation
+past the limit is refused and every descendant inherits it. That limit
+counts virtual address space, which numpy's OpenBLAS inflates by roughly
+64 MiB per BLAS thread when it loads, so the worker pins
+`OPENBLAS_NUM_THREADS`, `OMP_NUM_THREADS` and `MKL_NUM_THREADS` to
+`min(4, CPUs)` (an algorithm may declare `blas_threads`; a variable already
+set in the operator's environment is kept and widens the headroom) and the
+rlimit is the cap plus 512 MiB plus 64 MiB per BLAS thread of import
+headroom; the sampler enforces the cap itself. macOS refuses address-space
+limits below the process's already reserved address space (hundreds of GiB
+on Apple silicon; `setrlimit` returns `EINVAL`) and does not enforce the
+values it accepts, so no rlimit is set there and the sampler is the cap.
+
+An algorithm the cap stopped ends `failed` with reason `memory` and
+`memory cap exceeded (<cap>)` as its first line (a worker that could not be
+started under its limit fails the same way, never the run); the run
+continues with the next algorithm, exits 8 (TBX-LAB-016) and prints one
+`MEMORY` line plus a TBX-LAB-030 problem per stopped algorithm naming the
+cap and the fix: rerun with `--memory-cap` at twice the printed cap (raise
+again if needed); `--no-memory-cap` only as a last resort, because it lets
+one algorithm take all memory. The aligner (`samtools cat | samtools fastq
+| minimap2 | samtools sort` at ingest) is not an algorithm and never runs
+under a cap; `--sort-mem` governs its memory.
 
 **Reruns.** Rerunning the same command recomputes missing or failed results
 and a dependent result when a selected upstream attempt has changed;
@@ -438,6 +568,30 @@ even if an earlier preview passed.
 
 **Interruption.** Ctrl-C (or SIGTERM) stops the current step, kills its tools
 and exits 6. Completed results are kept; rerun the same command.
+
+**Alignment failure.** Alignment and prealigned ingest build the input in a
+`.staging-*` directory under `ROOT/lab/inputs/` and publish it in one rename
+only after the record count reconciles, so a failure (TBX-LAB-011, -013,
+-014, or a reference or index that changed under it) publishes nothing and
+removes that directory. `--keep-staging` keeps it instead, for inspection:
+the failure names it on its `align ... failed · staging kept <label>` line,
+at the end of the `FIX` text and as `staging_kept` in `--json` and in the
+run log's `step_end` event (`traceback lab runs RUN_ID --step align`). The
+label is `ROOT/lab`-relative (`inputs/.staging-<hex>`), the form `lab gc`
+lists it under; no host path is printed. A full volume still removes the
+staging so a rerun has its bytes back: TBX-LAB-011, and any failure whose
+error is `ENOSPC` or carries "No space left on device" (a TBX-LAB-014 from
+`samtools sort` or `index` on a full disk); an interruption removes it too.
+The kept directory is an ordinary orphan: `lab doctor` warns about it and
+`traceback lab gc --staging-only --apply --root <ROOT>` removes it. A
+successful run never keeps staging; for a stored sample (`latest`, `<id12>`)
+nothing is aligned, so the flag is recorded as not applicable with one
+notice line. Recorded fields: the `run_start` event's `flags.keep_staging`
+and `--json` `data.keep_staging` (run and dry run, `--example` included)
+hold the flag as it applied (`false` for a stored sample, with or without
+the flag); `staging_kept` appears only when a directory was kept, in the
+problem's `data` and in the failed `align` step's `step_end` event (that
+event is written only then; without the flag the run log is unchanged).
 
 **Output.** The run ends with a summary block (`ROOT`, `RUN`, `SAMPLE`,
 `DONE`, any `FAILED` lines, `NEXT`). With `--json`, stdout is one
@@ -1018,6 +1172,33 @@ the scroll controls are hidden.
   panels (short version, "Read the full explainer" expands in place, full text
   at `#/about/clia`), followed by the samples table and license callouts. The
   research-use notice is shown in the page header on every route.
+
+  The samples table also shows each sample's **kit columns**: instrument,
+  basecall model, modified-base models and the sequencer/basecaller software
+  versions. They come from the BAM header provenance recorded in the input
+  manifest at ingest (`@RG PM`, `@RG DS` `basecall_model` and
+  `modbase_models`, `@PG` program name and version), never from re-reading the
+  BAM when the page loads, and they are not part of the input ID. Instrument
+  is the device type inferred from the position/serial prefix in `@RG PM`
+  (`MN` + five digits is a MinION, `P2S_…-A/B` a P2 Solo, `X1`–`X5` a GridION
+  position) or an allowlisted device model name; the serial and its digits are
+  never stored, and any other PM (including PromethION position labels) reads
+  "not recorded". Otherwise only a dorado model name (`dna…@vN`, with a fixed
+  modified-base suffix vocabulary; MinKNOW's `modbase_model_version_id`
+  placeholder is not a model) of at most 64 characters, or a program version,
+  is kept: read-group IDs, flow-cell serials (`PU`), device serials,
+  sample and library names (`SM`, `LB`), run IDs, dates and `@PG` command lines
+  are not stored or shown. Only included chunks count (a chunk skipped with
+  `--skip-bad-chunks` does not). When chunks or read groups disagree, the
+  column reads "mixed (N values)" (a chunk that did not record the field counts
+  as one value); the manifest keeps up to 16 distinct values per field with the
+  full distinct count and `truncated: true` when more were seen. A field no
+  header carried, or any other value, reads "not recorded"; an input ingested
+  before this was recorded shows only the manifest's basecall model. The
+  flow-cell product code and library kit are not in an ONT BAM header; they are
+  in the MinKNOW run report, and showing them (via the `final_summary` that
+  `lab inventory` reads) is a follow-up, as is a full Kit lens. Rows keep the
+  run-date order; nothing is sorted by these values.
 - **Findings**: only above/below-reference results are cards (sorted by tier,
   then severity); not-interpretable, no-reference and in-range metrics are
   counted, collapsible rows. Before the kit cohort exists (n < 10) most
@@ -1411,7 +1592,8 @@ Categories:
   attempt), so its failed attempts are ordinary candidates. `--staging-only`
   skips this category entirely.
 - **staging** — orphaned `.staging-*` directories under `ROOT/lab` (the same
-  set `lab doctor` warns about: inputs, results, cohorts, assets). A dry run
+  set `lab doctor` warns about: inputs, results, cohorts, assets), including
+  one a `lab run --keep-staging` failure kept. A dry run
   leaves them unlisted, with a count, while a live writer heartbeat exists,
   because that writer may still own them; `--apply` holds the lock, so every
   remaining `.staging-*` directory is an orphan.
@@ -1571,7 +1753,7 @@ After alignment, the uBAM record total did not equal the aligned primary-plus-un
 
 ### TBX-LAB-014
 
-An alignment process failed or timed out (exit 3, retryable). The cause names the process and its first scrubbed stderr line. Rerun with `--verbose` to see live stderr; check `traceback lab doctor`.
+An alignment process failed or timed out (exit 3, retryable). The cause names the process and its first scrubbed stderr line. Rerun with `--verbose` to see live stderr; check `traceback lab doctor`. The staging directory was removed; rerun with `--keep-staging` to keep it for inspection (the `FIX` text then names it and how `lab gc --staging-only` removes it).
 
 ### TBX-LAB-015
 
@@ -1596,7 +1778,7 @@ checkout (`git pull && uv sync`). The store is never downgraded.
 
 ### TBX-LAB-019
 
-A warning (exit 0): the samtools or minimap2 version changed since this sample was last aligned, so it is realigned under a new input identity (results from the old alignment are never reused). `--dry-run` shows it first. Pin the tools to avoid it.
+A warning (exit 0): the samtools or minimap2 version changed since this sample was last aligned, so it is realigned under a new input identity (results from the old alignment are never reused). `--dry-run` shows it first. Pin the tools to avoid it ([Pinned aligners](#pinned-aligners); Linux x86-64).
 
 ### TBX-LAB-020
 
@@ -1704,6 +1886,18 @@ The support bundle's output path already exists, or is a directory (exit 2;
 existing file, or `--out PATH` naming a new file; a directory is never
 replaced.
 
+### TBX-LAB-030
+
+An algorithm exceeded its per-algorithm memory cap and was stopped, or could
+not be started under its limit (the run completed and exits 8 with
+TBX-LAB-016; this problem line names the algorithm, the cap in bytes and its
+basis). The result is `failed` with reason `memory`; the other algorithms
+ran. Rerun with `--memory-cap` at twice the printed cap, raising again if
+needed; use `--no-memory-cap` only as a last resort, since it lets one
+algorithm take all memory. Only the failed result recomputes. The default cap
+is `min(max(2 GiB, 2 x the algorithm's highest ok peak RSS), 0.8 x RAM, 64 GiB)`;
+see "Memory cap" under "Running on a kit". The aligner is never capped.
+
 ### TBX-LAB-031
 
 `lab inventory DIR` found no readable indexed `.bam` chunk in DIR (exit 3).
@@ -1727,6 +1921,24 @@ checked or written. No partial file is left. Pass a new `--out PATH` in a
 writable directory, or open the Lab page and use **Export / print** for the
 live view. An unknown or
 ambiguous ID12 is TBX-LAB-017 instead.
+### TBX-LAB-033
+
+The pinned aligner store exists under the per-user toolchain cache but does
+not verify (exit 3); the checks are listed under
+[Pinned aligners](#pinned-aligners). The Lab refuses rather than silently
+aligning with `PATH` tools under a different identity. The CAUSE names the
+failed check and the FIX is specific to it (`<TOOLCHAIN_CACHE>` is the real
+directory in terminal output):
+
+| Cause | FIX |
+|---|---|
+| the cache directory is a symlink | replace it with a real directory you own (mode 0700), then install |
+| the cache directory is owned by another user | `sudo chown "$USER" <TOOLCHAIN_CACHE> && chmod 0700 <TOOLCHAIN_CACHE>` |
+| the cache directory is writable by group or other | `chmod go-w <TOOLCHAIN_CACHE>`, or run the install, which tightens a cache directory you own to 0700 |
+| a store path is owned by another user | `sudo chown -R "$USER" <TOOLCHAIN_CACHE>/aligners-*` |
+| a store path is writable by group or other | `chmod -R go-w <TOOLCHAIN_CACHE>/aligners-*` |
+| a store path cannot be inspected | check access with `ls -ld`, fix ownership or permissions, rerun |
+| receipt missing, malformed or another pin set; a store path is a symlink; a binary missing, not executable, changed, not the pinned minimap2 release binary, or (doctor) not running | `traceback toolchain install aligners --yes` (builds a new store in staging and swaps it in; a failed install leaves the old one in place), or remove `<TOOLCHAIN_CACHE>/aligners-*` to go back to `PATH` (`unpinned`) |
 
 ## Adding an algorithm
 
@@ -1746,6 +1958,17 @@ ambiguous ID12 is TBX-LAB-017 instead.
 ## Changes
 
 - 2026-11-07: `lab report --html ID12` writes a self-contained HTML research report; TBX-LAB-034.
+- 2026-11-07: `traceback toolchain install aligners` pins samtools 1.21 and
+  minimap2 2.28 (Linux x86-64); `lab run` records aligner provenance;
+  TBX-LAB-033.
+- 2026-11-07: `lab run --keep-staging` keeps a failed alignment's staging
+  directory for inspection; `lab gc --staging-only` removes it. New:
+  `LabStore.publish_directory(keep_staging=)`, `ingest.publish_input` and
+  `ingest.volume_full`, the `keep_staging` run-start flag and `--json`
+  field, `staging_kept` in the problem data, the `FIX` text and a failed
+  `align` `step_end` event. No new TBX code.
+- 2026-11-07: the landing samples table shows kit columns (instrument, basecall
+  model, modified-base models, software) from the stored header provenance.
 - 2026-11-07: the Lab's worker and alignment pipelines run through the shared
   `traceback_runner.contained_process.run_contained_pipeline` (`traceback_lab/pipeline.py`
   removed); no operator-facing change.
@@ -1759,6 +1982,11 @@ ambiguous ID12 is TBX-LAB-017 instead.
 - 2026-11-06: `lab gc` (dry-run by default; `--apply` deletes stale failed
   attempts, orphaned staging and interrupted removals; `--staging-only`;
   panels of normals are not collected); TBX-LAB-027.
+- 2026-11-06: per-algorithm memory cap for `lab run` (`--memory-cap`,
+  `--no-memory-cap`, TBX-LAB-030); failed results gain an optional
+  `failure.reason` field and `ROOT/lab/memory-history.json` is new. The
+  store version pin means runtimes older than this checkout reading a newer
+  ROOT are not a goal.
 - 2026-11-06: `lab support-bundle RUN_ID`, a scrubbed archive of one run
   (TBX-LAB-028, TBX-LAB-029).
 - 2026-11-06: the input hash cache keys on inode and ctime as well as path,
