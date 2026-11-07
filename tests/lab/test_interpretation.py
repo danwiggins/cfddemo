@@ -177,6 +177,7 @@ def test_shipped_library_is_valid_and_covers_every_registered_metric_family() ->
         (lambda d: d["entries"][0].update(performance=None, performance_missing_reason=None), "performance"),
         (lambda d: d["entries"][0].update(citations=[{"doi": "10.1234/example"}]), "citations must be nonempty strings"),
         (lambda d: d["entries"].append(dict(d["entries"][0])), "duplicate"),
+        (lambda d: d["entries"][0].update(nonzero_flag="duplicate read names"), "nonzero_flag"),
     ],
 )
 def test_loader_refusals(mutator, message) -> None:
@@ -326,7 +327,9 @@ def test_editing_a_footnote_changes_no_result_byte() -> None:
     envelope = _envelope([{"metric_id": "mode_bp", "value": 168}])
     before = envelope.to_bytes()
     edited = parse_library(
-        _mutate(lambda d: d["entries"][12]["performance"].update(value="edited footnote")), LICENSES
+        _mutate(lambda d: next(e for e in d["entries"] if e["algorithm_id"] == "fragment-size"
+                               and e["metric_id"] == "mode_bp")["performance"].update(value="edited footnote")),
+        LICENSES
     )
     interpret_result(envelope, edited, depth_x=0.26)
     assert envelope.to_bytes() == before

@@ -13,12 +13,13 @@ import pytest
 
 from traceback_lab.ingest import cached_sha256, ensure_mmi, mmi_path, resolve_reference
 from traceback_lab.problems import LabProblem
-from traceback_lab.reference_integrity import verify_reference_source
+from traceback_lab.reference_integrity import _proof_key, _stamps, verify_reference_source
 from traceback_lab.runner import RunTarget, _verify_target_reference
 from traceback_lab.scrub import Scrubber
 from traceback_lab.store import LabStore
 from traceback_runner.cli import main
 from traceback_runner.references import register_reference
+from tests.lab.conftest import restore_mtime_past_ctime
 
 
 def _reference(tmp_path: Path) -> tuple[LabStore, Path]:
@@ -94,11 +95,11 @@ def test_same_size_restored_mtime_fasta_edit_fails_registered_digest(tmp_path) -
     reference = resolve_reference(store.root, "hg38")
     verify_reference_source(store, reference, write_cache=True)
     old = fasta.stat()
-    old_key = store.hash_cache_key(fasta)
     fasta.write_text(fasta.read_text().replace("ACGT", "TCGT", 1))
-    os.utime(fasta, ns=(old.st_atime_ns, old.st_mtime_ns))
-    assert store.hash_cache_key(fasta) == old_key
-    assert fasta.stat().st_ctime_ns != old.st_ctime_ns
+    restore_mtime_past_ctime(fasta, old)
+    edited = fasta.stat()
+    assert (edited.st_ino, edited.st_size, edited.st_mtime_ns) == (old.st_ino, old.st_size, old.st_mtime_ns)
+    assert edited.st_ctime_ns != old.st_ctime_ns
     with pytest.raises(LabProblem, match="No usable registered reference") as error:
         verify_reference_source(store, reference, write_cache=True)
     assert error.value.code == "TBX-LAB-004"
@@ -139,12 +140,12 @@ def test_fai_offset_edit_fails_indexed_m5_even_when_names_and_lengths_match(tmp_
     verify_reference_source(store, reference, write_cache=True)
     fai = Path(f"{fasta}.fai")
     old = fai.stat()
-    old_weak_key = store.hash_cache_key(fai)
     fields = fai.read_text().strip().split("\t")
     fields[2] = str(int(fields[2]) + 1)
     fai.write_text("\t".join(fields) + "\n")
-    os.utime(fai, ns=(old.st_atime_ns, old.st_mtime_ns))
-    assert store.hash_cache_key(fai) == old_weak_key
+    restore_mtime_past_ctime(fai, old)
+    edited = fai.stat()
+    assert (edited.st_ino, edited.st_size, edited.st_mtime_ns) == (old.st_ino, old.st_size, old.st_mtime_ns)
     with pytest.raises(LabProblem) as error:
         verify_reference_source(store, reference, write_cache=True)
     assert error.value.code == "TBX-LAB-004"
@@ -162,7 +163,7 @@ def test_index_edit_then_restore_invalidates_pre_use_proof(tmp_path) -> None:
     fields[2] = str(int(fields[2]) + 1)
     fai.write_text("\t".join(fields) + "\n")
     fai.write_bytes(original)
-    os.utime(fai, ns=(old.st_atime_ns, old.st_mtime_ns))
+    restore_mtime_past_ctime(fai, old)
     assert fai.stat().st_ctime_ns != old.st_ctime_ns
     with pytest.raises(LabProblem) as error:
         verify_reference_source(store, reference, write_cache=True, expected_proof=proof)
@@ -186,7 +187,7 @@ def test_index_build_edit_then_restore_does_not_publish_mmi(tmp_path, monkeypatc
         old = fasta.stat()
         fasta.write_bytes(original.replace(b"ACGT", b"TCGT", 1))
         fasta.write_bytes(original)
-        os.utime(fasta, ns=(old.st_atime_ns, old.st_mtime_ns))
+        restore_mtime_past_ctime(fasta, old)
         return SimpleNamespace(ok=True)
 
     monkeypatch.setattr(ingest, "run_pipeline", mutate_during_index)
@@ -219,7 +220,7 @@ def test_symlinked_fai_proof_tracks_link_target_edits(tmp_path) -> None:
     fields = target.read_text().strip().split("\t")
     fields[2] = str(int(fields[2]) + 1)
     target.write_text("\t".join(fields) + "\n")
-    os.utime(target, ns=(old.st_atime_ns, old.st_mtime_ns))
+    restore_mtime_past_ctime(target, old)
     with pytest.raises(LabProblem) as error:
         verify_reference_source(store, reference, write_cache=True)
     assert error.value.code == "TBX-LAB-004"
@@ -252,17 +253,64 @@ def test_mmi_cache_rehashes_same_size_restored_mtime_replacement(tmp_path) -> No
     mmi.write_bytes(b"aaaa")
     first = cached_sha256(store, mmi)
     old = mmi.stat()
-    old_weak_key = store.hash_cache_key(mmi)
+    strong_key = store.strong_hash_cache_key(mmi)
+    # In-place rewrite with the mtime restored: same inode, size and mtime; only ctime moves.
     mmi.write_bytes(b"bbbb")
-    os.utime(mmi, ns=(old.st_atime_ns, old.st_mtime_ns))
-    assert store.hash_cache_key(mmi) == old_weak_key
+    restore_mtime_past_ctime(mmi, old)
+    rewritten = mmi.stat()
+    assert (rewritten.st_ino, rewritten.st_size, rewritten.st_mtime_ns) == (old.st_ino, old.st_size, old.st_mtime_ns)
+    assert rewritten.st_ctime_ns != old.st_ctime_ns
+    assert store.strong_hash_cache_key(mmi) != strong_key
     assert cached_sha256(store, mmi) == hashlib.sha256(b"bbbb").hexdigest() != first
+    # Replacement by another file of the same size with the mtime restored: new inode.
     replacement = tmp_path / "replacement.mmi"
     replacement.write_bytes(b"cccc")
-    os.utime(replacement, ns=(old.st_atime_ns, old.st_mtime_ns))
+    restore_mtime_past_ctime(replacement, old)
     os.replace(replacement, mmi)
-    assert store.hash_cache_key(mmi) == old_weak_key
+    assert store.strong_hash_cache_key(mmi) != strong_key
     assert cached_sha256(store, mmi) == hashlib.sha256(b"cccc").hexdigest()
+
+
+def test_rehash_recomputes_a_stale_index_digest_under_the_current_strong_key(tmp_path) -> None:
+    store = LabStore(tmp_path / "root")
+    store.ensure()
+    mmi = tmp_path / "tiny.mmi"
+    mmi.write_bytes(b"aaaa")
+    stale = cached_sha256(store, mmi)
+    mmi.write_bytes(b"bbbb")
+    fresh = hashlib.sha256(b"bbbb").hexdigest()
+    # A cache that lies about the current bytes: the stale digest planted under the CURRENT key.
+    cache = store.load_hash_cache()
+    cache[store.strong_hash_cache_key(mmi)] = {"sha256": stale, "records": -1}
+    store.save_hash_cache(cache)
+    assert cached_sha256(store, mmi) == stale
+    assert cached_sha256(store, mmi, write_cache=False, rehash=True) == fresh
+    assert cached_sha256(store, mmi) == stale  # a read-only rehash writes nothing
+    assert cached_sha256(store, mmi, rehash=True) == fresh
+    assert store.load_hash_cache()[store.strong_hash_cache_key(mmi)]["sha256"] == fresh
+    assert cached_sha256(store, mmi) == fresh
+
+
+def test_rehash_detects_an_edit_hidden_by_a_stale_reference_proof(tmp_path) -> None:
+    store, fasta = _reference(tmp_path)
+    reference = resolve_reference(store.root, "hg38")
+    verify_reference_source(store, reference, write_cache=True)
+    old = fasta.stat()
+    fasta.write_text(fasta.read_text().replace("ACGT", "TCGT", 1))
+    restore_mtime_past_ctime(fasta, old)
+    with pytest.raises(LabProblem):
+        verify_reference_source(store, reference, write_cache=False)
+    # A stale proof planted under the CURRENT key hides the edit from a plain verification.
+    key = _proof_key(reference, _stamps(fasta))
+    cache = store.load_hash_cache()
+    cache[key] = {"sha256": reference.sha256, "indexed_m5_verified": True}
+    store.save_hash_cache(cache)
+    assert verify_reference_source(store, reference, write_cache=False) == key
+    with pytest.raises(LabProblem, match="No usable registered reference") as error:
+        verify_reference_source(store, reference, write_cache=True, rehash=True)
+    assert error.value.code == "TBX-LAB-004"
+    with pytest.raises(LabProblem):
+        verify_reference_source(store, reference, write_cache=False, rehash=True)
 
 
 def test_normal_cached_run_and_dry_run_refuse_changed_reference(tmp_path, capsys) -> None:
@@ -284,7 +332,7 @@ def test_normal_cached_run_and_dry_run_refuse_changed_reference(tmp_path, capsys
 
     old = fasta.stat()
     fasta.write_text(fasta.read_text().replace("ACGT", "TCGT", 1))
-    os.utime(fasta, ns=(old.st_atime_ns, old.st_mtime_ns))
+    restore_mtime_past_ctime(fasta, old)
     assert main(argv) == 3
     blocked = json.loads(capsys.readouterr().out)
     assert blocked["data"]["code"] == "TBX-LAB-004"
@@ -381,7 +429,7 @@ def test_worker_edit_then_restore_cannot_publish_consumed_bases(tmp_path, capsys
             return actual_pipeline(stages, **kwargs)
         old = fasta.stat()
         fasta.write_bytes(changed)
-        os.utime(fasta, ns=(old.st_atime_ns, old.st_mtime_ns))
+        restore_mtime_past_ctime(fasta, old)
         outcome = actual_pipeline(stages, **kwargs)
         produced = json.loads((request.parent / "output.json").read_text())
         consumed["gc_slope"] = next(
@@ -389,7 +437,7 @@ def test_worker_edit_then_restore_cannot_publish_consumed_bases(tmp_path, capsys
             if metric["metric_id"] == "gc_bias_slope"
         )
         fasta.write_bytes(original)
-        os.utime(fasta, ns=(old.st_atime_ns, old.st_mtime_ns))
+        restore_mtime_past_ctime(fasta, old)
         consumed["ctime_changed"] = fasta.stat().st_ctime_ns != old.st_ctime_ns
         return outcome
 
