@@ -3,6 +3,13 @@
 Status: documentation contract and sourced device baseline.
 Exact wet-lab instructions are not yet approved for operator use.
 
+The device and acquisition tables below are planning inputs, not a current
+vendor compatibility guarantee. Recheck their linked primary sources, exact
+part numbers and software versions at protocol approval. Repository CI runs
+synthetic software checks on macOS and Ubuntu; those hosts are not qualified
+MinION acquisition or POD5 processing profiles. The existing local-BAM and Lab
+paths remain development-unqualified research workflows.
+
 ## What this page will do
 
 This page will guide a trained operator through:
@@ -109,10 +116,11 @@ Traceback will publish two independent checks:
 - **Processing ready:** can the pinned post-run workflow finish within its
   published time and peak-storage envelope?
 
-The first `Processing ready` profile is Linux x86-64 with one qualified NVIDIA
-GPU, exact driver/runtime versions, measured peak RAM, measured peak disk, and
-measured completion time. macOS, Windows, ARM, CPU-only, real-time basecalling,
-and adaptive sampling are not release-one processing promises.
+The proposed first `Processing ready` profile is Linux x86-64 with one
+qualified NVIDIA GPU, exact driver/runtime versions, measured peak RAM, peak
+disk, and completion time. This is a planned qualification target, not a
+measured or selected release host. macOS, Windows, ARM, CPU-only, real-time
+basecalling, and adaptive sampling are not release-one processing promises.
 
 A machine can pass acquisition and fail local processing. The operator must
 then move the complete run package to another qualified local processing host

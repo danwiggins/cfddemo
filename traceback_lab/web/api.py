@@ -1,0 +1,1530 @@
+"""JSON views the Lab server returns (read-only; nothing is written).
+
+Every id in a request is matched against a regex by the server and then
+resolved through the store index; no request text becomes a path (D34).
+``data_ref`` files are served only when their realpath lies inside the
+result's own attempt directory and no component is a symlink.
+"""
+
+from __future__ import annotations
+
+import heapq
+import json
+import math
+import os
+import re
+import shlex
+import stat
+import threading
+import time
+from collections.abc import Iterable
+from pathlib import Path, PurePosixPath
+from typing import Any
+
+from .. import views
+from ..completed_runs import (
+    completed_for_source,
+    completion_history_unavailable,
+    completion_snapshot,
+    global_completion_history_unavailable,
+)
+from ..cohort_contracts import CohortGeneration, CohortMember, MetricProjection, project_metric
+from ..cohort_density import project_density_band
+from ..cohorts import list_cohorts, member_for_generation_or_independent, member_from_store, pon_dependent_algorithms, read_current
+from ..file_access import open_regular_no_follow
+from ..identity import resolve_prefix, shortest_unique_prefixes
+from ..ingest import source_ids, source_record
+from ..microbial_view import profile_for_sample
+from ..identity_pair import pairs_for_sample
+from ..algorithms.identity import somalier_tool
+from ..interpretation.engine import (
+    COHORT_MIN,
+    LIBRARY_FILE,
+    LICENSES_FILE,
+    Entry,
+    Library,
+    LibraryError,
+    interpret_result,
+    parse_library,
+    qc_band,
+)
+from ..problems import LabProblem
+from ..store import LabStore, ResultOrderUnavailable, SelectionSnapshotChanged, summarize_run
+from ..tf_concordance import report_tf_concordance
+
+_LOGGED_SAMPLE_COMMANDS = frozenset({"run", "simulate cna", "simulate split", "cohort build"})
+_STATUS_COMMANDS = _LOGGED_SAMPLE_COMMANDS | frozenset({
+    "asset add", "cohort add", "cohort remove", "identity sites add", "identity compare",
+    "asset register-clock-map", "asset griffin-register", "asset end-catalogues-register",
+    "microbial db add", "fetal register", "fetal chrY register", "donor register",
+})
+_STATUS_STEPS = frozenset({
+    "start", "sites", "relate", "ingest", "align", "derive", "read-summary",
+    "pmd", "tss-annotation", "viral-fasta", "methylbert-bundle", "meth-tf-reference",
+    "epi-clock-map", "aligned-ends", "database",
+})
+
+
+def _safe_status_step(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    if value in _STATUS_STEPS:
+        return value
+    algorithm, _, derived = value.partition("@")
+    if algorithm not in {item.id for item in _registry()}:
+        return None
+    if not derived:
+        return algorithm if "@" not in value else None
+    return value if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{0,39}", derived) else None
+
+
+def _safe_result_selections(sample: Any, order: list[str]) -> dict[str, Any]:
+    known = set(order)
+    unreadable = sample.full.unreadable
+    ambiguous = sample.full.ambiguous
+    return {
+        "unreadable_results": sorted(unreadable & known),
+        "ambiguous_results": sorted(ambiguous & known),
+        "malformed_result_selections": bool((unreadable | ambiguous) - known),
+    }
+
+
+def _recovery_problem(problem: LabProblem) -> dict[str, str]:
+    """Only operator-safe fields cross the local Compare API boundary."""
+
+    unsafe_path = re.compile(r"(?<![A-Za-z0-9])/[^\s`'\"<>]+|[A-Za-z]:[\\/]|file://|--root\s+(?!['\"]?<ROOT>)")
+    cause = problem.cause if not unsafe_path.search(problem.cause) else (
+        "The selected Lab record could not be read or verified."
+    )
+    fix = problem.fix if not unsafe_path.search(problem.fix) else (
+        "Check the Lab guide, restore the affected record from a known-good backup if needed, then retry Compare."
+    )
+    return {"code": problem.code, "summary": problem.summary,
+            "cause": cause, "fix": fix, "docs": problem.docs}
+
+
+_AGREEMENT_AXES = (
+    ("size-cn", ("fragment-size", "mode_bp"), ("copy-number", "tumor_fraction")),
+    ("mtdna-cn", ("mtdna", "chrm_fraction"), ("copy-number", "tumor_fraction")),
+)
+
+
+def _agreement_pairs(
+    sample: Any, generation: CohortGeneration | None, target: CohortMember | None,
+    source_id: str, cohort_state: str,
+) -> list[dict[str, Any]]:
+    """Pair only compatible scalar values from one pinned generation by source ID."""
+
+    rows = []
+    # One generation-wide map keeps a source's label stable even when the
+    # eligible sets differ between agreement charts.
+    labels = shortest_unique_prefixes(
+        [source_id, *(member.source_id for member in generation.members)]
+    ) if generation is not None else {}
+    for pair_id, (x_algorithm, x_metric), (y_algorithm, y_metric) in _AGREEMENT_AXES:
+        row: dict[str, Any] = {
+            "pair_id": pair_id, "state": cohort_state if cohort_state != "ready" else "unavailable",
+            "cohort_version": generation.version_id if generation else None,
+            "eligible_n": 0, "points": [], "excluded": {},
+            "target_display_id": labels.get(source_id, source_id[:12]),
+        }
+        if generation is None or target is None or cohort_state != "ready":
+            rows.append(row)
+            continue
+        projections: list[MetricProjection] = []
+        for algorithm_id, metric_id in ((x_algorithm, x_metric), (y_algorithm, y_metric)):
+            envelope = sample.full.results.get(algorithm_id)
+            selected = next((result for result in target.results if result.algorithm_id == algorithm_id), None)
+            if (envelope is None or envelope.status != "ok" or selected is None or
+                    selected.parameters_sha256 != envelope.provenance.parameters_sha256 or
+                    selected.metrics.get(metric_id) is None):
+                break
+            projections.append(project_metric(
+                generation, algorithm_id=algorithm_id, metric_id=metric_id,
+                cohort_compat_key=selected.cohort_compat_key, target_source_id=source_id,
+            ))
+        if len(projections) != 2:
+            row["state"] = "target_metric_unavailable"
+            rows.append(row)
+            continue
+        x_projection, y_projection = projections
+        y_by_source = dict(zip(y_projection.source_ids, y_projection.values, strict=True))
+        points = [
+            {"source_id": member_source, "x": x_value, "y": y_by_source[member_source]}
+            for member_source, x_value in zip(x_projection.source_ids, x_projection.values, strict=True)
+            if member_source in y_by_source
+        ]
+        for point in points:
+            point["display_id"] = labels[point["source_id"]]
+        row.update({
+            "state": "ready" if points else "no_paired_values",
+            "eligible_n": len(points), "points": points,
+            "excluded": {
+                "x": dict(x_projection.exclusions), "y": dict(y_projection.exclusions),
+                "unpaired_x": x_projection.percentile_n - len(points),
+                "unpaired_y": y_projection.percentile_n - len(points),
+            },
+        })
+        rows.append(row)
+    return rows
+def _pon_dependent_algorithms() -> set[str]:
+    return pon_dependent_algorithms()
+
+
+def _cohort_target(
+    store: LabStore, generation: CohortGeneration, source_id: str, *, input_id: str | None = None,
+) -> tuple[CohortMember, LabProblem | None]:
+    """Keep independent cohort metrics when only the PoN tools are missing."""
+
+    return member_for_generation_or_independent(store, generation, source_id, input_id=input_id)
+
+
+class LibraryHolder:
+    """The last good library; a broken edit on disk never blanks the page."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._mtimes: tuple[int, int] | None = None
+        self.library: Library | None = None
+        self.loaded_at: str | None = None
+        self.error: str | None = None
+
+    def get(self) -> Library:
+        with self._lock:
+            try:
+                stats = (LIBRARY_FILE.stat(), LICENSES_FILE.stat())
+                mtimes = tuple(
+                    (st.st_mtime_ns, st.st_size, st.st_ino) for st in stats
+                )
+            except OSError:
+                mtimes = ("unreadable",)
+            if mtimes != self._mtimes:
+                self._mtimes = mtimes
+                try:
+                    self.library = parse_library(
+                        LIBRARY_FILE.read_text(encoding="utf-8"),
+                        LICENSES_FILE.read_text(encoding="utf-8"),
+                    )
+                    self.loaded_at = time.strftime("%H:%M", time.localtime())
+                    self.error = None
+                except LibraryError as exc:
+                    self.error = str(exc)[:300]  # names the entry or YAML line, never a path
+                    if self.library is None:
+                        raise
+                except UnicodeDecodeError:
+                    self.error = "the library file is not valid UTF-8"
+                    if self.library is None:
+                        raise
+                except OSError:
+                    self.error = "the library file is unreadable"
+                    if self.library is None:
+                        raise
+            assert self.library is not None
+            return self.library
+
+    def health(self) -> dict[str, Any]:
+        return {
+            "version": self.library.version if self.library else None,
+            "loaded_at": self.loaded_at,
+            "error": self.error,
+        }
+
+
+_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
+_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+
+
+def _read_contained(base: Path, parts: list[str], data_ref: str, *, limit: int = 64 * 1024 * 1024) -> bytes | None:
+    """Read ``base/parts…/data_ref`` without following any symlink (D34).
+
+    Every component below ``base`` (the store's results directory) is opened
+    with ``O_NOFOLLOW`` relative to its parent's descriptor, so a symlinked
+    attempt, artifact directory or file, or a swap after a check, cannot
+    redirect the read.  The file must be a regular file with one link.
+    """
+
+    reference = PurePosixPath(data_ref)
+    if reference.is_absolute() or ".." in reference.parts or not reference.parts:
+        return None
+    components = [*parts, *reference.parts]
+    if any(part in ("", ".", "..") or "/" in part for part in components):
+        return None
+    try:
+        fd = os.open(base, os.O_RDONLY | _DIRECTORY)
+    except OSError:
+        return None
+    try:
+        for part in components[:-1]:
+            next_fd = os.open(part, os.O_RDONLY | _DIRECTORY | _NOFOLLOW, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        file_fd = os.open(components[-1], os.O_RDONLY | _NOFOLLOW, dir_fd=fd)
+    except OSError:
+        os.close(fd)
+        return None
+    os.close(fd)
+    try:
+        info = os.fstat(file_fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > limit:
+            return None
+        chunks = []
+        while chunk := os.read(file_fd, 1 << 20):
+            chunks.append(chunk)
+        return b"".join(chunks)
+    finally:
+        os.close(file_fd)
+
+
+def _contained(attempt: Path, data_ref: str) -> Path | None:
+    """Compatibility check used by tests: is ``data_ref`` readable without symlinks?"""
+
+    return attempt / data_ref if _read_contained(attempt, [], data_ref) is not None else None
+
+
+def _read_run_log(path: Path, *, limit: int = 1024 * 1024) -> bytes | None:
+    """Read one regular log, rejecting symlink ancestors and growth past limit."""
+
+    try:
+        descriptor = open_regular_no_follow(path)
+    except OSError:
+        return None
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > limit:
+            return None
+        chunks = []
+        size = 0
+        while chunk := os.read(descriptor, min(64 * 1024, limit + 1 - size)):
+            size += len(chunk)
+            if size > limit:
+                return None
+            chunks.append(chunk)
+        return b"".join(chunks)
+    except OSError:
+        return None
+    finally:
+        os.close(descriptor)
+
+
+def _run_events(store: LabStore, run_id: str) -> tuple[list[tuple[int, dict[str, Any]]], str | None]:
+    if not isinstance(run_id, str) or not re.fullmatch(r"r-\d{8}-\d{4}-[0-9a-f]{4,8}", run_id):
+        return [], "invalid_run_id"
+    path = store.runs_dir / f"{run_id}.jsonl"
+    raw = _read_run_log(path)
+    if raw is None:
+        try:
+            os.lstat(path)
+        except FileNotFoundError:
+            return [], "missing"
+        except OSError:
+            pass
+        return [], "unreadable_or_over_1mib"
+    lines = raw.split(b"\n")
+    complete_tail = raw.endswith(b"\n")
+    if complete_tail:
+        lines.pop()
+    if len(lines) > 4096:
+        return [], "over_4096_lines"
+    events = []
+    for number, line in enumerate(lines, 1):
+        try:
+            event = json.loads(line)
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            # One crash-torn append can leave an unterminated final fragment.
+            # Keep its validated prefix, but never skip a complete or middle line.
+            if number == len(lines) and not complete_tail:
+                if not events:
+                    return [], "pending_first_event"
+                break  # an interrupted append can leave only the final line torn
+            return [], "malformed_or_empty"
+        if not isinstance(event, dict):
+            return [], "malformed_or_empty"
+        if event.get("run_id") != run_id or not isinstance(event.get("event"), str):
+            return [], "malformed_or_empty"
+        events.append((number, event))
+    return (events, None) if events else ([], "malformed_or_empty")
+
+
+def _recent_run_ids(store: LabStore, *, limit: int = 64) -> list[str]:
+    """Keep only the newest regular run-log entries while scanning the directory."""
+
+    try:
+        if not stat.S_ISDIR(os.lstat(store.runs_dir).st_mode):
+            return []
+        with os.scandir(store.runs_dir) as entries:
+            def candidates() -> Iterable[tuple[int, str]]:
+                for entry in entries:
+                    if not re.fullmatch(r"r-\d{8}-\d{4}-[0-9a-f]{4,8}\.jsonl", entry.name):
+                        continue
+                    try:
+                        info = entry.stat(follow_symlinks=False)
+                    except OSError:
+                        continue
+                    if stat.S_ISREG(info.st_mode):
+                        yield info.st_mtime_ns, entry.name[:-6]
+
+            return [run_id for _, run_id in heapq.nlargest(limit, candidates())]
+    except OSError:
+        return []
+
+
+def _latest_analysis_run(store: LabStore) -> tuple[str | None, bool]:
+    """A small pointer read; other writer commands need not emit run logs."""
+
+    raw = _read_run_log(store.last_run_file, limit=4096)
+    if raw is None:
+        try:
+            os.lstat(store.last_run_file)
+        except FileNotFoundError:
+            return None, False
+        except OSError:
+            pass
+        return None, True
+    try:
+        pointer = json.loads(raw)
+    except (ValueError, RecursionError):
+        return None, True
+    if not isinstance(pointer, dict):
+        return None, True
+    command = pointer.get("command")
+    if not isinstance(command, str):
+        return None, True
+    if command not in _LOGGED_SAMPLE_COMMANDS:
+        return None, False
+    run_id = pointer.get("run_id")
+    if not isinstance(run_id, str) or not re.fullmatch(r"r-\d{8}-\d{4}-[0-9a-f]{4,8}", run_id):
+        return None, True
+    return run_id, False
+
+
+def _run_sample_identity(events: list[tuple[int, dict[str, Any]]]) -> dict[str, str]:
+    for _, event in reversed(events):
+        if event.get("event") != "sample":
+            continue
+        source_id, input_id = event.get("source_id"), event.get("input_id")
+        if (isinstance(source_id, str) and re.fullmatch(r"[0-9a-f]{64}", source_id)
+                and isinstance(input_id, str) and re.fullmatch(r"[0-9a-f]{64}", input_id)):
+            return {"source_id": source_id, "input_id": input_id}
+        return {}
+    return {}
+
+
+class LabApi:
+    def __init__(self, store: LabStore) -> None:
+        self.store = store
+        self.libraries = LibraryHolder()
+
+    # -- status (D22): bounded reads, never the lock -----------------------------
+    def status(self) -> dict[str, Any]:
+        status = self.store.status()
+        interrupted = None
+        run_log_unavailable = None
+        if status["active"] is not None and status["active"].get("command") in _LOGGED_SAMPLE_COMMANDS:
+            run_id = status["active"]["run_id"]
+            events, reason = _run_events(self.store, run_id)
+            if reason == "pending_first_event":
+                reason = None  # the first append is still in progress
+            if reason == "missing":
+                reason = None  # the writer may not have appended run_start yet
+            if reason in ("unreadable_or_over_1mib", "malformed_or_empty"):
+                # A writer publishes its heartbeat before appending run_start.
+                # An absent or empty log in that short window is pending, not damaged.
+                try:
+                    info = os.lstat(self.store.runs_dir / f"{run_id}.jsonl")
+                except FileNotFoundError:
+                    pass
+                except OSError:
+                    pass
+                else:
+                    if reason == "malformed_or_empty" and stat.S_ISREG(info.st_mode) and info.st_size == 0:
+                        reason = None
+            if not reason and events and events[0][1]["event"] != "run_start":
+                reason = "malformed_or_empty"
+                events = []
+            if reason:
+                run_log_unavailable = {"run_id": None if reason == "invalid_run_id" else run_id,
+                                       "reason": reason}
+            status["active"] = {**status["active"], **_run_sample_identity(events),
+                                "run_id": None if reason == "invalid_run_id" else run_id}
+        else:
+            if status["active"] is not None:
+                active_id = status["active"].get("run_id")
+                if not isinstance(active_id, str) or not re.fullmatch(r"r-\d{8}-\d{4}-[0-9a-f]{4,8}", active_id):
+                    status["active"] = {**status["active"], "run_id": None}
+            # Bounded (D22): one pointer file and that one run's log, never a scan.
+            last, pointer_unavailable = _latest_analysis_run(self.store)
+            if pointer_unavailable:
+                run_log_unavailable = {"run_id": None, "reason": "latest_run_pointer_unavailable"}
+            if last is not None:
+                events, reason = _run_events(self.store, last)
+                if reason == "pending_first_event":
+                    reason = "malformed_or_empty"  # no active writer can finish it
+                if not reason and events[0][1]["event"] != "run_start":
+                    reason = "malformed_or_empty"
+                    events = []
+                if reason:
+                    run_log_unavailable = {"run_id": last, "reason": reason}
+                else:
+                    summary = summarize_run([event for _, event in events], self.store)
+                    if summary["status"] == "interrupted":
+                        interrupted = {"run_id": last, "step": _safe_status_step(summary["open_step"]),
+                                       **_run_sample_identity(events)}
+        if status["active"] is not None:
+            command = status["active"].get("command")
+            status["active"] = {
+                **status["active"],
+                "command": command if isinstance(command, str) and command in _STATUS_COMMANDS else None,
+                "step": _safe_status_step(status["active"].get("step")),
+            }
+        try:
+            self.libraries.get()
+        except (LibraryError, OSError):
+            pass
+        return {**status, "interrupted": interrupted, "run_log_unavailable": run_log_unavailable,
+                "library": self.libraries.health()}
+
+    # -- samples -------------------------------------------------------------------
+    def _id12s(self) -> dict[str, str]:
+        ids = source_ids(self.store)
+        return shortest_unique_prefixes(ids) if ids else {}
+
+    def _published_sample_cohort(self) -> tuple[CohortGeneration | None, dict[str, str] | None]:
+        """Read one immutable generation pointer for an entire API response."""
+
+        try:
+            return read_current(self.store, "healthy-v1"), None
+        except LabProblem as problem:
+            return None, _recovery_problem(problem)
+
+    def _sample_cohort(
+        self, source_id: str, sample: Any,
+        snapshot: tuple[CohortGeneration | None, dict[str, str] | None] | None = None,
+    ) -> tuple[CohortGeneration | None, CohortMember | None, str, dict[str, str] | None]:
+        """Pin the default kit cohort and the same full input shown by the page.
+
+        A broken cohort or stale target must not turn an unrelated published
+        reference into a cohort result.  The metric then remains unreferenced.
+        """
+
+        if sample.example:
+            return None, None, "example", None
+        generation, problem = snapshot if snapshot is not None else self._published_sample_cohort()
+        if problem is not None:
+            return None, None, "cohort_unavailable", problem
+        if generation is None:
+            return None, None, "not_built", None
+        try:
+            target, pon_problem = _cohort_target(
+                self.store, generation, source_id, input_id=sample.full.input_id,
+            )
+        except LabProblem as error:
+            return generation, None, "target_unavailable", _recovery_problem(error)
+        except ValueError:
+            error = LabProblem("TBX-LAB-017", cause="sample has no readable current full input",
+                               fix="Inspect Lab runs, restore the input, then reload the sample")
+            return generation, None, "target_unavailable", _recovery_problem(error)
+        if target.source_id != source_id or target.input_id != sample.full.input_id:
+            error = LabProblem("TBX-LAB-017", cause="sample results changed while its cohort reference was loading",
+                               fix="Reload the sample to pin its current full input")
+            return generation, None, "stale_target", _recovery_problem(error)
+        return generation, target, "ready", _recovery_problem(pon_problem) if pon_problem else None
+
+    @staticmethod
+    def _interpret_sample_envelope(
+        envelope: Any, library: Library, depth_x: float | None, source_id: str,
+        generation: CohortGeneration | None, target: CohortMember | None,
+        *, include_interval: bool = True,
+    ) -> tuple[list[Any], dict[str, MetricProjection]]:
+        """Apply D8 only to library-declared cohort metrics, using D31 keys."""
+
+        if envelope.status != "ok" or generation is None or target is None:
+            return interpret_result(envelope, library, depth_x=depth_x,
+                                    include_interval=include_interval), {}
+        target_result = next((row for row in target.results if row.algorithm_id == envelope.algorithm_id), None)
+        if target_result is None or target_result.parameters_sha256 != envelope.provenance.parameters_sha256:
+            return interpret_result(envelope, library, depth_x=depth_x,
+                                    include_interval=include_interval), {}
+        projections: dict[str, MetricProjection] = {}
+        entries: dict[tuple[str, str], Entry] | None = None
+        for metric in envelope.metrics:
+            entry = library.entry(envelope.algorithm_id, metric.metric_id)
+            if entry is None or entry["reference"]["kind"] not in ("internal_cohort", "provisional_external"):
+                continue
+            if entry["value_kind"] in ("vector", "categorical"):
+                continue
+            projection = project_metric(
+                generation, algorithm_id=envelope.algorithm_id, metric_id=metric.metric_id,
+                cohort_compat_key=target_result.cohort_compat_key, target_source_id=source_id,
+            )
+            projections[metric.metric_id] = projection
+            if entry["reference"]["kind"] != generation.kind:
+                if entries is None:
+                    entries = dict(library.entries)
+                entries[(envelope.algorithm_id, metric.metric_id)] = Entry(
+                    envelope.algorithm_id, metric.metric_id,
+                    {**entry.raw, "reference": {"kind": generation.kind}},
+                )
+        interpreted = interpret_result(
+            envelope,
+            library if entries is None else Library(
+                version=library.version, entries=entries, licenses=library.licenses,
+                hidden_algorithms=library.hidden_algorithms,
+            ),
+            depth_x=depth_x,
+            cohorts={key: projection.interpretation_cohort() for key, projection in projections.items()},
+            include_interval=include_interval,
+        )
+        return interpreted, projections
+
+    def samples(self) -> dict[str, Any]:
+        for _ in range(3):
+            try:
+                with self.store.selection_read_context():
+                    return self._samples_once()
+            except SelectionSnapshotChanged:
+                continue
+        raise ResultOrderUnavailable("sample selections kept changing during read")
+
+    def _samples_once(self) -> dict[str, Any]:
+        library = self.libraries.get()
+        cohort_snapshot = self._published_sample_cohort()
+        completion_index, completed = completion_snapshot(self.store)
+        rows = []
+        source_history_unavailable = False
+        for source_id, id12 in self._id12s().items():
+            record = source_record(self.store, source_id) or {}
+            sample = views.load_sample(self.store, source_id, completion_index=completion_index)
+            if sample is None:
+                unavailable = completion_index.get(source_id)
+                uncertain = completion_history_unavailable(self.store, source_id, record, unavailable)
+                if uncertain and completion_history_unavailable(self.store, source_id, record, completed):
+                    source_history_unavailable = True
+                if uncertain or unavailable is not None:
+                    rows.append({
+                        "id12": id12,
+                        "state": "completion_history_unavailable" if uncertain else "completed_input_unavailable",
+                        "run_utc": "" if uncertain else unavailable["completed_utc"], "depth_x": None,
+                        "completed_utc": None if uncertain else unavailable["completed_utc"],
+                        "example": bool(record.get("example")),
+                        "counts": {"ok": 0, "skipped": 0, "failed": 0},
+                        "outside_reference": 0, "controls": {"spike": None, "split": False},
+                        "cohort_state": "unavailable", "unreadable_results": [],
+                        "ambiguous_results": [],
+                    })
+                continue
+            generation, target, cohort_state, cohort_problem = self._sample_cohort(
+                source_id, sample, cohort_snapshot,
+            )
+            completed_for_row = completion_index.get(source_id)
+            used = (completed_for_row["completed_utc"] if completed_for_row else
+                    max((entry.get("used_utc", "") for entry in record.get("inputs", [])), default=""))
+            counts = {"ok": 0, "skipped": 0, "failed": 0}
+            outside = 0
+            for envelope in sample.full.results.values():
+                if envelope.algorithm_id in library.hidden_algorithms:
+                    continue
+                counts[envelope.status] = counts.get(envelope.status, 0) + 1
+                interpreted, _ = self._interpret_sample_envelope(
+                    envelope, library, sample.full.depth_x(), source_id, generation, target,
+                    include_interval=False,
+                )
+                for row in interpreted:
+                    outside += int(row.interpretation.out_of_range)
+            spikes = views.synthetic(sample)
+            rows.append(
+                {
+                    "id12": id12,
+                    "run_utc": used,
+                    "completed_utc": sample.completed_utc,
+                    "depth_x": sample.full.depth_x(),
+                    "example": sample.example,
+                    "cohort_version": generation.version_id if generation else None,
+                    "cohort_kind": generation.kind if generation else None,
+                    "cohort_n": generation.percentile_n if generation else 0,
+                    "cohort_min": COHORT_MIN,
+                    "cohort_state": cohort_state,
+                    "cohort_problem": cohort_problem,
+                    "counts": counts,
+                    "outside_reference": outside,
+                    "controls": {
+                        "spike": None if not spikes else all(row["recovered"] for row in spikes if row["tf_expected"] >= 0.1),
+                        "split": bool(sample.by_transform("split")),
+                    },
+                    **_safe_result_selections(sample, [a.id for a in _registry()]),
+                }
+            )
+        rows.sort(key=lambda row: row["run_utc"], reverse=True)
+        history_unavailable = (source_history_unavailable
+                               or global_completion_history_unavailable(self.store, completed))
+        default_id12 = self._id12s().get(completed["source_id"]) if completed else None
+        if history_unavailable or default_id12 not in {
+            row["id12"] for row in rows if row.get("state") not in (
+                "completed_input_unavailable", "completion_history_unavailable",
+            )
+        }:
+            default_id12 = None
+        return {"samples": rows, "default_sample_id12": default_id12,
+                "completed_input_unavailable": bool(completed and default_id12 is None and not history_unavailable),
+                "completion_history_unavailable": history_unavailable,
+                "root_has_runs": bool(self.store.run_ids())}
+
+    def _resolve(self, id12: str) -> tuple[str | None, list[str]]:
+        mapping = self._id12s()
+        match = resolve_prefix(id12, mapping)
+        if match.state == "found":
+            return match.value, []
+        return None, [mapping[value] for value in match.candidates]
+
+    def sample(self, id12: str) -> dict[str, Any]:
+        for _ in range(3):
+            try:
+                with self.store.selection_read_context():
+                    return self._sample_once(id12)
+            except SelectionSnapshotChanged:
+                continue
+        raise ResultOrderUnavailable("sample selections kept changing during read")
+
+    def _sample_once(self, id12: str) -> dict[str, Any]:
+        source_id, candidates = self._resolve(id12)
+        if source_id is None:
+            return {"found": False, "candidates": candidates}
+        sample = views.load_sample(self.store, source_id)
+        if sample is None:
+            record = source_record(self.store, source_id) or {}
+            completed = completed_for_source(self.store, source_id, record)
+            if completion_history_unavailable(self.store, source_id, record, completed):
+                return {"found": True, "state": "completion_history_unavailable",
+                        "id12": self._id12s()[source_id], "source_id": source_id,
+                        "completed_utc": None}
+            if completed is not None:
+                return {"found": True, "state": "completed_input_unavailable",
+                        "id12": self._id12s()[source_id], "source_id": source_id,
+                        "run_utc": completed["completed_utc"],
+                        "completed_utc": completed["completed_utc"]}
+            return {"found": False, "candidates": []}
+        library = self.libraries.get()
+        record = source_record(self.store, source_id) or {}
+        depth_x = sample.full.depth_x()
+        registry = _registry()
+        input_gates = {algorithm.id: getattr(algorithm, "input_gate", None) for algorithm in registry}
+        generation, target, cohort_state, cohort_problem = self._sample_cohort(source_id, sample)
+        algorithms = []
+        no_entry = 0
+        unverified: set[tuple[str, str]] = set()
+        used_licenses: list[str] = []
+        for algorithm_id, envelope in sample.full.results.items():
+            metrics = []
+            cis = {m.metric_id: (m.ci, m.ci_level) for m in envelope.metrics}
+            interpreted, projections = self._interpret_sample_envelope(
+                envelope, library, depth_x, source_id, generation, target,
+            )
+            selected_target = next((result for result in target.results if result.algorithm_id == algorithm_id), None) if target else None
+            target_result_state = (
+                "missing_selected_result" if selected_target is None else
+                "stale_parameters" if selected_target.parameters_sha256 != envelope.provenance.parameters_sha256 else None
+            ) if generation is not None and target is not None and envelope.status == "ok" else None
+            for row in interpreted:
+                if algorithm_id == "microbial" and row.metric_id.startswith("taxon_"):
+                    # Taxid metrics enter the immutable cohort snapshot; the
+                    # dedicated profile gives them names and 97.5th percentiles.
+                    continue
+                entry = row.entry
+                license_ids = _result_license_ids(
+                    entry, algorithm_id, envelope.algorithm_version, envelope.status,
+                )
+                if entry is None and algorithm_id not in library.hidden_algorithms:
+                    no_entry += 1
+                elif (entry is not None and algorithm_id not in library.hidden_algorithms
+                      and not entry.citation_verified):
+                    unverified.add((row.algorithm_id, row.metric_id))
+                for license_id in license_ids:
+                    if license_id not in used_licenses:
+                        used_licenses.append(license_id)
+                payload = _metric_payload(row, entry, qc_band(row.value, entry))
+                if payload["entry"] is not None:
+                    payload["entry"]["license_ids"] = license_ids
+                payload["cohort_target_state"] = (
+                    target_result_state if entry is not None and
+                    entry["reference"]["kind"] in ("internal_cohort", "provisional_external") else None
+                )
+                projection = projections.get(row.metric_id)
+                payload["eligible_n"] = projection.percentile_n if projection else None
+                payload["cohort_values"] = list(projection.values) if projection else []
+                payload["cohort_excluded"] = dict(projection.exclusions) if projection else {}
+                payload["cohort_mean"] = (
+                    sum(projection.values) / projection.percentile_n
+                    if projection and projection.percentile_n >= COHORT_MIN else None
+                )
+                stored = cis.get(row.metric_id)
+                payload["ci"] = list(stored[0]) if stored and stored[0] else None
+                payload["ci_level"] = stored[1] if stored else None
+                metrics.append(payload)
+            headline = library.headline(algorithm_id)
+            algorithms.append(
+                {
+                    "algorithm_id": algorithm_id,
+                    "algorithm_version": envelope.algorithm_version,
+                    "hidden": algorithm_id in library.hidden_algorithms,
+                    "status": envelope.status,
+                    "skip_reason": envelope.skip_reason,
+                    "skip_message": envelope.skip_message,
+                    "failure": envelope.failure.model_dump() if envelope.failure else None,
+                    "duration_s": envelope.duration_s,
+                    "tier": headline.tier if headline else None,
+                    "min_depth_x": headline.get("min_depth_x") if headline else None,
+                    "input_gate": input_gates.get(algorithm_id),
+                    "headline_metric": headline.metric_id if headline else None,
+                    "panels": [{"panel_id": panel.panel_id, "kind": panel.kind} for panel in envelope.panels],
+                    "metrics": metrics,
+                    "provenance": {
+                        "tool": envelope.provenance.tool,
+                        "tool_version": envelope.provenance.tool_version,
+                        "parameters_sha256": envelope.provenance.parameters_sha256,
+                        "attempt_id": sample.full.attempt_ids.get(algorithm_id),
+                        "input_id": envelope.provenance.input_id,
+                        "source_id": envelope.provenance.source_id,
+                        "reference_id": envelope.provenance.reference_id,
+                        "timestamp_utc": envelope.provenance.timestamp_utc,
+                    },
+                }
+            )
+        order = [a.id for a in registry]
+        algorithms.sort(key=lambda row: order.index(row["algorithm_id"]) if row["algorithm_id"] in order else 99)
+        panels = views.stability_panels(sample, library)
+        curve = views.depth_curve(sample, library)
+        synthetic = views.synthetic(sample)
+        defended_block, headline_block = _defended(algorithms, curve, panels, synthetic, library, order, depth_x)
+        fragment = sample.full.results.get("fragment-size")
+        density_band = project_density_band(
+            generation, target, source_id,
+            fragment.provenance.parameters_sha256 if fragment is not None and fragment.status == "ok" else None,
+            cohort_state,
+        )
+        identity_tool_unavailable = ("identity" in sample.full.results and somalier_tool() is None)
+        identity_pairs = [] if identity_tool_unavailable else pairs_for_sample(self.store, source_id)
+        return {
+            "found": True,
+            "id12": self._id12s()[source_id],
+            "source_id": source_id,
+            "full_input_id": sample.full.input_id,
+            "platform": sample.platform,
+            "example": sample.example,
+            "completed_utc": sample.completed_utc,
+            "run_utc": sample.completed_utc or max(
+                (entry.get("used_utc", "") for entry in record.get("inputs", [])), default="",
+            ),
+            "depth": next((env.depth.model_dump() for env in sample.full.results.values() if env.depth), None),
+            "excluded_chunks": record.get("excluded", []),
+            "preanalytic_sex": views.sex_check_view(sample),
+            "interpretation_version": library.version,
+            "cohort_version": generation.version_id if generation else None,
+            "cohort_kind": generation.kind if generation else None,
+            "cohort_n": generation.percentile_n if generation else 0,
+            "cohort_min": COHORT_MIN,
+            "cohort_id": generation.cohort_id if generation else "healthy-v1",
+            "cohort_state": cohort_state,
+            "cohort_problem": cohort_problem,
+            "agreement_pairs": _agreement_pairs(sample, generation, target, source_id, cohort_state),
+            "size_density_band": density_band,
+            "algorithms": algorithms,
+            **_safe_result_selections(sample, order),
+            "microbial_profile": profile_for_sample(self.store, sample, generation, target, cohort_state),
+            "identity_pairs": identity_pairs,
+            "identity_pairs_reason": (
+                "Somalier is unavailable; reinstall the pinned tool and rerun identity before comparing."
+                if identity_tool_unavailable else None
+            ),
+            "curve": curve,
+            "stability": panels,
+            "stability_unavailable": [
+                {"algorithm_id": algorithm_id, "reason": "full-depth result unreadable"}
+                for algorithm_id in sorted(sample.full.unreadable & set(order))
+            ] + [
+                {"algorithm_id": algorithm_id, "reason": "full-depth result selection ambiguous"}
+                for algorithm_id in sorted(sample.full.ambiguous & set(order))
+            ],
+            "repeatability": views.repeatability(panels),
+            "synthetic": synthetic,
+            "concordance": report_tf_concordance(sample, generation, target),
+            "defended": defended_block,
+            "headline": headline_block,
+            "derived": [{"label": view.label, "transform": view.transform} for view in sample.derived],
+            "licenses": [{"license_id": key, **library.licenses[key]} for key in _all_used(used_licenses, library, order)],
+            "method_counts": {
+                "registered_steps": len(order),
+                "hidden_processing_steps": sorted(set(order) & library.hidden_algorithms),
+                "visible_methods": sum(algorithm_id not in library.hidden_algorithms for algorithm_id in order),
+            },
+            "catalog": _catalog(library, order, algorithms, sample.full.unreadable, sample.full.ambiguous,
+                                registry=registry),
+            "excluded": EXCLUDED,
+            "library_health": {
+                **self.libraries.health(),
+                "no_library_entry": no_entry,
+                "unverified_citations": len(unverified),
+            },
+        }
+
+    def run_log_line(self, id12: str, algorithm_id: str,
+                     expected_input_id: str | None = None, expected_identity: str | None = None,
+                     expected_attempt_id: str | None = None) -> dict[str, Any]:
+        for _ in range(3):
+            try:
+                with self.store.selection_read_context():
+                    return self._run_log_line_once(id12, algorithm_id, expected_input_id,
+                                                   expected_identity, expected_attempt_id)
+            except SelectionSnapshotChanged:
+                continue
+        raise ResultOrderUnavailable("result selections kept changing during run-log read")
+
+    def _run_log_line_once(self, id12: str, algorithm_id: str,
+                           expected_input_id: str | None = None, expected_identity: str | None = None,
+                           expected_attempt_id: str | None = None) -> dict[str, Any]:
+        """Return a bounded, allowlisted step-end line for the selected full result."""
+
+        source_id, _ = self._resolve(id12)
+        if source_id is None:
+            return {"found": False}
+        sample = views.load_sample(self.store, source_id)
+        if sample is None:
+            return {"found": False}
+        result = sample.full.results.get(algorithm_id)
+        if result is None:
+            return {"found": False}
+        identity = result.provenance.parameters_sha256
+        if (expected_input_id is not None and expected_input_id != sample.full.input_id
+                or expected_identity is not None and expected_identity != identity):
+            return {"found": False}
+        selected = self.store.selected_attempt(sample.full.input_id, algorithm_id, identity)
+        if selected is None:
+            return {"found": False}
+        if expected_attempt_id is not None and expected_attempt_id != selected.name:
+            return {"found": False}
+        for run_id in _recent_run_ids(self.store):
+            events, reason = _run_events(self.store, run_id)
+            if reason or events[0][1]["event"] != "run_start":
+                continue
+            if not any(
+                event.get("event") == "sample"
+                and event.get("source_id") == source_id
+                and event.get("input_id") == sample.full.input_id
+                for _, event in events
+            ):
+                continue
+            for number, event in reversed(events):
+                if (event.get("event") != "step_end" or event.get("step") != algorithm_id
+                        or event.get("parameters_sha256") != identity
+                        or event.get("input_id") != sample.full.input_id
+                        or event.get("attempt_id") != selected.name
+                        or event.get("status") != result.status
+                        or event.get("status") not in ("ok", "skipped", "failed")):
+                    continue
+                utc = event.get("utc")
+                reason = event.get("skip_reason")
+                duration = event.get("duration_s")
+                return {
+                    "found": True,
+                    "run_id": run_id,
+                    "line": number,
+                    "step": algorithm_id,
+                    "utc": utc if isinstance(utc, str) and re.fullmatch(r"[0-9TZ:.+-]{1,40}", utc) else None,
+                    "status": event["status"],
+                    "skip_reason": reason if isinstance(reason, str) and re.fullmatch(r"[a-z0-9_-]{1,64}", reason) else None,
+                    "duration_s": duration if isinstance(duration, (int, float)) and not isinstance(duration, bool)
+                    and math.isfinite(duration) and 0 <= duration <= 1e9 else None,
+                }
+        return {"found": False}
+
+    # -- Compare (L1.6): one pinned immutable cohort generation ----------------------
+    def cohorts(self) -> dict[str, Any]:
+        rows = []
+        unavailable = []
+        try:
+            listings = list_cohorts(self.store)
+        except LabProblem as problem:
+            return {"cohorts": [], "unavailable": [], "problem": _recovery_problem(problem)}
+        for listing in listings:
+            if listing.problem is not None:
+                unavailable.append({"cohort_id": listing.cohort_id,
+                                    "problem": _recovery_problem(listing.problem)})
+                continue
+            generation = listing.generation
+            if generation is not None:
+                rows.append({
+                    "cohort_id": listing.cohort_id,
+                    "cohort_version": generation.version_id,
+                    "kind": generation.kind,
+                    "member_n": generation.percentile_n,
+                    "pon_n": generation.pon_n,
+                })
+        return {"cohorts": rows, "unavailable": unavailable}
+
+    def compare(self, id12: str, cohort_id: str) -> dict[str, Any]:
+        for _ in range(3):
+            try:
+                with self.store.selection_read_context():
+                    return self._compare_once(id12, cohort_id)
+            except SelectionSnapshotChanged:
+                continue
+        raise ResultOrderUnavailable("cohort selections kept changing during comparison")
+
+    def _compare_once(self, id12: str, cohort_id: str) -> dict[str, Any]:
+        source_id, candidates = self._resolve(id12)
+        if source_id is None:
+            return {"found": False, "candidates": candidates}
+        sample = views.load_sample(self.store, source_id)
+        if sample is None:
+            problem = LabProblem(
+                "TBX-LAB-017", cause=f"sample {id12} has no readable current full input",
+                fix=("Inspect `traceback lab runs` and restore the source record, completed-run log, "
+                     "or pinned input manifest from a known-good backup as needed. If the pinned "
+                     "manifest is intact, rerun the sample from its original input under this ROOT "
+                     "and reload Compare. If the manifest cannot be restored, re-ingest the original "
+                     "input under a fresh ROOT, rebuild the cohort there, then serve that ROOT "
+                     "and open Compare"),
+            )
+            return {"found": True, "id12": id12, "cohort_id": cohort_id,
+                    "state": "target_unavailable", "metrics": [], "unscored": [],
+                    "problem": _recovery_problem(problem)}
+        try:
+            generation = read_current(self.store, cohort_id)
+        except LabProblem as problem:
+            return {"found": True, "id12": id12, "cohort_id": cohort_id,
+                    "state": "cohort_unavailable", "metrics": [], "unscored": [],
+                    "problem": _recovery_problem(problem)}
+        if generation is None:
+            problem = LabProblem(
+                "TBX-LAB-017", cause=f"cohort {cohort_id} has no published generation",
+                fix="Run `" + shlex.join(["traceback", "lab", "cohort", "build", "--cohort", cohort_id,
+                                          "--root", "<ROOT>"]) + "`, then reload Compare",
+            )
+            return {"found": True, "id12": id12, "cohort_id": cohort_id,
+                    "state": "cohort_unavailable", "metrics": [], "unscored": [],
+                    "problem": _recovery_problem(problem)}
+        base = {
+            "found": True,
+            "id12": self._id12s()[source_id],
+            "input_id": sample.full.input_id,
+            "cohort_id": cohort_id,
+            "cohort_version": generation.version_id,
+            "kind": generation.kind,
+            "member_n": generation.percentile_n,
+            "pon_n": generation.pon_n,
+            "store_generation": self.store.generation(),
+        }
+        # EXAMPLE cannot enter the real kit cohort, and its invented biological
+        # values must not be presented as a patient-vs-cohort comparison.
+        if sample.example:
+            return {**base, "state": "example_unscorable", "metrics": [], "unscored": []}
+        try:
+            target, pon_problem = _cohort_target(
+                self.store, generation, source_id, input_id=sample.full.input_id,
+            )
+        except LabProblem as problem:
+            if problem.code == "TBX-LAB-021":
+                return {**base, "state": "example_unscorable", "metrics": [], "unscored": []}
+            if (problem.code == "TBX-LAB-020"
+                    and problem.data.get("input_id") == sample.full.input_id
+                    and problem.data.get("field") in ("source input identity", "manifest")):
+                if problem.data["field"] == "source input identity":
+                    fix = (f"Restore the pinned source record entry for input {sample.full.input_id[:12]} "
+                           "from a known-good backup, or rerun the sample from its original input, "
+                           "then reload Compare")
+                else:
+                    fix = (f"Restore the pinned input manifest for input {sample.full.input_id[:12]} "
+                           "from a known-good backup. If it cannot be restored, re-ingest the original "
+                           "input under a fresh ROOT, rebuild the cohort there, then serve that ROOT "
+                           "and open Compare. The existing input directory cannot be replaced in place")
+                problem = LabProblem(
+                    "TBX-LAB-020", cause=problem.cause, fix=fix, data=problem.data,
+                    summary="Pinned input unavailable",
+                )
+            return {**base, "state": "target_unavailable", "metrics": [], "unscored": [],
+                    "problem": _recovery_problem(problem)}
+        # Both reads must describe the same full input. A newer run may become
+        # current between load_sample and member_for_generation while retaining the
+        # same algorithm parameter hash; comparing its compatibility key with
+        # the older envelope would mix two sample snapshots.
+        if target.source_id != source_id or target.input_id != sample.full.input_id:
+            return {**base, "state": "stale_target", "metrics": [], "unscored": []}
+        current = {result.algorithm_id: result for result in target.results}
+        pon_dependent = _pon_dependent_algorithms() if pon_problem else set()
+        library = self.libraries.get()
+        rows = []
+        unscored = []
+        for algorithm_id, envelope in sample.full.results.items():
+            if algorithm_id in library.hidden_algorithms:
+                continue
+            if envelope.status != "ok":
+                unscored.append({"algorithm_id": algorithm_id, "status": envelope.status,
+                                 "reason": envelope.skip_reason or "failed"})
+                continue
+            scalar_metrics = []
+            for metric in envelope.metrics:
+                entry = library.entry(algorithm_id, metric.metric_id)
+                if entry is not None and entry["value_kind"] in ("vector", "categorical"):
+                    unscored.append({"algorithm_id": algorithm_id, "status": "non_scalar",
+                                     "reason": metric.metric_id})
+                    continue
+                if metric.value is None or (isinstance(metric.value, (int, float)) and not isinstance(metric.value, bool)):
+                    scalar_metrics.append(metric)
+            if not scalar_metrics:
+                continue
+            target_result = current.get(algorithm_id)
+            if target_result is None or target_result.parameters_sha256 != envelope.provenance.parameters_sha256:
+                unscored.append({"algorithm_id": algorithm_id, "status": "incompatible",
+                                 "reason": ("panel of normals unavailable" if algorithm_id in pon_dependent
+                                            else "current target result unavailable")})
+                continue
+            projections = {}
+            comparison_entries = dict(library.entries)
+            for metric in scalar_metrics:
+                entry = library.entry(algorithm_id, metric.metric_id)
+                if entry is None or entry["value_kind"] in ("vector", "categorical"):
+                    continue
+                projection = project_metric(
+                    generation, algorithm_id=algorithm_id, metric_id=metric.metric_id,
+                    cohort_compat_key=target_result.cohort_compat_key, target_source_id=source_id,
+                )
+                projections[metric.metric_id] = projection
+                # D8 still classifies the value. This copy applies only to the
+                # selected Compare response; the library and normal sample
+                # interpretation retain their original reference policy.
+                comparison_entries[(algorithm_id, metric.metric_id)] = Entry(
+                    algorithm_id, metric.metric_id,
+                    {**entry.raw, "reference": {"kind": generation.kind}},
+                )
+            comparison_library = Library(
+                version=library.version, entries=comparison_entries,
+                licenses=library.licenses, hidden_algorithms=library.hidden_algorithms,
+            )
+            interpreted = interpret_result(
+                envelope, comparison_library, depth_x=sample.full.depth_x(),
+                cohorts={metric_id: projection.interpretation_cohort()
+                         for metric_id, projection in projections.items()},
+            )
+            for row in interpreted:
+                if row.metric_id not in {metric.metric_id for metric in scalar_metrics}:
+                    continue
+                projection = projections.get(row.metric_id)
+                original_entry = library.entry(algorithm_id, row.metric_id)
+                payload = _metric_payload(row, original_entry, qc_band(row.value, original_entry))
+                payload.update({
+                    "algorithm_id": algorithm_id,
+                    "eligible_n": projection.percentile_n if projection else None,
+                    "cohort_values": list(projection.values) if projection else [],
+                    "excluded": dict(projection.exclusions) if projection else {},
+                    "aligner_counts": dict(projection.aligner_counts) if projection else {},
+                    "original_reference": original_entry.get("reference") if original_entry else None,
+                    "comparison_context": "selected_cohort" if projection else "no_library_entry",
+                })
+                rows.append(payload)
+        aligners: dict[str, int] = {}
+        for member in generation.members:
+            aligners[member.aligner_identity] = aligners.get(member.aligner_identity, 0) + 1
+        return {**base, "state": "ready", "target_aligner": target.aligner_identity,
+                "pon_problem": _recovery_problem(pon_problem) if pon_problem else None,
+                "aligner_counts": dict(sorted(aligners.items())),
+                "metrics": rows, "unscored": unscored}
+
+    def compare_samples(self, id12_a: str, id12_b: str) -> dict[str, Any]:
+        for _ in range(3):
+            try:
+                with self.store.selection_read_context():
+                    return self._compare_samples_once(id12_a, id12_b)
+            except SelectionSnapshotChanged:
+                continue
+        raise ResultOrderUnavailable("result selections kept changing during sample comparison")
+
+    def _compare_samples_once(self, id12_a: str, id12_b: str) -> dict[str, Any]:
+        """Compare two distinct current full-input snapshots, B minus A.
+
+        This is cross-sectional: source IDs identify samples, not visits or
+        donors.  Each metric needs both exact selected executions and the same
+        D31 compatibility key; no numeric threshold is inferred.
+        """
+
+        mapping = self._id12s()
+        a_match = resolve_prefix(id12_a, mapping)
+        b_match = resolve_prefix(id12_b, mapping)
+        if a_match.state != "found" or b_match.state != "found":
+            return {"found": False, "which": "a" if a_match.state != "found" else "b",
+                    "candidates": [mapping[key] for key in (a_match.candidates if a_match.state != "found" else b_match.candidates)]}
+        source_a, source_b = a_match.value, b_match.value
+        base = {"found": True, "id12_a": mapping[source_a], "id12_b": mapping[source_b],
+                "source_id_a": source_a, "source_id_b": source_b}
+        if source_a == source_b:
+            return {**base, "state": "same_sample", "metrics": [], "unscored": []}
+        samples = [views.load_sample(self.store, source) for source in (source_a, source_b)]
+        if any(sample is None for sample in samples):
+            return {**base, "state": "sample_unavailable", "which": "a" if samples[0] is None else "b",
+                    "metrics": [], "unscored": []}
+        sample_a, sample_b = samples
+        if sample_a.example or sample_b.example:
+            return {**base, "state": "example_unscorable", "metrics": [], "unscored": []}
+        try:
+            selected_a = member_from_store(self.store, source_a, input_id=sample_a.full.input_id)
+        except (LabProblem, ValueError):
+            return {**base, "state": "sample_unavailable", "which": "a", "metrics": [], "unscored": []}
+        try:
+            selected_b = member_from_store(self.store, source_b, input_id=sample_b.full.input_id)
+        except (LabProblem, ValueError):
+            return {**base, "state": "sample_unavailable", "which": "b", "metrics": [], "unscored": []}
+        library = self.libraries.get()
+        public_algorithms = {algorithm.id for algorithm in _registry()}
+        public_algorithms.update(algorithm_id for algorithm_id, _ in library.entries)
+        not_current: set[str] = set()
+        pon_dependent = _pon_dependent_algorithms()
+        # Pair Compare has no shared cohort-generation pin. Its independent
+        # member projection must never pool a selected PoN-bound CN or consumer.
+        selected_pon = any(
+            cn is not None and cn.status == "ok" and any(
+                metric.metric_id == "pon_policy" and metric.value not in (None, "none")
+                for metric in cn.metrics
+            )
+            for sample in samples for cn in (sample.full.results.get("copy-number"),)
+        )
+        unpaired_dependent = set(pon_dependent) if selected_pon else set()
+        for source, sample, selected, which in (
+            (source_a, sample_a, selected_a, "a"), (source_b, sample_b, selected_b, "b"),
+        ):
+            if selected.source_id != source or selected.input_id != sample.full.input_id:
+                return {**base, "state": "stale_sample", "which": which, "metrics": [], "unscored": []}
+            current = {result.algorithm_id: result for result in selected.results}
+            for algorithm_id, envelope in sample.full.results.items():
+                if algorithm_id not in public_algorithms:
+                    continue
+                if envelope.status != "ok":
+                    continue
+                if algorithm_id in unpaired_dependent:
+                    continue
+                pinned = current.get(algorithm_id)
+                if pinned is None:
+                    if algorithm_id in pon_dependent:
+                        unpaired_dependent.update(pon_dependent)
+                        continue
+                    # The stored view can outlive a registry version change or removal.
+                    not_current.add(algorithm_id)
+                    continue
+                if pinned.parameters_sha256 != envelope.provenance.parameters_sha256:
+                    if algorithm_id in pon_dependent:
+                        unpaired_dependent.update(pon_dependent)
+                        continue
+                    return {**base, "state": "stale_sample", "which": which, "metrics": [], "unscored": []}
+                for metric in envelope.metrics:
+                    value = metric.value
+                    if value is None or (isinstance(value, (int, float)) and not isinstance(value, bool)):
+                        if metric.metric_id not in pinned.metrics or pinned.metrics[metric.metric_id] != value:
+                            return {**base, "state": "stale_sample", "which": which, "metrics": [], "unscored": []}
+        selected_results_a = {result.algorithm_id: result for result in selected_a.results}
+        selected_results_b = {result.algorithm_id: result for result in selected_b.results}
+        rows: list[dict[str, Any]] = []
+        unscored: list[dict[str, str]] = []
+        for algorithm_id, envelope_a in sample_a.full.results.items():
+            if algorithm_id not in public_algorithms or algorithm_id in library.hidden_algorithms:
+                continue
+            if algorithm_id in unpaired_dependent:
+                unscored.append({"algorithm_id": algorithm_id, "metric_id": "*",
+                                 "reason": "selected_pon_not_paired" if selected_pon else "selected_method_not_paired"})
+                continue
+            envelope_b = sample_b.full.results.get(algorithm_id)
+            if envelope_b is None or envelope_a.status != "ok" or envelope_b.status != "ok":
+                unscored.append({"algorithm_id": algorithm_id, "metric_id": "*", "reason": "missing_or_not_ok"})
+                continue
+            if algorithm_id in not_current or algorithm_id not in selected_results_a or algorithm_id not in selected_results_b:
+                unscored.append({"algorithm_id": algorithm_id, "metric_id": "*", "reason": "not_current_result"})
+                continue
+            result_a, result_b = selected_results_a[algorithm_id], selected_results_b[algorithm_id]
+            if result_a.cohort_compat_key != result_b.cohort_compat_key:
+                unscored.append({"algorithm_id": algorithm_id, "metric_id": "*", "reason": "incompatible_protocol"})
+                continue
+            metrics_a = {metric.metric_id: metric for metric in envelope_a.metrics}
+            metrics_b = {metric.metric_id: metric for metric in envelope_b.metrics}
+            interpreted_a = {row.metric_id: row for row in interpret_result(envelope_a, library, depth_x=sample_a.full.depth_x(), include_interval=False)}
+            interpreted_b = {row.metric_id: row for row in interpret_result(envelope_b, library, depth_x=sample_b.full.depth_x(), include_interval=False)}
+            for metric_id in sorted(metrics_a.keys() | metrics_b.keys()):
+                metric_a, metric_b = metrics_a.get(metric_id), metrics_b.get(metric_id)
+                entry = library.entry(algorithm_id, metric_id)
+                if metric_a is None or metric_b is None:
+                    reason = "missing_metric"
+                elif entry is not None and entry["value_kind"] in ("vector", "categorical"):
+                    reason = "non_scalar"
+                elif any(not isinstance(metric.value, (int, float)) or isinstance(metric.value, bool)
+                         or not math.isfinite(metric.value) for metric in (metric_a, metric_b)):
+                    reason = "missing_or_non_numeric"
+                elif metric_a.unit != metric_b.unit:
+                    reason = "unit_mismatch"
+                elif interpreted_a[metric_id].interpretation.state == "not_interpretable" or interpreted_b[metric_id].interpretation.state == "not_interpretable":
+                    reason = "not_interpretable"
+                else:
+                    reason = None
+                if reason is not None:
+                    unscored.append({"algorithm_id": algorithm_id, "metric_id": metric_id, "reason": reason})
+                    continue
+                rows.append({
+                    "algorithm_id": algorithm_id, "metric_id": metric_id,
+                    "label": entry["label"] if entry is not None else metric_id,
+                    "value_kind": entry.get("value_kind") if entry is not None else None,
+                    "unit": metric_a.unit, "value_a": metric_a.value, "value_b": metric_b.value,
+                    "delta_b_minus_a": metric_b.value - metric_a.value,
+                    "parameters_sha256_a": result_a.parameters_sha256,
+                    "parameters_sha256_b": result_b.parameters_sha256,
+                })
+        for algorithm_id in sample_b.full.results.keys() - sample_a.full.results.keys():
+            if algorithm_id in public_algorithms and algorithm_id not in library.hidden_algorithms:
+                reason = ("selected_pon_not_paired" if selected_pon else "selected_method_not_paired") if algorithm_id in unpaired_dependent else "missing_or_not_ok"
+                unscored.append({"algorithm_id": algorithm_id, "metric_id": "*", "reason": reason})
+        return {**base, "state": "ready", "input_id_a": selected_a.input_id,
+                "input_id_b": selected_b.input_id, "aligner_a": selected_a.aligner_identity,
+                "aligner_b": selected_b.aligner_identity, "metrics": rows, "unscored": unscored}
+
+    # -- artifacts (D34 containment) -------------------------------------------------
+    def artifact(self, id12: str, label: str, algorithm_id: str, panel_id: str) -> bytes | None:
+        for _ in range(3):
+            try:
+                with self.store.selection_read_context():
+                    return self._artifact_once(id12, label, algorithm_id, panel_id)
+            except SelectionSnapshotChanged:
+                continue
+        raise ResultOrderUnavailable("result selections kept changing during artifact read")
+
+    def _artifact_once(self, id12: str, label: str, algorithm_id: str, panel_id: str) -> bytes | None:
+        source_id, _ = self._resolve(id12)
+        if source_id is None:
+            return None
+        sample = views.load_sample(self.store, source_id)
+        if sample is None:
+            return None
+        view = sample.full if label == "full" else next((v for v in sample.derived if v.label == label), None)
+        if view is None:
+            return None
+        envelope = view.results.get(algorithm_id)
+        if envelope is None or envelope.status != "ok":
+            return None
+        panel = next((p for p in envelope.panels if p.panel_id == panel_id), None)
+        if panel is None:
+            return None
+        attempt = self.store.selected_attempt(view.input_id, algorithm_id, envelope.provenance.parameters_sha256)
+        if attempt is None:
+            return None
+        parts = [view.input_id, algorithm_id, envelope.provenance.parameters_sha256, "attempts", attempt.name]
+        return _read_contained(self.store.results_dir, parts, panel.data_ref)
+
+
+def _defended(
+    algorithms: list[dict[str, Any]],
+    curve: dict[str, Any],
+    panels: list[dict[str, Any]],
+    synthetic: list[dict[str, Any]],
+    library: Library,
+    order: list[str],
+    depth_x: float | None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    from ..defended import Candidate, defended, headline
+
+    rows = {row["algorithm_id"]: row for row in curve["rows"]}
+    by_metric = {(panel["algorithm_id"], panel["metric_id"]): panel for panel in panels}
+    spike = next((row for row in synthetic if abs(row["tf_expected"] - 0.10) < 1e-9), None)
+    candidates = []
+    usable = total = failed = 0
+    min_depths: dict[str, float | None] = {}
+    for algorithm in algorithms:
+        if algorithm["hidden"]:
+            continue
+        total += 1
+        failed += int(algorithm["status"] == "failed")
+        entry = library.headline(algorithm["algorithm_id"])
+        min_depths[algorithm["algorithm_id"]] = entry.get("min_depth_x") if entry else None
+        row = rows.get(algorithm["algorithm_id"])
+        if row and row["full_state"] == "ok_usable":
+            usable += 1
+        if entry is None:
+            continue
+        metric = next((m for m in algorithm["metrics"] if m["metric_id"] == entry.metric_id), None)
+        half = next((c for c in (row or {}).get("cells", []) if c["fraction"] == 0.5), None)
+        panel = by_metric.get((algorithm["algorithm_id"], entry.metric_id))
+        split = panel.get("split") if panel else None
+        candidates.append(
+            Candidate(
+                algorithm_id=algorithm["algorithm_id"],
+                label=entry["label"],
+                value=metric["value"] if metric else None,
+                unit=metric["unit"] if metric else None,
+                tier=entry.tier,
+                status=algorithm["status"],
+                state=metric["state"] if metric else None,
+                usable_at_half=bool(half and half.get("state") == "ok_usable"),
+                split_stable=split.get("stable") if split else None,
+                split_relative_diff=split.get("relative_abs_diff") if split else None,
+                citation_verified=entry.citation_verified,
+                control_recovered=(spike["recovered"] if spike else False) if algorithm["algorithm_id"] == "copy-number" else None,
+                order=order.index(algorithm["algorithm_id"]) if algorithm["algorithm_id"] in order else 99,
+                license_ids=_result_license_ids(
+                    entry, algorithm["algorithm_id"], algorithm.get("algorithm_version", ""),
+                    algorithm["status"],
+                ),
+            )
+        )
+    block = defended(candidates)
+    sentence = headline(
+        depth_x, usable, total, len(block["rows"]), min_depths, downsampled=curve["downsampled"], failed=failed
+    )
+    return block, sentence
+
+
+EXCLUDED = [
+    {"id": "jagged-ends", "reason": "needs Jag-seq library preparation; not computable from a standard ONT BAM"},
+    {"id": "low-vaf-snv", "reason": "needs a matched tumour sample; not computable from one plasma BAM"},
+]
+
+
+def _result_license_ids(
+    entry: Entry | None, algorithm_id: str, algorithm_version: str, status: str,
+) -> list[str]:
+    """Keep modkit disclosure on stored v1 results; later runs use the Lab decoder."""
+
+    licenses = list(entry.get("license_ids") or []) if entry else []
+    if (algorithm_id == "cell-origin" and algorithm_version in {"", "1"} and status == "ok"
+            and "modkit-ont-public" not in licenses):
+        licenses.append("modkit-ont-public")
+    return licenses
+
+
+def _all_used(used: list[str], library: Library, order: list[str]) -> list[str]:
+    """Licenses of every registered algorithm's entries (Evidence lists them all)."""
+
+    out = list(used)
+    for (algorithm_id, _), entry in library.entries.items():
+        if algorithm_id in order:
+            for license_id in entry.get("license_ids") or []:
+                if license_id not in out:
+                    out.append(license_id)
+    return out
+
+
+def _catalog(
+    library: Library, order: list[str], algorithms: list[dict[str, Any]],
+    unreadable: set[str] | None = None, ambiguous: set[str] | None = None,
+    *, registry: Iterable[Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Read-time catalog of visible methods and selected-result availability."""
+
+    by_id = {row["algorithm_id"]: row for row in algorithms}
+    registered = {algorithm.id: algorithm for algorithm in (registry if registry is not None else _registry())}
+    unreadable = unreadable or set()
+    ambiguous = ambiguous or set()
+    rows = []
+    for algorithm_id in order:
+        if algorithm_id in library.hidden_algorithms:
+            continue
+        entry = library.headline(algorithm_id)
+        licenses: list[str] = []
+        citations: list[str] = []
+        for (alg, _), item in library.entries.items():
+            if alg == algorithm_id:
+                for license_id in item.get("license_ids") or []:
+                    if license_id not in licenses:
+                        licenses.append(license_id)
+                for citation in item.get("citations") or []:
+                    if citation not in citations:
+                        citations.append(citation)
+        performance = entry.get("performance") if entry else None
+        method = library.method_catalog.get(algorithm_id)
+        declared = registered.get(algorithm_id)
+        result = by_id.get(algorithm_id)
+        status = result["status"] if result else (
+            "unreadable" if algorithm_id in unreadable else
+            "ambiguous" if algorithm_id in ambiguous else "not run"
+        )
+
+        if result is not None:
+            for license_id in _result_license_ids(
+                entry, algorithm_id, result.get("algorithm_version", ""), result["status"],
+            ):
+                if license_id not in licenses:
+                    licenses.append(license_id)
+        rows.append(
+            {
+                "algorithm_id": algorithm_id,
+                "label": entry["label"] if entry else algorithm_id,
+                "has_library_entry": entry is not None,
+                "tier": entry.tier if entry else None,
+                "origin_tier": entry.get("origin_tier") if entry else None,
+                "origin_platform": entry.get("origin_platform") if entry else None,
+                "footnote": (performance or {}).get("value") if performance else (entry.get("performance_missing_reason") if entry else None),
+                "footnote_source": (performance or {}).get("source") if performance else None,
+                "min_depth_x": entry.get("min_depth_x") if entry else None,
+                "license_ids": licenses,
+                "citation_checked": bool(entry and entry.citation_verified),
+                "status": status,
+                "skip_reason": result["skip_reason"] if result else None,
+                "family": declared.family if declared else None,
+                "platforms": sorted(declared.requires.platforms) if declared else [],
+                "min_eligible_reads": declared.requires.min_eligible_reads if declared else None,
+                "requires_mm_tags": declared.requires.mm_tags if declared else None,
+                "description": method["description"] if method else None,
+                "question": method["question"] if method else None,
+                "limitations": method["limitations"] if method else None,
+                "requirements": list(method["requirements"]) if method else [],
+                "citations": citations,
+                "environment_readiness": "unknown",
+                "readiness_checked_at": None,
+            }
+        )
+    return rows
+
+
+def _registry() -> Iterable[Any]:
+    from ..registry import load_registry
+
+    return load_registry()
+
+
+def _metric_payload(row: Any, entry: Any, band: str | None) -> dict[str, Any]:
+    interpretation = row.interpretation
+    payload: dict[str, Any] = {
+        "metric_id": row.metric_id,
+        "label": row.label,
+        "value": row.value,
+        "unit": row.unit,
+        "n": row.n,
+        "state": interpretation.state,
+        "reason": interpretation.reason,
+        "caption": interpretation.caption,
+        "reference_kind": interpretation.reference_kind,
+        "exploratory_n": interpretation.exploratory_n,
+        "percentile": interpretation.percentile,
+        "interval": list(interpretation.interval) if interpretation.interval else None,
+        "severity": interpretation.severity,
+        "qc_band": band,
+        "tier": row.tier,
+        "entry": None,
+    }
+    if entry is not None:
+        payload["entry"] = {
+            key: entry.get(key)
+            for key in (
+                "value_kind",
+                "origin_tier",
+                "origin_platform",
+                "min_depth_x",
+                "reference",
+                "performance",
+                "performance_missing_reason",
+                "meaning_high",
+                "meaning_low",
+                "confounders",
+                "next_steps",
+                "license_ids",
+                "flags",
+                "headline",
+                "citations",
+                "citation_checked",
+            )
+        }
+        if not entry.citation_verified:
+            payload["entry"]["citation_checked"] = None
+    return payload
+
+
+__all__ = ["LabApi", "LibraryHolder"]

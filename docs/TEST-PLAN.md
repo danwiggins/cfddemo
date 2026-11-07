@@ -1,6 +1,9 @@
 # Traceback Release-One Test Plan
 
-Status: `/autoplan` review artifact
+Status: release-gate plan, not a record of gates passed. The current CI,
+slow-suite and synthetic-canary commands are recorded in
+`docs/DEVELOPMENT-CONTROL.md`; Lab method and real-input limitations are in
+`docs/LAB-GUIDE.md`.
 
 ## Test architecture
 
@@ -59,3 +62,14 @@ strict contracts and state transitions
 
 Synthetic metadata fixtures prove orchestration only. They do not qualify
 Dorado, chemistry, the scientific measurement, or hardware.
+
+## Current evidence boundary
+
+The repository has offline runner, web, Lab, and method tests, plus a generated
+BAM canary on macOS and Ubuntu. A test passing on a synthetic BAM proves the
+named software behavior under that fixture; it does not satisfy the real POD5,
+wet-lab, approved-host, five-operator, or paid-pilot gates above. Lab outputs
+remain unsigned research results, and a development-signed runner record remains
+unqualified. Record each external gate separately with its exact input,
+workflow, host, protocol, reviewer, and observed result before changing a
+release capability.

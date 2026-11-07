@@ -1,7 +1,10 @@
-<!-- /autoplan restore point: ~/.gstack/projects/danwiggins-cfddemo/docs-golden-path-mvp-slice-autoplan-restore-20261002-161756.md -->
+<!-- /autoplan restore point: local planning snapshot, 2026-10-02 -->
 # Golden-path MVP slice and engineering hygiene
 
 Status: draft spec, 2026-10-02. Verified against `main` at `d3739ca`.
+Public copy note: historical review summaries and pending-gate wording below
+are redacted or paraphrased where input-specific details appeared; they are
+not verbatim transcripts.
 Update 2026-10-03: the Context and the item tables describe `main` at
 `d3739ca`. Since then CI (#91), `traceback run` on a real BAM (Milestone 1,
 #92) and the E12 browser routes, view, Save and Reopen (#93, `bc237e0`) have
@@ -18,9 +21,10 @@ protocol, or makes a record fit for clinical use.
 ## Context
 
 Every stage of the golden path already exists as a library API. A scratch
-script (`glue.py`, deep review 2026-10-02) drove a real 2.1 GB hg38 BAM through
+script (`glue.py`, deep review 2026-10-02) drove a local hg38 BAM through
 measurement, a signed bundle, an E04 catalog import and the loopback explorer
-in under 30 s of compute. No CLI command connects those stages. An operator
+in a bounded manual run. Input-specific timings are omitted here. No CLI
+command connects those stages. An operator
 today can run `traceback demo` (synthetic) and `traceback preflight`, which
 blocks the real BAM. Everything after that needs Python.
 
@@ -40,7 +44,7 @@ is the first step of that order. Track B is the third.
 | Stage | Library API | CLI today | Gap |
 |---|---|---|---|
 | Reference registration | `RegisteredReference` (`traceback_runner/contracts.py:163-175`) | none | Preflight hard-codes `synthetic_registered_reference()` (`traceback_runner/cli.py:601`) |
-| Preflight | `validate_bam_snapshot` (`traceback_runner/preflight.py:155`) | `traceback preflight BAM` | `_reference_matches` (`preflight.py:46-58`) requires `AS` and `M5` on every `@SQ` line; the real BAM has neither, so TBX-BAM-002 blocks |
+| Preflight | `validate_bam_snapshot` (`traceback_runner/preflight.py:155`) | `traceback preflight BAM` | `_reference_matches` (`preflight.py:46-58`) requires `AS` and `M5` on every `@SQ` line; inputs without those optional declarations are blocked by TBX-BAM-002 |
 | Measurement + sign | `scan_aligned_reference_spans`, `finalize_measurement`, `build_result_bundle` (`traceback_runner/bundles.py:180`) | `traceback demo` only (synthetic) | `traceback run` always returns TBX-RUN-003 (`cli.py:226-238`, dispatched at `cli.py:1224`) |
 | Approval label | `ApprovalState` has one member, `UNAPPROVED_SYNTHETIC` (`contracts.py:40-41`) | n/a | Pinned as a `Literal` at `contracts.py:205, 238, 389, 470`; `WorkflowRelease.synthetic_only: Literal[True]` (`contracts.py:239`) |
 | Verify | `verify_bundle` | `traceback verify BUNDLE --trust-store/--trust-registry` (`cli.py:99-111`) | works |
@@ -48,11 +52,10 @@ is the first step of that order. Track B is the third.
 | Result view | E06 result-view artifact | none | glue run: catalog row has `has_registered_view: false`, result detail GET returns 404 |
 | Serve | `RunningLocalWebService.start(..., explorer=...)` (`traceback_runner/web/server.py:1128-1135`) | `traceback reader launch` | `reader launch` opens `ROOT/runner.sqlite3` (`traceback_runner/reader_cli.py:811`); `demo` writes `ROOT/runner/runner.sqlite3` (`cli.py:556, 626`). `explorer` is never passed (`reader_cli.py:812-817`), so `/api/v1/explorer/catalog` answers unavailable (`server.py:842-853`) |
 
-Measured on the real BAM (glue run, library level): preflight 14.8 s,
-measurement 9.9 s, 5,822,296 records scanned, 3,435,813 eligible primary
-alignments, 195 `@SQ` lines matching the 195-line `hg38.primary.fa.fai`. The
-BAM has no `@RG`, `M5` or `AS` tags and no MM/ML modification tags
-(TBX-MOD-001 is PARTIAL).
+The manual glue run exercised preflight and measurement on a local input;
+missing optional reference and modification declarations exposed preflight
+and TBX-MOD-001 limitations. Its input-specific counts and timings are omitted
+here; the qualitative header limitations above remain part of the plan.
 
 Honesty defect found in the glue run: the catalog row reported
 `qualification_state: "qualified"` for an unqualified local record, because the
@@ -92,7 +95,7 @@ the machine therefore excludes every other.
 | D6 | Serve entry point (B6) | New `traceback serve --root ROOT`, operator (bootstrap) session, not a reader launch | The security spec's H1 makes reader-launched sessions 403 on the explorer routes; an operator session keeps the catalog route usable |
 | D7 | Signing in `run` | Development trust (same key flow as `demo`, `cli.py:563-567`) | Production custody is out of scope; every output keeps `development_trust_only: true` |
 | D8 | Branch protection | Documented `gh api` command, not executed | Repo admin action is Dan's |
-| D9 | Real BAM in CI | No. CI uses a generated small BAM + tiny FASTA; the real BAM run is manual evidence | 2.1 GB data is local-only and must never be committed |
+| D9 | Real BAM in CI | No. CI uses a generated small BAM + tiny FASTA; the real BAM run is manual evidence | The real input and its measurement values remain local and must never be committed |
 | D11 | Where measurement v2 lives | New `result-bundle.v3` + new catalog reader; v2 bundles unchanged | The catalog picks one reader per bundle version and matches the measurement tuple exactly (`result_catalog.py:400-420`) |
 | D12 | `WorkflowRelease` v2 | Not bumped | Never constructed or persisted today (`cli.py:550`); bumping it would be ceremony. Revisit at E0 |
 | D13 | Trust namespace for local records | New `development-local` namespace (B3b) | A local record signed as `development-synthetic` is a false label inside signed bytes |
@@ -233,8 +236,8 @@ Matching (D1), replacing `_reference_matches`:
 - If `M5` or `AS` is absent on any line: WARN, problem text "BAM header lacks M5/AS; contig names and lengths match the registered reference", remediation "Optional: `samtools reheader` with M5/AS for full provenance".
 
 Acceptance:
-1. `reference register` on `data/local/reference/hg38.primary.fa` produces 195 contigs and finishes in under 5 min on Dan's Mac (recorded as evidence, not a CI test).
-2. `preflight data/local/alignment-work/aligned.sorted.bam --reference hg38-local --root R` reports TBX-BAM-002 WARN, overall outcome PARTIAL (TBX-MOD-001 is PARTIAL), `fragment_measurement_eligible: true`, exit 0.
+1. `reference register` on the operator's local hg38 primary FASTA produces 195 reference contigs and finishes in under 5 min on the operator workstation (recorded privately, not a CI test).
+2. `preflight <local-aligned-bam> --reference hg38-local --root R` on a designated real acceptance input with no `M5`/`AS` declarations or sampled modification tags reports TBX-BAM-002 WARN and TBX-MOD-001 PARTIAL, overall outcome PARTIAL, `fragment_measurement_eligible: true`, exit 0. Keep its path and detailed header observations private.
 3. A BAM whose `M5` differs from the registration is BLOCKED.
 4. Synthetic preflight without `--reference` is byte-identical to today's output.
 
@@ -300,7 +303,7 @@ Behaviour:
 - `verify` gains `--root ROOT RECORD_ID` as an alternative to a bundle path plus `--trust-store` (resolves both under ROOT).
 
 Acceptance:
-1. Real BAM: exit 0, `eligible_alignments == 3435813`, under 120 s end to end on Dan's Mac (library-level 12.4 s; sealing copies 2.1 GB).
+1. Real BAM: exit 0, `eligible_alignments` exactly equals an independently counted primary, mapped, nonduplicate, QC-passing alignment total under the same locked contigs and MAPQ 20 policy, excluding records without a CIGAR or with a reference-consuming span outside `[1, 2**63 - 1]` bp (M, D, N, =, X; for example, start with `samtools view -F 0xF04 -q 20`, then apply those contig and span checks). Record that expected count privately before acceptance; finish under 120 s end to end on the operator workstation. Record input size and observed stage timings privately too.
 2. `traceback verify` on the record passes; `traceback status JOB` reports complete and verified.
 3. BLOCKED preflight: failed job with TBX-BAM-002, no record.
 4. A BAM with zero eligible alignments: TBX-RUN-005, no record.
@@ -410,7 +413,7 @@ The script reads the record ID from `traceback run --json` (`data.record_id`, th
 6. `traceback serve --root R` started in the background
 7. an operator-session HTTP GET of `/api/v1/explorer/catalog?limit=10` lists the record with `qualification_state="development_unqualified"`
 
-In CI the script uses a generated BAM (2 contigs, about 1,000 reads, no `M5`/`AS`, so the WARN path is exercised) and a matching tiny FASTA, both generated at test time by an extension of `traceback_runner/fixtures.py`. A pytest wrapper `tests/test_golden_path_acceptance.py` runs the script. The real BAM run is executed once manually; its evidence goes in the B6 PR as a hand-written table (exit codes, `eligible_alignments`, `records_scanned`, preflight outcome, wall times, catalog `qualification_state`). Raw CLI JSON is not pasted because it contains absolute local paths.
+In CI the script uses a generated BAM (2 contigs, about 1,000 reads, no `M5`/`AS`, so the WARN path is exercised) and a matching tiny FASTA, both generated at test time by an extension of `traceback_runner/fixtures.py`. A pytest wrapper `tests/test_golden_path_acceptance.py` runs the script. The real BAM run is executed once manually; record its input-specific counts, preflight outcome and wall times privately. The PR reports the manual pass/fail result, exit codes and observed catalog `qualification_state` (required to equal `development_unqualified`), without raw CLI JSON or real-input values.
 
 ## Dependency graph
 
@@ -519,7 +522,7 @@ Run autonomously. Intermediate questions were auto-decided with the six autoplan
 
 | # | Premise (stated or implied) | Status | Assessment |
 |---|---|---|---|
-| P1 | The local 2.1 GB BAM is a meaningful stand-in for the product's input | Assumed | No provenance, consent or licence statement. It has no MM/ML tags, so it exercises fragment length only. Needs one line on origin and rights before any record from it is shown to anyone |
+| P1 | The local research BAM is a meaningful stand-in for the product's input | Assumed | No provenance, consent or licence statement. The manual exercise covers fragment length only. Origin and rights need review before any record from it is shown to anyone |
 | P2 | Fragment-length output alone is worth a full CLI path | Assumed | EPICS.md defines the MVP around modBAM and later POD5; this slice proves one of the three signals |
 | P3 | Plumbing (real BAM to browser) is the right next build, ahead of demand evidence and E0 | Stated (plan-vs-reality order) | Both outside voices challenge it; see User Challenge UC2 |
 | P4 | Catalog + explorer is the right viewing surface for the first real record | Assumed | A static `report-local.html` or the existing E13 portable view (`evidence_inspector/portable_view.py`) would show the same record with fewer new surfaces |
@@ -587,7 +590,7 @@ Expansion candidates (each auto-decided; in-blast-radius and under 1 day CC unle
 | X1 | Per-root random HMAC key for `provider_hmac_sha256` in `run` provenance (glue used a constant key) | S | ACCEPTED into B4 | Security gap in blast radius (P2) |
 | X2 | `run`, `reference register`, `catalog import` take `_operator_lock` | S | ACCEPTED into B2/B4/B5 | Existing mutex, DRY (P4) |
 | X3 | One table documenting the ROOT directory layout | S | ACCEPTED (new spec section via Eng phase) | Layout becomes a contract |
-| X4 | APFS/reflink clone instead of a full 2.1 GB copy at seal | M | DEFERRED to TODOS | Outside blast radius (runner internals) |
+| X4 | APFS/reflink clone instead of a full input copy at seal | M | DEFERRED to TODOS | Outside blast radius (runner internals) |
 | X5 | DoD ends with the record opened in a browser and shown to one outside reader | S | Part of UC2 | Changes the user's DoD |
 | X6 | CI macOS job only on `main` pushes | S | TASTE (T1) | Cost vs coverage |
 | X7 | Static portable view instead of `serve` | M | Part of UC1 | Changes stated scope |
@@ -609,7 +612,7 @@ SELECTIVE EXPANSION (autoplan override). Approach A retained pending UC1.
 
 ### Dual voices (CEO)
 
-CODEX SAYS (CEO, strategy challenge): 8 findings. Integration milestone, not an MVP; the 10x move is a week of provider/workflow discovery first; "every stage exists" hides about 9 days of new composition; the BAM is availability-biased (no MM/ML/RG/M5/AS); E0 is sequenced too late and v2 contracts will encode temporary method assumptions; WARN weakens reference provenance; security ordering is contradictory (wants CI, E12 freeze, A3, minimum H1/H6, then any donor-data run); a cheaper alternative (glue as dev command + one test, defer B3/B5/B6) was dismissed.
+CODEX SAYS (CEO, strategy challenge): 8 findings. Integration milestone, not an MVP; the 10x move is a week of provider/workflow discovery first; "every stage exists" hides about 9 days of new composition; the local exercise covers fragment length only and has incomplete header declarations; E0 is sequenced too late and v2 contracts will encode temporary method assumptions; WARN weakens reference provenance; security ordering is contradictory (wants CI, E12 freeze, A3, minimum H1/H6, then any donor-data run); a cheaper alternative (glue as dev command + one test, defer B3/B5/B6) was dismissed.
 
 CLAUDE SUBAGENT (CEO, strategic independence): 10 findings. DoD ends at a JSON GET instead of a human (critical; PRODUCT-PLAN.md demand gate unrun); 6 unstated premises (P1-P6 above); scope about 30% too big, defer B5/B6; v2 bump is the costly one-way part; 6-month regret is "beautiful CI, zero customers"; alternatives (glue script, portable view, reheader a copy) unanalysed; Track A should be its own epic; D6 forks the security model; competitive positioning absent; estimates exclude review rounds.
 
@@ -631,7 +634,7 @@ CEO DUAL VOICES — CONSENSUS TABLE:
 
 **1. Architecture.** New components: `references.py` (register/load), `local_authority.py` (method registry + identity), `web/local_source.py` (explorer factory), `serve` and `catalog import` subcommands. Coupling added: `traceback_runner/cli.py` now composes `evidence_inspector` method registry, result-trust registry and catalog, which before were composed only in tests and `glue.py`. That coupling is justified (it is the point of the slice) but it makes the ROOT layout a de facto contract (X3). Single point of failure: the development trust file `ROOT/trust/development-result-trust.json`; losing it orphans every record's verification. Rollback is per-PR revert except B3 (see 9). Diagram in Eng Section 1.
 
-**2. Error & rescue map.** See the registry below. Two gaps: (a) disk exhaustion while sealing a 2.1 GB input has no named code; (b) a BAM with zero eligible alignments ends in `MeasurementUnavailableError` (`measurement.py:72`; the model itself also refuses at `contracts.py:406-407`), which `run` must map to a named outcome, not a traceback. Both auto-decided: add TBX-RUN-004 (insufficient space, retryable) and TBX-RUN-005 (measurement unavailable, not retryable) to B4.
+**2. Error & rescue map.** See the registry below. Two gaps: (a) disk exhaustion while sealing a large input has no named code; (b) a BAM with zero eligible alignments ends in `MeasurementUnavailableError` (`measurement.py:72`; the model itself also refuses at `contracts.py:406-407`), which `run` must map to a named outcome, not a traceback. Both auto-decided: add TBX-RUN-004 (insufficient space, retryable) and TBX-RUN-005 (measurement unavailable, not retryable) to B4.
 
 **3. Security & threat model.**
 | Threat | Likelihood | Impact | Mitigated? |
@@ -658,9 +661,9 @@ BAM ──▶ preflight ──▶ seal copy ──▶ measure ──▶ sign ─
 
 **5. Code quality.** Finding C5: B4 says "reuse the demo flow" but not how. Auto-decided (P4 DRY, P5 explicit): extract `_execute_signed_run(root, request, source, files, stages, key)` from `_demo` and call it from both; `demo` output bytes must not change. No over-engineering found: each new module has one caller set. `local_authority.py` is the only new abstraction and it replaces a test helper being reused in production.
 
-**6. Tests.** Full diagram in Eng Section 3. CEO-level gaps: no test for ENOSPC (TBX-RUN-004), zero-eligible (TBX-RUN-005), operator-lock contention, or "catalog row never says qualified" for the real path (B5 AC5 covers files, not the API). All four added to the test plan artifact. The 2am-Friday test is the DoD script; the hostile-QA test is "import a bundle signed by a key removed from the trust registry".
+**6. Tests.** Full diagram in Eng Section 3. CEO-level gaps: no test for ENOSPC (TBX-RUN-004), zero-eligible (TBX-RUN-005), operator-lock contention, or "catalog row never says qualified" for the real path (B5 AC5 covers files, not the API). All four added to the local test plan. The 2am-Friday test is the DoD script; the hostile-QA test is "import a bundle signed by a key removed from the trust registry".
 
-**7. Performance.** Slow paths: sealing copies the 2.1 GB BAM (seconds to tens of seconds on SSD), FASTA MD5 over 3.2 GB (about 10-30 s), measurement scan 9.9 s. None is user-blocking at this scale. Memory: measurement streams; catalog rows are 1 per record. The ">= 2x input free space" doctor rule scales to about 60 GB for a 30 GB modBAM later, which is fine to state. No issues beyond X4.
+**7. Performance.** Slow paths: sealing copies the full input, hashing the registered FASTA and scanning the measurement. Exact real-input timings are omitted here; record future runs privately. Memory: measurement streams; catalog rows are 1 per record. The ">= 2x input free space" doctor rule scales to about 60 GB for a hypothetical 30 GB modBAM, which is fine to state. No issues beyond X4.
 
 **8. Observability.** CLI emits structured JSON results (`traceback.cli-result.v1`) and the runner keeps an audit log (`traceback logs`). Gap: `run` gives no progress output during a 2-minute run. Auto-decided (P1): `run` prints one line per stage boundary in human mode; JSON mode unchanged. Server diagnostics are out of scope (security spec item 8).
 
@@ -699,13 +702,13 @@ BAM ──▶ preflight ──▶ seal copy ──▶ measure ──▶ sign ─
 ### NOT in scope (CEO additions)
 
 - Customer interviews and the PRODUCT-PLAN demand gate: product work, not engineering; raised as UC2.
-- modBAM/methylation signals: E4 territory; the real BAM has no MM/ML tags.
+- modBAM/methylation signals: E4 territory; this slice covers fragment length.
 - Seal-by-clone (X4): runner internals; TODO.
 - Competitive positioning copy: one paragraph belongs in PRODUCT-PLAN.md, not this spec.
 
 ### What already exists
 
-See 0B. Short form: every stage has a library API; `glue.py` proved the chain at library level in about 30 s of compute; the missing parts are composition (authority, trust registry, explorer factory), honest labels (v2 approval state, report template) and CLI entry points.
+See 0B. Short form: every stage has a library API; `glue.py` proved the chain at library level in a bounded manual run; the missing parts are composition (authority, trust registry, explorer factory), honest labels (v2 approval state, report template) and CLI entry points.
 
 ### Dream state delta
 
@@ -864,7 +867,7 @@ COVERAGE (planned): 15/15 code paths, 12/12 flows have a named test  |  REG = re
 GAPS remaining: none in plan; real-BAM run is manual evidence only
 ```
 
-Regression rule applied: frozen v2-synthetic bundle (B3a AC1), frozen trust registry (B3b AC2), `demo` byte-equality (B4 AC8), and the B1 path fix are mandatory regression tests. Flakiness risks: A3 concurrency tests (bound every wait, assert liveness), 100-record startup budget (use a generous 5 s and generated records). Test plan artifact written to `~/.gstack/projects/danwiggins-cfddemo/` (see report).
+Regression rule applied: frozen v2-synthetic bundle (B3a AC1), frozen trust registry (B3b AC2), `demo` byte-equality (B4 AC8), and the B1 path fix are mandatory regression tests. Flakiness risks: A3 concurrency tests (bound every wait, assert liveness), 100-record startup budget (use a generous 5 s and generated records). The test plan was recorded locally and is not part of this repository.
 
 ### Section 4: Performance
 
@@ -1126,7 +1129,7 @@ Nothing below is decided. The spec body reflects the user's stated direction plu
 
 | # | Premise | Recommendation | Status |
 |---|---|---|---|
-| P1 | The local 2.1 GB BAM is an acceptable stand-in; its origin, consent and licence are known | Write one line on provenance and rights in the PR that runs it; do not show records from it outside the team until then | UNDECIDED |
+| P1 | The local research BAM is an acceptable stand-in; its origin, consent and licence are known | Review provenance and rights privately before showing records from it outside the team; the PR records the decision without input-specific values | UNDECIDED |
 | P2 | Fragment-length-only output justifies a full CLI path before modBAM | Accept for plumbing; do not present it as the product's signal set | UNDECIDED |
 | P3 | Plumbing is the right next build ahead of demand evidence and E0 | See UC2 | UNDECIDED |
 | P4 | Catalog + explorer is the right first viewing surface | See UC1 (report first) | UNDECIDED |
@@ -1233,7 +1236,7 @@ Nothing below is decided. The spec body reflects the user's stated direction plu
 
 ## Implementation Tasks (aggregated)
 
-CEO tasks C-T1..C-T6 and Eng tasks E-T1..E-T10 are listed in their phases and written to `~/.gstack/projects/danwiggins-cfddemo/tasks-*-review-*.jsonl`. DX tasks:
+CEO tasks C-T1..C-T6 are listed in their phase. Eng tasks E-T1..E-T10 are recorded in local planning notes that are not part of this repository. DX tasks:
 - [ ] **D-T1 (P1, human: ~3h / CC: ~15min)** — B4 — cli-result v2 `data_origin`; help text. Files: `traceback_runner/cli.py`.
 - [ ] **D-T2 (P1, human: ~3h / CC: ~15min)** — B2/B4/B5a — `_problem` helper and six-field errors. Files: `traceback_runner/cli.py`.
 - [ ] **D-T3 (P1, human: ~4h / CC: ~30min)** — B8 — operator guide real-BAM section, README link, executed by the DoD. Files: `docs/OPERATOR-GUIDE.md`, `README.md`, `scripts/golden_path_acceptance.sh`.

@@ -1,28 +1,34 @@
 # Traceback quick guide for scientists
 
-A short, practical guide for a collaborating scientist. It takes Nanopore BAMs
-to a fragment-length record you can look at in your browser. For the full
-reference, see [the operator guide](OPERATOR-GUIDE.md).
+A short, practical guide for a collaborating scientist. This route takes
+Nanopore BAMs to a signed fragment-length record you can inspect in your
+browser. For optional signed cell-origin and copy-number analyses, see
+[the operator guide](OPERATOR-GUIDE.md#several-analyses-of-one-bam). The
+separate [Traceback Lab](LAB-GUIDE.md) provides unsigned exploratory methods.
 
 > Everything here is a research prototype. Records are **unqualified, local,
 > and not for clinical use**. Nothing is uploaded. The measurement describes one
 > file's fragment-length distribution; it makes no statement about health,
 > tumour content or sample quality.
 
-## What it does today
+## What this route does
 
-- **Measures one thing on real data:** the fragment-length distribution of an
+- **Measures fragment length on real data:** the fragment-length distribution of an
   aligned BAM, counted as aligned reference span. The policy is locked: MAPQ ≥ 20,
-  primary alignments only, chromosomes 1–22, X and Y, and 7 bins (0, 100, 150,
-  200, 300, 500, 1000+ bp).
+  primary mapped alignments that pass QC and are not marked duplicates,
+  chromosomes 1–22, X and Y, and 7 bins (0, 100, 150, 200, 300, 500,
+  1000+ bp).
 - **Seals every result as a signed record:** inputs are hashed and a copy is kept,
   so every number traces back to the exact file and method.
 - **Shows records in a local web page:** a histogram, the denominator (how many
   reads were scanned and why some were excluded), and each record's status in
   plain words.
 
-Cell-origin and copy-number are **not** in this pipeline yet. They exist only
-as the separate demo scripts.
+The signed CLI also registers cell-origin and optional ichorCNA copy-number
+stages; those need their own tools, assets, and readiness checks and are outside
+this short fragment-length journey. The public evidence demo uses separate
+fixed aggregate readouts. Lab has a wider unsigned algorithm catalog; none
+of these routes supplies a clinically qualified result.
 
 ## One-time setup (macOS)
 
@@ -62,12 +68,12 @@ samtools index barcode01.sorted.bam
 
 # Measure, sign, and add to the catalog in one step
 uv run traceback run barcode01.sorted.bam --reference hg38 --root "$R" \
-  --label "barcode01 plasma draw 1" --import
+  --label "barcode01" --import
 ```
 
-Timings on an M-series Mac: aligning a 3 GB run takes about 9 minutes with
-`-t 16`, mostly building the index if you skip the `.mmi` step. `run` takes
-about 1 minute for a 2 GB BAM.
+Alignment and `run` times depend on input size, reference-index reuse and the
+operator's workstation. Record measured times privately when
+planning a batch.
 
 The operator guide has a ready-made loop for all barcodes
 ([Aligning MinKNOW output](OPERATOR-GUIDE.md#aligning-minknow-output)).
@@ -102,9 +108,9 @@ How to read a record page:
 | **Development signature verified** | Signed and verified with this machine's development key. Proves the record wasn't altered; it is not a quality claim. |
 | **Preflight: warn / partial** | Technical caveats about the input. For example, "basecall model not declared in the header" doesn't affect fragment length. |
 
-As a reference point from the first real run: 3,435,813 of 5,822,296 records
-were eligible (59%), and 63% of eligible fragments were 150–199 bp. That
-describes that file only. It is not a reference range.
+The eligible and scanned counts, and the share in each fragment-size bin, come
+from the selected record. They describe that file only and are not a reference
+range. Real-input values remain in the local record rather than this guide.
 
 ## Other useful commands
 
@@ -130,16 +136,12 @@ Every refusal prints a **CODE**, a **CAUSE** and a **FIX**. The most common:
 All codes are listed in the operator guide's
 [troubleshooting table](OPERATOR-GUIDE.md#troubleshooting).
 
-## What's coming, and where your input matters
+## Further exploration
 
-- **Comparing two records side by side** (same settings, differences shown as
-  descriptive only) is next.
-- **Changing the analysis.** The plan is to measure once at 1-bp resolution, so
-  bins, size windows and ratios can be explored on the page without re-running.
-  A few named presets would be owned by the team. **Before this is built, it
-  would help to know what you most want to change:** bin edges, a size-selection
-  window, the MAPQ threshold, or a new metric such as a short-fragment ratio or
-  10-bp periodicity.
+For exploratory depth and split-half views, an aligned-span histogram,
+methylation, copy-number, and cohort comparisons, use the
+[Lab guide](LAB-GUIDE.md). Lab results are unsigned and keep their own
+provenance; they do not replace this route's signed record.
 
 ## Two rules before sharing anything
 

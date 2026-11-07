@@ -263,7 +263,7 @@ def test_repeat_mismatch_fails_as_not_reproducible(
     bam.write_bytes(b"BAM")
     counts = iter([866, 865])
 
-    def fake_run_once(*_: Any) -> dict[str, Any]:
+    def fake_run_once(*_: Any, **__: Any) -> dict[str, Any]:
         return {
             "metrics": {"measurement": {"eligible_alignments": next(counts)}},
             "wall_seconds": {"run": 1.0},
@@ -532,7 +532,7 @@ def test_failed_run_collapses_missing_baseline_fields(
         "metrics": {"exit_codes": {"run": 0, "verify": 0},
                     "measurement": {"records_scanned": 10, "eligible_alignments": 8}},
     }), encoding="utf-8")
-    monkeypatch.setattr(module, "run_once", lambda *_: {
+    monkeypatch.setattr(module, "run_once", lambda *_, **__: {
         "metrics": {"exit_codes": {"run": 6}}, "wall_seconds": {},
         "failures": ["step run exited 6"],
     })

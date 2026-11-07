@@ -30,7 +30,9 @@ from .receipts import (
     verify_receipt,
     write_receipt,
 )
-from .snapshots import InputSnapshot, SnapshotViolation, capture_snapshot, verify_snapshot
+from .snapshots import (
+    InputSnapshot, SnapshotViolation, capture_snapshot, finish_pending_snapshot, verify_snapshot,
+)
 from .serialization import canonical_json_bytes
 from .store import (
     AttemptLease,
@@ -264,10 +266,7 @@ class Runner:
                 self._fault("before_snapshot_capture")
                 snapshot_path = self.snapshots_dir / record.job_id
                 if snapshot_path.exists() or snapshot_path.is_symlink():
-                    snapshot = verify_snapshot(
-                        snapshot_path,
-                        expected_manifest_sha256=record.snapshot_manifest_sha256,
-                    )
+                    snapshot = self._submitted_snapshot(record, request, snapshot_path)
                 elif record.snapshot_id is not None or record.state == JobState.VALIDATING:
                     raise SnapshotViolation("attached snapshot is missing")
                 else:
@@ -556,10 +555,9 @@ class Runner:
                 path = self.snapshots_dir / job_id
                 if path.exists() or record.snapshot_id is not None or record.state == JobState.VALIDATING:
                     try:
-                        snapshot = verify_snapshot(
-                            path, expected_manifest_sha256=record.snapshot_manifest_sha256
-                        )
-                        self._attach_snapshot(record, self.store.request(job_id), snapshot)
+                        request = self.store.request(job_id)
+                        snapshot = self._submitted_snapshot(record, request, path)
+                        self._attach_snapshot(record, request, snapshot)
                     except SnapshotViolation as exc:
                         self.store.transition(job_id, JobState.TERMINAL_FAILURE, str(exc))
                         raise
@@ -665,6 +663,14 @@ class Runner:
         if len(latest) != 1:
             raise ReceiptCorrupt(f"multiple publications claim {stage} attempt {latest_attempt}")
         return latest[0]
+
+    @staticmethod
+    def _submitted_snapshot(
+        record: StoredJobRecord, request: JobRequest, path: Path,
+    ) -> InputSnapshot:
+        if record.state == JobState.SNAPSHOTTING and record.snapshot_id is None:
+            return finish_pending_snapshot(path, request.input_tree_sha256_local)
+        return verify_snapshot(path, expected_manifest_sha256=record.snapshot_manifest_sha256)
 
     def _attach_snapshot(
         self, record: StoredJobRecord, request: JobRequest, snapshot: InputSnapshot

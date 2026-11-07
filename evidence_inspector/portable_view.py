@@ -1856,17 +1856,22 @@ def _read_descriptor(descriptor: int, limit: int) -> bytes:
     return b"".join(chunks)
 
 
-def _require_sealed_directory(descriptor: int) -> None:
+def _require_directory_mode(descriptor: int, expected: int) -> None:
     metadata = os.fstat(descriptor)
     if (
         not stat.S_ISDIR(metadata.st_mode)
-        or stat.S_IMODE(metadata.st_mode) != SEALED_DIRECTORY_MODE
+        or stat.S_IMODE(metadata.st_mode) != expected
     ):
-        raise PortableViewTamperError("portable directory is not sealed")
+        raise PortableViewTamperError("portable directory mode is invalid")
+
+
+def _require_sealed_directory(descriptor: int) -> None:
+    _require_directory_mode(descriptor, SEALED_DIRECTORY_MODE)
 
 
 def _seal_stage(stage_fd: int) -> None:
     try:
+        _require_directory_mode(stage_fd, 0o700)
         for name in _FILES:
             descriptor = os.open(
                 name,
@@ -1885,9 +1890,10 @@ def _seal_stage(stage_fd: int) -> None:
                 os.fsync(descriptor)
             finally:
                 os.close(descriptor)
-        os.fchmod(stage_fd, SEALED_DIRECTORY_MODE)
+        # Darwin refuses the exclusive rename of a non-writable directory.
+        # Keep only this private root writable until it has been renamed.
         os.fsync(stage_fd)
-        _require_sealed_directory(stage_fd)
+        _require_directory_mode(stage_fd, 0o700)
     except PortableViewError:
         raise
     except OSError as exc:
@@ -2030,10 +2036,11 @@ def _validate_pinned_names(
     expected: dict[str, bytes],
     *,
     sync: bool,
+    root_mode: int = SEALED_DIRECTORY_MODE,
 ) -> None:
     named: dict[str, int] = {}
     try:
-        _require_sealed_directory(root_fd)
+        _require_directory_mode(root_fd, root_mode)
         if set(os.listdir(root_fd)) != set(_FILES):
             raise PortableViewTamperError("artifact inventory changed")
         for name in _FILES:
@@ -2100,7 +2107,7 @@ def _validate_pinned_names(
                 raise PortableViewTamperError(
                     "final artifact name-to-inode vector changed"
                 )
-        _require_sealed_directory(root_fd)
+        _require_directory_mode(root_fd, root_mode)
         if sync:
             os.fsync(root_fd)
     except PortableViewError:
@@ -2132,9 +2139,16 @@ def _quarantine_owned_directory(
         _same_directory_at(parent_fd, name, descriptor)
     except PortableViewTamperError:
         return None
+    try:
+        # Darwin also needs a writable source root for the quarantine rename.
+        if stat.S_IMODE(os.fstat(descriptor).st_mode) != 0o700:
+            os.fchmod(descriptor, 0o700)
+    except OSError:
+        return None
     for _ in range(32):
         quarantine_name = f".{name}.invalid.{secrets.token_hex(8)}"
         try:
+            _same_directory_at(parent_fd, name, descriptor)
             rename_directory_exclusive_at(parent_fd, name, quarantine_name)
             _same_directory_at(parent_fd, quarantine_name, descriptor)
             os.fsync(parent_fd)
@@ -2263,6 +2277,22 @@ def publish_portable_view(
             raise PortableViewStorageError(
                 "private staging could not be opened"
             ) from exc
+        try:
+            _same_directory_at(parent_fd, stage_name, stage_fd)
+            # A setgid parent can add 02000 despite mkdir(mode=0700). Normalize
+            # only the held private stage before creating any artifact files.
+            os.fchmod(stage_fd, 0o700)
+            _require_directory_mode(stage_fd, 0o700)
+        except PortableViewError:
+            raise
+        except PermissionError as exc:
+            raise PortableViewPermissionError(
+                "private staging permission denied"
+            ) from exc
+        except OSError as exc:
+            raise PortableViewStorageError(
+                "private staging mode could not be normalized"
+            ) from exc
         for relative_path in sorted(content):
             try:
                 descriptor = os.open(
@@ -2302,7 +2332,7 @@ def publish_portable_view(
         observed = _capture_source_identities(observed)
         if observed != view.source_identities:
             raise PortableViewTamperError("source identity changed before publication")
-        _validate_pinned_names(stage_fd, pinned, content, sync=True)
+        _validate_pinned_names(stage_fd, pinned, content, sync=True, root_mode=0o700)
         _same_directory_at(parent_fd, stage_name, stage_fd)
         _same_directory(destination.parent, parent_fd)
         try:
@@ -2319,6 +2349,13 @@ def publish_portable_view(
             raise PortableViewStorageError("portable atomic rename failed") from exc
         try:
             _same_directory_at(parent_fd, destination.name, stage_fd)
+            try:
+                os.fchmod(stage_fd, SEALED_DIRECTORY_MODE)
+                os.fsync(stage_fd)
+            except OSError as exc:
+                raise PortableViewStorageError(
+                    "portable published root could not be sealed"
+                ) from exc
             _validate_pinned_names(stage_fd, pinned, content, sync=True)
             _same_directory(destination.parent, parent_fd)
             try:

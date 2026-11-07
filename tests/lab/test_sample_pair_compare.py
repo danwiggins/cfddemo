@@ -1,0 +1,474 @@
+"""Cross-sectional A/B Compare pins current compatible results without donor assumptions."""
+
+from __future__ import annotations
+
+import json
+import time
+from types import SimpleNamespace
+
+import pytest
+
+from traceback_lab.cohort_contracts import CohortMember, CohortResult
+from traceback_lab import cohorts
+from traceback_lab.envelope import Metric, ResultEnvelope, provenance
+from traceback_lab.identity import parameters_sha256
+from traceback_lab.store import LabStore
+from traceback_lab.web import api as web_api
+
+
+SOURCE_A, SOURCE_B = "1" * 64, "2" * 64
+INPUT_A, INPUT_B = f"{101:064x}", f"{102:064x}"
+PARAM_A, PARAM_B = "a" * 64, "b" * 64
+COMPAT = "c" * 64
+
+
+def world(tmp_path, monkeypatch, *, compat_b=COMPAT, unit_b="bp", value_b=170.0):
+    sources = (SOURCE_A, SOURCE_B)
+    inputs = (INPUT_A, INPUT_B)
+    values = (160.0, value_b)
+    params = (PARAM_A, PARAM_B)
+    samples = {}
+    selected = {}
+    for index, source in enumerate(sources):
+        metric = Metric(metric_id="mode_bp", value=values[index], unit="bp" if index == 0 else unit_b)
+        envelope = ResultEnvelope(
+            algorithm_id="fragment-size", algorithm_version="1", status="ok",
+            provenance=provenance(tool="fixture", parameters_sha256=params[index], source_id=source,
+                                  input_id=inputs[index], reference_id="synthetic"),
+            metrics=[metric],
+        )
+        samples[source] = SimpleNamespace(example=False, full=SimpleNamespace(
+            input_id=inputs[index], results={"fragment-size": envelope}, depth_x=lambda: 1.0,
+        ))
+        selected[source] = CohortMember(
+            source_id=source, input_id=inputs[index], aligner_identity="fixture aligner",
+            results=(CohortResult(
+                algorithm_id="fragment-size", parameters_sha256=params[index],
+                cohort_compat_key=COMPAT if index == 0 else compat_b,
+                metrics={"mode_bp": values[index]},
+            ),),
+        )
+    monkeypatch.setattr(web_api.views, "load_sample", lambda store, source: samples[source])
+    monkeypatch.setattr(web_api, "member_from_store", lambda store, source, **_: selected[source])
+    api = web_api.LabApi(LabStore(tmp_path))
+    monkeypatch.setattr(api, "_id12s", lambda: {source: source[:12] for source in sources})
+    return api, samples, selected
+
+
+def test_sample_pair_reports_exact_b_minus_a_and_distinct_sources(tmp_path, monkeypatch) -> None:
+    api, _, _ = world(tmp_path, monkeypatch)
+    payload = api.compare_samples(SOURCE_A[:12], SOURCE_B[:12])
+    assert payload["state"] == "ready"
+    assert payload["source_id_a"] != payload["source_id_b"]
+    assert payload["input_id_a"] == INPUT_A and payload["input_id_b"] == INPUT_B
+    assert payload["unscored"] == []
+    row = payload["metrics"][0]
+    assert (row["value_a"], row["value_b"], row["delta_b_minus_a"], row["unit"]) == (160.0, 170.0, 10.0, "bp")
+    assert row["value_kind"] == "positive"
+    assert row["parameters_sha256_a"] == PARAM_A and row["parameters_sha256_b"] == PARAM_B
+    assert api.compare_samples(SOURCE_A[:12], SOURCE_A[:12])["state"] == "same_sample"
+
+
+@pytest.mark.parametrize("source,input_id", [(SOURCE_A, INPUT_A), (SOURCE_B, INPUT_B)])
+def test_sample_pair_does_not_reflect_unregistered_result_name(tmp_path, monkeypatch, source, input_id) -> None:
+    api, samples, _ = world(tmp_path, monkeypatch)
+    samples[source].full.results["private-donorname"] = ResultEnvelope(
+        algorithm_id="private-donorname", algorithm_version="1", status="ok",
+        provenance=provenance(tool="fixture", parameters_sha256=PARAM_A,
+                              source_id=source, input_id=input_id, reference_id="synthetic"),
+        metrics=[Metric(metric_id="mode_bp", value=1.0)],
+    )
+    payload = api.compare_samples(SOURCE_A[:12], SOURCE_B[:12])
+    assert payload["state"] == "ready"
+    assert [(row["algorithm_id"], row["delta_b_minus_a"]) for row in payload["metrics"]] == [
+        ("fragment-size", 10.0),
+    ]
+    assert "private-donorname" not in json.dumps(payload)
+
+
+def test_store_selected_results_keep_hidden_and_null_metrics(tmp_path, monkeypatch) -> None:
+    from tests.lab.test_cohort_store import _sample as stored_sample
+
+    store = LabStore(tmp_path)
+    registry = tuple(SimpleNamespace(id=name, version="1", parameters={}, tools=[], upstream=())
+                     for name in ("fragment-size", "read-summary"))
+    monkeypatch.setattr(cohorts, "load_registry", lambda: registry)
+    first = stored_sample(store, 1, value=160.0)
+    second = stored_sample(store, 2, value=170.0)
+    hidden_params = parameters_sha256(
+        algorithm_id="read-summary", algorithm_version="1", parameters={},
+        tools=[], reference_sha256=f"{900:064x}",
+    )
+    for source, input_id in ((first, f"{101:064x}"), (second, f"{102:064x}")):
+        store.publish_result(ResultEnvelope(
+            algorithm_id="read-summary", algorithm_version="1", status="ok",
+            provenance=provenance(tool="fixture", parameters_sha256=hidden_params,
+                                  source_id=source, input_id=input_id, reference_id="synthetic"),
+            metrics=[Metric(metric_id="optional_count", value=None)],
+        ), input_id=input_id)
+
+    api = web_api.LabApi(store)
+    selected = cohorts.member_from_store(store, first)
+    assert {row.algorithm_id for row in selected.results} == {"fragment-size", "read-summary"}
+    assert next(row for row in selected.results if row.algorithm_id == "read-summary").metrics == {"optional_count": None}
+    payload = api.compare_samples(first, second)
+    assert payload["state"] == "ready"
+    assert [(row["algorithm_id"], row["metric_id"], row["delta_b_minus_a"]) for row in payload["metrics"]] == [
+        ("fragment-size", "mode_bp", 10.0),
+    ]
+    assert payload["unscored"] == []
+
+
+@pytest.mark.parametrize("change", ["version_bump", "removed"])
+def test_old_stored_result_after_registry_change_is_unpaired(tmp_path, monkeypatch, change) -> None:
+    from tests.lab.test_cohort_store import _sample as stored_sample
+
+    store = LabStore(tmp_path)
+    algorithm = SimpleNamespace(id="fragment-size", version="1", parameters={}, tools=[], upstream=())
+    monkeypatch.setattr(cohorts, "load_registry", lambda: (algorithm,))
+    first = stored_sample(store, 1, value=160.0)
+    second = stored_sample(store, 2, value=170.0)
+    assert web_api.views.load_sample(store, first).full.results["fragment-size"].metrics[0].value == 160.0
+    current = () if change == "removed" else (SimpleNamespace(
+        id="fragment-size", version="2", parameters={}, tools=[], upstream=(),
+    ),)
+    monkeypatch.setattr(cohorts, "load_registry", lambda: current)
+    assert cohorts.member_from_store(store, first).results == ()
+
+    payload = web_api.LabApi(store).compare_samples(first, second)
+    assert payload["state"] == "ready"
+    assert payload["metrics"] == []
+    assert payload["unscored"] == [
+        {"algorithm_id": "fragment-size", "metric_id": "*", "reason": "not_current_result"},
+    ]
+@pytest.mark.parametrize("pon_sources", ((SOURCE_A, SOURCE_B), (SOURCE_A,), (SOURCE_B,)))
+def test_sample_pair_keeps_independent_metrics_when_selected_pon_is_unpaired(tmp_path, monkeypatch, pon_sources) -> None:
+    api, samples, selected = world(tmp_path, monkeypatch)
+    for source, input_id in ((SOURCE_A, INPUT_A), (SOURCE_B, INPUT_B)):
+        if source not in pon_sources:
+            continue
+        samples[source].full.results["copy-number"] = ResultEnvelope(
+            algorithm_id="copy-number", algorithm_version="2", status="ok",
+            provenance=provenance(
+                tool="fixture", parameters_sha256="d" * 64,
+                source_id=source, input_id=input_id, reference_id="synthetic",
+            ),
+            metrics=[Metric(metric_id="pon_policy", value="lab_loo_v1"),
+                     Metric(metric_id="tumor_fraction", value=0.2)],
+        )
+        samples[source].full.results["instability"] = ResultEnvelope(
+            algorithm_id="instability", algorithm_version="1", status="ok",
+            provenance=provenance(
+                tool="fixture", parameters_sha256="e" * 64,
+                source_id=source, input_id=input_id, reference_id="synthetic",
+            ),
+        )
+        # Even a matching compatibility key cannot stand in for a shared,
+        # pinned PoN generation in this two-sample view.
+        selected[source] = selected[source].model_copy(update={
+            "results": (*selected[source].results, CohortResult(
+                algorithm_id="copy-number", parameters_sha256="d" * 64,
+                cohort_compat_key="f" * 64, metrics={"tumor_fraction": 0.2},
+            )),
+        })
+
+    payload = api.compare_samples(SOURCE_A[:12], SOURCE_B[:12])
+    assert payload["state"] == "ready"
+    assert [(row["algorithm_id"], row["metric_id"], row["delta_b_minus_a"])
+            for row in payload["metrics"]] == [("fragment-size", "mode_bp", 10.0)]
+    assert {(row["algorithm_id"], row["reason"]) for row in payload["unscored"]} == {
+        ("copy-number", "selected_pon_not_paired"),
+        ("instability", "selected_pon_not_paired"),
+    }
+
+
+def test_sample_pair_rejects_protocol_or_unit_mismatch(tmp_path, monkeypatch) -> None:
+    api, _, _ = world(tmp_path, monkeypatch, compat_b="d" * 64)
+    payload = api.compare_samples(SOURCE_A[:12], SOURCE_B[:12])
+    assert payload["metrics"] == []
+    assert payload["unscored"] == [{"algorithm_id": "fragment-size", "metric_id": "*", "reason": "incompatible_protocol"}]
+
+    api, _, _ = world(tmp_path, monkeypatch, unit_b="cm")
+    payload = api.compare_samples(SOURCE_A[:12], SOURCE_B[:12])
+    assert payload["metrics"] == []
+    assert payload["unscored"] == [{"algorithm_id": "fragment-size", "metric_id": "mode_bp", "reason": "unit_mismatch"}]
+
+
+@pytest.mark.parametrize("change", ["input", "parameters", "value"])
+def test_sample_pair_refuses_changed_selected_result(tmp_path, monkeypatch, change) -> None:
+    api, samples, selected = world(tmp_path, monkeypatch)
+    if change == "input":
+        samples[SOURCE_B].full.input_id = f"{999:064x}"
+    elif change == "parameters":
+        envelope = samples[SOURCE_B].full.results["fragment-size"]
+        samples[SOURCE_B].full.results["fragment-size"] = envelope.model_copy(update={
+            "provenance": envelope.provenance.model_copy(update={"parameters_sha256": "e" * 64}),
+        })
+    else:
+        selected[SOURCE_B] = selected[SOURCE_B].model_copy(update={
+            "results": (selected[SOURCE_B].results[0].model_copy(update={"metrics": {"mode_bp": 171.0}}),),
+        })
+    payload = api.compare_samples(SOURCE_A[:12], SOURCE_B[:12])
+    assert payload["state"] == "stale_sample" and payload["which"] == "b"
+    assert payload["metrics"] == []
+
+
+def test_sample_pair_rejects_example_and_unknown_peer(tmp_path, monkeypatch) -> None:
+    api, samples, _ = world(tmp_path, monkeypatch)
+    samples[SOURCE_B].example = True
+    assert api.compare_samples(SOURCE_A[:12], SOURCE_B[:12])["state"] == "example_unscorable"
+    assert api.compare_samples(SOURCE_A[:12], f"{3:012x}")["found"] is False
+
+
+def test_sample_pair_marks_unavailable_peer_without_substituting_zero(tmp_path, monkeypatch) -> None:
+    api, _, selected = world(tmp_path, monkeypatch)
+    def current(store, source, **_):
+        if source == SOURCE_B:
+            raise ValueError("admitted source has no full aligned input")
+        return selected[source]
+    monkeypatch.setattr(web_api, "member_from_store", current)
+    payload = api.compare_samples(SOURCE_A[:12], SOURCE_B[:12])
+    assert payload["state"] == "sample_unavailable" and payload["which"] == "b"
+    assert payload["metrics"] == [] and payload["unscored"] == []
+
+
+def test_sample_pair_route_requires_session_and_passes_both_ids(tmp_path, monkeypatch) -> None:
+    from tests.lab.test_lab_server import _get, _request, _session
+    from traceback_lab.web.server import RunningLabServer
+
+    seen = []
+    monkeypatch.setattr(web_api.LabApi, "compare_samples", lambda self, a, b: (
+        seen.append((a, b)), {"found": True, "state": "same_sample"}
+    )[1])
+    with RunningLabServer(LabStore(tmp_path)) as server:
+        path = f"/api/samples/{SOURCE_A[:12]}/compare/{SOURCE_B[:12]}"
+        response, _ = _request(server, "GET", path)
+        assert response.status == 401
+        response, body = _get(server, path, _session(server))
+    assert response.status == 200
+    assert json.loads(body)["state"] == "same_sample"
+    assert seen == [(SOURCE_A[:12], SOURCE_B[:12])]
+
+
+@pytest.mark.skipif(__import__("tests.lab.test_lab_server", fromlist=["_chrome"])._chrome() is None,
+                    reason="no Chrome/Chromium for sample Compare DOM check")
+@pytest.mark.parametrize("unit,value_a,value_b,expected", [
+    ("bp", 160.0, 170.0, ("160 bp", "170 bp", "10 bp")),
+    ("fraction", 0.10, 0.15, ("10%", "15%", "5 percentage points")),
+])
+def test_sample_pair_selector_overlay_and_table_fallback(tmp_path, monkeypatch, unit, value_a, value_b, expected) -> None:
+    from tests.lab.test_lab_server import _chrome, _dom_cdp
+    from traceback_lab.web.server import RunningLabServer
+
+    monkeypatch.setattr(web_api.LabApi, "samples", lambda self: {"samples": [
+        {"id12": SOURCE_A[:12], "run_utc": "", "depth_x": 1.0, "example": False},
+        {"id12": SOURCE_B[:12], "run_utc": "", "depth_x": 1.0, "example": False},
+    ], "root_has_runs": True})
+    monkeypatch.setattr(web_api.LabApi, "sample", lambda self, id12: {
+        "found": True, "id12": id12, "source_id": SOURCE_A if id12 == SOURCE_A[:12] else SOURCE_B,
+        "full_input_id": INPUT_A if id12 == SOURCE_A[:12] else INPUT_B,
+        "algorithms": [], "catalog": [], "licenses": [],
+        "cohort_n": 0, "cohort_version": None, "interpretation_version": "fixture",
+        "excluded_chunks": [],
+    })
+    monkeypatch.setattr(web_api.LabApi, "cohorts", lambda self: {"cohorts": [], "unavailable": []})
+    monkeypatch.setattr(web_api.LabApi, "compare_samples", lambda self, a, b: {
+        "found": True, "state": "ready", "id12_a": a, "id12_b": b,
+        "input_id_a": INPUT_A, "input_id_b": INPUT_B,
+        "aligner_a": "fixture aligner", "aligner_b": "fixture aligner",
+        "metrics": [{"algorithm_id": "fragment-size", "metric_id": "mode_bp", "label": "Size mode",
+                     "unit": unit, "value_a": value_a, "value_b": value_b,
+                     "delta_b_minus_a": value_b - value_a}],
+        "unscored": [
+            {"algorithm_id": "copy-number", "metric_id": "*", "reason": "incompatible_protocol"},
+            {"algorithm_id": "instability", "metric_id": "*", "reason": "selected_pon_not_paired"},
+        ],
+    })
+    with RunningLabServer(LabStore(tmp_path)) as server:
+        profile = tmp_path / "sample-pair-chrome"
+        html = _dom_cdp([
+            _chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+            f"--user-data-dir={profile}", "--window-size=360,740",
+            server.issue_link() + f"&route=/sample/{SOURCE_A[:12]}/compare",
+        ], profile, ok=lambda page: 'data-ready="1"' in page and "Unpaired metrics and reasons" in page,
+            timeout=90)
+    assert 'for="compare-other-sample"' in html and 'id="compare-other-sample"' in html
+    assert 'aria-label="Sample A and B comparison"' in html
+    assert "Sample A" in html and "Sample B" in html and "B−A" in html
+    assert f"input ID (abbrev.) {INPUT_A[:12]}…{INPUT_A[-6:]}" in html
+    assert f"input ID (abbrev.) {INPUT_B[:12]}…{INPUT_B[-6:]}" in html
+    assert all(f'<span class="display-value">{value}</span>' in html for value in expected)
+    if unit == "fraction":
+        assert "B minus A 5 percentage points" in html
+        assert '<span class="display-value">5 percentage points</span>' in html
+        assert '<code>0.04999999999999999 fraction</code>' in html or '<code>0.05 fraction</code>' in html
+    assert "not protocol compatible" in html
+    assert "selected panel of normals differs" in html
+    assert "Source IDs do not establish a shared donor or timepoint" in html
+    assert 'data-csp-violations="0"' in html
+
+
+@pytest.mark.skipif(__import__("tests.lab.test_lab_server", fromlist=["_chrome"])._chrome() is None,
+                    reason="no Chrome/Chromium for sample Compare DOM check")
+def test_sample_pair_disables_unavailable_peer_and_explains_empty_choice(tmp_path, monkeypatch) -> None:
+    from tests.lab.test_lab_server import _chrome, _dom_cdp
+    from traceback_lab.web.server import RunningLabServer
+
+    rows = [
+        {"id12": SOURCE_A[:12], "run_utc": "", "depth_x": 1.0, "example": False},
+        {"id12": SOURCE_B[:12], "state": "completed_input_unavailable", "run_utc": "",
+         "depth_x": None, "example": False},
+    ]
+    monkeypatch.setattr(web_api.LabApi, "samples", lambda self: {"samples": rows, "root_has_runs": True})
+    monkeypatch.setattr(web_api.LabApi, "sample", lambda self, id12: {
+        "found": True, "id12": id12, "source_id": SOURCE_A if id12 == SOURCE_A[:12] else SOURCE_B,
+        "full_input_id": INPUT_A if id12 == SOURCE_A[:12] else INPUT_B,
+        "algorithms": [], "catalog": [], "licenses": [],
+        "cohort_n": 0, "cohort_version": None, "interpretation_version": "fixture",
+        "excluded_chunks": [],
+    })
+    monkeypatch.setattr(web_api.LabApi, "cohorts", lambda self: {"cohorts": [], "unavailable": []})
+    calls = []
+    monkeypatch.setattr(web_api.LabApi, "compare_samples", lambda self, a, b: calls.append((a, b)))
+
+    with RunningLabServer(LabStore(tmp_path)) as server:
+        def dom(profile_name, expected):
+            profile = tmp_path / profile_name
+            return _dom_cdp([
+                _chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+                f"--user-data-dir={profile}", "--window-size=360,740",
+                server.issue_link() + f"&route=/sample/{SOURCE_A[:12]}/compare",
+            ], profile, ok=lambda page: 'data-ready="1"' in page and expected in page, timeout=90)
+
+        empty = dom("pair-empty", "No eligible second sample")
+        assert 'disabled=""' in empty and "unavailable current full input" in empty
+        assert calls == []
+
+        rows.append({"id12": "3" * 12, "run_utc": "", "depth_x": 1.0, "example": False})
+        monkeypatch.setattr(web_api.LabApi, "compare_samples", lambda self, a, b: {
+            "found": False, "which": "b", "candidates": ["private-source-id"],
+        })
+        unresolved = dom("pair-unresolved", "could not be resolved")
+        assert 'value="' + SOURCE_B[:12] + '" disabled=""' in unresolved
+        assert "private-source-id" not in unresolved
+        assert "Reload the sample list" in unresolved
+
+
+@pytest.mark.skipif(__import__("tests.lab.test_lab_server", fromlist=["_chrome"])._chrome() is None,
+                    reason="no Chrome/Chromium for Compare request-order check")
+def test_compare_keeps_latest_pair_and_cohort_and_ignores_old_401(tmp_path) -> None:
+    from tests.lab.test_acceptance_synthetic_routes import ID12, _sample, _server
+    from tests.lab.test_lab_server import _chrome, _dom_cdp
+
+    peer_b, peer_c = "2" * 12, "3" * 12
+    sample = _sample()
+    with _server(tmp_path, sample) as server:
+        server.app.api.samples = lambda: {"samples": [
+            {"id12": id12, "run_utc": "", "depth_x": 1.0, "example": False}
+            for id12 in (ID12, peer_b, peer_c)
+        ], "root_has_runs": True}
+        server.app.api.cohorts = lambda: {"cohorts": [
+            {"cohort_id": name, "cohort_version": f"initial-{name}",
+             "kind": "internal_cohort", "member_n": 11, "pon_n": 0}
+            for name in ("b", "a")
+        ], "unavailable": []}
+
+        def cohort_payload(name: str, version: str) -> dict:
+            return {"found": True, "state": "ready", "id12": ID12,
+                    "input_id": sample["full_input_id"], "cohort_id": name,
+                    "cohort_version": version, "kind": "internal_cohort",
+                    "member_n": 11, "pon_n": 0, "target_aligner": "fixture",
+                    "aligner_counts": {}, "metrics": [], "unscored": []}
+
+        def pair_payload(peer: str, marker: str) -> dict:
+            return {"found": True, "state": "ready", "id12_a": ID12,
+                    "id12_b": peer, "input_id_a": sample["full_input_id"],
+                    "input_id_b": f"{102 if peer == peer_b else 103:064x}",
+                    "aligner_a": "fixture", "aligner_b": marker,
+                    "metrics": [], "unscored": []}
+
+        server.app.api.compare = lambda id12, name: cohort_payload(name, f"initial-{name}")
+        server.app.api.compare_samples = lambda a, b: pair_payload(b, "initial-pair")
+
+        def interact(_command, evaluate) -> None:
+            def until(expression: str) -> None:
+                for _ in range(60):
+                    if evaluate(expression):
+                        return
+                    time.sleep(0.05)
+                pytest.fail(f"Compare did not reach expected state: {expression}")
+
+            pair = "document.querySelector('#compare-sample-title').parentElement"
+            cohort = "document.querySelector('#compare-title').parentElement"
+            evaluate("""(() => {
+              const original = window.fetch.bind(window);
+              window.comparePending = [];
+              window.fetch = (url, options) => {
+                const path = String(url);
+                if (path.includes('/compare/') || path.includes('/compare'))
+                  return new Promise((resolve) => window.comparePending.push({path, resolve}));
+                return original(url, options);
+              };
+              window.releaseCompare = (index, payload, status = 200) => {
+                const pending = window.comparePending[index];
+                pending.resolve(new Response(JSON.stringify(payload), {
+                  status, headers: {'Content-Type': 'application/json'}
+                }));
+                return pending.path;
+              };
+            })()""")
+
+            def select(selector: str, value: str) -> None:
+                evaluate(f"""(() => {{ const picker = document.querySelector({json.dumps(selector)});
+                  picker.value = {json.dumps(value)};
+                  picker.dispatchEvent(new Event('change')); }})()""")
+
+            def release(index: int, payload: dict, status: int = 200) -> None:
+                evaluate(f"window.releaseCompare({index}, {json.dumps(payload)}, {status})")
+
+            select("#compare-other-sample", peer_c)
+            select("#compare-other-sample", peer_b)
+            until("window.comparePending.length === 2")
+            release(1, pair_payload(peer_b, "latest-pair"))
+            until(f"{pair}.innerText.includes('latest-pair')")
+            release(0, pair_payload(peer_c, "stale-pair"))
+            time.sleep(0.05)
+            assert "stale-pair" not in evaluate(f"{pair}.innerText")
+
+            select("#compare-other-sample", peer_c)
+            select("#compare-other-sample", peer_b)
+            until("window.comparePending.length === 4")
+            release(3, {}, 503)
+            until(f"{pair}.innerText.includes('Sample comparison unavailable')")
+            release(2, pair_payload(peer_c, "stale-after-error"))
+            time.sleep(0.05)
+            assert "stale-after-error" not in evaluate(f"{pair}.innerText")
+            evaluate(f"{pair}.querySelector('button').click()")
+            until("window.comparePending.length === 5")
+            release(4, pair_payload(peer_b, "retried-pair"))
+            until(f"{pair}.innerText.includes('retried-pair')")
+
+            select("#compare-title + div select", "a")
+            select("#compare-title + div select", "b")
+            until("window.comparePending.length === 7")
+            release(6, cohort_payload("b", "latest-b"))
+            until(f"{cohort}.innerText.includes('latest-b')")
+            release(5, cohort_payload("a", "stale-a"))
+            time.sleep(0.05)
+            assert "stale-a" not in evaluate(f"{cohort}.innerText")
+
+            select("#compare-other-sample", peer_c)
+            until("window.comparePending.length === 8")
+            evaluate(f"location.hash = '#/sample/{ID12}/methods'")
+            until("document.querySelector('#main h1')?.textContent.trim() === 'Methods'")
+            release(7, {}, 401)
+            time.sleep(0.05)
+            assert evaluate("window.TracebackLab.state.sessionExpired") is False
+            assert evaluate("document.querySelector('#main h1')?.textContent.trim()") == "Methods"
+
+        profile = tmp_path / "compare-order-browser"
+        _dom_cdp([
+            _chrome(), "--headless=new", "--disable-gpu", "--no-first-run",
+            f"--user-data-dir={profile}", server.issue_link() + f"&route=/sample/{ID12}/compare",
+        ], profile, ok=lambda page: 'data-ready="1"' in page and "initial-pair" in page
+            and "initial-b" in page, interact=interact)

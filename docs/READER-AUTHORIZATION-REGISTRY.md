@@ -1,9 +1,10 @@
 # Protected reader-authorization registry and B01 session binding
 
 Status: E12 prerequisite, local only. It does not authorize clinical use,
-export, or release. No E12 read route exists yet; this provides the registry,
-the local operator authority, the launch exchange route, and the boundary
-those routes must call.
+export, or release. The synthetic E12 browser routes use this registry and
+session binding through the composite authority fence; the packaged reader
+launch still does not install the longitudinal adapter (see
+`docs/LONGITUDINAL-BROWSER.md`).
 
 `evidence_inspector/reader_authorization_registry.py` holds the
 `ReaderAuthorizationRegistry`. `traceback_runner/web/reader_session.py` binds a
@@ -256,11 +257,8 @@ are single-use.
   one root, so running the original and a restored copy at the same time
   splits it: a revocation in one is invisible to the other. Operators must
   retire the original before opening a restored copy.
-- No E12 read route consumes a bound session yet.
 - Launch credentials live in the `launch` process's memory, so a link can be
   issued only by the process serving it.
-- The composite E12 fence coordinator does not exist; this registry provides
-  the shared fence and the in-fence reads it will compose.
 
 ## Decisions still open
 

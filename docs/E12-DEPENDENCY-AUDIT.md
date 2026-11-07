@@ -4,6 +4,14 @@ Audit baseline: `origin/main` at `cd988a795a4eb2f3237da4f0a1c6d239701a146d`.
 This is an implementation inventory, not evidence that Epic D's provider,
 scientific, governance, or usability gates have passed.
 
+Current reading: the baseline and sequence below are historical. The D08
+protected read model (`evidence_inspector.longitudinal_workspace`), composite
+authority fence, saved-comparison registry, and local browser routes now exist.
+`docs/E12-INTEGRATION-PLAN.md` records the remaining installed quickstart,
+rollback rehearsal, and production composition-root gaps. The E14 release
+report still holds its E12 dependency unavailable, and no synthetic registry
+or browser fixture satisfies external provider or scientific approval.
+
 ## Merged foundations
 
 | Dependency | What is reusable | What it does not supply for E12 |
@@ -20,7 +28,7 @@ longitudinal series. E12 must consume protected provider-local linkage and an
 immutable comparison anchor rather than infer either from aliases, dates,
 method labels, or adjacency.
 
-## Delivery sequence
+## Historical delivery sequence
 
 1. **D01 linkage/authority foundation (this PR):** closed provider-local
    biological and technical lineage contracts, independently pinned provider

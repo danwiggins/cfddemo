@@ -4,6 +4,9 @@
 
 Traceback computes three cfDNA signals from one real MinION run, then checks
 whether the report's claims match both the measurements and the written method.
+This walkthrough is for the fixed public evidence demo. The separate local
+[signed runner](OPERATOR-GUIDE.md) and [unsigned Lab](LAB-GUIDE.md) can analyze
+other inputs with different methods and prerequisites.
 
 ## Walkthrough
 
@@ -39,9 +42,10 @@ cloud credentials. It is visibly labeled **Public demo mode** and the result
 shows **Execution: Fixture**. A local run with Bedrock credentials performs the
 same bounded review live.
 
-## What is not built
+## What is not in this public demo
 
-- ichorCNA segmentation or tumor-fraction inference
+- ichorCNA segmentation or tumour-fraction inference (available only as
+  separate, unqualified local signed and Lab methods)
 - focal or subclonal copy-number calling
 - Clinical classification or diagnosis
 - Prospective validation, sensitivity, or specificity claims

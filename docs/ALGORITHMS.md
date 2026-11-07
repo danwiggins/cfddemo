@@ -1,5 +1,11 @@
 # Algorithms and evidence design
 
+Sections 1–4 describe the original demo measurements and evidence review.
+The separate `traceback lab` research workflow has its own execution registry,
+stored result attempts, and read-time interpretation library. A Lab result is
+not a signed local record; see [Lab interpretation evidence](LAB-INTERPRETATION-EVIDENCE.md)
+for the current evidence boundary.
+
 ## 1. Fragment length
 
 The pipeline streams alignment records, keeps primary records, deduplicates by
@@ -90,6 +96,34 @@ citations, revised wording, assumptions, and missing validation.
 Validation rejects unknown evidence IDs, invented numeric fields, changed
 values, mismatched units, changed denominators, changed filters, and stale claim
 bindings.
+
+## Lab research methods
+
+The [Lab registry](../traceback_lab/registry.py) currently declares 37
+algorithms, including the hidden `read-summary` and `meth-calls` producers.
+Each algorithm declares its input requirements, consumed data, parameters,
+tools, and upstream dependencies. Those declarations form execution identity;
+the [interpretation library](../traceback_lab/interpretation/library.yaml)
+joins tier, citations, reference policy, and stability at read time. Editing
+an interpretation note does not re-key a stored result.
+
+Method families include QC and fragmentomics, methylation and cell origin,
+copy number and arm summaries, non-human reads, and composite checks. Their
+platform and depth gates are method-specific. For example, the
+[TSS profile](LAB-TSS-PROFILE.md) needs a registered GENCODE annotation and
+five million eligible autosomal reads. [MethylBERT](METHYLBERT-BUNDLE.md)
+needs an operator-supplied fine-tuned model, matching installed code, and a
+CUDA GPU; no qualified checkpoint is bundled. The [epi-clock](epi-clock.md)
+needs an operator-verified CpG coordinate map. Prenatal and donor chrY
+fractions require separate input-scoped calibrations; the
+[NIPTeR adapter](fetal-nipter.md) does not estimate fetal fraction.
+
+The default healthy-cohort reference is a read-side comparison of compatible,
+source-excluded members. A selected panel of normals applies only to methods
+that depend on copy number. A missing or mismatched panel cannot qualify those
+methods, while independently compatible metrics can still be compared with a
+visible warning. These comparisons, as well as split and depth stability
+panels, are exploratory software context rather than clinical validation.
 
 ## Known limitations
 

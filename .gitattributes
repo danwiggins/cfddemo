@@ -1,0 +1,9 @@
+# This vendored upstream script is pinned by its exact SHA-256 bytes.
+traceback_lab/pon_scripts/createPanelOfNormals.R -text whitespace=-trailing-space
+traceback_lab/pon_scripts/buildPanelLab.R -text
+traceback_lab/pon_scripts/validatePanelOfNormals.R -text whitespace=-trailing-space
+traceback_runner/toolchain_locks/*.lock -text
+traceback_runner/toolchain_locks/runIchorCNA.R -text
+tests/lab/fixtures/griffin/*.tsv text eol=lf
+tests/lab/data/finaletoolkit_110_*.tsv text eol=lf
+docs/assets/weidner-3-grch38-map.json text eol=lf

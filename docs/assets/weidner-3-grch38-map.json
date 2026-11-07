@@ -1,0 +1,11 @@
+{
+  "schema": "traceback.lab.epi-clock-map.v2",
+  "model_id": "Weidner-3",
+  "genome_build": "hg38",
+  "source_label": "Weidner2014-IlluminaHM450v1.2-NCBI-GRCh38p13",
+  "sites": [
+    {"cpg_id": "cg02228185", "chrom": "chr17", "pos0": 3476272},
+    {"cpg_id": "cg25809905", "chrom": "chr17", "pos0": 44390359},
+    {"cpg_id": "pde4c_upstream_of_cg17861230", "chrom": "chr19", "pos0": 18233104}
+  ]
+}

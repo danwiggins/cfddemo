@@ -1,4 +1,4 @@
-<!-- /autoplan restore point: /Users/danwiggins/.gstack/projects/danwiggins-cfddemo/docs-pilot-security-hardening-autoplan-restore-20261002-113316.md -->
+<!-- /autoplan restore point: local planning snapshot, 2026-10-02 -->
 # Pilot security hardening
 
 Status: spec, 2026-10-02. Source: a structural security, privacy and trust review of `main` at `eaac96a`, verified against the code on `d3739ca`.
@@ -371,7 +371,7 @@ So this spec hardens a deployment that doesn't exist yet, on code that the archi
 - **Repo age and pace.** First commit 2026-09-26; 477 commits in 7 days (153 on 2026-09-29). No `.github/workflows`, so no CI (as of 2026-10-02; CI landed in #91).
 - **The branch diff vs. local `main`** shows D10 files as well, because local `main` is behind `origin`. This branch's only own change is this spec.
 - **TODOS.md (16 lines)** already defers "additional operating systems … after the paid provider pilot", which is consistent with P3. It has no security items.
-- **The in-flight browser work** was uncommitted at review time in worktree `agent-a2f921bc99d6aee7a` (branch `epic-e/e12-browser-integration`, then at `eaac96a`; merged since as #93). Diff: +323 lines across `server.py`, `reader_session.py`, `explorer.py`, `app.js` and `index.html`, plus new files `web/longitudinal.py` (2185 lines) and `static/longitudinal.js`.
+- **The in-flight browser work** was uncommitted in a separate worktree at review time (branch `epic-e/e12-browser-integration`, then at `eaac96a`; merged since as #93). Diff: +323 lines across `server.py`, `reader_session.py`, `explorer.py`, `app.js` and `index.html`, plus new files `web/longitudinal.py` (2185 lines) and `static/longitudinal.js`.
   - It adds 3 GET and 4 POST longitudinal routes.
   - It adds `ReaderSessionBinder.session_credential`, which builds the D08 `ReaderGrantBinding` from **server-side session state**. That already covers the realistic part of H7.
 - **Design doc:** none for this branch. The office-hours prerequisite was skipped (P6).
@@ -787,7 +787,7 @@ There are 2 critical gaps, and both exist **today**. Both are fixed by H6-min, w
   | Failure modes        | 6 total, 2 CRITICAL GAPS (both pre-existing)|
   | TODOS.md updates     | 6 items proposed (see Phase 3)              |
   | Scope proposals      | 6 proposed, 2 accepted, 4 deferred          |
-  | CEO plan             | written (~/.gstack ceo-plans)               |
+  | CEO plan             | written as a local planning record          |
   | Outside voice        | ran (codex + claude)                        |
   | Lake Score           | 9/11 recommendations chose complete option  |
   | Diagrams produced    | 5 (arch, data flow, error, dream, launch)   |
@@ -1010,7 +1010,7 @@ QUALITY: ★★★:0 ★★:1 ★:0
 
 **Chaos test.** Kill the server between bootstrap exchange and reader-launch. Expected: the page shows the stopped state, and `launch` exits non-zero.
 
-**Test plan artifact:** `~/.gstack/projects/danwiggins-cfddemo/danwiggins-docs-pilot-security-hardening-eng-review-test-plan-20261002-*.md`.
+**Test plan artifact:** recorded locally; not part of this repository.
 
 ### Section 4: Performance
 

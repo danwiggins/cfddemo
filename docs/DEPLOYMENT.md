@@ -2,6 +2,12 @@
 
 Live service: <https://cfddemo-production.up.railway.app>
 
+This page describes the public Streamlit evidence-review demo served by
+`app.py`. Its replay and Bedrock modes are separate from the local `traceback`
+runner and unsigned `traceback lab` workflow. The latter writes to a local
+operator-controlled root; this Railway deployment does not execute Lab methods
+or establish real-input, protocol, scientific, or clinical qualification.
+
 The repository includes a `Procfile` for Streamlit:
 
 ```text

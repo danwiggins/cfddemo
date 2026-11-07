@@ -4,10 +4,11 @@ Guidance for Codex (and other coding agents) working in this project.
 
 ## What this project is
 
-Traceback is a local-first Streamlit prototype for auditing scientific claims
-against bounded deterministic evidence and cited source passages. It uses
-Amazon Bedrock's OpenAI-compatible responses endpoint with SigV4 auth. The
-original terminal chat remains available as a transport example.
+Traceback has three local surfaces: the public Streamlit evidence-review demo,
+the signed but development-unqualified `traceback` runner, and the separate,
+unsigned research `traceback lab` workflow. The demo can use Amazon Bedrock's
+OpenAI-compatible responses endpoint with SigV4 auth or replay checked-in
+assessments. Neither local workflow grants clinical or release qualification.
 
 ## Layout
 
@@ -19,6 +20,11 @@ original terminal chat remains available as a transport example.
 - `scripts/prepare_local_case.py` — bounded local BAM preparation.
 - `evals/` — synthetic six-case semantic evaluation harness.
 - `tests/` — fully offline pytest suite.
+- `traceback_runner/` — local signed development runner, contracts, receipts,
+  trust, result explorer, and CLI.
+- `traceback_lab/` — unsigned cfDNA algorithm registry, local store, worker,
+  cohort/PoN handling, and Lab CLI/web view.
+- `docs/LAB-GUIDE.md` — Lab operations and research limitations.
 
 ## Run it
 
@@ -26,9 +32,12 @@ original terminal chat remains available as a transport example.
 uv sync
 uv run pytest
 uv run streamlit run app.py
+uv run traceback lab doctor
+uv run traceback lab run --example
 ```
 
-Config comes from the environment: `BEDROCK_MODEL_ID`, `BEDROCK_REGION`
+The Streamlit demo's live review config comes from the environment:
+`BEDROCK_MODEL_ID`, `BEDROCK_REGION`
 (falls back to `AWS_REGION` / `AWS_DEFAULT_REGION`), `BEDROCK_MAX_TOKENS`,
 `BEDROCK_TEMPERATURE`, and optional `TRACEBACK_CASE_PATH`.
 
@@ -52,5 +61,15 @@ fake client or exercising pure helpers.
   linkage, trimming state, and partial-collection limits.
 - Keep AWS-touching code isolated in `bedrock_chat/`; keep helpers pure and tested.
 - `boto3` is imported lazily so the test suite runs without AWS setup — preserve that.
-- Add a test with every behavior change; run `pytest` before finishing.
+- Cover behavior changes with meaningful offline tests. Run the relevant
+  focused suite and the applicable CI checks before finishing.
 - Match the existing style: type hints, module docstrings, small focused functions.
+
+## Current CI boundary
+
+`.github/workflows/ci.yml` runs fast offline tests on macOS and Ubuntu with
+Python 3.11. It installs `samtools` and `minimap2` on both hosts, runs `uv sync`,
+checks that `uv.lock` remains unchanged, then runs Ruff and the non-slow pytest
+suite with xdist. The separate `slow` and `canary` workflows have their own
+triggers; CI fixtures and a green build do not establish real-input,
+workstation, protocol, or clinical qualification.
