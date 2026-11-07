@@ -226,17 +226,26 @@ def lab_checks(store: LabStore) -> list[dict[str, Any]]:
     return checks
 
 
-def doctor_command(args: Any, store: LabStore) -> tuple[int, dict[str, Any]]:
-    checks = lab_checks(store)
-    blocked = [check for check in checks if check.get("blocks_example")]
-    warnings = [check for check in checks if check["status"] == "warn"]
+def doctor_summary(checks: list[dict[str, Any]]) -> dict[str, Any]:
+    """Status, one-line summary and the ordered fix list for one set of checks
+    (``lab doctor`` prints it; ``lab setup`` reports it before and after)."""
+
+    blocked = [check["name"] for check in checks if check.get("blocks_example")]
+    warnings = [check["name"] for check in checks if check["status"] == "warn"]
     steps = [check["fix"] for check in checks if check["status"] != "pass" and check.get("fix")]
     summary = (
         "The example journey is blocked" if blocked
         else "Lab ready for `traceback lab run --example`" + (f" ({len(warnings)} warning{'s' if len(warnings) != 1 else ''})" if warnings else "")
     )
+    return {"status": "blocked" if blocked else "ok", "summary": summary, "blocked": blocked, "warnings": warnings, "setup_steps": steps}
+
+
+def doctor_command(args: Any, store: LabStore) -> tuple[int, dict[str, Any]]:
+    checks = lab_checks(store)
+    verdict = doctor_summary(checks)
+    blocked, steps = verdict["blocked"], verdict["setup_steps"]
     payload = _local_envelope(
-        _result("lab doctor", "blocked" if blocked else "ok", summary, data={"root": str(store.root), "checks": checks, "setup_steps": steps})
+        _result("lab doctor", verdict["status"], verdict["summary"], data={"root": str(store.root), "checks": checks, "setup_steps": steps})
     )
     real = str(store.root)
     quoted_root = shlex.quote(real)
@@ -267,4 +276,4 @@ def add_doctor_parser(commands: Any, common: Any) -> None:
     doctor.set_defaults(handler=doctor_command)
 
 
-__all__ = ["add_doctor_parser", "doctor_command", "lab_checks"]
+__all__ = ["add_doctor_parser", "doctor_command", "doctor_summary", "lab_checks"]
