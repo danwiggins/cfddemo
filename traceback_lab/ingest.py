@@ -13,7 +13,9 @@ Unaligned chunks (no ``@SQ``) are aligned in one process group::
 
 into ``ROOT/lab/inputs/.staging-<random>/``.  The uBAM record total must equal
 the aligned primary-plus-unmapped count (TBX-LAB-013) before the directory is
-published as ``ROOT/lab/inputs/<input_id>/`` in one rename (D35).
+published as ``ROOT/lab/inputs/<input_id>/`` in one rename (D35).  A failed
+build removes its staging directory; ``lab run --keep-staging`` keeps it for
+inspection and names it (``staging_kept``), except on a full volume.
 """
 
 from __future__ import annotations
@@ -659,6 +661,46 @@ def input_manifest(store: LabStore, input_id: str) -> dict[str, Any] | None:
         return None
 
 
+STAGING_KEPT_FIX = (
+    "staging kept for inspection at ROOT/lab/{label}; "
+    "`traceback lab gc --staging-only --apply --root <ROOT>` removes it"
+)
+_STAGING_NOT_KEPT = frozenset({"TBX-LAB-011"})  # a full volume gets its bytes back
+
+
+def publish_input(
+    store: LabStore, input_id: str, build: Callable[[Path], None], *, keep_staging: bool = False
+) -> Path:
+    """``publish_directory`` under ``inputs/``; with ``keep_staging`` a failed build's staging is kept and named.
+
+    The staging is kept only for a Lab refusal other than TBX-LAB-011 (the
+    volume is full): an interrupt, an unexpected error or a full volume
+    removes it exactly as without the flag.  A kept directory is named by its
+    ``ROOT/lab``-relative label (``inputs/.staging-<hex>``, the form ``lab gc``
+    lists it under, never a host path) in ``problem.data["staging_kept"]`` and
+    at the end of the problem's FIX text.
+    """
+
+    staged: dict[str, Path] = {}
+
+    def record(staging: Path) -> None:
+        staged["path"] = staging
+        build(staging)
+
+    try:
+        return store.publish_directory(store.inputs_dir, input_id, record, keep_staging=keep_staging)
+    except BaseException as problem:
+        staging = staged.get("path")
+        if keep_staging and staging is not None:
+            if isinstance(problem, LabProblem) and problem.code not in _STAGING_NOT_KEPT:
+                label = staging.relative_to(store.lab).as_posix()
+                problem.data["staging_kept"] = label
+                problem.fix = f"{problem.fix}; {STAGING_KEPT_FIX.format(label=label)}"
+            else:
+                shutil.rmtree(staging, ignore_errors=True)
+        raise
+
+
 def _threads(requested: int | None) -> int:
     if requested is not None:
         return max(1, requested)
@@ -735,6 +777,7 @@ def align(
     scrubber: Scrubber,
     echo: Callable[[str], None] | None = None,
     progress: Callable[[str], None] | None = None,
+    keep_staging: bool = False,
 ) -> AlignedInput:
     """Align into staging, reconcile counts, publish ``inputs/<input_id>/``."""
 
@@ -854,7 +897,7 @@ def align(
         (staging / "manifest.json").write_bytes(canonical_json_bytes(manifest))
         metrics["manifest"] = manifest
 
-    store.publish_directory(store.inputs_dir, input_id, build)
+    publish_input(store, input_id, build, keep_staging=keep_staging)
     store.bump_generation()
     metrics.setdefault("duration_s", round(time.monotonic() - started, 1))
     return AlignedInput(input_id, source_id, store.inputs_dir / input_id, metrics["manifest"], reused=False)
@@ -867,6 +910,7 @@ def ingest_prealigned(
     *,
     reference_proof: str | None = None,
     progress: Callable[[str], None] | None = None,
+    keep_staging: bool = False,
 ) -> AlignedInput:
     """Copy one already-aligned BAM into the store and index it."""
 
@@ -932,7 +976,7 @@ def ingest_prealigned(
         (staging / "manifest.json").write_bytes(canonical_json_bytes(manifest))
         holder["manifest"] = manifest
 
-    store.publish_directory(store.inputs_dir, input_id, build)
+    publish_input(store, input_id, build, keep_staging=keep_staging)
     store.bump_generation()
     return AlignedInput(input_id, source_id, store.inputs_dir / input_id, holder["manifest"], reused=False)
 
@@ -1092,6 +1136,7 @@ __all__ = [
     "require_unchanged",
     "is_sample_reference",
     "mmi_path",
+    "publish_input",
     "require_budget",
     "resolve_reference",
     "resolve_sample",
