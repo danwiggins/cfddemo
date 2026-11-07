@@ -106,10 +106,14 @@ duration or resource needs for a full kit run.
 ## ROOT
 
 Every Lab command takes `--root R`. Without it the Lab uses
-`$TRACEBACK_ROOT`, else `.traceback` in the current directory (the signed
-default). The first line every command prints is the resolved absolute
-`ROOT  /…`; `--json` carries it as `data.root`. Set `TRACEBACK_ROOT` once so
-commands started in different directories share one store.
+`$TRACEBACK_ROOT`, else `.traceback` in the current directory. The signed CLI
+resolves ROOT identically (`--root`, else `$TRACEBACK_ROOT`, else
+`.traceback`; see [OPERATOR-GUIDE § ROOT](OPERATOR-GUIDE.md#root)), so one
+`TRACEBACK_ROOT` serves both surfaces. The first line every Lab command
+prints is the resolved absolute `ROOT  /…` (the signed CLI prints the same
+line after its status line); `--json` carries it as `data.root`. Set
+`TRACEBACK_ROOT` once so commands started in different directories share one
+store.
 
 Lab data lives under `ROOT/lab/` and never touches signed records:
 

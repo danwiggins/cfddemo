@@ -1,4 +1,5 @@
-"""Small fail-closed filesystem primitives shared by local publishers."""
+"""Small fail-closed filesystem primitives shared by local publishers, and the
+one ROOT resolution both operator surfaces (signed CLI and Lab) use."""
 
 from __future__ import annotations
 
@@ -6,6 +7,18 @@ import ctypes
 import errno
 import os
 import sys
+from pathlib import Path
+
+ROOT_ENV = "TRACEBACK_ROOT"
+DEFAULT_ROOT = ".traceback"
+
+
+def resolve_root(value: Path | None, environ: dict[str, str] | None = None) -> Path:
+    """``--root``, else ``$TRACEBACK_ROOT``, else ``.traceback``; made absolute."""
+
+    env = os.environ if environ is None else environ
+    chosen = value if value is not None else Path(env[ROOT_ENV]) if env.get(ROOT_ENV) else Path(DEFAULT_ROOT)
+    return Path(os.path.abspath(chosen.expanduser()))
 
 
 def rename_directory_exclusive_at(
@@ -65,4 +78,4 @@ def rename_directory_exclusive_at(
         raise OSError(error, os.strerror(error), destination_name)
 
 
-__all__ = ["rename_directory_exclusive_at"]
+__all__ = ["DEFAULT_ROOT", "ROOT_ENV", "rename_directory_exclusive_at", "resolve_root"]
