@@ -246,9 +246,15 @@ def inspect_chunks(
     *,
     skip_bad_chunks: bool = False,
     write_cache: bool = True,
+    rehash: bool = False,
     progress: Callable[[str], None] | None = None,
 ) -> ChunkSet:
-    """Quickcheck, order, hash (cached), count (cached) and cross-check chunks."""
+    """Quickcheck, order, hash (cached), count (cached) and cross-check chunks.
+
+    ``rehash`` ignores every cached chunk entry for this call (each chunk is
+    hashed and counted again) and, with ``write_cache``, records the fresh
+    entries under the current keys.
+    """
 
     ordered = sorted(paths, key=_order_key)
     chunks: list[Chunk] = []
@@ -282,7 +288,7 @@ def inspect_chunks(
     changed = False
     for number, chunk in enumerate(chunks, start=1):
         key = store.hash_cache_key(chunk.path)
-        cached = cache.get(key)
+        cached = None if rehash else cache.get(key)
         if cached and isinstance(cached.get("sha256"), str) and isinstance(cached.get("records"), int):
             chunk.sha256 = cached["sha256"]
             chunk.records = cached["records"]

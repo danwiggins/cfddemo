@@ -261,7 +261,8 @@ def test_mmi_cache_rehashes_same_size_restored_mtime_replacement(tmp_path) -> No
     replacement.write_bytes(b"cccc")
     os.utime(replacement, ns=(old.st_atime_ns, old.st_mtime_ns))
     os.replace(replacement, mmi)
-    assert store.hash_cache_key(mmi) == old_weak_key
+    # The v2 chunk key sees the new inode too; the strong key also sees ctime.
+    assert store.hash_cache_key(mmi) != old_weak_key
     assert cached_sha256(store, mmi) == hashlib.sha256(b"cccc").hexdigest()
 
 

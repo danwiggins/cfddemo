@@ -117,6 +117,7 @@ Lab data lives under `ROOT/lab/` and never touches signed records:
 |---|---|
 | `ROOT/lab/STORE_VERSION` | layout version; a newer store is refused |
 | `ROOT/lab/runs/<run_id>.jsonl` | one line per step event; hashes only, never paths |
+| `ROOT/lab/inputs/index.json` | the input hash cache (schema v2; see Reruns) |
 | `ROOT/lab/inputs/<input_id>/` | an aligned input and its intermediates |
 | `ROOT/lab/results/<input_id>/<algorithm>/<parameters_sha256>/` | immutable attempts plus `selected.json` |
 
@@ -127,7 +128,7 @@ traceback lab run (<BAM|uBAM|chunk dir>... | <id12> | latest | --example)
     [--reference ID] [--profile all|fast] [--only a,b] [--cohort ID]
     [--downsample 0.5,0.25,0.1 | --no-downsample]
     [--controls | --no-controls] [--tf 0.03,0.10,0.30]
-    [--skip-bad-chunks] [--sex M|F] [--force] [--timeout-s 3600]
+    [--skip-bad-chunks] [--sex M|F] [--force] [--rehash] [--timeout-s 3600]
     [--threads N] [--sort-mem 1G] [--mmi PATH]
     [--dry-run] [--verbose] [--json] [--root R]
 traceback lab simulate cna <id12|latest> [--tf 0.03,0.10,0.30] [--cohort ID] [--verbose]   synthetic CNA spike, copy-number recovery
@@ -202,9 +203,9 @@ of MinKNOW chunks (`*.bam`, not recursive). It:
 
 1. refuses symlinks, non-regular and unreadable files, truncated chunks
    (`samtools quickcheck -u`), duplicate chunks and mixed basecall models;
-2. orders chunks by the `_<n>.bam` index, hashes them (cached by path, size
-   and mtime) and derives the sample identity (`id12`, the first 12+ hex of
-   the chunk-set digest);
+2. orders chunks by the `_<n>.bam` index, hashes them (cached by path,
+   device, inode, size and mtime) and derives the sample identity (`id12`,
+   the first 12+ hex of the chunk-set digest);
 3. checks free space against the disk budget (about 2.2x the chunk bytes,
    plus the minimap2 index the first time, plus 2 GB);
 4. aligns unaligned chunks in one process group:
@@ -237,6 +238,22 @@ unchanged chunks are not re-hashed and the alignment is reused.
 sample without the chunk paths. `--force` recomputes every result.
 `--only a,b` runs just those algorithms (overriding `--profile`), plus the
 intermediates they need, labelled "(upstream)".
+
+**Input hash cache.** `ROOT/lab/inputs/index.json` remembers each chunk's
+SHA-256 and record count under a key of its real path, device number, inode
+number, byte size and mtime (nanoseconds). A chunk whose key matches is not
+read again, so a rerun with unchanged inputs finishes in seconds. A file
+replaced by another file of the same size with a restored mtime (a restore
+from backup, `cp -p`, `rsync -a`) lands on a new inode and is hashed again.
+The one case the key cannot see is a rewrite in place that keeps the inode
+and restores the mtime; after any restore or copy you do not fully trust, run
+once with `--rehash`, which ignores the cache for that run, hashes and counts
+every chunk, and writes the fresh entries. The run log's `run_start` flags and
+the `--json` output carry `rehash: true` for that run. The cache file is
+schema `traceback.lab.hash-cache.v2`; a file written before the device and
+inode joined the key (v1) still loads, its chunk entries are misses, and the
+next write stores it as v2. Under a tight disk budget `--rehash` also hashes
+the chunks in the read-only preflight, so they are read twice in that run.
 
 A result is reused only when its selected attempt matches the input, algorithm,
 and execution identity. Dependents also record the exact upstream attempts
@@ -1361,6 +1378,9 @@ the loopback interface is up and retry. `--json` carries the requested `port`
 ## Changes
 
 - 2026-11-06: `lab serve --port N` binds a fixed loopback port; TBX-LAB-026.
+- 2026-11-06: the input hash cache keys on device and inode as well as path,
+  size and mtime (schema v2; v1 files load as misses); `lab run --rehash`
+  ignores the cache for one run and is recorded in the run log and `--json`.
 - 2026-10-17: documented the expanded registered catalog, platform-specific
   methods, input-scoped calibrations, and current Lab writer commands.
 - 2026-10-15: first slice: `lab run`, `lab runs`, `lab algorithms`,

@@ -131,12 +131,79 @@ def test_hash_cache_avoids_rehashing(lab_world, monkeypatch) -> None:
     store.ensure()
     paths = ingest.collect_paths([str(lab_world["chunks"])])
     first = ingest.inspect_chunks(paths, store)
+    cached_file = store.hash_cache_file.read_bytes()
     calls: list[Path] = []
-    monkeypatch.setattr(ingest, "_sha256_file", lambda path: calls.append(path) or "0" * 64)
+    counts: list[Path] = []
+    original_hash, original_count = ingest._sha256_file, ingest.count_records
+    monkeypatch.setattr(ingest, "_sha256_file", lambda path: calls.append(path) or original_hash(path))
+    monkeypatch.setattr(ingest, "count_records", lambda path, *flags: counts.append(path) or original_count(path, *flags))
     second = ingest.inspect_chunks(paths, store)
-    assert calls == []
+    assert calls == [] and counts == []
     assert first.source_id == second.source_id
     assert second.total_records == 1800
+    assert store.hash_cache_file.read_bytes() == cached_file
+    # --rehash ignores every cached entry, recomputes, and rewrites the same identity.
+    third = ingest.inspect_chunks(paths, store, rehash=True)
+    assert sorted(calls) == sorted(paths) and sorted(counts) == sorted(paths)
+    assert third.source_id == first.source_id
+    assert store.hash_cache_file.read_bytes() == cached_file
+    # A rehash with write_cache=False (dry run, preflight) also recomputes and writes nothing.
+    calls.clear()
+    ingest.inspect_chunks(paths, store, rehash=True, write_cache=False)
+    assert sorted(calls) == sorted(paths)
+    assert store.hash_cache_file.read_bytes() == cached_file
+
+
+def _rewrite_uncompressed(src: Path, dst: Path, *, flip_first_base: bool) -> None:
+    """Write ``src`` as an uncompressed BAM so a one-base edit keeps the byte size."""
+
+    with pysam.AlignmentFile(str(src), "rb", check_sq=False) as inp, pysam.AlignmentFile(
+        str(dst), "wbu", header=inp.header
+    ) as out:
+        for number, record in enumerate(inp):
+            if flip_first_base and number == 0:
+                sequence = list(record.query_sequence)
+                qualities = record.query_qualities
+                sequence[0] = "C" if sequence[0] != "C" else "G"
+                record.query_sequence = "".join(sequence)
+                record.query_qualities = qualities
+            out.write(record)
+
+
+def test_same_size_same_mtime_replacement_on_a_new_inode_is_rehashed(lab_world, monkeypatch) -> None:
+    store = LabStore(lab_world["root"])
+    store.ensure()
+    chunks = lab_world["chunks"]
+    target = chunks / "SYNTH0001_pass_synthetic_1.bam"
+    staged = lab_world["tmp"] / "uncompressed.bam"
+    _rewrite_uncompressed(target, staged, flip_first_base=False)
+    os.replace(staged, target)
+    paths = ingest.collect_paths([str(chunks)])
+    first = ingest.inspect_chunks(paths, store)
+    before = target.stat()
+    first_sha = next(chunk.sha256 for chunk in first.chunks if chunk.path == target)
+
+    restored = lab_world["tmp"] / "restored.bam"
+    _rewrite_uncompressed(target, restored, flip_first_base=True)
+    os.utime(restored, ns=(before.st_atime_ns, before.st_mtime_ns))
+    os.replace(restored, target)
+    after = target.stat()
+    assert (after.st_size, after.st_mtime_ns) == (before.st_size, before.st_mtime_ns)
+    assert after.st_ino != before.st_ino
+
+    calls: list[Path] = []
+    original_hash = ingest._sha256_file
+    monkeypatch.setattr(ingest, "_sha256_file", lambda path: calls.append(path) or original_hash(path))
+    second = ingest.inspect_chunks(paths, store)
+    assert calls == [target]
+    second_sha = next(chunk.sha256 for chunk in second.chunks if chunk.path == target)
+    assert second_sha != first_sha
+    assert second.source_id != first.source_id
+    assert second.total_records == first.total_records == 1800
+    # The fresh entry is cached under the new key: a third pass recomputes nothing.
+    calls.clear()
+    assert ingest.inspect_chunks(paths, store).source_id == second.source_id
+    assert calls == []
 
 
 def _aligned_header_bam(path: Path, contigs) -> None:

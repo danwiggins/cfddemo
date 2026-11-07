@@ -94,6 +94,7 @@ def add_run_parser(commands: Any, common: Callable[[argparse.ArgumentParser], No
     run.add_argument("--skip-bad-chunks", action="store_true", help="exclude truncated chunks (provisional)")
     run.add_argument("--sex", choices=("M", "F"), help="operator assertion for a pre-analytic comparison; not a diagnostic sex or gender determination")
     run.add_argument("--force", action="store_true", help="recompute every result")
+    run.add_argument("--rehash", action="store_true", help="ignore the input hash cache: hash every chunk again (after a restore from backup or a timestamp-preserving copy)")
     run.add_argument("--timeout-s", type=float, default=DEFAULT_TIMEOUT_S, metavar="S")
     run.add_argument("--threads", type=_threads, metavar="N", help="alignment threads (default min(8, cores-2))")
     run.add_argument("--sort-mem", type=_sort_mem, default="1G", metavar="MEM", help="samtools sort memory per thread (e.g. 768M, 2G)")
@@ -196,6 +197,7 @@ def _flags(args: argparse.Namespace) -> dict[str, Any]:
         "cohort": args.cohort,
         "skip_bad_chunks": args.skip_bad_chunks,
         "force": args.force,
+        "rehash": args.rehash,
         "timeout_s": args.timeout_s,
         "threads": args.threads,
         "sort_mem": args.sort_mem,
@@ -416,7 +418,7 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
         for item in items
     ]
     memory_warning = _memory_warning()
-    data: dict[str, Any] = {"root": str(store.root), "dry_run": True, "plan": plan_rows,
+    data: dict[str, Any] = {"root": str(store.root), "dry_run": True, "rehash": args.rehash, "plan": plan_rows,
                             "warnings": [memory_warning] if memory_warning else []}
     lines = [f"ROOT      {store.root}"]
     if memory_warning:
@@ -529,7 +531,9 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
                 row["decision"] = "decided at run time"
     else:
         paths = collect_paths(args.inputs)
-        chunkset = inspect_chunks(paths, store, skip_bad_chunks=args.skip_bad_chunks, write_cache=False)
+        chunkset = inspect_chunks(
+            paths, store, skip_bad_chunks=args.skip_bad_chunks, write_cache=False, rehash=args.rehash,
+        )
         input_platform = _declared_platform(chunkset)
         platform = input_platform if chunkset.aligned else "ont"
         data["sample"] = {"source_id": chunkset.source_id,
@@ -664,7 +668,7 @@ def _preflight_budget(
 
     progress("preflight  checking exact disk budget and input identity (read-only)")
     chunkset = inspect_chunks(
-        paths, store, skip_bad_chunks=args.skip_bad_chunks, write_cache=False,
+        paths, store, skip_bad_chunks=args.skip_bad_chunks, write_cache=False, rehash=args.rehash,
         progress=lambda line: progress(f"preflight  {line.removeprefix('ingest  ')}"),
     )
     input_platform = _declared_platform(chunkset)
@@ -809,8 +813,11 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                         prepare(store.root)
                     paths = collect_paths(args.inputs)
                     scrubber = Scrubber(root=store.root, chunk_stems=[p.name[:-4] for p in paths])
+                    if args.rehash:
+                        progress("ingest                   --rehash: ignoring the input hash cache")
                     chunkset = inspect_chunks(
-                        paths, store, skip_bad_chunks=args.skip_bad_chunks, progress=progress
+                        paths, store, skip_bad_chunks=args.skip_bad_chunks, rehash=args.rehash,
+                        progress=progress,
                     )
                     input_platform = _declared_platform(chunkset)
                     with_sex_assertion(source_record(store, chunkset.source_id) or {}, args.sex)
@@ -957,7 +964,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                 code, payload = _summary(
                     store, run_id, aligned, id12, chunkset, results, warnings, time.monotonic() - started,
                     depth=target.depth.model_dump() if target.depth is not None else None,
-                    controls=controls["summary"], platform=target.platform,
+                    controls=controls["summary"], platform=target.platform, rehash=args.rehash,
                 )
                 log.append("run_end", status=payload["status"], exit_code=code)
             except KeyboardInterrupt:
@@ -1128,6 +1135,7 @@ def _summary(
     depth: dict[str, Any] | None = None,
     controls: dict[str, Any] | None = None,
     platform: str = "ont",
+    rehash: bool = False,
 ) -> tuple[int, dict[str, Any]]:
     ok = sum(result.status == "ok" for result in results)
     skipped: dict[str, int] = {}
@@ -1164,6 +1172,7 @@ def _summary(
         "steps": [result.public() for result in results],
         "controls": controls,
         "excluded_chunks": aligned.manifest.get("excluded_chunks", []),
+        "rehash": rehash,
         "warnings": warnings,
         "remediations": remedies,
         "next": next_argv,

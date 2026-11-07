@@ -9,7 +9,8 @@ Layout (D11, D19, D22, D35)::
     ROOT/lab/generation           integer bumped by every publish
     ROOT/lab/runs/<run_id>.jsonl  one line per step event; hashes, never paths
     ROOT/lab/sources/<source_id>.json
-    ROOT/lab/inputs/index.json    hash cache (realpath, size, mtime_ns) -> digest
+    ROOT/lab/inputs/index.json    hash cache; chunk keys are (realpath, device,
+                                  inode, size, mtime_ns) -> digest (schema v2)
     ROOT/lab/inputs/<input_id>/   aligned or derived input (published as a unit)
     ROOT/lab/results/<input_id>/<algorithm_id>/<parameters_sha256>/
         attempts/<attempt_id>/{result.json, artifacts/, artifacts.json,
@@ -53,6 +54,7 @@ from .file_access import directory_no_follow, open_regular_no_follow, write_atom
 from .identity import ALGORITHM_ID_PATTERN, SHA256_PATTERN
 from .problems import LabProblem
 
+HASH_CACHE_SCHEMA = "traceback.lab.hash-cache.v2"  # v1: unprefixed chunk keys without device/inode
 HEARTBEAT_INTERVAL_S = 10.0
 HEARTBEAT_FRESH_S = 30.0
 KEEP_FAILED_ATTEMPTS = 3
@@ -1467,26 +1469,48 @@ class LabStore:
 
     # -- hash cache (D11) ---------------------------------------------------
     def load_hash_cache(self) -> dict[str, dict[str, Any]]:
+        """Read the cache; a file written by older code loads as misses.
+
+        Schema v1 keyed chunks on ``realpath\\0size\\0mtime_ns`` with no
+        prefix. Every v2 chunk key carries the ``chunk-v2`` prefix, so a v1
+        chunk entry can never match and is dropped here; the next save
+        rewrites the file as v2. Index proofs and reference proofs carry their
+        own prefixes and survive the bump unchanged.
+        """
+
         try:
             data = json.loads(self.hash_cache_file.read_bytes())
         except (FileNotFoundError, ValueError):
             return {}
         entries = data.get("entries", {}) if isinstance(data, dict) else {}
-        return {str(key): value for key, value in entries.items() if isinstance(value, dict)}
+        if not isinstance(entries, dict):
+            return {}
+        return {
+            str(key): value for key, value in entries.items()
+            if isinstance(value, dict) and not str(key).startswith("/")
+        }
 
     def save_hash_cache(self, entries: Mapping[str, Mapping[str, Any]]) -> None:
         """Rewrite the cache (callers hold the writer lock)."""
 
         write_atomic(
             self.hash_cache_file,
-            canonical_json_bytes({"schema": "traceback.lab.hash-cache.v1", "entries": dict(entries)}),
+            canonical_json_bytes({"schema": HASH_CACHE_SCHEMA, "entries": dict(entries)}),
         )
 
     @staticmethod
     def hash_cache_key(path: Path) -> str:
+        """Chunk cache key: realpath, device, inode, size and mtime.
+
+        A file replaced by another of the same size with a restored mtime
+        lives on a new inode, so it misses the cache and is rehashed. An
+        in-place rewrite that keeps the inode and restores the mtime still
+        hits; ``lab run --rehash`` covers that case.
+        """
+
         real = os.path.realpath(path)
         info = os.stat(real)
-        return f"{real}\0{info.st_size}\0{info.st_mtime_ns}"
+        return f"chunk-v2\0{real}\0{info.st_dev}\0{info.st_ino}\0{info.st_size}\0{info.st_mtime_ns}"
 
     @staticmethod
     def strong_hash_cache_key(path: Path) -> str:

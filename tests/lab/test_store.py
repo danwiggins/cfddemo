@@ -949,8 +949,65 @@ def test_hash_cache_round_trip(tmp_path: Path) -> None:
     key = store.hash_cache_key(chunk)
     store.save_hash_cache({key: {"sha256": A, "records": 3}})
     assert store.load_hash_cache() == {key: {"sha256": A, "records": 3}}
+    assert json.loads(store.hash_cache_file.read_bytes())["schema"] == "traceback.lab.hash-cache.v2"
     os.utime(chunk, ns=(1, 1))
     assert store.hash_cache_key(chunk) != key
+
+
+def test_hash_cache_key_changes_when_a_same_size_same_mtime_replacement_has_a_new_inode(tmp_path: Path) -> None:
+    store = LabStore(tmp_path)
+    chunk = tmp_path / "chunk_0.bam"
+    chunk.write_bytes(b"aaaa")
+    old = chunk.stat()
+    key = store.hash_cache_key(chunk)
+    assert key.startswith("chunk-v2\0")
+    replacement = tmp_path / "chunk_0.bam.restored"
+    replacement.write_bytes(b"bbbb")
+    os.utime(replacement, ns=(old.st_atime_ns, old.st_mtime_ns))
+    assert replacement.stat().st_ino != old.st_ino
+    os.replace(replacement, chunk)
+    new = chunk.stat()
+    assert (new.st_size, new.st_mtime_ns) == (old.st_size, old.st_mtime_ns)
+    replaced_key = store.hash_cache_key(chunk)
+    assert replaced_key != key
+    # An in-place rewrite that keeps the inode and restores the mtime still hits:
+    # that is what `lab run --rehash` is for.
+    chunk.write_bytes(b"cccc")
+    os.utime(chunk, ns=(old.st_atime_ns, old.st_mtime_ns))
+    assert chunk.stat().st_ino == new.st_ino
+    assert store.hash_cache_key(chunk) == replaced_key
+
+
+def test_hash_cache_written_by_v1_code_loads_as_misses_and_is_rewritten_as_v2(tmp_path: Path) -> None:
+    store = LabStore(tmp_path)
+    chunk = tmp_path / "chunk_0.bam"
+    chunk.write_bytes(b"x")
+    info = chunk.stat()
+    legacy_key = f"{os.path.realpath(chunk)}\0{info.st_size}\0{info.st_mtime_ns}"
+    proof_key = "reference-indexed-proof-v1:" + "c" * 64
+    strong_key = store.strong_hash_cache_key(chunk)
+    store.hash_cache_file.parent.mkdir(parents=True)
+    store.hash_cache_file.write_bytes(json.dumps({
+        "schema": "traceback.lab.hash-cache.v1",
+        "entries": {
+            legacy_key: {"sha256": A, "records": 3},
+            proof_key: {"sha256": B, "indexed_m5_verified": True},
+            strong_key: {"sha256": A, "records": -1},
+        },
+    }).encode())
+    loaded = store.load_hash_cache()
+    assert legacy_key not in loaded
+    assert store.hash_cache_key(chunk) not in loaded
+    assert loaded == {
+        proof_key: {"sha256": B, "indexed_m5_verified": True},
+        strong_key: {"sha256": A, "records": -1},
+    }
+    loaded[store.hash_cache_key(chunk)] = {"sha256": A, "records": 3}
+    store.save_hash_cache(loaded)
+    on_disk = json.loads(store.hash_cache_file.read_bytes())
+    assert on_disk["schema"] == "traceback.lab.hash-cache.v2"
+    assert legacy_key not in on_disk["entries"]
+    assert store.load_hash_cache() == loaded
 
 
 def test_orphaned_staging_is_reported(tmp_path: Path) -> None:
