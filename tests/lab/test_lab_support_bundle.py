@@ -157,23 +157,23 @@ def test_failed_step_log_is_included_and_scrubbed(tmp_path: Path, capsys) -> Non
 
 
 @pytest.mark.parametrize("as_json", [False, True])
-def test_unknown_run_is_tbx_lab_026(tmp_path: Path, capsys, as_json: bool) -> None:
+def test_unknown_run_is_tbx_lab_028(tmp_path: Path, capsys, as_json: bool) -> None:
     store, _, _ = _world(tmp_path)
     argv = ["support-bundle", "r-20261106-0000-0000", "--root", str(store.root)] + (["--json"] if as_json else [])
     code, out = _run(capsys, argv)
     assert code == 4
     if as_json:
         data = json.loads(out)["data"]
-        assert data["code"] == "TBX-LAB-026" and data["docs"] == "docs/LAB-GUIDE.md#tbx-lab-026"
+        assert data["code"] == "TBX-LAB-028" and data["docs"] == "docs/LAB-GUIDE.md#tbx-lab-028"
         assert data["candidates"] == [RUN_ID] and data["retryable"] is False
     else:
         lines = out.splitlines()
         assert lines[0] == f"ROOT  {store.root}"
-        for label in ("CODE       TBX-LAB-026", "CAUSE", "FIX", "RETRYABLE  no", "DOCS"):
+        for label in ("CODE       TBX-LAB-028", "CAUSE", "FIX", "RETRYABLE  no", "DOCS"):
             assert any(line.startswith(label) for line in lines), label
     assert not (store.lab / "support").exists()
     code, out = _run(capsys, ["support-bundle", "not-a-run-id", "--root", str(store.root), "--json"])
-    assert code == 4 and json.loads(out)["data"]["code"] == "TBX-LAB-026"
+    assert code == 4 and json.loads(out)["data"]["code"] == "TBX-LAB-028"
 
 
 def test_refuses_to_overwrite_unless_force(tmp_path: Path, capsys) -> None:
@@ -184,7 +184,7 @@ def test_refuses_to_overwrite_unless_force(tmp_path: Path, capsys) -> None:
     first = out_path.read_bytes()
     code, out = _run(capsys, ["support-bundle", RUN_ID, "--root", str(store.root), "--out", str(out_path), "--json"])
     data = json.loads(out)["data"]
-    assert code == 2 and data["code"] == "TBX-LAB-027" and data["docs"] == "docs/LAB-GUIDE.md#tbx-lab-027"
+    assert code == 2 and data["code"] == "TBX-LAB-029" and data["docs"] == "docs/LAB-GUIDE.md#tbx-lab-029"
     assert "--force" in data["fix"] and str(tmp_path) not in json.dumps({k: v for k, v in data.items() if k != "root"})
     assert out_path.read_bytes() == first
     code, out = _run(capsys, ["support-bundle", RUN_ID, "--root", str(store.root), "--out", str(out_path), "--force", "--json"])

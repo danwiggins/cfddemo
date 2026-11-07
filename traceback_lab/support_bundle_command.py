@@ -209,14 +209,14 @@ def build_bundle(store: LabStore, run_id: str, destination: Path, *, force: bool
     events = log.events() if log is not None else []
     if not events:
         raise LabProblem(
-            "TBX-LAB-026",
+            "TBX-LAB-028",
             cause=f"no Lab run {run_id!r} under this ROOT",
             fix="`traceback lab runs` lists runs; pass the same --root you ran with",
             data={"run_id": run_id, "candidates": store.run_ids()[:10]},
         )
     if destination.exists() and not force:
         raise LabProblem(
-            "TBX-LAB-027",
+            "TBX-LAB-029",
             cause=f"a support bundle for {run_id} already exists at the output path",
             fix="pass --force to replace it, or --out PATH for a new file",
             data={"run_id": run_id, "bundle": destination.name},

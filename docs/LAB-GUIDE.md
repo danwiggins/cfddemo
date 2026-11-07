@@ -1156,7 +1156,7 @@ Both take the writer lock and rerun only what is missing.
 send to someone when a run needs a second pair of eyes. Nothing is uploaded;
 you send the file. The default path is `ROOT/lab/support/RUN_ID.tar.gz`
 (`--out PATH` for another); an existing file is refused unless you pass
-`--force` (TBX-LAB-027). `--json` carries the path, size and member list.
+`--force` (TBX-LAB-029). `--json` carries the path, size and member list.
 
 In the bundle, under `RUN_ID/`:
 
@@ -1361,14 +1361,14 @@ for full hg38 alignment. The run continues, but alignment may fail or be slow.
 Use a machine with at least 16 GiB RAM for a full alignment. If physical RAM
 cannot be detected, the Lab omits this advisory rather than blocking the run.
 
-### TBX-LAB-026
+### TBX-LAB-028
 
 `support-bundle` found no run with that id under this ROOT (exit 4). Nothing
 was written. `traceback lab runs` lists runs; pass the same `--root` (or
 `TRACEBACK_ROOT`) you ran with. The cause's `candidates` names up to ten
 runs.
 
-### TBX-LAB-027
+### TBX-LAB-029
 
 The support bundle's output path already exists (exit 2). Nothing was
 written. Pass `--force` to replace it, or `--out PATH` for a new file.
@@ -1391,7 +1391,7 @@ written. Pass `--force` to replace it, or `--out PATH` for a new file.
 ## Changes
 
 - 2026-11-06: `lab support-bundle RUN_ID`, a scrubbed archive of one run
-  (TBX-LAB-026, TBX-LAB-027).
+  (TBX-LAB-028, TBX-LAB-029).
 - 2026-10-17: documented the expanded registered catalog, platform-specific
   methods, input-scoped calibrations, and current Lab writer commands.
 - 2026-10-15: first slice: `lab run`, `lab runs`, `lab algorithms`,
