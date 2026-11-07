@@ -15,6 +15,8 @@ The bundle is for asking someone else for help.  It is one ``.tar.gz`` holding:
   scrubber cannot know, so they are omitted by name;
 - ``<run_id>/MANIFEST.json``: every member with its size and sha256, the
   failed steps (present, pruned or outside ROOT), and every omitted file.
+  Its names and ids are built from validated components and are written
+  without scrubbing, so they always equal the archive's member names.
 
 Every member is JSON (or JSON lines).  Its string values pass through the D34
 scrubber (``scrub.py``: ROOT, paths, home, login); free-text values
@@ -70,6 +72,11 @@ HOST_TEXT_KEYS = frozenset({
     "setup_steps", "platform", "samtools", "minimap2",
 })
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9._@-]")
+
+
+def _safe_component(part: str) -> str:
+    sanitized = _SAFE_NAME.sub("_", part)
+    return "_" if not sanitized or set(sanitized) == {"."} else sanitized
 
 
 def _hostname() -> str | None:
@@ -202,11 +209,20 @@ class _Bundle:
         self.omitted: list[dict[str, Any]] = []
 
     def name(self, *parts: str) -> str:
-        return "/".join([self.run_id, *(_SAFE_NAME.sub("_", part) for part in parts)])
+        """A member name from the validated run id and sanitized components.
+
+        A component that is empty or only dots (``.``/``..``) becomes ``_``, so a
+        malformed step in the run log can never shape a traversal."""
+
+        return "/".join([self.run_id, *(_safe_component(part) for part in parts)])
 
     def add_json(self, name: str, value: Any) -> None:
-        scrubbed = self.values.walk(value)
-        self.members.append((name, (json.dumps(scrubbed, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8")))
+        self.add_raw_json(name, self.values.walk(value))
+
+    def add_raw_json(self, name: str, value: Any) -> None:
+        """Serialize without scrubbing: for the manifest, whose names are already safe."""
+
+        self.members.append((name, (json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n").encode("utf-8")))
 
     def add_jsonl(self, name: str, raw: bytes) -> None:
         lines: list[bytes] = []
@@ -359,7 +375,9 @@ def build_bundle(store: LabStore, run_id: str, destination: Path, *, force: bool
         failed.append(entry)
     created = time.time()
     created_utc = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(created))
-    bundle.add_json(bundle.name("MANIFEST.json"), bundle.manifest(failed, created_utc))
+    # Names, ids and steps in the manifest are already safe; only ``first_line``
+    # was free text, and it was scrubbed when the entry was built.
+    bundle.add_raw_json(bundle.name("MANIFEST.json"), bundle.manifest(failed, created_utc))
     size = _write_tar(destination, bundle.members, int(created))
     return {
         "run_id": run_id,
@@ -395,7 +413,7 @@ def support_bundle_command(args: argparse.Namespace, store: LabStore) -> tuple[i
     ]
     if data["omitted"]:
         lines.append(f"OMITTED  {len(data['omitted'])} file(s) (not allowlisted, too large or outside ROOT; listed in MANIFEST.json)")
-    lines.append("Scrubbed: no host path, user name or host name; read names never appear. Send the file yourself.")
+    lines.append("Scrubbed: stderr is scrubbed for paths, user and host names; algorithm artifacts are not included. Send the file yourself.")
     return EXIT_OK, _with_human(payload, lines, replace_data=True)
 
 

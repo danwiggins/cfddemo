@@ -1160,8 +1160,8 @@ you send the file. The default path is `ROOT/lab/support/RUN_ID.tar.gz`
 
 In the bundle, under `RUN_ID/`:
 
-- `run.jsonl`: the run log, line for line (step events; hashes, never paths or
-  read names);
+- `run.jsonl`: the run log, one scrubbed canonical event per line (step
+  events; hashes and ids, no paths);
 - `doctor.json`: `traceback lab doctor --json` captured when the bundle is
   written;
 - `versions.json`: the traceback package version, Python, platform, the first
@@ -1183,8 +1183,11 @@ Every member is JSON. Its string values pass through the same scrubber as
 stored stderr (D34): `ROOT` becomes `<ROOT>`, every other path `<path>`, and
 the home directory and login `<redacted>`. Free text (stderr lines, doctor
 messages, version strings) also has the host name and its first label
-redacted as whole words of three or more characters, case-insensitively;
-keys, identifiers and member names are never rewritten. The archive's entries
+redacted as whole words, case-insensitively; a host name (or first label)
+shorter than three characters is not redacted. Keys, identifiers and member
+names are never rewritten. Stderr is scrubbed for paths, user and host
+names, and algorithm artifacts are not included; a tool's stderr line is
+otherwise shipped as stored. The archive's entries
 carry no owner name. Not in the bundle: BAMs, aligned inputs, reference
 files, any method artifact (successful or failed), source records, the hash
 cache, or anything from outside `ROOT/lab`. A run log that exists but holds

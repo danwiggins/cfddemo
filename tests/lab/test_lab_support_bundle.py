@@ -215,6 +215,44 @@ def test_attempt_outside_root_is_omitted(tmp_path: Path, capsys) -> None:
     assert marker.encode() not in gzip.decompress(_default_bundle(store).read_bytes())
 
 
+def test_manifest_names_are_not_scrubbed(tmp_path: Path, capsys, monkeypatch) -> None:
+    from traceback_lab import scrub
+
+    monkeypatch.setattr(scrub.getpass, "getuser", lambda: "size")  # a substring of "fragment-size"
+    store, _, _ = _world(tmp_path, stderr=["size: cannot allocate", "exit 1"])
+    code, out = _run(capsys, ["support-bundle", RUN_ID, "--root", str(store.root), "--json"])
+    assert code == 0, out
+    members = _members(_default_bundle(store))
+    manifest = json.loads(members[f"{RUN_ID}/MANIFEST.json"])
+    assert [entry["name"] for entry in manifest["members"]] == list(members)[:-1]
+    assert manifest["run_id"] == RUN_ID and all("fragment-size" in entry["name"] for entry in manifest["omitted"])
+    steps = {entry["step"]: entry for entry in manifest["failed_steps"]}
+    assert set(steps) == {"fragment-size", "wps"} and steps["wps"]["attempt_id"] == "a-20261106T091000000000-deadbeef"
+    assert steps["fragment-size"]["first_line"] == "<redacted>: cannot allocate"  # free text is scrubbed
+    assert not [name for name in members if "<redacted>" in name]
+
+
+def test_malformed_step_names_cannot_shape_member_names(tmp_path: Path, capsys) -> None:
+    from traceback_lab.support_bundle_command import _Bundle, _safe_component
+
+    assert [_safe_component(part) for part in ("..", ".", "", "a/../b", "fragment-size@0.5")] == [
+        "_", "_", "_", "a_.._b", "fragment-size@0.5",
+    ]
+    assert _Bundle(RUN_ID, None).name("failed", "..", "", "result.json") == f"{RUN_ID}/failed/_/_/result.json"
+    store, _, _ = _world(tmp_path)
+    log = store.run_log(RUN_ID)
+    for step in ("..", ""):
+        log.append("step_end", step=step, status="failed", first_line="boom", parameters_sha256=A, input_id=C,
+                   attempt_id="a-20261106T091000000000-deadbeef")
+    code, out = _run(capsys, ["support-bundle", RUN_ID, "--root", str(store.root), "--json"])
+    assert code == 0, out
+    data = json.loads(out)["data"]
+    by_step = {entry["step"]: entry for entry in data["failed_steps"]}
+    assert by_step[".."]["reason"] == "no_attempt" and by_step[""]["reason"] == "no_attempt"
+    for name in _members(_default_bundle(store)):
+        assert name.startswith(f"{RUN_ID}/") and ".." not in name.split("/") and "" not in name.split("/")
+
+
 @pytest.mark.parametrize("as_json", [False, True])
 def test_unknown_run_is_tbx_lab_028(tmp_path: Path, capsys, as_json: bool) -> None:
     store, _, _ = _world(tmp_path)
