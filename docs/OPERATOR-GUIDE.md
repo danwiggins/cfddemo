@@ -5,7 +5,7 @@ Scope: the **signed local CLI** (`traceback run`, `catalog`, `serve`,
 development-signed, unqualified records for fragment length, cell origin and
 optional ichorCNA copy number. Nothing here is qualified or for clinical use.
 
-For most analysis, use the [Traceback Lab](LAB-GUIDE.md) instead: it runs
+For most analysis, use the [Traceback Lab](LAB-GUIDE.md) instead: it attempts
 all 35 registered cfDNA algorithms on a kit and is the main surface of this
 repository. The Lab and this CLI share ROOT, the registered reference and the
 `toolchain install` commands. The public Streamlit evidence demo is separate
@@ -209,9 +209,12 @@ Two rules apply before any real data enters this path:
 
 - Write down the source BAM's provenance and consent before any record from it
   is shown to anyone outside the team.
-- Keep donor data on the operator's machine. The pilot security items this
-  rule waited on, H1 (core) and H6-min, have landed (#99); the rest of
-  `docs/PILOT-SECURITY-HARDENING.md` is a historical plan.
+- The original rule was: no donor data until the pilot security items H1
+  and H6-min have landed (`docs/PILOT-SECURITY-HARDENING.md`). What landed
+  in #99 is H1 **core** (operator/reader session kinds and one exact route
+  table) and H6-min (a dispatcher catch answering `TBX-INTERNAL`, an error
+  counter and the launch watchdog fix). The rest of H1 was deferred in the spec. Get the
+  owner's sign-off before donor data enters this path.
 
 ### Prerequisites
 

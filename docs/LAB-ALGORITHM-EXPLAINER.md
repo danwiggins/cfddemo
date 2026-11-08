@@ -10,8 +10,9 @@ views of the same sample. Together they can help us ask better research
 questions; they do not automatically identify a disease or establish a diagnosis.
 
 Most methods here operate on Oxford Nanopore (ONT) data. One,
-`short-read-fragment-size`, is for paired-end Illumina data only; `griffin`
-and `finaletoolkit-xcheck` accept either platform. A registered algorithm is
+`short-read-fragment-size`, is for paired-end Illumina data only; `bam-qc`,
+`depth`, `griffin` and `finaletoolkit-xcheck` (and the `read-summary`
+intermediate) accept either platform. A registered algorithm is
 not a promise that it can run on today's sample: depth, reference files,
 trained models, controls, platform, and licensing requirements can prevent
 execution. The Lab shows those missing requirements rather than filling in a

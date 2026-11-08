@@ -1,5 +1,7 @@
 # ADR 0001: provisional execution-substrate direction
 
+> **Historical:** a provisional September 2026 comparison; no executor was selected. Not maintained.
+
 - Status: provisional; no executor selected or qualified
 - Date: 2026-09-27
 - Scope: A02 synthetic comparison only

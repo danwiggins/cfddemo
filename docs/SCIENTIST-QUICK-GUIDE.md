@@ -45,7 +45,8 @@ report `missing_asset`.
 ## From MinKNOW output to results
 
 MinKNOW and Dorado write unaligned BAM chunks. The Lab aligns them for you;
-point it at one barcode's `bam_pass` folder. Never mix barcodes in one run.
+point it at one barcode's folder, `bam_pass/barcodeNN/` (or `bam_pass/` for
+an unbarcoded run). Never mix barcodes in one run.
 
 ```bash
 uv run traceback lab inventory <chunks-dir>                  # is the run complete?

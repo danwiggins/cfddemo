@@ -54,8 +54,8 @@ record. The code is still in the repository and tested.
 
 - [L0 development control plane](DEVELOPMENT-CONTROL.md) (the CI section is
   current; the rest is historical)
-- `docs/changes/`: one change note per pull request, for the Lab guide's
-  Changes list
+- `docs/changes/<ID>.md`: one dated bullet per pull request, to be folded
+  into the Lab guide's Changes list
 
 ## Historical: plans and specs
 

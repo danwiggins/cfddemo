@@ -10,7 +10,7 @@ run. A local web page and a one-file HTML report show the results with their
 provenance.
 
 > **Research use only. Not CLIA-validated. Not a diagnosis.** Nothing here is
-> a validated clinical assay, and no result is uploaded anywhere.
+> a validated clinical assay. The Lab runs locally and uploads nothing.
 
 ## Quick start (synthetic data)
 

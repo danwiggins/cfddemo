@@ -8,9 +8,11 @@ This repository has two sets of methods:
   a plain-language description of each method is in the
   [explainer](LAB-ALGORITHM-EXPLAINER.md).
 - **Public evidence demo** (`app.py`, `evidence_inspector/`): three fixed
-  readouts and a bounded AI review, described in sections 1–4 below. The
-  signed `traceback run` path reuses the fragment-length, cell-origin and
-  ichorCNA methods; see the [operator guide](OPERATOR-GUIDE.md).
+  readouts (fragment length, cell origin, a whole-chromosome dosage screen)
+  and a bounded AI review, described in sections 1–4 below. The dosage
+  screen is not ichorCNA. The separate signed `traceback run` path has its
+  own fragment-length, cell-origin and ichorCNA copy-number analyses; see the
+  [operator guide](OPERATOR-GUIDE.md).
 
 Research use only. No method here is clinically validated.
 
@@ -36,7 +38,7 @@ reference. Platform is ONT unless stated.
 | `identity` | qc | SPECULATIVE | 10M | Somalier on `PATH`, registered sites VCF |
 | `copy-number` | copy-number | NEWER | 2M (and 1M counted reads) | ichorCNA toolchain and assets; a built panel of normals for an interpretable result |
 | `instability` | copy-number | SPECULATIVE | 2M | a `copy-number` result |
-| `arm-summary` | copy-number | SPECULATIVE | 2M | `copy-number` with a selected panel of normals (≥ 10 cohort samples) |
+| `arm-summary` | copy-number | SPECULATIVE | 2M | `copy-number` with a selected panel of normals (`lab cohort build` from ≥ 10 Lab-aligned samples, each ≥ 2M counted reads) |
 | `end-motifs` | fragmentomics | SPECULATIVE | 500k | registered FASTA |
 | `breakpoint-motifs` | fragmentomics | SPECULATIVE | 1M | registered FASTA |
 | `delfi-ratio` | fragmentomics | SPECULATIVE | 1M | |
@@ -59,7 +61,7 @@ reference. Platform is ONT unless stated.
 | `methylbert` | methylation | SPECULATIVE | 2.5M (not bypassable) | trusted fine-tuned bundle, CUDA GPU |
 | `viral-reads` | non-human | SPECULATIVE | none | viral FASTA and targets TSV |
 | `microbial` | non-human | SPECULATIVE | none | Kraken2, Bracken and a database (not supported for now) |
-| `fetal-fraction` | copy-number | SPECULATIVE | 2M (not bypassable) | Rscript with NIPTeR 1.0.2, input-scoped prenatal control |
+| `fetal-fraction` | copy-number | SPECULATIVE | 2M (not bypassable) | Rscript with NIPTeR 1.0.2, input-scoped prenatal control. Reports chr13/18/21 z-scores only: its `fetal_fraction` metric is always null, because NIPTeR does not estimate fetal fraction |
 | `fetal-fraction-chry` | copy-number | SPECULATIVE | 2M and calibrated depth (not bypassable) | input-scoped male-fetus calibration |
 | `dd-cfdna-chry` | copy-number | SPECULATIVE | calibrated depth (not bypassable) | input-scoped transplant calibration |
 
