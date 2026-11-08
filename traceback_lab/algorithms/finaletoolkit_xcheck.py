@@ -92,6 +92,17 @@ def _command_base(launcher: Path, interpreter: Path, *, overridden: bool) -> lis
     return [str(launcher)]
 
 
+
+def _tool_env() -> dict[str, str]:
+    """FinaleToolkit runs in its own interpreter, never on the Lab worker's path.
+
+    Lab workers inherit a PYTHONPATH naming the Lab's own site-packages; letting
+    FinaleToolkit's interpreter import those packages breaks its imports and
+    changes the pinned dependency versions between planning and the worker.
+    """
+
+    return {key: value for key, value in os.environ.items() if key not in {"PYTHONPATH", "PYTHONHOME"}}
+
 def _tool() -> tuple[str, str] | None:
     selected = os.environ.get("TRACEBACK_FINALETOOLKIT_BIN") or shutil.which("finaletoolkit")
     if not selected:
@@ -130,12 +141,12 @@ def _tool() -> tuple[str, str] | None:
         if not interpreter.is_file():
             return None
         cli = subprocess.run([*_command_base(path, interpreter, overridden=bool(override)), "--version"],
-                             capture_output=True, text=True,
+                             capture_output=True, text=True, env=_tool_env(),
                              timeout=20, check=False)
         if cli.returncode or not re.search(r"\b1\.1\.0\b", cli.stdout + cli.stderr):
             return None
         answer = subprocess.run([str(interpreter), "-c", _PIN_SCRIPT], capture_output=True,
-                                text=True, timeout=20, check=False)
+                                text=True, env=_tool_env(), timeout=20, check=False)
     except (OSError, UnicodeError, ValueError, IndexError, subprocess.TimeoutExpired):
         return None
     if answer.returncode:
@@ -523,7 +534,7 @@ class FinaleToolkitXcheck(Base):
         ]
         for name, command in zip(("end-motifs", "delfi"), commands):
             completed = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                       timeout=7200, check=False)
+                                       env=_tool_env(), timeout=7200, check=False)
             if completed.returncode:
                 raise RuntimeError(f"FinaleToolkit {name} failed (exit {completed.returncode})")
         if _tool() != tool:
