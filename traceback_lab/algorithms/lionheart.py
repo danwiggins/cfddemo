@@ -17,6 +17,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 from contextlib import nullcontext
@@ -82,10 +83,14 @@ def _mosdepth_library_dir(mosdepth: Path) -> Path | None:
 
 
 def _libhts(library_dir: Path | None) -> Path | None:
+    """The shared htslib in the library directory: ``.so`` on Linux, ``.dylib`` on macOS."""
     if library_dir is None:
         return None
-    candidate = library_dir / "libhts.so"
-    return candidate.resolve() if candidate.is_file() else None
+    for name in ("libhts.so", "libhts.dylib"):
+        candidate = library_dir / name
+        if candidate.is_file():
+            return candidate.resolve()
+    return None
 
 
 def _resources(root: Path) -> tuple[Path, Path]:
@@ -124,6 +129,24 @@ print(json.dumps({'version': dist.version, 'sha256': digest.hexdigest()}))
 """
 
 
+def _cli_env() -> dict[str, str]:
+    """The environment for LIONHEART's own interpreter, without the Lab's paths.
+
+    The Lab worker puts its own interpreter's ``sys.path`` (stdlib included)
+    on ``PYTHONPATH``; a LIONHEART environment on another Python version
+    cannot start with it.
+    """
+    env = dict(os.environ)
+    lab_paths = {os.path.realpath(entry) for entry in sys.path if entry}
+    kept = [entry for entry in env.get("PYTHONPATH", "").split(os.pathsep)
+            if entry and os.path.realpath(entry) not in lab_paths]
+    if kept:
+        env["PYTHONPATH"] = os.pathsep.join(kept)
+    else:
+        env.pop("PYTHONPATH", None)
+    return env
+
+
 def _cli_python(executable: Path) -> Path | None:
     """Identify the interpreter named by a directly executable Python launcher."""
     try:
@@ -147,7 +170,7 @@ def _package_pin(executable: Path) -> tuple[str, str] | None:
         return None
     try:
         result = subprocess.run([str(python), "-c", _PACKAGE_PIN_SCRIPT], capture_output=True,
-                                text=True, timeout=15, check=False)
+                                text=True, timeout=15, check=False, env=_cli_env())
         if result.returncode != 0:
             return None
         reported = json.loads(result.stdout)
@@ -164,7 +187,7 @@ def _pyarrow_available(python: Path) -> bool:
 
     try:
         result = subprocess.run([str(python), "-c", "import pyarrow.parquet"],
-                                capture_output=True, timeout=15, check=False)
+                                capture_output=True, timeout=15, check=False, env=_cli_env())
     except (OSError, subprocess.SubprocessError):
         return False
     return result.returncode == 0
@@ -345,7 +368,7 @@ class Lionheart(Base):
         if executable is None or mosdepth is None or _program(None, "samtools") is None or _program(None, "unpigz") is None:
             return Skip("missing_toolchain", "Install LIONHEART v2.2.0, modified mosdepth, samtools, and unpigz")
         if _libhts(_mosdepth_library_dir(mosdepth)) is None:
-            return Skip("missing_toolchain", "LIONHEART mosdepth library directory must contain libhts.so")
+            return Skip("missing_toolchain", "LIONHEART mosdepth library directory must contain libhts.so or libhts.dylib")
         python = _cli_python(executable)
         if python is None:
             return Skip("missing_toolchain", "Use a LIONHEART Python launcher with a direct interpreter shebang so its package can be pinned")
@@ -356,7 +379,7 @@ class Lionheart(Base):
             return Skip("missing_toolchain", "Install pyarrow in the LIONHEART CLI's Python environment to read Parquet resources")
         try:
             version = subprocess.run([str(executable), "--version"], capture_output=True, text=True,
-                                     timeout=30, check=False)
+                                     timeout=30, check=False, env=_cli_env())
             help_page = subprocess.run([str(mosdepth), "--help"], capture_output=True, text=True,
                                        timeout=30, check=False)
         except (OSError, subprocess.SubprocessError):
@@ -413,9 +436,14 @@ class Lionheart(Base):
             command = [str(executable), "extract_features", "--bam_file", str(bam),
                        "--resources_dir", str(snapshot), "--out_dir", str(work),
                        "--mosdepth_path", str(mosdepth), "--ld_library_path", str(library_dir),
-                       "--n_jobs", "1", "--single_end_mode"]
+                       # Upstream gives each mosdepth call int((n_jobs - 2) / 2) threads and
+                       # passes that to ``unpigz -p``, which rejects 0: 4 is the fewest that works.
+                       "--n_jobs", "4", "--single_end_mode"]
+            # ...and n_jobs also sizes its joblib pool: run the feature workers
+            # in-process, one at a time, so memory stays near one worker's peak.
+            env = {**_cli_env(), "JOBLIB_MULTIPROCESSING": "0"}
             with (out.parent / "lionheart.log").open("wb") as log:
-                completed = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=False)
+                completed = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=False, env=env)
         if completed.returncode != 0:
             raise RuntimeError(f"LIONHEART feature extraction failed (exit {completed.returncode})")
         if planned_tools != {pin.name: pin.version for pin in self.tools}:

@@ -103,6 +103,8 @@ parser.add_argument('--n_jobs')
 parser.add_argument('--single_end_mode', action='store_true')
 args = parser.parse_args()
 assert args.command == 'extract_features' and args.single_end_mode
+assert int((int(args.n_jobs) - 2) / 2) >= 1  # upstream's per-mosdepth thread count feeds `unpigz -p`
+assert os.environ.get('JOBLIB_MULTIPROCESSING') == '0'  # feature workers run one at a time
 if os.environ.get('TRACEBACK_LIONHEART_CAPTURE_NAMES'):
     import json
     import pysam
@@ -472,3 +474,56 @@ def test_lionheart_scores_are_labeled_research_only_in_signals(tmp_path) -> None
     assert "not cell fractions or cancer predictions" in dom
     assert "RESEARCH-ONLY RESOURCES: LIONHEART cell-type scores" in dom
     assert "synthetic 0" in dom and "synthetic 897" in dom
+
+
+def test_lionheart_accepts_macos_libhts_dylib(tmp_path, monkeypatch) -> None:
+    ctx, _ = _setup(tmp_path, monkeypatch)
+    library = tmp_path / "macos-library"
+    library.mkdir()
+    monkeypatch.setenv("TRACEBACK_LIONHEART_LD_LIBRARY_PATH", str(library))
+    decision = lionheart.LIONHEART.preflight(ctx)
+    assert decision.reason_code == "missing_toolchain"
+    assert "libhts.dylib" in decision.message
+    (library / "libhts.dylib").write_bytes(b"fixture macOS libhts")
+    assert lionheart._libhts(library) == (library / "libhts.dylib").resolve()
+    pins = {pin.name: pin.version for pin in lionheart.LIONHEART.tools}
+    assert pins["lionheart-libhts"] == hashlib.sha256(b"fixture macOS libhts").hexdigest()
+    ctx = replace(ctx, extras={**ctx.extras, "tool_versions": pins})
+    assert isinstance(lionheart.LIONHEART.preflight(ctx), Ready)
+    out = tmp_path / "scratch" / "artifacts"
+    out.mkdir(parents=True)
+    assert lionheart.LIONHEART.run(ctx, out).metrics[0]["value"] == 898
+
+
+def test_lionheart_below_depth_runs_underpowered_not_skipped(tmp_path, monkeypatch) -> None:
+    ctx, _ = _setup(tmp_path, monkeypatch)
+    shallow = replace(ctx, eligible_reads=3_000_000)
+    strict = lionheart.LIONHEART.preflight(shallow)
+    assert strict.reason_code == "depth"
+    assert (strict.floor, strict.observed, strict.floor_kind) == (5_000_000, 3_000_000, "eligible_reads")
+    marks: list[dict] = []
+    exploratory = replace(shallow, extras={**shallow.extras, "below_depth": True, "underpowered_marks": marks})
+    assert isinstance(lionheart.LIONHEART.preflight(exploratory), Ready)
+    assert marks == [{"floor": 5_000_000, "observed": 3_000_000, "kind": "eligible_reads"}]
+    # An unmeasured count still skips: there is nothing to mark the result against.
+    unmeasured = replace(exploratory, eligible_reads=None)
+    assert lionheart.LIONHEART.preflight(unmeasured).reason_code == "depth"
+
+
+def test_lionheart_interpreter_does_not_inherit_the_lab_worker_pythonpath(tmp_path, monkeypatch) -> None:
+    from traceback_lab.runner import _worker_env
+
+    extra = tmp_path / "operator-packages"
+    extra.mkdir()
+    worker_path = _worker_env()["PYTHONPATH"]
+    monkeypatch.setenv("PYTHONPATH", os.pathsep.join([worker_path, str(extra)]))
+    assert lionheart._cli_env()["PYTHONPATH"] == str(extra)
+    monkeypatch.setenv("PYTHONPATH", worker_path)
+    assert "PYTHONPATH" not in lionheart._cli_env()
+
+
+def test_lionheart_default_memory_cap_starts_at_its_measured_floor(tmp_path) -> None:
+    from traceback_lab.memory_cap import MemoryCap, MemoryCapPolicy
+
+    policy = MemoryCapPolicy.for_store(LabStore(tmp_path / "root"), ram_bytes=64 * 1024**3)
+    assert policy.for_algorithm("lionheart") == MemoryCap(24 * 1024**3, "floor")
