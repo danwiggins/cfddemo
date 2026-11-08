@@ -684,7 +684,9 @@
     // Lens tabs belong to a sample's lens routes; the landing page has none (spec layout).
     nav.hidden = !sample || state.route.name !== "lens";
     if (!sample || nav.hidden) { updateNavFade(); return; }
-    const current = state.route.name === "lens" ? state.route.lens : LENSES[0].id;
+    // A per-method result page belongs to the all-methods overview tab.
+    const routed = state.route.name === "lens" ? state.route.lens : LENSES[0].id;
+    const current = routed === "result" ? "overview" : routed;
     for (const lens of LENSES) {
       let label = lens.label;
       if (lens.id === "trust-qc") {
@@ -872,8 +874,10 @@
     requestAnimationFrame(() => {
       try {
         if (!window.echarts) throw new Error("chart library unavailable");
-        const instance = window.echarts.init(box, null, { renderer: "canvas" });
-        instance.setOption(Object.assign({ animation: false }, option));
+        const dark = document.documentElement.dataset.resolvedTheme === "dark";
+        const instance = window.echarts.init(box, dark ? "dark" : null, { renderer: "canvas" });
+        instance.setOption(Object.assign({ animation: false },
+          dark ? { backgroundColor: "transparent" } : {}, dark ? darkChartOption(option) : option));
         box.dataset.rendered = "1";
       } catch (_error) {
         box.replaceWith(h("div", { class: "problem" }, "Chart could not be drawn. The data table below has the same numbers."));
@@ -882,6 +886,17 @@
       }
     });
     return wrap;
+  }
+
+  // Dark theme: lift the fixed light-theme series colours to readable equivalents.
+  const DARK_CHART_COLORS = { "#1f5f8b": "#7cb3e0", "#8a4b08": "#e5a865", "#4b5563": "#aab4c0", "#45524b": "#a7b5ad", "#17221d": "#e4ebe7" };
+  function darkChartOption(value) {
+    if (typeof value === "string") return DARK_CHART_COLORS[value.toLowerCase()] || value;
+    if (Array.isArray(value)) return value.map(darkChartOption);
+    if (value && typeof value === "object" && Object.getPrototypeOf(value) === Object.prototype) {
+      return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, darkChartOption(item)]));
+    }
+    return value;
   }
 
   async function fetchArtifact(sample, label, algorithmId, panelId) {
@@ -1396,7 +1411,13 @@
       renderRecoveryState();
     }
     document.getElementById("sample-switcher").addEventListener("change", (event) => {
-      location.hash = `#/?sample=${event.target.value}`;
+      // Keep the current view when switching samples from a lens; home stays home.
+      const id12 = event.target.value;
+      const route = state.route;
+      if (route.name === "lens" && /^[0-9a-f]{12,64}$/.test(id12)) {
+        const query = route.lens === "result" && route.context?.algorithm ? `?algorithm=${route.context.algorithm}` : "";
+        location.hash = `#/sample/${id12}/${route.lens}${query}`;
+      } else location.hash = `#/?sample=${id12}`;
     });
     window.addEventListener("hashchange", navigate);
     setInterval(poll, POLL_MS);

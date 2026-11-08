@@ -163,7 +163,7 @@ def test_mobile_lens_deep_link_and_route_changes_reveal_current_tab(tmp_path) ->
             evaluate("document.querySelector('#lenses').scrollLeft = 0")
             time.sleep(0.05)
             observed["start"] = evaluate(snapshot)
-            observed["findings"] = route("findings")
+            observed["first"] = route("overview")
             observed["methods_again"] = route("methods")
 
         _dom_cdp(
@@ -181,9 +181,10 @@ def test_mobile_lens_deep_link_and_route_changes_reveal_current_tab(tmp_path) ->
     assert initial["leftFade"] and not initial["rightFade"] and initial["mask"] != "none", initial
     start = observed["start"]
     assert not start["leftFade"] and start["rightFade"] and start["mask"] != "none", start
-    findings = observed["findings"]
-    assert findings["current"].startswith("Findings") and findings["visible"] and findings["hitCurrent"], findings
-    assert not findings["leftFade"] and findings["rightFade"], findings
+    # The first tab is the all-methods overview (LABUI redesign).
+    first = observed["first"]
+    assert first["current"] == "All methods" and first["visible"] and first["hitCurrent"], first
+    assert not first["leftFade"] and first["rightFade"], first
     again = observed["methods_again"]
     assert again["current"] == "Methods" and again["visible"] and again["hitCurrent"] and again["leftFade"], again
     assert all(not state["pageOverflow"] for state in observed.values()), observed
@@ -372,7 +373,7 @@ def test_lens_navigation_labels_controls_and_history(width, tmp_path) -> None:
             command("Page.bringToFront")
             initial = snapshot(evaluate)
             assert not initial["pageOverflow"] and initial["activeVisible"], initial
-            assert len(initial["labels"]) == 9, initial
+            assert len(initial["labels"]) == 10, initial
             assert all(row["nowrap"] and row["shrink"] == "0" for row in initial["labels"]), initial
             assert [row["name"] for row in initial["controls"]] == ["Previous views", "More views"]
             assert all(row["target"] == "lenses" for row in initial["controls"]), initial
@@ -1591,7 +1592,8 @@ def test_failed_other_sample_keeps_confirmed_sample_and_switcher_available(tmp_p
                 time.sleep(0.05)
             else:
                 pytest.fail("sample C could not be opened after B failed")
-            assert evaluate(f"location.hash === '#/?sample={next_id}'")
+            # Switching from a lens keeps that lens for the new sample (LABUI redesign).
+            assert evaluate(f"location.hash === '#/sample/{next_id}/findings'")
             assert evaluate("window.TracebackLab.state.loadFailure === null")
 
         profile = tmp_path / "browser-profile"
