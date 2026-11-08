@@ -659,7 +659,7 @@ publication controls.
 | Email and SMS | Managed provider |
 | Object storage and database | Managed infrastructure |
 | Audit history | Append-only relational records first |
-| AI model | Bedrock behind the bounded existing adapter |
+| AI model | Bedrock behind the bounded existing adapter (removed on 2026-11-08) |
 
 ### Test strategy
 

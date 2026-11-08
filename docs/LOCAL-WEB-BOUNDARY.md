@@ -8,7 +8,7 @@ a standard-library HTTP adapter on an operating-system-selected random loopback
 port (or, with `traceback serve --port N`, an operator-chosen unprivileged
 loopback port). The adapter reads the authoritative `JobStore` through the existing
 operator projection; it does not create a browser-owned or in-memory production
-job database. The preserved Streamlit demo is not this service.
+job database.
 
 ## Packaged runtime
 

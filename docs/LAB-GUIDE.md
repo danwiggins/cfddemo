@@ -514,6 +514,37 @@ minimap2`). The minimap2 index of the reference is built once under
 you already have. Measure alignment speed on the operator's workstation and
 keep input-specific results private.
 
+### How a method's status is decided
+
+Each method in the plan ends `ok`, `skipped` or `failed`, decided in this
+order:
+
+```mermaid
+flowchart TD
+    N["Next method in registry order"] --> C{"Cached ok result with the same identity?"}
+    C -->|"yes, and no --force"| OKC["ok, reused"]
+    C -->|"no"| G{"Platform supported, panel of normals present, upstream ok?"}
+    G -->|"no"| S1["skipped: platform, PoN or upstream"]
+    G -->|"yes"| P{"preflight"}
+    P -->|"raises"| F["failed"]
+    P -->|"Skip: missing tool, asset,<br>reads or depth"| S2["skipped, with a reason"]
+    P -->|"depth-floor Skip<br>with --below-depth"| U["run past the floor, marked underpowered"]
+    P -->|"Ready"| W["worker process with timeout and memory cap"]
+    U --> W
+    W -->|"valid output"| OK["ok: metrics and chart panels"]
+    W -->|"method reports a skip"| S2
+    W -->|"crash, timeout, memory cap or invalid output"| F
+```
+
+A skipped result names its reason code, and the run summary gives the fix
+for a missing tool or asset where there is one. A failed result keeps the
+last 50 scrubbed stderr lines (reason `memory` when the cap killed it).
+Nothing retries automatically: a rerun recomputes missing and failed results,
+and preflights every skipped method again, because depth can change. A
+cached result marked underpowered is reused only under `--below-depth`, and a
+result built on an underpowered upstream is itself underpowered (see
+**Below the depth floor** below).
+
 ### Pinned aligners
 
 `traceback toolchain install aligners` (a dry run; add `--yes` to install)

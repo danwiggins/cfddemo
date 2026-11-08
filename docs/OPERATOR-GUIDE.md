@@ -8,8 +8,7 @@ optional ichorCNA copy number. Nothing here is qualified or for clinical use.
 For most analysis, use the [Traceback Lab](LAB-GUIDE.md) instead: it attempts
 all 35 registered cfDNA algorithms on a kit and is the main surface of this
 repository. The Lab and this CLI share ROOT, the registered reference and the
-`toolchain install` commands. The public Streamlit evidence demo is separate
-again ([DEMO.md](DEMO.md)).
+`toolchain install` commands.
 
 This guide does not qualify hardware, MinKNOW, Dorado, a wet-lab protocol, a
 reference, or a real-data workflow.

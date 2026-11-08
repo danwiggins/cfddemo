@@ -11,8 +11,7 @@ L0 is the higher-model coordinator and reviewer. L0 owns sprint planning,
 feature scope, roadmap, staffing and implementation lanes, dependency
 sequencing, interface arbitration, integration, verification, and the PR
 queue. Sessions 1–5 are the implementers. The reviewed PRODUCT-SPEC.md and
-EPICS.md are the product authority. PRODUCT-PLAN.md is historical. The public
-Streamlit demo remains separate. No deployment, main-branch merge, real genomic
+EPICS.md are the product authority. PRODUCT-PLAN.md is historical. No deployment, main-branch merge, real genomic
 processing, or protocol approval is implied by this wave.
 
 ## First-wave PR stack
