@@ -99,7 +99,7 @@ def test_derived_platform_skip_is_persisted_and_shown_in_depth_curve(
     assert row["cells"][0]["state"] == "skipped" and row["cells"][0]["reason"] == "platform"
 
 
-@pytest.mark.parametrize("method,platform", [("finaletoolkit", "ont"), ("microbial", "illumina")])
+@pytest.mark.parametrize("method,platform", [("finaletoolkit", "unknown"), ("microbial", "illumina")])
 def test_dynamic_tool_platform_skip_uses_static_identity_without_probes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, method: str, platform: str,
 ) -> None:

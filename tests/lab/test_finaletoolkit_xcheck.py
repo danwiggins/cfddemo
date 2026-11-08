@@ -1,4 +1,4 @@
-"""Paired-end FinaleToolkit cross-check contracts and a real-tool parity fixture."""
+"""FinaleToolkit cross-check contracts and real-tool parity fixtures (paired-end and ONT)."""
 
 from __future__ import annotations
 
@@ -113,13 +113,80 @@ def _fixture(root: Path) -> InputContext:
                         extras={"reference_fasta": str(reference)})
 
 
+def _ont_fixture(root: Path) -> InputContext:
+    """Synthetic native ONT single-end BAM: one primary record per molecule."""
+    root.mkdir(exist_ok=True)
+    input_dir = root / "input"
+    input_dir.mkdir()
+    reference = root / "hg38.fa"
+    bases = "".join(random.Random(907).choices("ACGT", k=300_000))
+    bases = bases[:10_000] + "N" + bases[10_001:]
+    # chr2 holds no reads; chrUn_fixture holds only non-canonical reads.
+    reference.write_text(f">chr1\n{bases}\n>chr2\n{bases[:150_000]}\n>chrX\n{bases[:100_000]}\n"
+                         f">chrUn_fixture\n{bases[:20_000]}\n")
+    pysam.faidx(str(reference))
+    (input_dir / "manifest.json").write_text(json.dumps({"kind": "prealigned", "platform": "ont"}))
+    lengths = {"chr1": 300_000, "chr2": 150_000, "chrX": 100_000, "chrUn_fixture": 20_000}
+    header = {"HD": {"VN": "1.6", "SO": "coordinate"},
+              "SQ": [{"SN": name, "LN": length} for name, length in lengths.items()],
+              "RG": [{"ID": "rg1", "PL": "ONT"}]}
+    tid = {name: index for index, name in enumerate(lengths)}
+    records = []
+
+    def add(name: str, contig: str, start: int, span: int, *, reverse: bool = False,
+            mapq: int = 60, flag_add: int = 0) -> None:
+        read = pysam.AlignedSegment()
+        read.query_name = name
+        read.query_sequence = "A" * span
+        read.flag = (16 if reverse else 0) | flag_add
+        read.reference_id = tid[contig]
+        read.reference_start = start
+        read.mapping_quality = mapq
+        read.cigarstring = f"{span}M"
+        read.query_qualities = pysam.qualitystring_to_array("I" * span)
+        read.set_tag("RG", "rg1")
+        records.append(read)
+
+    specs = [(0, 8, 4), (1, 5, 5), (2, 3, 9)]
+    for bin_index, short_n, long_n in specs:
+        for ordinal, span in enumerate([120] * short_n + [180] * long_n):
+            add(f"read-{bin_index}-{ordinal}", "chr1", bin_index * 100_000 + 10_000 + ordinal * 200,
+                span, reverse=bool(ordinal % 2))
+    # Inclusive DELFI boundaries; 99 and 221 bp still count for motifs.
+    for i, span in enumerate((100, 150, 151, 220, 99, 221)):
+        add(f"boundary-{span}", "chr1", (i // 2) * 100_000 + 30_000 + i * 300, span, reverse=bool(i % 2))
+    # A long read (for example a concatemer) is one fragment for motifs only,
+    # exactly as the Lab's end-motifs and delfi-ratio treat it.
+    add("long-read", "chr1", 240_000, 2_500, reverse=True)
+    add("mapq-20", "chr1", 231_000, 120, mapq=20)
+    add("midpoint-next-bin", "chr1", 99_900, 220)
+    add("sex-chromosome", "chrX", 5_000, 120)
+    # Every D21 exclusion disappears from both sides.
+    add("mapq-19", "chr1", 232_000, 120, mapq=19)
+    add("duplicate", "chr1", 233_000, 120, flag_add=0x400)
+    add("secondary", "chr1", 234_000, 120, flag_add=0x100)
+    add("supplementary", "chr1", 235_000, 120, flag_add=0x800)
+    add("qc-fail", "chr1", 236_000, 120, flag_add=0x200)
+    add("non-canonical", "chrUn_fixture", 1_000, 150)
+    records.sort(key=lambda record: (record.reference_id, record.reference_start))
+    bam_path = input_dir / "aligned.bam"
+    with pysam.AlignmentFile(str(bam_path), "wb", header=header) as bam:
+        for record in records:
+            bam.write(record)
+    pysam.index(str(bam_path))
+    return InputContext(root=root, source_id="a" * 64, input_id="b" * 64,
+                        reference_id="hg38", reference_sha256="c" * 64,
+                        input_dir=input_dir, platform="ont", eligible_reads=1_000_000,
+                        extras={"reference_fasta": str(reference)})
+
+
 def test_registered_and_platform_gate(tmp_path: Path) -> None:
     assert any(a.id == "finaletoolkit-xcheck" for a in load_registry())
     ctx = _fixture(tmp_path)
-    ont = InputContext(**{**ctx.__dict__, "platform": "ont"})
-    assert FINALETOOLKIT_XCHECK.requires.platforms == frozenset({"illumina"})
+    unknown = InputContext(**{**ctx.__dict__, "platform": "unknown"})
+    assert FINALETOOLKIT_XCHECK.requires.platforms == frozenset({"illumina", "ont"})
     # The runner publishes the platform skip before calling preflight.
-    assert isinstance(FINALETOOLKIT_XCHECK.preflight(ont), Skip)
+    assert FINALETOOLKIT_XCHECK.preflight(unknown).reason_code == "platform"
     derived = InputContext(**{**ctx.__dict__, "derived": {"transform": "downsample", "fraction": 0.5}})
     assert FINALETOOLKIT_XCHECK.preflight(derived) == Skip(
         "derived_not_supported", "FinaleToolkit cross-check uses the full paired-end input only")
@@ -335,3 +402,158 @@ def test_actual_finaletoolkit_110_pair_parity(tmp_path: Path) -> None:
                       ("chr1", 200_000): (5, 9)}
     assert b"chr1\t0\t10\t4\t2.5\n" in result.artifacts["reference_delfi.tsv"]
     assert panel["verdict"] == "concordant"
+
+
+def _replay_ont(fixtures: Path, seen: list[list[str]]):
+    def replay(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        seen.append(command)
+        name = ("finaletoolkit_110_ont_motifs.tsv" if "end-motifs" in command
+                else "finaletoolkit_110_ont_delfi.tsv")
+        shutil.copyfile(fixtures / name, Path(command[command.index("-o") + 1]))
+        return SimpleNamespace(returncode=0)
+    return replay
+
+
+def test_ont_mode_identity_and_gates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import traceback_lab.algorithms.finaletoolkit_xcheck as module
+
+    illumina = _fixture(tmp_path / "illumina")
+    assert FINALETOOLKIT_XCHECK.identity_parameters(illumina) == FINALETOOLKIT_XCHECK.parameters
+    ont = _ont_fixture(tmp_path / "ont")
+    identity = FINALETOOLKIT_XCHECK.identity_parameters(ont)
+    assert identity["input_mode"] == "ont_single_end"
+    assert identity["fragment"]["fragment"] == "aligned reference span [start, end) of the whole read"
+    monkeypatch.setattr(module, "_tool", lambda: ("pinned-fixture", "e" * 64))
+    assert FINALETOOLKIT_XCHECK.preflight(ont).__class__.__name__ == "Ready"
+    derived = InputContext(**{**ont.__dict__, "derived": {"transform": "downsample", "fraction": 0.5}})
+    assert FINALETOOLKIT_XCHECK.preflight(derived) == Skip(
+        "derived_not_supported", "FinaleToolkit cross-check uses the full single-end input only")
+    # An Illumina-declared BAM cannot run in ONT mode.
+    mislabelled = InputContext(**{**illumina.__dict__, "platform": "ont"})
+    assert FINALETOOLKIT_XCHECK.preflight(mislabelled).reason_code == "input_kind"
+
+
+def test_ont_fragments_feed_finaletoolkit_and_match_the_lab_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import traceback_lab.algorithms.finaletoolkit_xcheck as module
+
+    ctx = _ont_fixture(tmp_path)
+    monkeypatch.setattr(module, "_tool", lambda: ("pinned-fixture", "e" * 64))
+    ctx.extras["planned_tool_pins"] = [pin.identity() for pin in FINALETOOLKIT_XCHECK.tools]
+    seen: list[list[str]] = []
+    monkeypatch.setattr(module.subprocess, "run", _replay_ont(Path(__file__).parent / "data", seen))
+    result = FINALETOOLKIT_XCHECK.run(ctx, tmp_path / "out")
+    work = tmp_path / "finaletoolkit-work"
+    # FinaleToolkit receives the Lab's fragment file, never the ONT BAM, and a
+    # reference view limited to contigs holding fragments.
+    for command in seen:
+        assert command[2].endswith("fragments.frag.gz")
+        assert not any(part.endswith("aligned.bam") for part in command)
+    with pysam.TabixFile(str(work / "fragments.frag.gz")) as frags:
+        assert sorted(frags.contigs) == ["chr1", "chrX"]
+        rows = [row.split("\t") for contig in frags.contigs for row in frags.fetch(contig)]
+    assert len(rows) == 44
+    assert ["chr1", "240000", "242500", "60", "-"] in rows
+    assert all(int(row[3]) >= 20 for row in rows)
+    with pysam.FastaFile(str(work / "reference.fa")) as view:
+        assert dict(zip(view.references, view.lengths)) == {"chr1": 300_000, "chrX": 100_000}
+    assert (work / "autosomes.chrom.sizes").read_text() == "chr1\t300000\n"
+    panel = json.loads(result.artifacts["finaletoolkit_xcheck.json"])
+    assert panel["input_mode"] == "ont_single_end" and "pairs" not in panel
+    assert panel["fragments"] == 44 and panel["motif_ends"] == 87
+    assert panel["fragment_definition"] == module.ONT_FRAGMENT_DEFINITION
+    assert panel["motif"]["fragments_crossing_1mb_windows"] == 0
+    assert panel["motif"]["max_abs_frequency_difference"] < 1e-12
+    assert panel["delfi"]["upstream_counts_equal"] and panel["delfi"]["comparable_bins"] == 3
+    assert panel["verdict"] == "concordant"
+    assert b"chr1\t100000\t5\t8\t0.625\n" in result.artifacts["reference_delfi.tsv"]
+    # A direct retry rebuilds the fragment file and reference view in place.
+    assert FINALETOOLKIT_XCHECK.run(ctx, tmp_path / "out").artifacts == result.artifacts
+
+
+def test_illumina_panel_records_paired_end_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import traceback_lab.algorithms.finaletoolkit_xcheck as module
+
+    ctx = _fixture(tmp_path)
+    monkeypatch.setattr(module, "_tool", lambda: ("pinned-fixture", "e" * 64))
+    ctx.extras["planned_tool_pins"] = [pin.identity() for pin in FINALETOOLKIT_XCHECK.tools]
+    seen: list[list[str]] = []
+
+    def replay(command: list[str], **_kwargs: object) -> SimpleNamespace:
+        seen.append(command)
+        name = "finaletoolkit_110_motifs.tsv" if "end-motifs" in command else "finaletoolkit_110_delfi.tsv"
+        shutil.copyfile(Path(__file__).parent / "data" / name, Path(command[command.index("-o") + 1]))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(module.subprocess, "run", replay)
+    panel = json.loads(FINALETOOLKIT_XCHECK.run(ctx, tmp_path / "out").artifacts["finaletoolkit_xcheck.json"])
+    assert panel["input_mode"] == "paired_end" and "fragments" not in panel and "fragment_definition" not in panel
+    assert len(seen) == 2
+    assert all(command[2].endswith("aligned.bam") and ctx.extras["reference_fasta"] in command for command in seen)
+    assert not (tmp_path / "finaletoolkit-work" / "fragments.frag.gz").exists()
+
+
+def test_reference_view_copies_contigs_when_links_are_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from traceback_lab.algorithms.finaletoolkit_xcheck import _reference_view
+
+    ctx = _ont_fixture(tmp_path)
+    fasta = Path(ctx.extras["reference_fasta"])
+    work = tmp_path / "work"
+    work.mkdir()
+
+    def refuse(*_args: object, **_kwargs: object) -> None:
+        raise OSError("links unavailable")
+
+    monkeypatch.setattr(Path, "symlink_to", refuse)
+    view = _reference_view(fasta, [("chr1", 300_000), ("chrX", 100_000)], work)
+    assert not view.is_symlink()
+    with pysam.FastaFile(str(view)) as copy, pysam.FastaFile(str(fasta)) as original:
+        assert list(copy.references) == ["chr1", "chrX"]
+        assert copy.fetch("chrX") == original.fetch("chrX")
+
+
+def test_ont_input_without_eligible_reads_fails_without_a_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import traceback_lab.algorithms.finaletoolkit_xcheck as module
+
+    ctx = _ont_fixture(tmp_path / "DonorName_2026")
+    bam_path = ctx.input_dir / "aligned.bam"
+    with pysam.AlignmentFile(str(bam_path), "rb") as source:
+        header = source.header.to_dict()
+    bam_path.unlink()
+    with pysam.AlignmentFile(str(bam_path), "wb", header=header):
+        pass
+    pysam.index(str(bam_path))
+    monkeypatch.setattr(module, "_tool", lambda: ("pinned-fixture", "e" * 64))
+    ctx.extras["planned_tool_pins"] = [pin.identity() for pin in FINALETOOLKIT_XCHECK.tools]
+    with pytest.raises(RuntimeError, match="input or output became unreadable") as error:
+        FINALETOOLKIT_XCHECK.run(ctx, tmp_path / "out")
+    assert "DonorName_2026" not in str(error.value)
+
+
+@pytest.mark.skipif(not os.environ.get("TRACEBACK_FINALETOOLKIT_BIN"),
+                    reason="set TRACEBACK_FINALETOOLKIT_BIN to a pinned 1.1.0 executable")
+def test_actual_finaletoolkit_110_ont_single_end_parity(tmp_path: Path) -> None:
+    assert _tool() is not None
+    ctx = _ont_fixture(tmp_path)
+    ctx.extras["planned_tool_pins"] = [pin.identity() for pin in FINALETOOLKIT_XCHECK.tools]
+    assert FINALETOOLKIT_XCHECK.preflight(ctx).__class__.__name__ == "Ready"
+    result = FINALETOOLKIT_XCHECK.run(ctx, tmp_path / "out")
+    panel = json.loads(result.artifacts["finaletoolkit_xcheck.json"])
+    assert panel["input_mode"] == "ont_single_end"
+    assert panel["fragments"] == 44 and panel["motif_ends"] == 87
+    assert all(abs(panel["motif"]["upstream"][k] - panel["motif"]["reference"][k]) < 1e-12
+               for k in panel["motif"]["upstream"])
+    assert panel["delfi"]["upstream_counts_equal"] and panel["delfi"]["r"] == pytest.approx(1.0)
+    assert _delfi(tmp_path / "finaletoolkit-work" / "delfi.tsv",
+                  {("chr1", start) for start in (0, 100_000, 200_000)}) == {
+        ("chr1", 0): (10, 4), ("chr1", 100_000): (5, 8), ("chr1", 200_000): (4, 9)}
+    assert panel["verdict"] == "concordant"
+    # The replay fixtures are this live output byte for byte.
+    data = Path(__file__).parent / "data"
+    assert result.artifacts["finaletoolkit_motifs.tsv"] == (data / "finaletoolkit_110_ont_motifs.tsv").read_bytes()
+    assert result.artifacts["finaletoolkit_delfi.tsv"] == (data / "finaletoolkit_110_ont_delfi.tsv").read_bytes()

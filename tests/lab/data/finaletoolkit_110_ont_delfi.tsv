@@ -1,0 +1,4 @@
+#contig	start	stop	arm	short	long	gc	num_frags	ratio
+chr1	0	100000	chr1	10	4	0.50052	14	2.5
+chr1	100000	200000	chr1	5	8	0.49903	13	0.625
+chr1	200000	300000	chr1	4	9	0.5013	13	0.4444444444444444
