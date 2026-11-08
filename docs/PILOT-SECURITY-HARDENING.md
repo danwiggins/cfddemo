@@ -1,6 +1,8 @@
 <!-- /autoplan restore point: local planning snapshot, 2026-10-02 -->
 # Pilot security hardening
 
+> **Historical:** the October 2026 security hardening spec. H2-status-min and the H5 validator landed in #97, H1 (core) and H6-min in #99; this page is not maintained as a status record.
+
 Status: spec, 2026-10-02. Source: a structural security, privacy and trust review of `main` at `eaac96a`, verified against the code on `d3739ca`.
 
 Update 2026-10-03: two audit facts below are now out of date. CI exists (`.github/workflows/ci.yml`, #91). The browser branch `epic-e/e12-browser-integration` was committed and merged as #93 (`bc237e0`). Still true: no production composition root wires an explorer; `traceback reader launch` starts the service with `explorer=None`. The audit text is kept as written on 2026-10-02.

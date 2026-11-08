@@ -1,5 +1,7 @@
 # Traceback MinION-to-Research-Record Specification
 
+> **Historical:** the September 2026 provider-side MVP specification. Superseded as a plan: the Lab is now the main surface; see [LAB-GUIDE.md](LAB-GUIDE.md).
+
 Status: `/autoplan` reviewed; synthetic contract implementation may start,
 real-data execution remains gated
 Product boundary: research-use software, one qualified MinION workflow, hg38

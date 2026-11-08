@@ -1,13 +1,18 @@
 # Traceback operator guide
 
-Status: development-signed synthetic and unqualified local-BAM workflows.
-The signed CLI can run fragment length, cell origin, and optional ichorCNA
-copy number. Nothing here is qualified or for clinical use.
+Scope: the **signed local CLI** (`traceback run`, `catalog`, `serve`,
+`verify` and related commands) and its development trust model. It makes
+development-signed, unqualified records for fragment length, cell origin and
+optional ichorCNA copy number. Nothing here is qualified or for clinical use.
 
-This guide covers the signed local CLI and its development trust model.
-It does not qualify hardware, MinKNOW, Dorado, a wet-lab protocol, a reference,
-or a real-data workflow. The public Streamlit evidence demo and the
-[unsigned Lab workflow](LAB-GUIDE.md) are separate.
+For most analysis, use the [Traceback Lab](LAB-GUIDE.md) instead: it runs
+all 35 registered cfDNA algorithms on a kit and is the main surface of this
+repository. The Lab and this CLI share ROOT, the registered reference and the
+`toolchain install` commands. The public Streamlit evidence demo is separate
+again ([DEMO.md](DEMO.md)).
+
+This guide does not qualify hardware, MinKNOW, Dorado, a wet-lab protocol, a
+reference, or a real-data workflow.
 
 ## First five minutes
 
@@ -71,7 +76,17 @@ traceback assets verify --release-evidence ENVELOPE \
 traceback support-bundle JOB_ID --output OUTPUT [--root ROOT] [--json]
 traceback toolchain install modkit [--yes] [--micromamba ABS_PATH] [--json]
 traceback toolchain install {ichor|copy-number} [--yes] [--micromamba ABS_PATH] [--json]
+traceback toolchain install aligners [--yes] [--json]
+traceback method-asset register (--file FILE --kind KIND [--id ID] | --from-dir LOYFER_DIR | --from-toolchain copy-number) [--root ROOT] [--json]
+traceback method-asset show ID [--root ROOT] [--json]
+traceback reader {authority|grant|launch} ...
+traceback lab COMMAND ...        # the unsigned Lab; see LAB-GUIDE.md
 ```
+
+`toolchain install aligners` pins samtools and minimap2 for the Lab on Linux
+x86-64 ([Lab guide](LAB-GUIDE.md#pinned-aligners)). `reader` manages local
+reader grants for the longitudinal browser routes
+([reader-authorization registry](READER-AUTHORIZATION-REGISTRY.md)).
 
 `toolchain install modkit` installs the pinned modkit 0.6.4 that cell origin
 uses into the per-user cache `~/.cache/traceback/toolchains/<lock sha256>/`,
@@ -194,8 +209,9 @@ Two rules apply before any real data enters this path:
 
 - Write down the source BAM's provenance and consent before any record from it
   is shown to anyone outside the team.
-- No donor data until the pilot security items H1 and H6-min have landed
-  (`docs/PILOT-SECURITY-HARDENING.md`).
+- Keep donor data on the operator's machine. The pilot security items this
+  rule waited on, H1 (core) and H6-min, have landed (#99); the rest of
+  `docs/PILOT-SECURITY-HARDENING.md` is a historical plan.
 
 ### Prerequisites
 

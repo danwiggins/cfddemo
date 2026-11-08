@@ -1,5 +1,7 @@
 # E12 dependency audit
 
+> **Historical:** an October 2026 dependency inventory for E12. Not maintained.
+
 Audit baseline: `origin/main` at `cd988a795a4eb2f3237da4f0a1c6d239701a146d`.
 This is an implementation inventory, not evidence that Epic D's provider,
 scientific, governance, or usability gates have passed.

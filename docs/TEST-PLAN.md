@@ -1,5 +1,7 @@
 # Traceback Release-One Test Plan
 
+> **Historical:** the release-one gate plan for the signed provider MVP. Not the current test process; CI and tiers are in [DEVELOPMENT-CONTROL.md](DEVELOPMENT-CONTROL.md).
+
 Status: release-gate plan, not a record of gates passed. The current CI,
 slow-suite and synthetic-canary commands are recorded in
 `docs/DEVELOPMENT-CONTROL.md`; Lab method and real-input limitations are in

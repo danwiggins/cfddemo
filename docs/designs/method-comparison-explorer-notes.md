@@ -1,5 +1,7 @@
 # Method comparison explorer: states and interactions
 
+> **Historical:** a disposable E03 design fixture from September 2026. Not a description of a shipped UI.
+
 Status: disposable E03 design fixture. This is not production UI and does not choose a frontend framework.
 
 ## Core interaction

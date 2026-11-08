@@ -1,11 +1,13 @@
 # Traceback Lab guide
 
-Traceback Lab attempts its registered cfDNA algorithms from one run command;
-each method either reports a result or a specific skip or failure when the
-input, platform, depth, tools, or assets do not qualify. A local page explains
-the available results. Lab is a separate, **unsigned** subsystem: its results
-carry execution provenance and immutable attempts, not a development
-signature. The signed `traceback run` path has its own methods and records.
+Traceback Lab runs 35 registered cfDNA algorithms (plus two hidden
+intermediates) on one sample from a single `traceback lab run` command.
+Each algorithm either reports a result or a named skip or failure that says
+what is missing: platform, depth, tool, asset or calibration. `traceback lab
+serve` opens a local page over the results. Lab is the main way to analyse a
+real nanopore kit in this repository. It is **unsigned**: results carry
+execution provenance and immutable attempts, not a development signature. The
+signed `traceback run` path ([operator guide](OPERATOR-GUIDE.md)) is separate.
 
 **Research use only. Not CLIA-validated. Not a diagnosis.**
 
@@ -13,6 +15,15 @@ From a repository checkout, run `uv sync` once, then run the `traceback`
 commands below with `uv run` as shown in the first-run steps. If the CLI is
 already installed, the bare `traceback` commands used elsewhere in this guide
 are equivalent.
+
+Where to go next:
+
+- New here: [First five minutes](#first-five-minutes) (synthetic example).
+- A real kit: [Running on real data](#running-on-real-data), then
+  [Algorithm status on real data](#algorithm-status-on-real-data).
+- What each method measures: [Algorithms](#algorithms) and the
+  [plain-language explainer](LAB-ALGORITHM-EXPLAINER.md).
+- An error code: [Troubleshooting](#troubleshooting).
 
 ## First five minutes
 
@@ -146,20 +157,120 @@ before interpreting any exploratory pattern.
 1. `brew install samtools minimap2` (samtools ≥ 1.20, minimap2 ≥ 2.28).
    On Linux x86-64, `uv run traceback toolchain install aligners --yes` pins
    them instead (see [Pinned aligners](#pinned-aligners)).
-2. Register hg38: `uv run traceback reference register --fasta hg38.fa --id hg38 --root R`.
-3. For copy-number: `uv run traceback toolchain install ichor`, then
+2. Register hg38 under the id `hg38`:
+   `uv run traceback reference register --fasta hg38.fa --id hg38 --root R`.
+   Use UCSC `chr` contig names. Several methods (`griffin`, `wps`,
+   `viral-reads`, `aligned-end-structure`, `short-read-fragment-size`) check
+   for the id `hg38` itself, so another id makes them skip with `reference`.
+3. For copy-number: `uv run traceback toolchain install ichor --yes` (needs
+   micromamba and the network; about 3 GB), then
    `uv run traceback method-asset register --from-toolchain copy-number --root R`.
 4. `uv run traceback lab doctor --root R` shows setup checks and recovery commands;
    `uv run traceback lab setup --root R` runs the ones it can (see
-   [Setup in one command](#setup-in-one-command)); inspect readiness for the
-   methods you intend to run. Other methods have
-   additional optional tools, assets, or input-scoped calibrations below.
+   [Setup in one command](#setup-in-one-command)). Doctor covers the aligners,
+   reference, disk, RAM, ichorCNA, the Loyfer atlas and the PMD asset. Every
+   other method's tools and assets are listed in
+   [Running on real data](#running-on-real-data); a missing one shows up as
+   that method's skip reason in the run, not in doctor.
 
 Before running a real chunk directory, confirm the platform, basecall and
 modification channels, depth, and method-specific assets required for your
 intended methods. Use the same ROOT for reference registration, the run, and
 the local page. An environment check does not make a result available or
 validate its interpretation.
+
+## Running on real data
+
+This is the short path from a MinKNOW output directory to a page of results.
+Every input, asset and tool below is operator-supplied and stays local; none
+is shipped in this repository. Placeholders: `<run-dir>` is the MinKNOW run
+folder, `<chunks-dir>` its `bam_pass/` (or `bam_pass/barcodeNN/`), `R` the
+Lab ROOT.
+
+```bash
+export TRACEBACK_ROOT=R                        # one store for every command
+uv run traceback lab doctor
+uv run traceback lab inventory <chunks-dir>    # completeness check, read-only
+uv run traceback lab run <chunks-dir> --below-depth --memory-cap 8GiB --dry-run
+uv run traceback lab run <chunks-dir> --below-depth --memory-cap 8GiB
+uv run traceback lab serve --open
+uv run traceback lab report --html <id12>      # optional: one-file HTML report
+```
+
+`lab run` aligns the chunks once (minimap2 `map-ont`, keeping MM/ML/MN tags),
+then runs every algorithm. A rerun of the same command reuses the alignment
+and every cached result, and recomputes only what is missing, failed or
+changed; `traceback lab run latest` reruns on the stored sample without the
+chunk paths. Add `--only a,b` to run a subset after registering a new asset.
+
+**Flags that matter on real data**
+
+| Flag | Why |
+|---|---|
+| `--below-depth` | A single kit is often below some methods' depth floors. Without the flag those methods skip with reason `depth`; with it they run and every such result is marked **underpowered**: exploratory, `not_interpretable (depth)`, never shown as a call and never fed to cohorts or stability verdicts. Calibration floors (prenatal, transplant) and MethylBERT's minimum still skip. Details: [Below the depth floor](#running-on-a-kit). |
+| `--memory-cap 8GiB` | Each algorithm runs under a memory cap (default `max(2 GiB, 2x its recorded peak)`). On a full-size input `finaletoolkit-xcheck` needs more than 2 GiB; 8 GiB has been enough. A capped step fails with TBX-LAB-030 and prints the cap to retry with. |
+| `--timeout-s S` | Per-algorithm time limit, default 3600 s. Raise it if a slow method (`wps`, `griffin`, `cell-origin`) times out on a large input. |
+| `--threads N`, `--sort-mem MEM`, `--mmi PATH` | Alignment speed and memory; `--mmi` reuses an existing minimap2 index (hg38 index: about 8 GB, 20–40 min to build once). |
+| `--dry-run` | Prints the plan, disk budget and depth gates without writing anything. |
+| `--sex M\|F` | Optional operator assertion compared with `sex-check` in Trust/QC; not a diagnostic determination. |
+
+**Tools and assets per method.** Register each asset under the same ROOT as
+the run; registrations pin exact bytes and are re-checked before use. Methods
+without a row here need only the aligned input and the registered hg38.
+
+| Method | Needs | How |
+|---|---|---|
+| `copy-number`, `instability` | ichorCNA toolchain and its three assets | step 3 above |
+| `cell-origin` | Loyfer U250 atlas directory (three files; data-use terms unknown) | `traceback method-asset register --from-dir LOYFER_DIR --root R` |
+| `pmd-score` | Zhou 2018 hg38 common-PMD BED.gz | `traceback lab asset add pmd --file <pmd.bed.gz> --source-label <label> --terms unknown --root R` ([PMD asset](#algorithms)) |
+| `tss-profile` | GENCODE v46 basic CHR GTF, `gencode.v46.basic.annotation.gtf.gz` (SHA-256 `d620d548…b9b4`) | `traceback lab asset add tss-annotation --file <gtf.gz> --source-label "GENCODE v46 basic CHR GTF" --terms unknown --root R` ([details](LAB-TSS-PROFILE.md)) |
+| `epi-clock` | the Weidner hg38 assay-site map in this repository | `traceback lab asset register-clock-map --file docs/assets/weidner-3-grch38-map.json --sha256 <sha256 from epi-clock.md> --root R` ([details](epi-clock.md)) |
+| `identity` | `somalier` on `PATH`; an hg38 sites VCF (gzip) and its SHA-256 | `traceback lab identity sites add --file <sites.vcf.gz> --sha256 <sha256> --source-label <label> --root R` |
+| `viral-reads` | an EBV/HPV/HBV FASTA and a contig → virus TSV | `traceback lab asset add viral-fasta --file <viral.fasta> --targets <targets.tsv> --source-label <label> --terms unknown --root R` |
+| `griffin` | `pyBigWig` (in the default `uv sync`; builds from source on macOS, needs a C compiler); a Griffin checkout, its hg38 reference assets and at least one TF-site list | `traceback lab asset griffin-register --upstream-root <griffin-checkout> --ref-assets <griffin-ref-dir> --site-list CTCF=<sites> --primary-site CTCF --source-label <label> --terms unknown --root R` ([details](griffin-integration.md)) |
+| `finaletoolkit-xcheck` | FinaleToolkit 1.1.0 (its own environment is fine) | put `finaletoolkit` on `PATH` or `export TRACEBACK_FINALETOOLKIT_BIN=<path>`; run with `--memory-cap 8GiB` |
+| `wps` | free space on the ROOT volume for its exact track (4 bytes per autosomal base, plus 10%, plus 2 GiB) | skips with reason `disk` otherwise |
+| `global-5hmc` | basecalls with a 5hmC (`C+h`) channel | skips `missing_channel` otherwise |
+| methylation methods | MM/ML tags from a modified-base basecall model, kept through alignment | skip `missing_tags` otherwise |
+
+Methods that need more than this (a panel of normals, a trained model, an
+input-scoped calibration, a catalogue choice) are in the status table below.
+Environment variables the Lab reads: `TRACEBACK_ROOT`,
+`TRACEBACK_FINALETOOLKIT_BIN`, `TRACEBACK_FINALETOOLKIT_PYTHON`, and the
+`TRACEBACK_LIONHEART_*` settings described under [Algorithms](#algorithms).
+
+## Algorithm status on real data
+
+Status recorded by the maintainers on 2026-11-07 from one in-house ONT
+cfDNA kit run with `--below-depth`, `--memory-cap 8GiB` and the assets above
+registered: 25 of 35 algorithms produce a result. "ok" means the method ran, not that its
+output is validated; underpowered results stay exploratory. Re-check with
+`traceback lab runs <run_id>` on your own data.
+
+| Algorithm | Status | What it needs / what blocks it |
+|---|---|---|
+| `bam-qc`, `depth`, `fragment-size`, `long-tail`, `mtdna`, `sex-check`, `delfi-ratio` | ok | aligned hg38 input only |
+| `end-motifs`, `breakpoint-motifs` | ok | aligned input and the registered hg38 FASTA |
+| `modbase-qc`, `global-5mc`, `global-5hmc`, `hypometh-reads`, `frag-x-meth` | ok | MM/ML tags (`global-5hmc` also a `C+h` channel) |
+| `copy-number`, `instability` | ok | ichorCNA toolchain and assets; without a built panel of normals the result is marked not interpretable |
+| `cell-origin` | ok | Loyfer atlas |
+| `pmd-score` | ok | PMD BED.gz |
+| `tss-profile` | ok | GENCODE v46 GTF |
+| `epi-clock` | ok | Weidner map |
+| `identity` | ok | Somalier and a sites VCF |
+| `viral-reads` | ok | viral FASTA and targets TSV |
+| `griffin` | ok | pyBigWig and `griffin-register` assets (ONT path is the Lab's port; SPECULATIVE) |
+| `finaletoolkit-xcheck` | ok | FinaleToolkit 1.1.0 and `--memory-cap 8GiB` |
+| `wps` | ok | free disk for the exact track; 10x depth floor (runs underpowered below it) |
+| `microbial` | not set up | Kraken2/Bracken and a database are out of scope for now. The code path exists (`lab microbial db add`), but we do not run or support it |
+| `lionheart` | not working yet | being worked on separately; see the LIONHEART notes under [Algorithms](#algorithms) |
+| `aligned-end-structure` | blocked | needs two operator-chosen hg38 catalogues (open-chromatin centers and preferred U/D end sites); no catalogue has been chosen |
+| `arm-summary` | blocked | needs a selected panel of normals, which `lab cohort build` makes only from at least ten Lab-aligned samples with ≥ 2M counted reads each |
+| `methylbert` | blocked | needs an operator-trusted fine-tuned tumour/normal bundle, its code digest, a qualified minimum and a CUDA GPU ([bundle contract](METHYLBERT-BUNDLE.md)) |
+| `meth-tf` | blocked | needs an operator-supplied tumour/healthy methylation marker panel |
+| `fetal-fraction`, `fetal-fraction-chry` | not applicable | prenatal methods; need a pregnancy sample, an operator attestation and an input-scoped control or calibration ([NIPTeR](fetal-nipter.md), [chrY](fetal-chry.md)) |
+| `dd-cfdna-chry` | not applicable | transplant method; needs a male-donor/female-recipient sample and an input-scoped calibration ([details](dd-cfdna-chry.md)) |
+| `short-read-fragment-size` | not applicable | Illumina-only: needs a prealigned paired-end BAM with every `@RG PL:ILLUMINA` |
 
 ## Duration and disk for a real run
 
@@ -202,11 +313,11 @@ traceback lab run (<BAM|uBAM|chunk dir>... | <id12> | latest | --example)
     [--skip-bad-chunks] [--sex M|F] [--force] [--rehash] [--below-depth] [--timeout-s 3600]
     [--threads N] [--sort-mem 1G] [--mmi PATH] [--keep-staging]
     [--memory-cap BYTES | --no-memory-cap]
-    [--threads N] [--sort-mem 1G] [--mmi PATH]
+    [--methylbert-bundle-sha256 SHA256] [--methylbert-code-sha256 SHA256] [--methylbert-min-classified N]
     [--dry-run] [--verbose] [--json] [--root R]
 traceback lab simulate cna <id12|latest> [--tf 0.03,0.10,0.30] [--cohort ID] [--verbose]   synthetic CNA spike, copy-number recovery
 traceback lab simulate split <id12|latest> [--cohort ID] [--verbose]                         split-half pseudo-replicate
-traceback lab algorithms [--json]          registered algorithms (id, tier, min depth, licenses, footnote)
+traceback lab algorithms [--json]          registered algorithms (id, tier, family, cost, literature depth, input gate, licenses, footnote)
 traceback lab inventory DIR [--recursive] [--report PATH] [--no-hash] [--json]   chunk-set completeness before alignment (read-only)
 traceback lab report --html ID12 [--out PATH] [--json]   one sample's research report as a self-contained HTML file
 traceback lab doctor [--json]              setup checks, each with a fix command
@@ -721,8 +832,13 @@ new measurement.
 
 ## Algorithms
 
-`traceback lab algorithms` is the live catalog of registered IDs, versions,
-tiers, license notes, and minimum depths. This table explains their outputs.
+`traceback lab algorithms` is the live catalog: id, tier, family, cost,
+literature depth, input gate, license notes and footnote. Its `MIN DEPTH`
+column is the depth a cited study used (drawn as "literature, not measured"),
+not the Lab's gate; the gates are the eligible-read floors named in the table
+below. This table explains each method's output; the
+[status table](#algorithm-status-on-real-data) says which ones run on a real
+ONT kit.
 Run a subset with `--only ID[,ID...]`; a listed method can still skip for a
 particular input. For a scientist-friendly explanation of what each measurement
 may reveal, including epigenetic age, read the

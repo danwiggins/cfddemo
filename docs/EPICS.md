@@ -1,5 +1,7 @@
 # Traceback Product Epics
 
+> **Historical:** the provider-side MVP epic sequence (E0–E14). Superseded as a plan by the Lab-first work; see [LAB-GUIDE.md](LAB-GUIDE.md) for what runs today.
+
 Status: `/autoplan`-reviewed implementation sequence
 Delivery rule: preserve the existing public demo while product code is built
 behind separate entry points.

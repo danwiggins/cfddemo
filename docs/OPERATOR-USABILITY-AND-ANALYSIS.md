@@ -1,6 +1,8 @@
 <!-- /autoplan restore point: local planning snapshot, 2026-10-03 -->
 # Operator usability, changeable analysis and an interpretable site
 
+> **Historical:** the October 2026 operator-usability draft spec. Superseded as a plan; current commands are in [LAB-GUIDE.md](LAB-GUIDE.md) and [OPERATOR-GUIDE.md](OPERATOR-GUIDE.md).
+
 Status: draft spec, 2026-10-03. Verified against `main` at `e76e9d0`.
 Public copy note: historical review summaries and pending-gate wording below
 are redacted or paraphrased where input-specific details appeared; they are
