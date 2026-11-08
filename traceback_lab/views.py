@@ -451,6 +451,8 @@ def cell_state(
         return {"state": "not_interpretable", "reason": "missing_metric"}
     values = {m.metric_id: m.value for m in envelope.metrics}
     reason = "no_pon" if entry is not None and entry.get("requires_pon") and values.get("pon_policy") in (None, "none") else None
+    if envelope.underpowered is not None:
+        reason = "depth"  # lab run --below-depth: exploratory only
     interpretation = classify(metric.value, entry, depth_x=view.depth_x(), not_interpretable=reason)
     if interpretation.state == "not_interpretable":
         return {"state": "not_interpretable", "reason": interpretation.reason, "value": metric.value}

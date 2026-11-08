@@ -548,6 +548,18 @@
     return h("p", { class: "help" }, metric.caption || (ref.kind === "none" ? "No published reference." : ""));
   }
 
+  // lab run --below-depth: the method ran below its depth floor (exploratory only).
+  function underpoweredBanner(algorithm) {
+    const u = algorithm && algorithm.underpowered;
+    if (!u) return "";
+    const measured = u.kind === "depth_x"
+      ? `${Number(u.observed).toPrecision(3)}x of ${u.floor}x depth`
+      : `${Math.round(u.observed).toLocaleString("en-US")} of ${Math.round(u.floor).toLocaleString("en-US")} eligible reads`;
+    return h("p", { class: "problem underpowered", role: "note" },
+      h("strong", {}, "Underpowered — below the method's depth floor; exploratory only. "),
+      `${algorithm.algorithm_id}: ${measured}. Not a call.`);
+  }
+
   function card(sample, metric, seen, open) {
     const entry = metric.entry || {};
     const perf = entry.performance;
@@ -572,6 +584,7 @@
     });
     return h("article", { class: "finding-card" },
       h("div", { class: "card-head" }, h("h3", {}, metric.label), stateChip(metric), " ", tierBadge(metric.tier)),
+      underpoweredBanner(algo(sample, metric.algorithm_id)),
       h("p", { class: "card-value" }, h("strong", {}, fmtMetric(metric))),
       strip(metric),
       h("p", {}, "Performance: ", perf ? `${perf.value} (${perf.platform || ""}${perf.depth ? ", " + perf.depth : ""}; ${perf.source || ""})` : (entry.performance_missing_reason || "none published"),
@@ -1758,7 +1771,7 @@
     const seen = new Set();
     if (!present.length && !joint.length) return [h("p", { class: "empty" }, "No methylation summary algorithm has run on this sample yet (Phase 1). Cell-type composition is in Body map.")];
     // Scalar tables scroll inside .table-wrap at narrow widths (AC24) instead of widening the page.
-    return [...joint, ...present.map((a) => h("section", { class: "panel" }, h("h2", {}, a.algorithm_id), a.status === "ok"
+    return [...joint, ...present.map((a) => h("section", { class: "panel" }, h("h2", {}, a.algorithm_id), underpoweredBanner(a), a.status === "ok"
       ? h("div", { class: "table-wrap", tabindex: "0", role: "region", "aria-label": `${a.algorithm_id} scalar metrics` },
         h("table", { class: "data-table" }, h("tbody", {}, ...a.metrics.filter((m) => m.value === null || typeof m.value !== "object").map((m) => h("tr", {}, h("th", { scope: "row" }, m.label),
           h("td", {}, rawCell(fmtMetric(m, { algorithmId: a.algorithm_id }), m.value, m.unit,

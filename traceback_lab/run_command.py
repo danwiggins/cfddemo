@@ -95,6 +95,7 @@ def add_run_parser(commands: Any, common: Callable[[argparse.ArgumentParser], No
     run.add_argument("--skip-bad-chunks", action="store_true", help="exclude truncated chunks (provisional)")
     run.add_argument("--sex", choices=("M", "F"), help="operator assertion for a pre-analytic comparison; not a diagnostic sex or gender determination")
     run.add_argument("--force", action="store_true", help="recompute every result")
+    run.add_argument("--below-depth", action="store_true", help="exploratory: run methods below their depth floor; results are marked underpowered")
     run.add_argument("--rehash", action="store_true", help="ignore the input hash cache: hash every chunk again (after a restore from backup or a timestamp-preserving copy)")
     run.add_argument("--timeout-s", type=float, default=DEFAULT_TIMEOUT_S, metavar="S")
     run.add_argument("--memory-cap", type=_memory_cap, metavar="BYTES", help="cap every algorithm at this much memory (e.g. 4GiB, 512MiB); default max(2GiB, 2x its recorded peak)")
@@ -208,6 +209,7 @@ def _flags(args: argparse.Namespace) -> dict[str, Any]:
         "cohort": args.cohort,
         "skip_bad_chunks": args.skip_bad_chunks,
         "force": args.force,
+        "below_depth": bool(getattr(args, "below_depth", False)),
         # Requested and applicable: a stored sample (<id12>, latest) has no chunks to rehash.
         "rehash": args.rehash and not (len(args.inputs) == 1 and _is_stored(args.inputs[0])),
         "rehash_requested": args.rehash,
@@ -538,7 +540,11 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
                         if row["decision"] != "decided after alignment":
                             continue
                         minimum = item.algorithm.requires.min_eligible_reads
-                        if minimum and eligible < minimum:
+                        if minimum and eligible < minimum and getattr(args, "below_depth", False):
+                            row["decision"] = "runs underpowered below depth minimum (--below-depth)"
+                            row["eligible_reads"] = eligible
+                            row["minimum_eligible_reads"] = minimum
+                        elif minimum and eligible < minimum:
                             row["decision"] = "skip expected below depth minimum (unless cached)"
                             row["eligible_reads"] = eligible
                             row["minimum_eligible_reads"] = minimum
@@ -985,6 +991,8 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     methylbert_code_sha256=getattr(args, "methylbert_code_sha256", None),
                     methylbert_min_classified_reads=getattr(args, "methylbert_min_classified", None),
                 )
+                if getattr(args, "below_depth", False):
+                    target.extras["below_depth"] = True  # derived controls inherit it
                 log.append("sample", sample=id12, source_id=aligned.source_id, input_id=aligned.input_id,
                            platform=target.platform)
                 from .pon_consumer import bind_target
@@ -1028,6 +1036,7 @@ def run_command(args: argparse.Namespace, store: LabStore) -> tuple[int, dict[st
                     keep_staging=args.keep_staging and chunkset is not None,
                     memory_cap=memory_cap,
                     rehash=args.rehash and chunkset is not None, rehash_requested=args.rehash,
+                    below_depth=bool(getattr(args, "below_depth", False)),
                 )
                 log.append("run_end", status=payload["status"], exit_code=code)
             except KeyboardInterrupt:
@@ -1210,6 +1219,7 @@ def _summary(
     memory_cap: MemoryCapPolicy | None = None,
     rehash: bool = False,
     rehash_requested: bool = False,
+    below_depth: bool = False,
 ) -> tuple[int, dict[str, Any]]:
     ok = sum(result.status == "ok" for result in results)
     skipped: dict[str, int] = {}
@@ -1249,6 +1259,11 @@ def _summary(
         "keep_staging": keep_staging,
         "rehash": rehash,
         "rehash_requested": rehash_requested,
+        "below_depth": below_depth,
+        "underpowered": [
+            {"algorithm_id": result.algorithm_id, "input": result.input_label, **result.underpowered}
+            for result in results if result.status == "ok" and result.underpowered
+        ],
         "warnings": warnings,
         "remediations": remedies,
         "memory_cap": _memory_cap_data(memory_cap, failed, run_id),
@@ -1294,6 +1309,12 @@ def _summary(
             recovered = "-" if row["tf_recovered"] is None else f"{row['tf_recovered']:.3f}"
             verdict = "recovered" if row["recovered_within_tolerance"] else "not recovered"
             lines.append(f"        spike TF {row['tf_expected']:g} -> {recovered} ({verdict})")
+    underpowered = [result for result in results if result.status == "ok" and result.underpowered]
+    if underpowered:
+        lines.append(
+            f"NOTE    {len(underpowered)} result(s) underpowered (--below-depth): below the method's "
+            "depth floor; exploratory only"
+        )
     if aligned.manifest.get("excluded_chunks"):
         lines.append(f"        provisional: excluded chunks {aligned.manifest['excluded_chunks']}")
     for result in failed:

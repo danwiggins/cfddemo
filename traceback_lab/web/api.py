@@ -772,6 +772,7 @@ class LabApi:
                     "skip_message": envelope.skip_message,
                     "failure": envelope.failure.model_dump() if envelope.failure else None,
                     "duration_s": envelope.duration_s,
+                    "underpowered": envelope.underpowered.model_dump() if envelope.underpowered else None,
                     "tier": headline.tier if headline else None,
                     "min_depth_x": headline.get("min_depth_x") if headline else None,
                     "input_gate": input_gates.get(algorithm_id),

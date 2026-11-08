@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 
@@ -80,6 +80,8 @@ def _fraction(y_count: int, denominator: int, contract: FetalChrYContract) -> fl
 
 @dataclass
 class FetalFractionChrY(Base):
+    # The 2M floor is part of the prenatal calibration contract, not a power floor.
+    below_depth_allowed: ClassVar[bool] = False
     family: str = "copy-number"
     requires: Requirements = field(default_factory=lambda: Requirements(min_eligible_reads=2_000_000))
     parameters: dict[str, Any] = field(default_factory=lambda: {
