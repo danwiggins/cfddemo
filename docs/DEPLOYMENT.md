@@ -1,5 +1,7 @@
 # Railway deployment
 
+> Historical: hackathon proof-of-concept, no longer maintained. The current tool is [Traceback Lab](LAB-GUIDE.md).
+
 Live service: <https://cfddemo-production.up.railway.app>
 
 This page describes the public Streamlit evidence-review demo served by

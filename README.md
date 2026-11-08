@@ -1,13 +1,14 @@
 # Traceback
 
-Local, research-only cfDNA analysis for Oxford Nanopore data.
+Bring your cfDNA sequencing data, run it against every publicly available
+cfDNA algorithm we have wrapped, get charts, and look for aberrations.
 
-The main tool is **Traceback Lab**: one command aligns a MinKNOW chunk
-directory and runs 35 registered cfDNA algorithms on it (fragment size,
-copy number, methylation, cell origin, end motifs, nucleosome profiles,
-QC and more). Each algorithm reports a result or a named reason it did not
-run. A local web page and a one-file HTML report show the results with their
-provenance.
+**Traceback Lab** takes a BAM, an unaligned BAM, or a MinKNOW chunk
+directory, aligns it if needed, and runs 35 cfDNA methods on it, most from published tools:
+fragment size, copy number, methylation, cell and tissue origin, end
+motifs, nucleosome profiles, QC and more. Each method either reports a
+result with its charts or says exactly why it did not run. A local web page
+and a one-file HTML report show everything, with provenance.
 
 > **Research use only. Not CLIA-validated. Not a diagnosis.** Nothing here is
 > a validated clinical assay. The Lab runs locally and uploads nothing.
@@ -64,14 +65,10 @@ shows which methods run on a real ONT kit today and what blocks the rest.
   turns one aligned BAM into a development-signed fragment-length (and
   optional cell-origin or ichorCNA copy-number) record. See the
   [operator guide](docs/OPERATOR-GUIDE.md).
-- **Public evidence demo** (`app.py`, Streamlit): three fixed aggregate
-  readouts and a bounded AI review of whether a written report's claims match
-  them. See [DEMO.md](docs/DEMO.md) and the
-  [live demo](https://cfddemo-production.up.railway.app). Run it locally with
-  `uv run streamlit run app.py`; set `TRACEBACK_DEMO_REPLAY=1` to replay
-  recorded reviews without AWS credentials. Live review uses Amazon Bedrock
-  (`BEDROCK_MODEL_ID`, default `openai.gpt-5.5`; `BEDROCK_REGION`, default
-  `us-east-2`; `BEDROCK_MAX_TOKENS`, default `1024`).
+- **Historical: hackathon demo** (`app.py`, Streamlit): an early
+  proof-of-concept with three fixed readouts and an AI review step. It is no
+  longer maintained or relevant to the Lab; see [DEMO.md](docs/DEMO.md) only
+  if you need it.
 
 ## Tests
 
@@ -85,5 +82,5 @@ Tests are offline and use synthetic fixtures only.
 
 Never commit `.env` files, credentials, sequence files, BAMs, read IDs, source
 reports, local paths, or patient or sample identifiers. Lab results, assets
-and run logs stay under your local ROOT. Only bounded excerpts and aggregate
-check results may enter the demo's model prompts.
+and run logs stay under your local ROOT. The historical demo sends only bounded excerpts and aggregate check
+results to its model.

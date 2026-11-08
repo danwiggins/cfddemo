@@ -1,5 +1,7 @@
 # 75-second recording script
 
+> Historical: hackathon proof-of-concept, no longer maintained. The current tool is [Traceback Lab](LAB-GUIDE.md).
+
 Use the live site at <https://cfddemo-production.up.railway.app>. Record at
 1080p with the browser zoom at 90–100%.
 This script describes the fixed public evidence demo. It does not demonstrate

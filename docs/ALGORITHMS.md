@@ -7,11 +7,10 @@ This repository has two sets of methods:
   analysis surface. Commands and setup are in the [Lab guide](LAB-GUIDE.md);
   a plain-language description of each method is in the
   [explainer](LAB-ALGORITHM-EXPLAINER.md).
-- **Public evidence demo** (`app.py`, `evidence_inspector/`): three fixed
-  readouts (fragment length, cell origin, a whole-chromosome dosage screen)
-  and a bounded AI review, described in sections 1–4 below. The dosage
-  screen is not ichorCNA. The separate signed `traceback run` path has its
-  own fragment-length, cell-origin and ichorCNA copy-number analyses; see the
+- **Historical hackathon demo** (`app.py`, `evidence_inspector/`): an early
+  proof-of-concept with three fixed readouts, kept at the end of this page
+  for reference only. The separate signed `traceback run` path has its own
+  fragment-length, cell-origin and ichorCNA copy-number analyses; see the
   [operator guide](OPERATOR-GUIDE.md).
 
 Research use only. No method here is clinically validated.
@@ -84,7 +83,9 @@ copy-number and its dependents. Depth curves, split halves and synthetic CNA
 spikes are software checks, not clinical validation. See
 [Lab interpretation evidence](LAB-INTERPRETATION-EVIDENCE.md).
 
-## Public demo methods
+## Historical: hackathon demo methods
+
+No longer maintained. Kept for reference.
 
 ## 1. Fragment length
 
