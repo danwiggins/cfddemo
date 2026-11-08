@@ -144,6 +144,7 @@ np.save(output / 'feature_dataset.npy', matrix)
     monkeypatch.setenv("TRACEBACK_LIONHEART_RESOURCES", str(directory))
     monkeypatch.setenv("TRACEBACK_LIONHEART_ARCHIVE", str(archive))
     monkeypatch.setenv("TRACEBACK_LIONHEART_ENABLE_ONT", "1")
+    monkeypatch.setattr(sys, "platform", "linux")  # the fixture library is libhts.so
     monkeypatch.setattr(lionheart, "_package_pin", lambda _executable: ("2.2.0", "d" * 64))
     monkeypatch.setattr(lionheart, "_pyarrow_available", lambda _python: True)
     ctx = InputContext(
@@ -481,6 +482,8 @@ def test_lionheart_accepts_macos_libhts_dylib(tmp_path, monkeypatch) -> None:
     library = tmp_path / "macos-library"
     library.mkdir()
     monkeypatch.setenv("TRACEBACK_LIONHEART_LD_LIBRARY_PATH", str(library))
+    monkeypatch.setattr(sys, "platform", "darwin")
+    (library / "libhts.so").write_bytes(b"a Linux library is not loaded on macOS")
     decision = lionheart.LIONHEART.preflight(ctx)
     assert decision.reason_code == "missing_toolchain"
     assert "libhts.dylib" in decision.message
@@ -510,16 +513,33 @@ def test_lionheart_below_depth_runs_underpowered_not_skipped(tmp_path, monkeypat
     assert lionheart.LIONHEART.preflight(unmeasured).reason_code == "depth"
 
 
-def test_lionheart_interpreter_does_not_inherit_the_lab_worker_pythonpath(tmp_path, monkeypatch) -> None:
-    from traceback_lab.runner import _worker_env
+def test_lionheart_interpreter_gets_the_operator_pythonpath_not_the_lab_workers(tmp_path) -> None:
+    import subprocess
 
-    extra = tmp_path / "operator-packages"
-    extra.mkdir()
-    worker_path = _worker_env()["PYTHONPATH"]
-    monkeypatch.setenv("PYTHONPATH", os.pathsep.join([worker_path, str(extra)]))
-    assert lionheart._cli_env()["PYTHONPATH"] == str(extra)
-    monkeypatch.setenv("PYTHONPATH", worker_path)
-    assert "PYTHONPATH" not in lionheart._cli_env()
+    operator = tmp_path / "operator-packages"
+    operator.mkdir()
+    # Lab process started with an operator PYTHONPATH -> real worker env -> _cli_env in the worker.
+    script = (
+        "import json, subprocess, sys\n"
+        "from traceback_lab.runner import _worker_env\n"
+        "child = subprocess.run([sys.executable, '-c', 'import json; from traceback_lab.algorithms "
+        "import lionheart; print(json.dumps(lionheart._cli_env().get(\"PYTHONPATH\")))'],\n"
+        "                       env=_worker_env(), capture_output=True, text=True, check=True)\n"
+        "print(child.stdout.strip())\n"
+    )
+    repo = str(Path(__file__).resolve().parents[2])
+    for operator_path, expected in ((os.pathsep.join([str(operator), repo]), os.pathsep.join([str(operator), repo])),
+                                    (repo, repo)):
+        env = {**os.environ, "PYTHONPATH": operator_path}
+        env.pop("TRACEBACK_LAB_OPERATOR_PYTHONPATH", None)
+        result = subprocess.run([sys.executable, "-c", script], env=env, cwd=tmp_path,
+                                capture_output=True, text=True, check=True)
+        assert json.loads(result.stdout) == expected
+    env = {key: value for key, value in os.environ.items()
+           if key not in {"PYTHONPATH", "TRACEBACK_LAB_OPERATOR_PYTHONPATH"}}
+    result = subprocess.run([sys.executable, "-c", script], env=env, cwd=Path(repo),
+                            capture_output=True, text=True, check=True)
+    assert json.loads(result.stdout) is None
 
 
 def test_lionheart_default_memory_cap_starts_at_its_measured_floor(tmp_path) -> None:
@@ -527,3 +547,11 @@ def test_lionheart_default_memory_cap_starts_at_its_measured_floor(tmp_path) -> 
 
     policy = MemoryCapPolicy.for_store(LabStore(tmp_path / "root"), ram_bytes=64 * 1024**3)
     assert policy.for_algorithm("lionheart") == MemoryCap(24 * 1024**3, "floor")
+
+
+def test_explicit_memory_cap_overrides_the_lionheart_floor(tmp_path) -> None:
+    from traceback_lab.memory_cap import MemoryCap, MemoryCapPolicy
+
+    policy = MemoryCapPolicy.for_store(LabStore(tmp_path / "root"), override_bytes=8 * 1024**3,
+                                       ram_bytes=64 * 1024**3)
+    assert policy.for_algorithm("lionheart") == MemoryCap(8 * 1024**3, "override")

@@ -83,14 +83,11 @@ def _mosdepth_library_dir(mosdepth: Path) -> Path | None:
 
 
 def _libhts(library_dir: Path | None) -> Path | None:
-    """The shared htslib in the library directory: ``.so`` on Linux, ``.dylib`` on macOS."""
+    """The shared htslib in the library directory: ``.dylib`` on macOS, else ``.so``."""
     if library_dir is None:
         return None
-    for name in ("libhts.so", "libhts.dylib"):
-        candidate = library_dir / name
-        if candidate.is_file():
-            return candidate.resolve()
-    return None
+    candidate = library_dir / ("libhts.dylib" if sys.platform == "darwin" else "libhts.so")
+    return candidate.resolve() if candidate.is_file() else None
 
 
 def _resources(root: Path) -> tuple[Path, Path]:
@@ -132,18 +129,19 @@ print(json.dumps({'version': dist.version, 'sha256': digest.hexdigest()}))
 def _cli_env() -> dict[str, str]:
     """The environment for LIONHEART's own interpreter, without the Lab's paths.
 
-    The Lab worker puts its own interpreter's ``sys.path`` (stdlib included)
-    on ``PYTHONPATH``; a LIONHEART environment on another Python version
-    cannot start with it.
+    The Lab worker replaces ``PYTHONPATH`` with its own interpreter's
+    ``sys.path`` (stdlib included), which a LIONHEART environment on another
+    Python version cannot start with; restore the operator's value it recorded.
     """
+    from ..runner import OPERATOR_PYTHONPATH_ENV
+
     env = dict(os.environ)
-    lab_paths = {os.path.realpath(entry) for entry in sys.path if entry}
-    kept = [entry for entry in env.get("PYTHONPATH", "").split(os.pathsep)
-            if entry and os.path.realpath(entry) not in lab_paths]
-    if kept:
-        env["PYTHONPATH"] = os.pathsep.join(kept)
-    else:
-        env.pop("PYTHONPATH", None)
+    if OPERATOR_PYTHONPATH_ENV in env:
+        operator = env.pop(OPERATOR_PYTHONPATH_ENV)
+        if operator:
+            env["PYTHONPATH"] = operator
+        else:
+            env.pop("PYTHONPATH", None)
     return env
 
 
@@ -368,7 +366,7 @@ class Lionheart(Base):
         if executable is None or mosdepth is None or _program(None, "samtools") is None or _program(None, "unpigz") is None:
             return Skip("missing_toolchain", "Install LIONHEART v2.2.0, modified mosdepth, samtools, and unpigz")
         if _libhts(_mosdepth_library_dir(mosdepth)) is None:
-            return Skip("missing_toolchain", "LIONHEART mosdepth library directory must contain libhts.so or libhts.dylib")
+            return Skip("missing_toolchain", "LIONHEART mosdepth library directory must contain libhts.so (libhts.dylib on macOS)")
         python = _cli_python(executable)
         if python is None:
             return Skip("missing_toolchain", "Use a LIONHEART Python launcher with a direct interpreter shebang so its package can be pinned")
@@ -439,8 +437,8 @@ class Lionheart(Base):
                        # Upstream gives each mosdepth call int((n_jobs - 2) / 2) threads and
                        # passes that to ``unpigz -p``, which rejects 0: 4 is the fewest that works.
                        "--n_jobs", "4", "--single_end_mode"]
-            # ...and n_jobs also sizes its joblib pool: run the feature workers
-            # in-process, one at a time, so memory stays near one worker's peak.
+            # ...and n_jobs also sizes its one joblib ``Parallel`` call (default loky
+            # process backend); this makes it run in-process, one task at a time.
             env = {**_cli_env(), "JOBLIB_MULTIPROCESSING": "0"}
             with (out.parent / "lionheart.log").open("wb") as log:
                 completed = subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=False, env=env)

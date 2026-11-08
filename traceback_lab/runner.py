@@ -57,6 +57,7 @@ from .store import (MAX_EXECUTION_PLAN_BYTES, LabStore, ResultOrderUnavailable, 
                     open_regular_no_follow)
 
 DEFAULT_TIMEOUT_S = 3600.0
+OPERATOR_PYTHONPATH_ENV = "TRACEBACK_LAB_OPERATOR_PYTHONPATH"
 
 
 def _verify_target_reference(
@@ -199,6 +200,8 @@ def _worker_env(threads: int | None = None) -> dict[str, str]:
 
     env = dict(os.environ)
     paths = [entry for entry in sys.path if entry and os.path.isdir(entry)]
+    # The operator's own PYTHONPATH, for tools on another interpreter (lionheart).
+    env.setdefault(OPERATOR_PYTHONPATH_ENV, os.environ.get("PYTHONPATH", ""))
     env["PYTHONPATH"] = os.pathsep.join(paths)
     env.setdefault("PYTHONDONTWRITEBYTECODE", "1")
     if threads is not None:
