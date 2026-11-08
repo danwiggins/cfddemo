@@ -404,9 +404,18 @@ def test_actual_finaletoolkit_110_pair_parity(tmp_path: Path) -> None:
     assert panel["verdict"] == "concordant"
 
 
-def _replay_ont(fixtures: Path, seen: list[list[str]]):
+def _replay_ont(fixtures: Path, seen: list[list[str]], snapshot: dict | None = None, returncode: int = 0):
     def replay(command: list[str], **_kwargs: object) -> SimpleNamespace:
         seen.append(command)
+        if snapshot is not None and "end-motifs" in command:
+            # The fragment file and reference view exist only while the tool runs.
+            with pysam.TabixFile(command[2]) as frags:
+                snapshot["contigs"] = sorted(frags.contigs)
+                snapshot["rows"] = [row.split("\t") for contig in frags.contigs for row in frags.fetch(contig)]
+            with pysam.FastaFile(command[3]) as view:
+                snapshot["view"] = dict(zip(view.references, view.lengths))
+        if returncode:
+            return SimpleNamespace(returncode=returncode)
         name = ("finaletoolkit_110_ont_motifs.tsv" if "end-motifs" in command
                 else "finaletoolkit_110_ont_delfi.tsv")
         shutil.copyfile(fixtures / name, Path(command[command.index("-o") + 1]))
@@ -442,7 +451,8 @@ def test_ont_fragments_feed_finaletoolkit_and_match_the_lab_counts(
     monkeypatch.setattr(module, "_tool", lambda: ("pinned-fixture", "e" * 64))
     ctx.extras["planned_tool_pins"] = [pin.identity() for pin in FINALETOOLKIT_XCHECK.tools]
     seen: list[list[str]] = []
-    monkeypatch.setattr(module.subprocess, "run", _replay_ont(Path(__file__).parent / "data", seen))
+    snapshot: dict = {}
+    monkeypatch.setattr(module.subprocess, "run", _replay_ont(Path(__file__).parent / "data", seen, snapshot))
     result = FINALETOOLKIT_XCHECK.run(ctx, tmp_path / "out")
     work = tmp_path / "finaletoolkit-work"
     # FinaleToolkit receives the Lab's fragment file, never the ONT BAM, and a
@@ -450,15 +460,16 @@ def test_ont_fragments_feed_finaletoolkit_and_match_the_lab_counts(
     for command in seen:
         assert command[2].endswith("fragments.frag.gz")
         assert not any(part.endswith("aligned.bam") for part in command)
-    with pysam.TabixFile(str(work / "fragments.frag.gz")) as frags:
-        assert sorted(frags.contigs) == ["chr1", "chrX"]
-        rows = [row.split("\t") for contig in frags.contigs for row in frags.fetch(contig)]
+    assert snapshot["contigs"] == ["chr1", "chrX"]
+    rows = snapshot["rows"]
     assert len(rows) == 44
     assert ["chr1", "240000", "242500", "60", "-"] in rows
     assert all(int(row[3]) >= 20 for row in rows)
-    with pysam.FastaFile(str(work / "reference.fa")) as view:
-        assert dict(zip(view.references, view.lengths)) == {"chr1": 300_000, "chrX": 100_000}
+    assert snapshot["view"] == {"chr1": 300_000, "chrX": 100_000}
     assert (work / "autosomes.chrom.sizes").read_text() == "chr1\t300000\n"
+    # The fragment file and reference view are removed; small outputs remain.
+    assert sorted(path.name for path in work.iterdir()) == [
+        "autosomes.100kb.bed", "autosomes.chrom.sizes", "delfi.tsv", "motifs.tsv"]
     panel = json.loads(result.artifacts["finaletoolkit_xcheck.json"])
     assert panel["input_mode"] == "ont_single_end" and "pairs" not in panel
     assert panel["fragments"] == 44 and panel["motif_ends"] == 87
@@ -557,3 +568,69 @@ def test_actual_finaletoolkit_110_ont_single_end_parity(tmp_path: Path) -> None:
     data = Path(__file__).parent / "data"
     assert result.artifacts["finaletoolkit_motifs.tsv"] == (data / "finaletoolkit_110_ont_motifs.tsv").read_bytes()
     assert result.artifacts["finaletoolkit_delfi.tsv"] == (data / "finaletoolkit_110_ont_delfi.tsv").read_bytes()
+
+
+def test_ont_scratch_is_removed_when_finaletoolkit_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import traceback_lab.algorithms.finaletoolkit_xcheck as module
+
+    ctx = _ont_fixture(tmp_path)
+    monkeypatch.setattr(module, "_tool", lambda: ("pinned-fixture", "e" * 64))
+    ctx.extras["planned_tool_pins"] = [pin.identity() for pin in FINALETOOLKIT_XCHECK.tools]
+    seen: list[list[str]] = []
+    snapshot: dict = {}
+    monkeypatch.setattr(module.subprocess, "run",
+                        _replay_ont(Path(__file__).parent / "data", seen, snapshot, returncode=1))
+    with pytest.raises(RuntimeError, match="end-motifs failed"):
+        FINALETOOLKIT_XCHECK.run(ctx, tmp_path / "out")
+    assert snapshot["contigs"] == ["chr1", "chrX"]
+    work = tmp_path / "finaletoolkit-work"
+    assert sorted(path.name for path in work.iterdir()) == ["autosomes.100kb.bed", "autosomes.chrom.sizes"]
+
+
+def test_legacy_illumina_result_without_plan_still_joins_a_cohort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pre-ONT Illumina result has no execution_plan.json; its identity is static."""
+    import traceback_lab.algorithms.finaletoolkit_xcheck as module
+    from traceback_lab import cohorts
+    from traceback_lab.cohorts import add_sample, build_cohort
+    from traceback_lab.envelope import Metric, ResultEnvelope, provenance
+    from traceback_lab.registry import execution_identity
+    from traceback_lab.store import LabStore
+
+    store = LabStore(tmp_path / "store")
+    store.ensure()
+    source_id, input_id, reference_sha256 = "1" * 64, "2" * 64, "3" * 64
+    store.sources_dir.mkdir(parents=True, exist_ok=True)
+    (store.sources_dir / f"{source_id}.json").write_text(json.dumps({
+        "source_id": source_id, "example": False,
+        "inputs": [{"input_id": input_id, "kind": "prealigned", "used_utc": "2026-10-16T00:00:00Z"}],
+    }))
+    input_dir = store.inputs_dir / input_id
+    input_dir.mkdir(parents=True)
+    (input_dir / "manifest.json").write_text(json.dumps({
+        "kind": "prealigned", "platform": "illumina", "source_id": source_id, "input_id": input_id,
+        "reference_sha256": reference_sha256, "tools": None, "mmi_sha256": None, "aligner_argv": None,
+    }))
+    header = {"HD": {"VN": "1.6"}, "SQ": [{"SN": "chr1", "LN": 1000}], "RG": [{"ID": "one", "PL": "ILLUMINA"}]}
+    with pysam.AlignmentFile(str(input_dir / "aligned.bam"), "wb", header=header):
+        pass
+    monkeypatch.setattr(module, "_tool", lambda: ("pinned-fixture", "e" * 64))
+    monkeypatch.setattr(cohorts, "load_registry", lambda: (FINALETOOLKIT_XCHECK,))
+    identity = execution_identity(
+        FINALETOOLKIT_XCHECK, reference_sha256=reference_sha256, upstream=[], asset_sha256s=(),
+        platform="illumina", tool_pins=[pin.identity() for pin in FINALETOOLKIT_XCHECK.tools],
+    )
+    store.publish_result(ResultEnvelope(
+        algorithm_id=FINALETOOLKIT_XCHECK.id, algorithm_version=FINALETOOLKIT_XCHECK.version, status="ok",
+        provenance=provenance(tool="fixture", parameters_sha256=identity,
+                              source_id=source_id, input_id=input_id, reference_id="hg38"),
+        metrics=[Metric(metric_id="motif_pearson_r", value=0.99)],
+    ), input_id=input_id)
+    attempt = store.selected_attempt(input_id, FINALETOOLKIT_XCHECK.id, identity)
+    assert attempt is not None and not (attempt / "execution_plan.json").exists()
+    add_sample(store, "illumina", source_id)
+    generation = build_cohort(store, "illumina")
+    assert [row.algorithm_id for row in generation.members[0].results] == ["finaletoolkit-xcheck"]

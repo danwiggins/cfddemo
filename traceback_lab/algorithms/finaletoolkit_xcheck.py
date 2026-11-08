@@ -353,6 +353,14 @@ def _reference_view(fasta: Path, contigs: list[tuple[str, int]], work: Path) -> 
     return view
 
 
+def _remove_ont_scratch(work: Path) -> None:
+    """Delete the fragment file and reference view (a copied FASTA can be genome-sized)."""
+    for name in ("fragments.frag", "fragments.frag.gz", "fragments.frag.gz.tbi",
+                 "reference.fa", "reference.fa.fai", "reference.fa.gzi",
+                 "reference.fa.gz", "reference.fa.gz.fai", "reference.fa.gz.gzi"):
+        (work / name).unlink(missing_ok=True)
+
+
 def _motifs(path: Path) -> dict[str, float]:
     if path.stat().st_size > _MAX_OUTPUT:
         raise ValueError("FinaleToolkit motif output exceeds the size limit")
@@ -393,6 +401,9 @@ def _delfi(path: Path, expected: set[tuple[str, int]]) -> dict[tuple[str, int], 
 @dataclass
 class FinaleToolkitXcheck(Base):
     platform_skip_tools: ClassVar[tuple[ToolPin, ...]] = (ToolPin("finaletoolkit", "not-applicable"),)
+    # identity_parameters returns the static parameters on these platforms, so
+    # cohorts may still rebuild a legacy result's identity without a plan.
+    static_parameter_platforms: ClassVar[frozenset[str]] = frozenset({"illumina"})
     version: str = "1"
     family: str = "fragmentomics"
     requires: Requirements = field(default_factory=lambda: Requirements(
@@ -464,6 +475,13 @@ class FinaleToolkitXcheck(Base):
             raise RuntimeError("FinaleToolkit input or output became unreadable") from None
 
     def _run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
+        try:
+            return self._measure(ctx, out)
+        finally:
+            if ctx.platform == "ont":
+                _remove_ont_scratch(out.parent / "finaletoolkit-work")
+
+    def _measure(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
         tool = _tool()
         if tool is None or ctx.extras.get("planned_tool_pins") != [pin.identity() for pin in self.tools]:
             raise RuntimeError("FinaleToolkit tool changed since execution planning")
