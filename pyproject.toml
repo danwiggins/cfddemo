@@ -5,18 +5,16 @@ build-backend = "hatchling.build"
 [project]
 name = "traceback-evidence-inspector"
 version = "0.1.0"
-description = "Local-first cfDNA evidence inspection prototype with Amazon Bedrock review."
+description = "Local-first cfDNA research workbench: run public cfDNA methods on a BAM and chart the results."
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
 dependencies = [
-    "boto3==1.40.0",
     "cryptography==46.0.3",
     "numpy==2.4.6",
     "openpyxl==3.1.5",
     "pydantic==2.11.7",
     "pysam==0.23.3",
     "pyyaml==6.0.3",
-    "streamlit==1.48.0",
 ]
 
 [project.scripts]
@@ -24,6 +22,9 @@ traceback = "traceback_runner.cli:main"
 
 [dependency-groups]
 dev = [
+    # Test-only imports that streamlit used to pull in transitively.
+    "jsonschema==4.26.0",
+    "pandas==2.3.3",
     "pytest==8.4.1",
     "pytest-timeout==2.4.0",
     "pytest-xdist==3.8.0",
@@ -46,4 +47,4 @@ markers = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["bedrock_chat", "evidence_inspector", "evals", "traceback_lab", "traceback_runner"]
+packages = ["evidence_inspector", "traceback_lab", "traceback_runner"]

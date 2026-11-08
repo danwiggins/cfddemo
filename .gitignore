@@ -14,16 +14,14 @@ build/
 # Secrets and local configuration
 .env
 .env*
-.streamlit/secrets.toml
 *.pem
 *.key
 
-# Private/local inputs and generated evaluation records
+# Private/local inputs
 /data/local/
 /data/private/
 /inputs/
 /private/
-/evals/results/
 
 # Sequence data and indexes must never be committed
 *.bam
