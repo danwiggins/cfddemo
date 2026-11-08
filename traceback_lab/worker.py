@@ -21,7 +21,7 @@ from pathlib import Path
 from traceback_runner.serialization import canonical_json_bytes
 
 from .memory_cap import WORKER_MEMORY_EXIT
-from .registry import AlgorithmOutput, Skip, context_from_json, load_entry
+from .registry import AlgorithmOutput, InputContext, Skip, context_from_json, load_entry
 
 
 def _descendants(root_pid: int) -> list[tuple[int, int]]:
@@ -77,7 +77,8 @@ def main(argv: list[str]) -> int:
     algorithm = load_entry(request["entry"])
     context = context_from_json(request["context"])
     marks: list[dict[str, object]] = []  # depth floors run() passed only under --below-depth
-    context = replace(context, extras={**context.extras, "underpowered_marks": marks})
+    if isinstance(context, InputContext):
+        context = replace(context, extras={**context.extras, "underpowered_marks": marks})
     out = Path(request["out_dir"])
     artifacts = out / "artifacts"
     artifacts.mkdir(parents=True, exist_ok=True)

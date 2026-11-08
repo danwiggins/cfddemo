@@ -72,8 +72,9 @@ def test_report_shape_csv_protection_and_private_diagnostics() -> None:
         "schema_version", "generated_at", "research_use_only", "example", "sample_id",
         "source_id", "full_input_id", "recorded_utc", "recorded_utc_kind",
         "interpretation_version", "cohort_version",
-        "limitations", "metrics",
+        "limitations", "metrics", "underpowered",
     ]
+    assert model["underpowered"] == {}
     assert len(model["metrics"]) == 3
     assert model["metrics"][0]["label"] == "Sex call (male / female / indeterminate)"
     assert model["metrics"][1]["raw_value"] is None
@@ -238,8 +239,8 @@ def test_report_date_kind_and_interpretation_reason_roundtrip() -> None:
     assert all(row["recorded_utc_kind"] == "completion" for row in csv_rows)
     for row in csv_rows:
         for key, value in model.items():
-            if key == "metrics":
-                continue
+            if key in ("metrics", "underpowered"):
+                continue  # the CSV carries an underpowered mark as its limitation line
             if key == "limitations":
                 for limitation in value:
                     assert limitation in row[key]
