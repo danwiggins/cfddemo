@@ -14,6 +14,7 @@ One enumeration is used throughout:
 - Signed: `traceback_runner/` (signed records and bundles; the operator site
   served by the signed `traceback serve`).
 - Demo: `app.py` (the Streamlit demo; personalized output, not signed).
+  Removed on 2026-11-08; the rules below that name it no longer apply.
 - Operator guide: `docs/OPERATOR-GUIDE.md` (operator-facing text; it is not
   an output surface and appears only under the vocabulary rule below).
 

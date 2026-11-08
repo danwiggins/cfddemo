@@ -750,15 +750,3 @@ def test_design_tokens_meet_contrast() -> None:
         value = re.search(rf"{token}:\s*(#[0-9a-f]{{6}})", css).group(1)
         assert _contrast(value, "#ffffff") >= 4.5, token
     assert "#d88400" not in css
-
-
-def test_streamlit_demo_no_longer_says_validated() -> None:
-    lines = [
-        number
-        for number, line in enumerate(Path("app.py").read_text().splitlines(), start=1)
-        if "Validated" in line
-    ]
-    # Only the "Not built" disclaimer remains.
-    assert len(lines) == 1
-    assert "Validated tumor-fraction calling" in Path("app.py").read_text().splitlines()[lines[0] - 1]
-

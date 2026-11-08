@@ -8,9 +8,8 @@ and [OPERATOR-GUIDE](docs/OPERATOR-GUIDE.md) for the current signed workflow.
 
 ## Boundary
 
-The CLI is a separate entry point over `traceback_runner`; it does not modify
-the public Streamlit demo. The only end-to-end execution enabled in this wave
-is the runtime-generated synthetic path. Real input may be inspected by
+The CLI is a separate entry point over `traceback_runner`. The only end-to-end
+execution enabled in this wave is the runtime-generated synthetic path. Real input may be inspected by
 bounded preflight code, but processing remains disabled.
 
 ```text

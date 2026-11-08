@@ -15,6 +15,30 @@ with provenance.
 > **Research use only. Not CLIA-validated. Not a diagnosis.** Nothing here is
 > a validated clinical assay. The Lab runs locally and uploads nothing.
 
+## How a run works
+
+```mermaid
+flowchart TD
+    A["BAM, uBAM or MinKNOW chunk directory"] --> B["Ingest: chunk safety, hashes, platform"]
+    B -->|"unaligned ONT"| C["Align: minimap2 map-ont, then sort and index"]
+    B -->|"already aligned"| D["Aligned BAM"]
+    C --> D
+    D --> E["read-summary: one pass, one row per read"]
+    D --> M["meth-calls: per-read CpG calls, ONT modBAM only"]
+    D --> F
+    E --> F
+    M --> F
+    F["35 methods in registry order<br>QC 6, fragmentomics 12,<br>copy number 6, methylation 9,<br>non-human reads 2"]
+    E --> G["Derived inputs: downsample curve,<br>split halves, CNA spike-in controls"]
+    G -->|"summary methods and copy-number rerun"| F
+    F --> H[("Result store under ROOT/lab")]
+    H --> I["Local web page with charts:<br>traceback lab serve"]
+    H --> J["One-file HTML report:<br>traceback lab report"]
+```
+
+Every method ends `ok`, `skipped` with a reason, or `failed`; the
+[Lab guide](docs/LAB-GUIDE.md#how-a-methods-status-is-decided) shows how.
+
 ## Quick start (synthetic data)
 
 Requires macOS or Linux, Python 3.11, [uv](https://docs.astral.sh/uv/),
@@ -61,16 +85,11 @@ shows which methods run on a real ONT kit today and what blocks the rest.
 - [All documentation](docs/README.md), including the signed-record path and
   historical design documents.
 
-## Other surfaces in this repository
+## Signed local records
 
-- **Signed local records** (`traceback run`): an older, narrower path that
-  turns one aligned BAM into a development-signed fragment-length (and
-  optional cell-origin or ichorCNA copy-number) record. See the
-  [operator guide](docs/OPERATOR-GUIDE.md).
-- **Historical: hackathon demo** (`app.py`, Streamlit): an early
-  proof-of-concept with three fixed readouts and an AI review step. It is no
-  longer maintained or relevant to the Lab; see [DEMO.md](docs/DEMO.md) only
-  if you need it.
+`traceback run` is an older, narrower path that turns one aligned BAM into a
+development-signed fragment-length (and optional cell-origin or ichorCNA
+copy-number) record. See the [operator guide](docs/OPERATOR-GUIDE.md).
 
 ## Tests
 
@@ -84,5 +103,4 @@ Tests are offline and use synthetic fixtures only.
 
 Never commit `.env` files, credentials, sequence files, BAMs, read IDs, source
 reports, local paths, or patient or sample identifiers. Lab results, assets
-and run logs stay under your local ROOT. The historical demo sends only bounded excerpts and aggregate check
-results to its model.
+and run logs stay under your local ROOT.

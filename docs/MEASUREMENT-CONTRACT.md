@@ -2,7 +2,7 @@
 
 Status: first-wave synthetic implementation. Nothing in this contract qualifies
 real genomic data, hg38 assets, Dorado, hardware, a scientific threshold, or a
-wet-lab protocol. The public Streamlit demo is unchanged.
+wet-lab protocol.
 
 ## Boundary
 

@@ -7,9 +7,10 @@ This repository has two sets of methods:
   analysis surface. Commands and setup are in the [Lab guide](LAB-GUIDE.md);
   a plain-language description of each method is in the
   [explainer](LAB-ALGORITHM-EXPLAINER.md).
-- **Historical hackathon demo** (`app.py`, `evidence_inspector/`): an early
-  proof-of-concept with three fixed readouts, kept at the end of this page
-  for reference only. Its dosage screen is not ichorCNA. The separate signed `traceback run` path has its own
+- **Standalone cell-origin and dosage-screen scripts** (`evidence_inspector/`,
+  `scripts/regenerate_*.py`): two readouts left from the removed hackathon
+  demo, described at the end of this page. The dosage screen is not
+  ichorCNA. The separate signed `traceback run` path has its own
   fragment-length, cell-origin and ichorCNA copy-number analyses; see the
   [operator guide](OPERATOR-GUIDE.md).
 
@@ -83,30 +84,14 @@ copy-number and its dependents. Depth curves, split halves and synthetic CNA
 spikes are software checks, not clinical validation. See
 [Lab interpretation evidence](LAB-INTERPRETATION-EVIDENCE.md).
 
-## Historical: hackathon demo methods
+## Standalone cell-origin and dosage-screen scripts
 
-No longer maintained. Kept for reference.
+The hackathon demo that first showed these readouts, its fragment-length
+readout and its AI review step have been removed. The two methods below are
+still in `evidence_inspector/` and can be run with the scripts at the end of
+this section. They are not part of the Lab run.
 
-## 1. Fragment length
-
-The pipeline streams alignment records, keeps primary records, deduplicates by
-read ID across ordered inputs, requires a positive query length, and caps
-accepted lengths at 1,000,000 bp. Every displayed statistic uses the same
-denominator.
-
-```text
-BAM records
-  → primary-record filter
-  → first eligible record per read ID
-  → raw query-sequence length
-  → histogram + mode + median + fraction above 1 kb
-```
-
-The public chart uses raw query-sequence length. It does not subtract a fixed
-adapter length. That definition matters: an aligned reference span and a raw
-length minus 45 bp are different measurements.
-
-## 2. Cell-origin deconvolution
+## 1. Cell-origin deconvolution
 
 ```text
 aligned modBAM
@@ -145,7 +130,7 @@ cell type. A zero-width or unavailable interval is reported as
 `insufficient_information`, not as precise uncertainty. The historical v1
 bootstrap contract and estimator remain available for compatibility.
 
-## 3. Experimental chromosome dosage
+## 2. Experimental chromosome dosage
 
 ```text
 aligned BAM
@@ -161,24 +146,7 @@ panel of normals, segmentation model, or tumor-fraction inference. It cannot
 resolve focal or subclonal events. The threshold is a visualization boundary,
 not a validated clinical cutoff.
 
-## 4. Bounded AI evidence review
-
-The model does not calculate fragment or methylation results. It receives:
-
-- one claim;
-- allowlisted tool capabilities;
-- bounded source excerpts;
-- aggregate registered results.
-
-It first selects one permitted check. Deterministic code executes or retrieves
-the check. The model then returns a strict structured assessment with status,
-citations, revised wording, assumptions, and missing validation.
-
-Validation rejects unknown evidence IDs, invented numeric fields, changed
-values, mismatched units, changed denominators, changed filters, and stale claim
-bindings.
-
-## Regenerating the demo readouts
+## Running the scripts
 
 Private inputs belong under ignored `data/local/` paths (hg38 FASTA and
 minimap2 index; the Loyfer U250 regions, markers, atlas and healthy-plasma
@@ -194,15 +162,12 @@ uv run python -m scripts.regenerate_copy_number \
 ```
 
 The cell-origin result is written to `data/local/cell-origin/result.json` and
-takes precedence over the public aggregate bundle.
+the dosage screen to `data/local/copy-number/result.json`.
 
-## Known limitations of the demo
+## Known limitations of these scripts
 
 - One research sample does not establish diagnostic performance.
-- The fragment bundle is a registered subset with unverified sample linkage.
 - Cell-origin estimates depend on marker coverage and atlas assumptions.
 - The dosage screen uses sample-internal normalization and tests only broad
   whole-chromosome shifts.
 - Shallow whole-genome sequencing may miss low tumor fractions.
-- The report contains a known reproduction mismatch between its updated
-  fragment method and older fixed-subtraction instructions.

@@ -674,7 +674,7 @@ tests and extend `tests/web/test_integrated_explorer.py` for the HTTP/DOM layer.
     absent, stale, corrupt, or over bound.
 
 Run focused tests, the D01-D10 suites, the full offline suite, and
-`python -m evals.harness`. An exact-head independent review must inspect the
+`python -m evals.harness` (removed on 2026-11-08 with the Bedrock reviewer). An exact-head independent review must inspect the
 authority fence, protected/public field split, delta suppression, denominator
 preservation, graph bounds, and browser privacy before merge.
 

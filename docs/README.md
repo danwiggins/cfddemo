@@ -44,14 +44,6 @@ record. The code is still in the repository and tested.
 - [Versioned compatibility decisions](COMPATIBILITY.md)
 - [Protocol & Setup](PROTOCOL-SETUP.md)
 
-## Historical: hackathon demo
-
-An early three-readout proof-of-concept, no longer maintained.
-
-- [Three-minute demo](DEMO.md)
-- [75-second recording script](RECORDING-SCRIPT.md)
-- [Railway deployment](DEPLOYMENT.md)
-
 ## Development
 
 - [L0 development control plane](DEVELOPMENT-CONTROL.md) (the CI section is

@@ -543,14 +543,14 @@ record; it never edits history.
 
 | Need | Existing code | Decision |
 |---|---|---|
-| BAM streaming and bounded extraction | `evidence_inspector/preparation.py` | Reuse pure logic; wrap in runner stage |
-| Aligned-span fragment computation | `evidence_inspector/fragmentomics.py` | Reuse with one locked definition |
+| BAM streaming and bounded extraction | `evidence_inspector/preparation.py` | Reuse pure logic; wrap in runner stage (removed on 2026-11-08) |
+| Aligned-span fragment computation | `evidence_inspector/fragmentomics.py` | Reuse with one locked definition (removed on 2026-11-08) |
 | Modified-base extraction and validation | `evidence_inspector/cell_origin_pipeline.py` | Reuse after modBAM eligibility |
 | UXM classification and NNLS | `uxm.py`, `deconvolution.py` | Reuse after analytical gate |
 | Broad dosage calculation | `copy_number.py` | Keep experimental and separately gated |
 | Strict evidence/result models | `models.py`, `cell_origin_models.py` | Extend with versioned runner contracts |
-| Bounded AI review | `reviewer.py`, `checks.py` | Keep downstream of deterministic results |
-| Demo UI | `app.py` | Preserve as demo; do not use as runner architecture |
+| Bounded AI review | `reviewer.py`, `checks.py` | Keep downstream of deterministic results (removed on 2026-11-08) |
+| Demo UI | `app.py` | Preserve as demo; do not use as runner architecture (removed on 2026-11-08) |
 
 ## 19. `/autoplan` decision record
 
