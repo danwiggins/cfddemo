@@ -316,6 +316,54 @@ def test_invalid_newer_identity_does_not_expose_older_success(
         store.publish_result(_envelope(3), input_id=C)
 
 
+def test_cached_runner_recomputes_when_a_legacy_sibling_blocks_reselection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from traceback_lab import runner as lab_runner
+
+    store = LabStore(tmp_path)
+    store.ensure()
+    algorithm = _Base("fragment-size")
+    identity = execution_identity(algorithm, reference_sha256=B)
+    first = json.loads(_envelope(1).to_bytes())
+    first["provenance"]["parameters_sha256"] = identity
+    store.publish_result(ResultEnvelope.model_validate(first), input_id=C)
+    # A selection written by an older Lab version: no publication order and an
+    # envelope this version cannot read.
+    legacy = store.result_dir(C, "fragment-size", A)
+    old_attempt = "a-20261015T090816870676-c20c34dc"
+    (legacy / "attempts" / old_attempt).mkdir(parents=True)
+    (legacy / "attempts" / old_attempt / "result.json").write_text('{"schema": "older"}')
+    (legacy / "selected.json").write_text(json.dumps({"attempt_id": old_attempt}))
+    with pytest.raises(store_module.ResultOrderUnavailable):
+        store.reselect_cached_result(C, "fragment-size", identity)
+    messages: list[str] = []
+
+    def fake_pipeline(stages, **_kwargs):  # noqa: ANN001, ANN202
+        request = json.loads(Path(stages[0].argv[-1]).read_bytes())
+        scratch = Path(request["out_dir"])
+        (scratch / "artifacts").mkdir(exist_ok=True)
+        (scratch / "output.json").write_text(json.dumps({
+            "metrics": [{"metric_id": "x", "value": 2}], "panels": [],
+        }))
+        return SimpleNamespace(
+            ok=True, duration_s=0.01, peak_rss_bytes=0,
+            sampled_tree_peak_rss_bytes=0, peak_disk_bytes=0,
+        )
+
+    monkeypatch.setattr(lab_runner, "run_pipeline", fake_pipeline)
+    results = run_plan(
+        store, None, store.run_log(new_run_id()), RunTarget(C, B, tmp_path, "ref", B),
+        [PlanItem(algorithm, False)], {"fragment-size": "fake:ALGO"}, run_id=new_run_id(),
+        scrubber=Scrubber(root=tmp_path), progress=messages.append,
+    )
+
+    assert len(results) == 1 and results[0].status == "ok" and not results[0].cached
+    assert any("recomputing" in message for message in messages)
+
+
 def test_cached_runner_reselects_prior_identity_once(tmp_path: Path) -> None:
     store = LabStore(tmp_path)
     store.ensure()

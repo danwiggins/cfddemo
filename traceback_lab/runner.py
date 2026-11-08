@@ -53,7 +53,8 @@ from .registry import (
     execution_identity,
 )
 from .scrub import Scrubber
-from .store import MAX_EXECUTION_PLAN_BYTES, LabStore, RunLog, WriterLock, open_regular_no_follow
+from .store import (MAX_EXECUTION_PLAN_BYTES, LabStore, ResultOrderUnavailable, RunLog, WriterLock,
+                    open_regular_no_follow)
 
 DEFAULT_TIMEOUT_S = 3600.0
 
@@ -259,6 +260,26 @@ def _selected_upstream_attempts(
     return tuple(rows)
 
 
+
+def _reselect_cached(
+    store: LabStore, input_id: str, algorithm_id: str, identity: str,
+    step: str, progress: Callable[[str], None] | None,
+) -> bool:
+    """Reuse a cached success, or report that the step must be recomputed.
+
+    A sibling result the store cannot order (for example one written by an
+    older Lab version) makes reselection unsafe; recomputing publishes a fresh,
+    ordered result instead of aborting the whole run.
+    """
+
+    try:
+        store.reselect_cached_result(input_id, algorithm_id, identity)
+    except ResultOrderUnavailable:
+        if progress:
+            progress(f"{step:<24} cache not reusable (unreadable sibling result); recomputing")
+        return False
+    return True
+
 def run_plan(
     store: LabStore,
     lock: WriterLock | None,
@@ -371,8 +392,8 @@ def run_plan(
                 cached_attempt, execution_plan, required=dynamic_plan,
             )
         if (existing is not None and existing.status == "ok" and not force and
-                not platform_rejected and not pon_unavailable and not blocked and cache_valid):
-            store.reselect_cached_result(target.input_id, algorithm.id, identity)
+                not platform_rejected and not pon_unavailable and not blocked and cache_valid
+                and _reselect_cached(store, target.input_id, algorithm.id, identity, step, progress)):
             selected = store.selected_attempt(target.input_id, algorithm.id, identity)
             result = StepResult(
                 algorithm.id, "ok", item.upstream_only, identity, cached=True, input_label=target.label,
