@@ -134,7 +134,8 @@ class CopyNumber(Base):
             try:
                 result = ichor.measure(
                     counting, counted, scanned, work, toolchain=toolchain, assets=assets, parameters=parameters,
-                    pon=pon, validate_grid=validate_grid, below_floor=exploratory,
+                    pon=pon, validate_grid=validate_grid,
+                    **({"below_floor": True} if exploratory else {}),  # default call unchanged
                 )
             except ichor.IchorNoOutput as exc:
                 if not exploratory:
