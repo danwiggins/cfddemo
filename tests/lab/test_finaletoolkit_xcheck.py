@@ -634,3 +634,34 @@ def test_legacy_illumina_result_without_plan_still_joins_a_cohort(
     add_sample(store, "illumina", source_id)
     generation = build_cohort(store, "illumina")
     assert [row.algorithm_id for row in generation.members[0].results] == ["finaletoolkit-xcheck"]
+
+
+def test_finaletoolkit_subprocesses_drop_the_lab_worker_pythonpath(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Lab workers export PYTHONPATH for the Lab's own packages; FinaleToolkit
+    runs in its own interpreter and must not import them (the pin would change
+    between planning and the worker)."""
+
+    from traceback_lab.algorithms import finaletoolkit_xcheck as ftk
+
+    interpreter = tmp_path / "python"
+    interpreter.write_text("")
+    launcher = tmp_path / "finaletoolkit"
+    launcher.write_text(f"#!{interpreter}\n")
+    monkeypatch.setenv("TRACEBACK_FINALETOOLKIT_BIN", str(launcher))
+    monkeypatch.setenv("PYTHONPATH", "/lab/site-packages")
+    monkeypatch.setenv("PYTHONHOME", "/lab")
+    monkeypatch.delenv("TRACEBACK_FINALETOOLKIT_PYTHON", raising=False)
+    seen: list[dict[str, str]] = []
+
+    def fake_run(argv, **kwargs):  # noqa: ANN001, ANN202
+        seen.append(kwargs.get("env") or dict(os.environ))
+        if argv[-1] == "--version":
+            return subprocess.CompletedProcess(argv, 0, "FinaleToolkit 1.1.0", "")
+        return subprocess.CompletedProcess(argv, 1, "", "")
+
+    monkeypatch.setattr(ftk.subprocess, "run", fake_run)
+    assert ftk._tool() is None
+    assert len(seen) == 2 and all("PYTHONPATH" not in env and "PYTHONHOME" not in env for env in seen)
+    assert ftk._tool_env().get("PATH") == os.environ.get("PATH")
