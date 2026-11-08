@@ -1,5 +1,7 @@
 # Three-minute demo
 
+> Historical: hackathon proof-of-concept, no longer maintained. The current tool is [Traceback Lab](LAB-GUIDE.md).
+
 ## The one-line story
 
 Traceback computes three cfDNA signals from one real MinION run, then checks

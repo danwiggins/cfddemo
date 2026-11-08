@@ -1,5 +1,7 @@
 # E12 cohort/timepoint integration plan
 
+> **Historical:** the E12 cohort/timepoint implementation map from October 2026. The routes it planned exist; the plan itself is not maintained.
+
 Status: implementation map at `7df3ca834217c06c99dfdcae3f99885e0d8d949d`.
 This document is not qualification evidence and does not authorize release,
 export, provider operation, or clinical interpretation.

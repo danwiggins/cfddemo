@@ -1,5 +1,7 @@
 # Signal methods: cell origin and copy number as signed local records
 
+> **Historical:** the October 2026 design for signed cell-origin and copy-number records. Commands and line numbers are from that time; see [OPERATOR-GUIDE.md](OPERATOR-GUIDE.md).
+
 Status: draft spec, 2026-10-04. Verified against `origin/main` at `149799e`
 (includes PR #109, the record view). Line numbers are from that commit.
 

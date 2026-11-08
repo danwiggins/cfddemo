@@ -1,6 +1,8 @@
 <!-- /autoplan restore point: local planning snapshot, 2026-10-02 -->
 # Golden-path MVP slice and engineering hygiene
 
+> **Historical:** the October 2026 golden-path draft spec. Its commands and gaps are from that time; the current signed path is in [OPERATOR-GUIDE.md](OPERATOR-GUIDE.md).
+
 Status: draft spec, 2026-10-02. Verified against `main` at `d3739ca`.
 Public copy note: historical review summaries and pending-gate wording below
 are redacted or paraphrased where input-specific details appeared; they are

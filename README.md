@@ -1,147 +1,88 @@
 # Traceback
 
-**One blood draw. Three computed cfDNA signals. Every claim traceable.**
+Bring your cfDNA sequencing data, run it against every publicly available
+cfDNA algorithm Traceback wraps (35 so far), get charts, and look for
+aberrations.
 
-The public evidence demo turns Oxford Nanopore reads into fragment-length,
-methylation cell-origin, and chromosome-dosage evidence, then uses a bounded
-AI reviewer to check whether the written interpretation is supported.
+**Traceback Lab** takes a BAM, an unaligned BAM, or a MinKNOW chunk
+directory, aligns it if needed, and runs 35 cfDNA methods on it, most from
+published tools: fragment size, copy number, methylation, cell and tissue
+origin, end motifs, nucleosome profiles, QC and more. Each method either
+reports a result, with charts where the method draws them, or names why it
+did not run. A local web page and a one-file HTML report show everything,
+with provenance.
 
-[Open the live demo](https://cfddemo-production.up.railway.app) ·
-[View the repository](https://github.com/danwiggins/cfddemo) ·
-[Demo walkthrough](docs/DEMO.md) · [Algorithms](docs/ALGORITHMS.md)
+> **Research use only. Not CLIA-validated. Not a diagnosis.** Nothing here is
+> a validated clinical assay. The Lab runs locally and uploads nothing.
 
-> Research prototype only. It does not diagnose cancer or replace a validated
-> clinical assay.
+## Quick start (synthetic data)
 
-## Choose a local workflow
-
-| Workflow | Use it for | Record and qualification |
-|---|---|---|
-| [Signed local runner](docs/SCIENTIST-QUICK-GUIDE.md) | A BAM-to-record journey for fragment length; optional cell-origin and ichorCNA copy-number analyses are described in the [operator guide](docs/OPERATOR-GUIDE.md#several-analyses-of-one-bam). | Development-signed, local, unqualified records. |
-| [Traceback Lab](docs/LAB-GUIDE.md) | Exploratory measurements on stored ONT or supported prealigned Illumina BAMs, with local sample and cohort views. | Unsigned results with execution provenance; research use only. |
-| [Public evidence demo](docs/DEMO.md) | Inspect three fixed aggregate readouts and a recorded or live bounded AI evidence review. | A demonstration, not a new analysis of your BAM. |
-
-Lab includes read quality and depth checks; fragment, methylation, end-pattern,
-and microbial measurements; exploratory copy-number and cohort comparisons;
-and input-scoped prenatal or transplant calculations where an operator supplies
-matching controls. Each method has its own platform, depth, asset, and tool
-requirements. Run `traceback lab algorithms` for the registered catalog and
-see the [plain-language algorithm explainer](docs/LAB-ALGORITHM-EXPLAINER.md)
-for what each method may teach you and the [Lab algorithm guide](docs/LAB-GUIDE.md#algorithms)
-for requirements and limits.
-
-## What the public demo shows
-
-- **Fragmentomics:** a deterministic BAM-derived read-length distribution with
-  explicit filters, denominator, mode, median, and long-fragment fraction.
-- **Cell origin:** CpG methylation calls classified against Loyfer markers,
-  followed by count-weighted NNLS deconvolution and seeded bootstrap intervals.
-- **Chromosome dosage:** an experimental whole-chromosome screen using
-  high-confidence read starts in fixed 5 Mb bins.
-- **AI evidence review:** the model can select only registered checks and must
-  cite the exact result or source passage behind its conclusion.
-- **A real catch:** the reviewer identifies that the report's updated
-  aligned-span method conflicts with its fixed 45 bp subtraction instructions.
-
-The third readout is deliberately narrow: it is not ichorCNA, does not estimate
-tumor fraction, and cannot resolve focal or subclonal events.
-
-The diagram below describes the public evidence demo, not the Lab run path.
-
-```mermaid
-flowchart LR
-    A[MinION modBAM] --> B[Fragment-length summary]
-    A --> C[CpG methylation extraction]
-    A --> J[Whole-chromosome dosage screen]
-    C --> D[Loyfer UXM classification]
-    D --> E[NNLS cell-mixture estimate]
-    B --> F[Registered evidence]
-    E --> F
-    J --> F
-    G[Source passages] --> F
-    F --> H[Bounded AI review]
-    H --> I[Cited assessment + limitations]
-```
-
-## Run locally
-
-Requires Python 3.11 and [uv](https://docs.astral.sh/uv/).
+Requires macOS or Linux, Python 3.11, [uv](https://docs.astral.sh/uv/),
+samtools ≥ 1.20 and minimap2 ≥ 2.28 (`brew install samtools minimap2`).
 
 ```bash
 uv sync
-uv run pytest
-uv run streamlit run app.py
+uv run traceback lab doctor
+uv run traceback lab run --example
+uv run traceback lab serve --open
 ```
 
-To take your own Nanopore BAMs through the signed CLI (align, reference
-register, preflight, run, catalog import, `serve`), start with the short
-[scientist quick guide](docs/SCIENTIST-QUICK-GUIDE.md). The full reference is
-[Real local BAM (unqualified)](docs/OPERATOR-GUIDE.md#real-local-bam-unqualified)
-in the operator guide. It needs `samtools` (`brew install samtools`) to index
-the inputs. These local records are unqualified and not for clinical use.
-For the separate, unsigned multi-algorithm workflow, follow the
-[Lab guide](docs/LAB-GUIDE.md#first-five-minutes).
+`--example` generates a small synthetic sample at runtime and runs the real
+pipeline on it. Methods that need hg38-scale assets skip with a reason.
 
-The checked-in public demo bundles contain aggregate measurements and
-provenance only. They do not contain BAMs, read IDs, local paths, source
-documents, or credentials.
-
-### Review modes
-
-- **Live:** the default local mode calls the Bedrock OpenAI-compatible Responses
-  endpoint after the user presses **Run check**.
-- **Recorded:** set `TRACEBACK_DEMO_REPLAY=1` to replay validated assessments
-  without AWS credentials. The UI labels the result as a fixture and does not
-  claim a live provider call.
-
-For live review, configure the standard AWS credential chain and optionally:
-
-| Variable | Default |
-|---|---|
-| `BEDROCK_MODEL_ID` | `openai.gpt-5.5` |
-| `BEDROCK_REGION` | `us-east-2` |
-| `BEDROCK_MAX_TOKENS` | `1024` |
-
-## Regenerate cell-origin results
-
-Private inputs belong under ignored `data/local/` paths:
-
-- hg38 FASTA and minimap2 index
-- Loyfer U250 regions, markers, atlas, and healthy-plasma reference workbook
-- an aligned modBAM with valid `MM`, `ML`, and `MN` tags, or a normalized
-  `modkit extract calls` TSV
+## Real data
 
 ```bash
-TRACEBACK_FRAGMENT_HASH_SALT='local-private-value' \
-  uv run python scripts/regenerate_cell_origin.py \
-  --extract-tsv data/local/cell-origin/calls.normalized.tsv
+export TRACEBACK_ROOT=<lab-root>
+uv run traceback reference register --fasta <hg38.fa> --id hg38
+uv run traceback lab doctor
+uv run traceback lab inventory <chunks-dir>
+uv run traceback lab run <chunks-dir> --below-depth --memory-cap 8GiB
+uv run traceback lab serve --open
 ```
 
-The validated result is written to `data/local/cell-origin/result.json` and
-takes precedence over the public aggregate bundle.
-
-Regenerate the experimental chromosome-dosage result:
-
-```bash
-uv run python -m scripts.regenerate_copy_number \
-  --bam data/local/cell-origin/full.hg38.sorted.bam
-```
+Most methods need extra tools or operator-supplied assets (ichorCNA, the
+Loyfer atlas, GENCODE v46, a Somalier sites file, Griffin references and
+others). The [Lab guide: Running on real data](docs/LAB-GUIDE.md#running-on-real-data)
+lists each one and how to register it, and
+[Algorithm status on real data](docs/LAB-GUIDE.md#algorithm-status-on-real-data)
+shows which methods run on a real ONT kit today and what blocks the rest.
 
 ## Documentation
 
-- [Browse all documentation](docs/README.md)
-- [Scientist quick guide: your BAMs to a browsable record](docs/SCIENTIST-QUICK-GUIDE.md)
-- [Operator guide: every command, error code and recovery step](docs/OPERATOR-GUIDE.md)
-- [Lab guide: every cfDNA algorithm on a kit BAM, unsigned, research only](docs/LAB-GUIDE.md)
-- [Lab algorithm explainer: what each measurement may reveal](docs/LAB-ALGORITHM-EXPLAINER.md)
-- [Canaries: the nightly real-data and CI checks](docs/CANARIES.md)
-- [Three-minute demo](docs/DEMO.md)
-- [75-second recording script](docs/RECORDING-SCRIPT.md)
-- [Algorithm and evidence design](docs/ALGORITHMS.md)
-- [Railway deployment](docs/DEPLOYMENT.md)
+- [Lab guide](docs/LAB-GUIDE.md): commands, real-data setup, every algorithm,
+  error codes.
+- [Lab quick guide for scientists](docs/SCIENTIST-QUICK-GUIDE.md): the short
+  version.
+- [Algorithm explainer](docs/LAB-ALGORITHM-EXPLAINER.md): what each method
+  measures and what it cannot tell you.
+- [Algorithms reference](docs/ALGORITHMS.md) and
+  [Lab assets](docs/ASSETS.md).
+- [All documentation](docs/README.md), including the signed-record path and
+  historical design documents.
+
+## Other surfaces in this repository
+
+- **Signed local records** (`traceback run`): an older, narrower path that
+  turns one aligned BAM into a development-signed fragment-length (and
+  optional cell-origin or ichorCNA copy-number) record. See the
+  [operator guide](docs/OPERATOR-GUIDE.md).
+- **Historical: hackathon demo** (`app.py`, Streamlit): an early
+  proof-of-concept with three fixed readouts and an AI review step. It is no
+  longer maintained or relevant to the Lab; see [DEMO.md](docs/DEMO.md) only
+  if you need it.
+
+## Tests
+
+```bash
+uv run pytest
+```
+
+Tests are offline and use synthetic fixtures only.
 
 ## Privacy boundary
 
 Never commit `.env` files, credentials, sequence files, BAMs, read IDs, source
-reports, local paths, or patient/sample identifiers. Tests are fully offline.
-Only bounded excerpts and aggregate check results may enter model prompts.
+reports, local paths, or patient or sample identifiers. Lab results, assets
+and run logs stay under your local ROOT. The historical demo sends only bounded excerpts and aggregate check
+results to its model.

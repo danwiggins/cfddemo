@@ -1,18 +1,26 @@
 # cfDNA Lab: what each algorithm could help us learn
 
-A plain-English guide to the 37 registered algorithms, plus the views that
-combine their results. Updated 17 October 2026.
+A plain-English guide to the Lab's 35 algorithms and two shared
+intermediates (`read-summary`, `meth-calls`), plus the views that combine
+their results. Updated 8 November 2026.
 
 cfDNA is DNA circulating outside cells. The Lab examines its amount, fragment
 patterns, chromosome representation, and methylation marks. These are different
 views of the same sample. Together they can help us ask better research
 questions; they do not automatically identify a disease or establish a diagnosis.
 
-Most methods here operate on Oxford Nanopore (ONT) data. Three methods are
-specifically for paired-end Illumina data. A registered algorithm is not a
-promise that it can run on today's sample: depth, reference files, trained
-models, controls, platform, and licensing requirements can prevent execution.
-The Lab shows those missing requirements rather than filling in a result.
+Most methods here operate on Oxford Nanopore (ONT) data. One,
+`short-read-fragment-size`, is for paired-end Illumina data only; `bam-qc`,
+`depth`, `griffin` and `finaletoolkit-xcheck` (and the `read-summary`
+intermediate) accept either platform. A registered algorithm is
+not a promise that it can run on today's sample: depth, reference files,
+trained models, controls, platform, and licensing requirements can prevent
+execution. The Lab shows those missing requirements rather than filling in a
+result. Which methods run on a real ONT kit today, and what blocks the rest,
+is in the Lab guide's
+[status table](LAB-GUIDE.md#algorithm-status-on-real-data). Results run
+below a method's depth floor with `--below-depth` are labelled underpowered
+and are exploratory only.
 
 For commands and exact gates, use [LAB-GUIDE](LAB-GUIDE.md). The live inventory
 is `traceback lab algorithms`. Evidence and interpretation are described in
@@ -180,9 +188,12 @@ its external reference resources and tools.
 
 **Measures:** GC-corrected profiles around registered transcription-factor
 binding sites. **What we learn:** how those local packaging patterns compare
-between suitable samples. This adapter requires paired-end Illumina data and
-at least five million eligible autosomal pairs. It skips native ONT and does
-not turn a profile into a tissue-origin or disease call.
+between suitable samples. Illumina input runs the pinned upstream Griffin
+workflow (at least five million eligible autosomal pairs). Native ONT input
+runs the Lab's port of the same arithmetic, treating each aligned read span
+as a fragment (at least five million eligible autosomal reads); no published
+ONT performance exists, and ONT and Illumina profiles are not comparable. It
+does not turn a profile into a tissue-origin or disease call.
 
 ### 16. Windowed protection score (`wps`)
 
@@ -366,7 +377,9 @@ causation or a virus-associated cancer.
 ### 37. Microbial profile (`microbial`)
 
 **Measures:** Kraken2/Bracken species classifications from selected
-human-unmapped ONT reads using pinned tools and a registered database.
+human-unmapped ONT reads using pinned tools and a registered database. We do
+not set up or support Kraken2/Bracken for now, so this method normally
+skips.
 **What we learn:** which microbial sequence patterns appear and whether they
 recur in controls or batches. Database errors and contamination are major
 alternative explanations. This is not an infection diagnosis or an inventory

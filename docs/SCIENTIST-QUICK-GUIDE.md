@@ -1,34 +1,25 @@
 # Traceback quick guide for scientists
 
-A short, practical guide for a collaborating scientist. This route takes
-Nanopore BAMs to a signed fragment-length record you can inspect in your
-browser. For optional signed cell-origin and copy-number analyses, see
-[the operator guide](OPERATOR-GUIDE.md#several-analyses-of-one-bam). The
-separate [Traceback Lab](LAB-GUIDE.md) provides unsigned exploratory methods.
+The short version of the [Lab guide](LAB-GUIDE.md): take a Nanopore kit
+from MinKNOW output to a local page of cfDNA measurements.
 
-> Everything here is a research prototype. Records are **unqualified, local,
-> and not for clinical use**. Nothing is uploaded. The measurement describes one
-> file's fragment-length distribution; it makes no statement about health,
-> tumour content or sample quality.
+> Research prototype. **Research use only. Not CLIA-validated. Not a
+> diagnosis.** Everything stays on your machine; nothing is uploaded.
 
-## What this route does
+## What you get
 
-- **Measures fragment length on real data:** the fragment-length distribution of an
-  aligned BAM, counted as aligned reference span. The policy is locked: MAPQ ≥ 20,
-  primary mapped alignments that pass QC and are not marked duplicates,
-  chromosomes 1–22, X and Y, and 7 bins (0, 100, 150, 200, 300, 500,
-  1000+ bp).
-- **Seals every result as a signed record:** inputs are hashed and a copy is kept,
-  so every number traces back to the exact file and method.
-- **Shows records in a local web page:** a histogram, the denominator (how many
-  reads were scanned and why some were excluded), and each record's status in
-  plain words.
+`traceback lab run` aligns your chunks once and runs 35 registered
+algorithms: QC and depth, fragment size and end patterns, copy number,
+methylation and cell origin, nucleosome profiles, and a few exploratory
+signals. Each one either reports a result or says exactly why it did not run
+(too little depth, missing asset, wrong platform). Results below a method's
+depth floor can be run with `--below-depth`; they are then marked
+**underpowered** and are never shown as a call.
 
-The signed CLI also registers cell-origin and optional ichorCNA copy-number
-stages; those need their own tools, assets, and readiness checks and are outside
-this short fragment-length journey. The public evidence demo uses separate
-fixed aggregate readouts. Lab has a wider unsigned algorithm catalog; none
-of these routes supplies a clinically qualified result.
+Which methods run on a real ONT kit today, and what blocks the others, is in
+[Algorithm status on real data](LAB-GUIDE.md#algorithm-status-on-real-data).
+What each method measures is in the
+[algorithm explainer](LAB-ALGORITHM-EXPLAINER.md).
 
 ## One-time setup (macOS)
 
@@ -36,115 +27,72 @@ of these routes supplies a clinically qualified result.
 brew install samtools minimap2
 git clone https://github.com/danwiggins/cfddemo.git traceback && cd traceback
 uv sync
+export TRACEBACK_ROOT="$HOME/traceback-lab"     # one store for everything
+uv run traceback reference register --fasta <hg38.fa> --id hg38
+uv run traceback lab doctor
 ```
 
-You also need a reference FASTA with its index, for example hg38 primary
-(`samtools faidx hg38.primary.fa`). Building a minimap2 index once saves time
-on every alignment:
+`lab doctor` lists anything missing with the command that fixes it. Try the
+synthetic example first if you like: `uv run traceback lab run --example`.
+
+Most methods need an extra tool or a reference file you supply (ichorCNA for
+copy number, the Loyfer atlas for cell origin, GENCODE for the TSS profile,
+and so on). The table in
+[Running on real data](LAB-GUIDE.md#running-on-real-data) lists each one with
+its registration command. Skip the ones you do not need; their methods just
+report `missing_asset`.
+
+## From MinKNOW output to results
+
+MinKNOW and Dorado write unaligned BAM chunks. The Lab aligns them for you;
+point it at one barcode's folder, `bam_pass/barcodeNN/` (or `bam_pass/` for
+an unbarcoded run). Never mix barcodes in one run.
 
 ```bash
-minimap2 -x map-ont -d hg38.primary.mmi hg38.primary.fa
+uv run traceback lab inventory <chunks-dir>                  # is the run complete?
+uv run traceback lab run <chunks-dir> --below-depth --memory-cap 8GiB
+uv run traceback lab serve --open                            # opens the local page
 ```
 
-## From MinKNOW output to a record
+The first run builds a minimap2 index of hg38 (about 20–40 minutes and 8 GB,
+once) and aligns the chunks; later runs reuse both. If you stop a run, run
+the same command again: finished results are kept. `traceback lab run latest`
+reruns on the last sample without the chunk paths.
 
-MinKNOW and Dorado write **unaligned** BAMs. Traceback detects this and stops
-with `TBX-BAM-003`, printing the command below. Align each barcode separately:
-never merge different barcodes into one BAM.
-
-```bash
-R="$HOME/traceback-run1"            # one folder (ROOT) per experiment
-FASTA=/path/to/hg38.primary.fa
-
-# Once per ROOT
-uv run traceback reference register --fasta "$FASTA" --id hg38 --root "$R"
-
-# Per barcode: merge, align (keeping modification tags), sort, index
-samtools cat -o barcode01.bam bam_pass/barcode01/*.bam
-samtools fastq -T MM,ML,MN barcode01.bam \
-  | minimap2 -ax map-ont -y hg38.primary.mmi - \
-  | samtools sort -o barcode01.sorted.bam
-samtools index barcode01.sorted.bam
-
-# Measure, sign, and add to the catalog in one step
-uv run traceback run barcode01.sorted.bam --reference hg38 --root "$R" \
-  --label "barcode01" --import
-```
-
-Alignment and `run` times depend on input size, reference-index reuse and the
-operator's workstation. Record measured times privately when
-planning a batch.
-
-The operator guide has a ready-made loop for all barcodes
-([Aligning MinKNOW output](OPERATOR-GUIDE.md#aligning-minknow-output)).
-
-**Labels:** use a short operator note such as a barcode or draw number. Never
-put names, dates of birth, MRNs or other donor identifiers in a label.
-
-## Looking at results
+On the page, start with **Check reliability** (QC, depth, split-half
+repeatability) before **Explore signals**. To share one sample as a file:
 
 ```bash
-uv run traceback catalog list --root "$R"   # every record, its label and counts
-uv run traceback serve --root "$R"          # prints a one-use link; open it
-```
-
-The link works once, on this machine, for 60 seconds. Press Enter in the
-terminal for a new one, and Ctrl-C to stop the server.
-
-In the browser:
-
-- **The records table** lists one row per record: label, eligible and scanned
-  counts, preflight result, and import time.
-- **A record page** shows the fragment-length histogram, a denominator strip,
-  and a "What this record is" table.
-
-How to read a record page:
-
-| On the page | What it means |
-|---|---|
-| **Histogram** | Share of eligible alignments per bp in each bin. Bins have unequal widths, so bar *area* is the share. The open 1000+ bin is hatched. |
-| **Eligible of scanned** | Reads that passed the locked policy, out of all records read. The strip shows why the rest were excluded: secondary, supplementary, MAPQ < 20, unmapped, contig outside the policy. |
-| **Unqualified** | The method has not been qualified. Counts only, no interpretation. |
-| **Development signature verified** | Signed and verified with this machine's development key. Proves the record wasn't altered; it is not a quality claim. |
-| **Preflight: warn / partial** | Technical caveats about the input. For example, "basecall model not declared in the header" doesn't affect fragment length. |
-
-The eligible and scanned counts, and the share in each fragment-size bin, come
-from the selected record. They describe that file only and are not a reference
-range. Real-input values remain in the local record rather than this guide.
-
-## Other useful commands
-
-```bash
-uv run traceback jobs --root "$R"                         # every run, newest first, with failures
-uv run traceback status JOB_ID --root "$R"                # one job; a failed job shows code, cause and fix
-uv run traceback label RECORD_ID "new note" --root "$R"   # add or change a label later
-uv run traceback catalog export --csv out.csv --root "$R" # one row per record and bin, from signed counts
-uv run traceback doctor --root "$R"                       # checks tools, disk and the reference
+uv run traceback lab report --html <id12>
 ```
 
 ## When something goes wrong
 
-Every refusal prints a **CODE**, a **CAUSE** and a **FIX**. The most common:
+Every refusal prints **CODE**, **CAUSE**, **FIX** and a link into the
+[Lab guide troubleshooting list](LAB-GUIDE.md#troubleshooting). Common ones:
 
 | Code | Meaning | Fix |
 |---|---|---|
-| `TBX-BAM-003` | Unaligned BAM (straight from MinKNOW or Dorado) | Align it with the commands above |
-| `TBX-RUN-008` / `TBX-RUN-009` | BAM or its `.bai` index not found | Check the path; run `samtools index` |
-| `TBX-BAM-002` | BAM contigs don't match the registered reference | The diff shows the first mismatches. If only the `chr` prefix differs, use `samtools reheader` |
-| `TBX-JOB-002` | Another run on this ROOT is still working | Wait, or use a separate ROOT |
+| `TBX-LAB-010` | Not enough free disk for the run | Free space, or use a ROOT on a larger volume |
+| `TBX-LAB-012` | Another Lab command holds the writer lock | Wait for it, then rerun |
+| `TBX-LAB-016` | The run finished but some algorithms failed | Read the `FAILED` lines; rerun the same command after fixing |
+| `TBX-LAB-030` | An algorithm hit its memory cap | Rerun with the `--memory-cap` value the FIX line prints |
 
-All codes are listed in the operator guide's
-[troubleshooting table](OPERATOR-GUIDE.md#troubleshooting).
+`traceback lab support-bundle <run_id>` writes a scrubbed archive of one run
+for asking for help.
 
-## Further exploration
+## Signed records (separate, older path)
 
-For exploratory depth and split-half views, an aligned-span histogram,
-methylation, copy-number, and cohort comparisons, use the
-[Lab guide](LAB-GUIDE.md). Lab results are unsigned and keep their own
-provenance; they do not replace this route's signed record.
+`traceback run` turns one aligned BAM into a development-signed
+fragment-length record (optionally cell-origin and ichorCNA copy number) with
+its own browser view. It is narrower than the Lab and documented in the
+[operator guide](OPERATOR-GUIDE.md), including
+[aligning MinKNOW output by hand](OPERATOR-GUIDE.md#aligning-minknow-output).
 
 ## Two rules before sharing anything
 
-1. Write down each BAM's provenance and consent before showing any record from
-   it to anyone outside the team.
-2. Keep donor identifiers out of labels, file names you share, and screenshots.
+1. Write down each sample's provenance and consent before showing any result
+   from it to anyone outside the team.
+2. Keep donor identifiers out of labels, file names you share, and
+   screenshots. Lab reports and support bundles are scrubbed of paths, but you
+   are responsible for what you send.

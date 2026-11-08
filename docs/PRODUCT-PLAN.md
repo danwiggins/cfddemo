@@ -1,5 +1,7 @@
 # Traceback Consumer Research Product Plan
 
+> **Historical:** the September 2026 consumer product exploration. Superseded as a plan; see [LAB-GUIDE.md](LAB-GUIDE.md) for what runs today.
+
 > Historical strategy exploration. Where this document conflicts with
 > `PRODUCT-SPEC.md`, the `/autoplan`-reviewed provider-side MVP in
 > `PRODUCT-SPEC.md` and `EPICS.md` controls. Consumer membership, hosted
