@@ -6,10 +6,12 @@
 <title>Traceback Lab</title>
 <link rel="stylesheet" href="/assets/base.css">
 <link rel="stylesheet" href="/assets/lab.css">
+<script src="/assets/lab-theme.js"></script>
 <script src="/assets/vendor/echarts.min.js" defer></script>
 <script src="/assets/lab-format.js" defer></script>
 <script src="/assets/lab.js" defer></script>
 <script src="/assets/lab-views.js" defer></script>
+<script src="/assets/lab-overview.js" defer></script>
 <script src="/assets/lab-report.js" defer></script>
 <script src="/assets/lab-report-ui.js" defer></script>
 </head>
@@ -24,6 +26,7 @@
     </label>
     <span class="flag-pill" id="pii-flag">FLAG: PII — donor metadata on screen; de-identified IDs only; never a name or MRN</span>
     <button type="button" id="key-button" class="control">Key</button>
+    <button type="button" id="theme-toggle" class="control theme-toggle" aria-label="Dark theme" aria-pressed="false" title="Dark theme"><span aria-hidden="true">◐</span></button>
     <p id="status" class="lab-status" role="status" aria-live="polite"></p>
   </div>
   <p id="sample-context" class="sample-context"></p>

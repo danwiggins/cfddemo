@@ -1379,6 +1379,32 @@ the scroll controls are hidden.
 
 ## What the page shows
 
+- **All methods (`#/sample/<id>/overview`)**: every visible method at a
+  glance, grouped by what it measures (quality and identity, fragment size,
+  fragment ends and DNA packaging, copy number, methylation, tissue and cell
+  origin, fetal and donor fractions, non-human DNA). Each card shows its
+  status as text plus glyph: **ran** (with the headline value and its
+  interpretation state), **underpowered · not a call** (ran below its depth
+  floor with `--below-depth`; no value is shown on the card), **skipped**
+  (with the plain-English reason), **failed**, or not run / unavailable.
+  Filter by status, search by name, and switch the input between the full
+  input and its downsampled or split controls; on a control each card shows
+  the recorded headline state from the depth curve or split record. Groups
+  never order or group by a measured value. The landing adds a compact
+  "Methods at a glance" strip linking to each method and to All methods.
+- **Method result (`#/sample/<id>/result?algorithm=<id>`)**: one page per
+  method with its status (the skip reason, its specific message and how to
+  fix it; a failure's first line and error tail; or the underpowered banner),
+  every recorded scalar metric with its interpretation state, recorded charts
+  for the full input or any derived input, the headline metric across inputs,
+  what the method asks, its limits and prerequisites, and evidence and
+  provenance. An underpowered method's values are withheld on every input
+  (they stay in the result JSON and report exports, marked underpowered),
+  and its exploratory charts draw only on request. Previous/next links walk the methods in overview order.
+- **Theme**: the page follows the system light or dark setting; the ◐ header
+  button (Dark theme, pressed when dark) overrides it and remembers the choice
+  in this browser only.
+
 - **Landing (`#/`)**: a selected-sample overview names the ID, built-in
   synthetic-example status, recorded UTC date, approximate depth,
   visible method states, hidden intermediate failures and result-selection

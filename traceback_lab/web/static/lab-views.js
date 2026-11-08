@@ -2292,6 +2292,10 @@
   }
 
   window.TracebackLabViews = {
+    // Shared pieces for the overview and per-method result pages (lab-overview.js).
+    parts: { card, stateChip, tierBadge, flagPill, underpoweredBanner, context, provenance,
+      readinessReason: (reason) => READINESS_REASONS[reason] || null, readinessGuide: READINESS_GUIDE,
+      cellText, CELL, STATE },
     signals,
     signalDefinition: (algorithmId, metricId) => {
       const row = GUIDE_SIGNALS.find((item) => item.algorithm === algorithmId && item.metric === metricId);
