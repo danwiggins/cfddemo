@@ -139,8 +139,9 @@ class Failure(_Strict):
 class Underpowered(_Strict):
     """``lab run --below-depth`` ran this method below its depth floor: exploratory only."""
 
-    floor: int | float = Field(gt=0)
-    observed: int | float = Field(ge=0)
+    # One bound per branch, so the committed JSON Schema enforces it.
+    floor: Annotated[int, Field(gt=0)] | Annotated[float, Field(gt=0)]
+    observed: Annotated[int, Field(ge=0)] | Annotated[float, Field(ge=0)]
     kind: Literal["eligible_reads", "depth_x"]
     # Set when the floor was this result's upstream's, not its own.
     upstream: str | None = Field(default=None, pattern=ALGORITHM_ID_PATTERN.pattern)

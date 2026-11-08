@@ -213,16 +213,18 @@ FAKE_RUNTIME_FLOOR = _RunTimeFloor("fake-runtime-floor")
 FAKE_LOW_SUPPORT = _LowSupport("fake-low-support")
 FAKE_FLOOR = _Floor("fake-floor")
 FAKE_DOWNSTREAM = _Downstream("fake-downstream")
+FAKE_LATER_DOWNSTREAM = _Downstream("fake-later-downstream")
 _FAKES = (FAKE_RUNTIME_FLOOR, FAKE_LOW_SUPPORT, FAKE_FLOOR, FAKE_DOWNSTREAM)
 _ENTRIES = {
     "fake-runtime-floor": "tests.lab.test_below_depth:FAKE_RUNTIME_FLOOR",
     "fake-low-support": "tests.lab.test_below_depth:FAKE_LOW_SUPPORT",
     "fake-floor": "tests.lab.test_below_depth:FAKE_FLOOR",
     "fake-downstream": "tests.lab.test_below_depth:FAKE_DOWNSTREAM",
+    "fake-later-downstream": "tests.lab.test_below_depth:FAKE_LATER_DOWNSTREAM",
 }
 
 
-def _plan(tmp_path: Path, below: bool) -> dict:
+def _plan(tmp_path: Path, below: bool, algorithms: tuple = _FAKES) -> dict:
     from traceback_lab.registry import PlanItem
     from traceback_lab.runner import RunTarget, run_plan
     from traceback_lab.scrub import Scrubber
@@ -239,7 +241,7 @@ def _plan(tmp_path: Path, below: bool) -> dict:
     )
     run_id = new_run_id()
     results = run_plan(store, None, store.run_log(run_id), target,
-                       [PlanItem(algorithm, False) for algorithm in _FAKES], _ENTRIES,
+                       [PlanItem(algorithm, False) for algorithm in algorithms], _ENTRIES,
                        run_id=run_id, scrubber=Scrubber(root=root))
     out = {}
     for result in results:
@@ -264,6 +266,14 @@ def test_runner_marks_run_time_floors_and_upstreams_and_keeps_skips_unmarked(tmp
     result, envelope = below["fake-downstream"]
     assert result.status == "ok" and envelope.underpowered is not None
     assert envelope.underpowered.upstream == "fake-floor" and result.underpowered["upstream"] == "fake-floor"
+
+    # --only <downstream>: the planner adds the stored upstream; reused from
+    # the store (not computed in this run), it still marks the new downstream
+    later = _plan(tmp_path, True, (FAKE_FLOOR, FAKE_LATER_DOWNSTREAM))
+    assert later["fake-floor"][0].cached and later["fake-floor"][0].underpowered is not None
+    result, envelope = later["fake-later-downstream"]
+    assert result.status == "ok" and not result.cached
+    assert envelope.underpowered is not None and envelope.underpowered.upstream == "fake-floor"
 
     # a default run reuses none of the marked results
     default = _plan(tmp_path, False)
@@ -420,3 +430,57 @@ def test_envelope_mark_shape_and_interpretation() -> None:
     assert rows and all(row.interpretation.state == "not_interpretable"
                         and row.interpretation.reason == "depth"
                         and row.interpretation.caption == UNDERPOWERED_CAPTION for row in rows)
+
+
+def test_schema_file_enforces_the_mark_bounds() -> None:
+    import jsonschema
+
+    from traceback_lab.envelope import SCHEMA_FILE
+
+    schema = json.loads(SCHEMA_FILE.read_text())
+    good = json.loads(_envelope(underpowered={"floor": 10, "observed": 0, "kind": "depth_x"}).to_bytes())
+    jsonschema.validate(good, schema)
+    for bad in ({"floor": 0, "observed": 1, "kind": "depth_x"}, {"floor": 0.0, "observed": 1, "kind": "depth_x"},
+                {"floor": 10, "observed": -1, "kind": "eligible_reads"},
+                {"floor": 10, "observed": -0.5, "kind": "eligible_reads"}):
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate({**good, "underpowered": bad}, schema)
+
+
+@dataclass
+class _Probe(Base):
+    """Records what the worker hands run(); bypasses a numpy-valued floor."""
+
+    upstream: tuple[str, ...] = ()
+
+    def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
+        keys = sorted(ctx.extras)
+        floor = depth_floor(ctx, floor=np.int64(100), observed=np.int64(5), kind="eligible_reads", message="x")
+        return AlgorithmOutput(metrics=[metric("bypassed", floor is None), metric("keys", ",".join(keys))])
+
+
+@pytest.mark.parametrize("below", [False, True])
+def test_worker_injects_marks_only_under_below_depth(tmp_path, monkeypatch, below) -> None:
+    import signal
+
+    from traceback_lab import worker
+    from traceback_lab.registry import context_to_json
+
+    monkeypatch.setattr(worker, "load_entry", lambda entry: _Probe("probe"))
+    ctx = _ctx(tmp_path, extras={"below_depth": True} if below else {})
+    request = tmp_path / "request.json"
+    request.write_text(json.dumps({"entry": "x:Y", "context": context_to_json(ctx), "out_dir": str(tmp_path / "out")}))
+    previous = signal.getsignal(signal.SIGTERM)
+    try:
+        assert worker.main([str(request)]) == 0
+    finally:
+        signal.signal(signal.SIGTERM, previous)
+    produced = json.loads((tmp_path / "out" / "output.json").read_bytes())
+    values = {row["metric_id"]: row["value"] for row in produced["metrics"]}
+    if below:
+        assert values["bypassed"] is True and values["keys"] == "below_depth,underpowered_marks"
+        assert produced["underpowered"] == {"floor": 100, "observed": 5, "kind": "eligible_reads"}
+        assert type(produced["underpowered"]["observed"]) is int
+    else:
+        # a default run's worker context is exactly what the runner sent
+        assert values["bypassed"] is False and values["keys"] == "" and "underpowered" not in produced

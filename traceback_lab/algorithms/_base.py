@@ -44,6 +44,12 @@ class Base:
         return Ready()
 
 
+def _plain(value: int | float) -> int | float:
+    """A JSON-safe Python number (numpy scalars are not)."""
+
+    return int(value) if isinstance(value, (int, np.integer)) else float(value)
+
+
 def below_depth(ctx: InputContext) -> bool:
     """True when ``lab run --below-depth`` asked to run past depth floors."""
 
@@ -67,7 +73,7 @@ def depth_floor(
         if isinstance(marks, list):
             # Inside the worker: a floor passed only because of the flag marks
             # the result even when the runner's preflight saw a different count.
-            marks.append({"floor": floor, "observed": observed, "kind": kind})
+            marks.append({"floor": _plain(floor), "observed": _plain(observed), "kind": kind})
         return None
     return Skip("depth", message, floor=floor, observed=observed, floor_kind=kind)
 

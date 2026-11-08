@@ -183,9 +183,10 @@ def simulate_command(args: argparse.Namespace, store: LabStore) -> tuple[int, di
             for row in synthetic:
                 recovered = "-" if row["tf_recovered"] is None else f"{row['tf_recovered']:.3f}"
                 verdict = ("underpowered; exploratory, no verdict" if row.get("underpowered")
-                           else "recovered" if row["recovered_within_tolerance"] else "not recovered")
+                           else ("recovered" if row["recovered_within_tolerance"] else "not recovered")
+                           + f" within ±{TF_TOLERANCE}")
                 lines.append(
-                    f"SPIKE   TF {row['tf_expected']:.2f} -> {recovered}  ({verdict} within ±{TF_TOLERANCE}; {row['status']})"
+                    f"SPIKE   TF {row['tf_expected']:.2f} -> {recovered}  ({verdict}; {row['status']})"
                 )
             if kind == "split":
                 lines.append("SPLIT   halves A and B computed: " + ", ".join(sorted({r.algorithm_id for r in results if r.status == 'ok'})))

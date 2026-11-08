@@ -77,7 +77,7 @@ def main(argv: list[str]) -> int:
     algorithm = load_entry(request["entry"])
     context = context_from_json(request["context"])
     marks: list[dict[str, object]] = []  # depth floors run() passed only under --below-depth
-    if isinstance(context, InputContext):
+    if isinstance(context, InputContext) and context.extras.get("below_depth") is True:
         context = replace(context, extras={**context.extras, "underpowered_marks": marks})
     out = Path(request["out_dir"])
     artifacts = out / "artifacts"

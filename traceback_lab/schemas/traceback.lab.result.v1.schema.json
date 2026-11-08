@@ -329,13 +329,14 @@
         "floor": {
           "anyOf": [
             {
+              "exclusiveMinimum": 0,
               "type": "integer"
             },
             {
+              "exclusiveMinimum": 0,
               "type": "number"
             }
           ],
-          "gt": 0,
           "title": "Floor"
         },
         "kind": {
@@ -349,13 +350,14 @@
         "observed": {
           "anyOf": [
             {
+              "minimum": 0,
               "type": "integer"
             },
             {
+              "minimum": 0,
               "type": "number"
             }
           ],
-          "ge": 0,
           "title": "Observed"
         },
         "upstream": {
