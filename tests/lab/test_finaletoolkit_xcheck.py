@@ -652,13 +652,16 @@ def test_finaletoolkit_subprocesses_drop_the_lab_worker_pythonpath(
     monkeypatch.setenv("TRACEBACK_FINALETOOLKIT_BIN", str(launcher))
     monkeypatch.setenv("PYTHONPATH", "/lab/site-packages")
     monkeypatch.setenv("PYTHONHOME", "/lab")
+    monkeypatch.delenv("TRACEBACK_FINALETOOLKIT_PYTHON", raising=False)
     seen: list[dict[str, str]] = []
 
     def fake_run(argv, **kwargs):  # noqa: ANN001, ANN202
         seen.append(kwargs.get("env") or dict(os.environ))
+        if argv[-1] == "--version":
+            return subprocess.CompletedProcess(argv, 0, "FinaleToolkit 1.1.0", "")
         return subprocess.CompletedProcess(argv, 1, "", "")
 
     monkeypatch.setattr(ftk.subprocess, "run", fake_run)
     assert ftk._tool() is None
-    assert seen and all("PYTHONPATH" not in env and "PYTHONHOME" not in env for env in seen)
+    assert len(seen) == 2 and all("PYTHONPATH" not in env and "PYTHONHOME" not in env for env in seen)
     assert ftk._tool_env().get("PATH") == os.environ.get("PATH")

@@ -101,7 +101,9 @@ def _tool_env() -> dict[str, str]:
     changes the pinned dependency versions between planning and the worker.
     """
 
-    return {key: value for key, value in os.environ.items() if key not in {"PYTHONPATH", "PYTHONHOME"}}
+    dropped = {"PYTHONPATH", "PYTHONHOME"}
+    return {key: value for key, value in os.environ.items() if key not in dropped}
+
 
 def _tool() -> tuple[str, str] | None:
     selected = os.environ.get("TRACEBACK_FINALETOOLKIT_BIN") or shutil.which("finaletoolkit")
