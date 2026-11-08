@@ -316,7 +316,30 @@ def test_invalid_newer_identity_does_not_expose_older_success(
         store.publish_result(_envelope(3), input_id=C)
 
 
-def test_cached_runner_recomputes_when_a_legacy_sibling_blocks_reselection(
+def _write_legacy_selection(store: LabStore, identity: str) -> Path:
+    """A selection written by an older Lab version: no order, unreadable envelope."""
+
+    legacy = store.result_dir(C, "fragment-size", identity)
+    old_attempt = "a-20261015T090816870676-c20c34dc"
+    (legacy / "attempts" / old_attempt).mkdir(parents=True)
+    (legacy / "attempts" / old_attempt / "result.json").write_text('{"schema": "older"}')
+    (legacy / "selected.json").write_text(json.dumps({"attempt_id": old_attempt}))
+    return legacy
+
+
+def test_current_cached_selection_is_reused_beside_a_legacy_sibling(tmp_path: Path) -> None:
+    store = LabStore(tmp_path)
+    store.ensure()
+    store.publish_result(_envelope(1), input_id=C)
+    legacy = _write_legacy_selection(store, B)
+    before = (store.result_dir(C, "fragment-size", A) / "selected.json").read_bytes()
+
+    assert store.reselect_cached_result(C, "fragment-size", A) is False
+    assert (store.result_dir(C, "fragment-size", A) / "selected.json").read_bytes() == before
+    assert (legacy / "selected.json").exists()
+
+
+def test_cached_runner_recomputes_when_reselection_is_unsafe(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from types import SimpleNamespace
@@ -329,17 +352,16 @@ def test_cached_runner_recomputes_when_a_legacy_sibling_blocks_reselection(
     identity = execution_identity(algorithm, reference_sha256=B)
     first = json.loads(_envelope(1).to_bytes())
     first["provenance"]["parameters_sha256"] = identity
-    store.publish_result(ResultEnvelope.model_validate(first), input_id=C)
-    # A selection written by an older Lab version: no publication order and an
-    # envelope this version cannot read.
-    legacy = store.result_dir(C, "fragment-size", A)
-    old_attempt = "a-20261015T090816870676-c20c34dc"
-    (legacy / "attempts" / old_attempt).mkdir(parents=True)
-    (legacy / "attempts" / old_attempt / "result.json").write_text('{"schema": "older"}')
-    (legacy / "selected.json").write_text(json.dumps({"attempt_id": old_attempt}))
-    with pytest.raises(store_module.ResultOrderUnavailable):
+    first_attempt = store.publish_result(ResultEnvelope.model_validate(first), input_id=C)
+    # A newer failed identity forces a real switch, and the legacy sibling
+    # makes that switch unsafe to perform.
+    newer = json.loads(_failed(2).to_bytes())
+    newer["provenance"]["parameters_sha256"] = A
+    store.publish_result(ResultEnvelope.model_validate(newer), input_id=C)
+    legacy = _write_legacy_selection(store, "f" * 64)
+    legacy_bytes = (legacy / "selected.json").read_bytes()
+    with pytest.raises(store_module.ResultOrderUnavailable, match="Another result selection"):
         store.reselect_cached_result(C, "fragment-size", identity)
-    messages: list[str] = []
 
     def fake_pipeline(stages, **_kwargs):  # noqa: ANN001, ANN202
         request = json.loads(Path(stages[0].argv[-1]).read_bytes())
@@ -354,14 +376,29 @@ def test_cached_runner_recomputes_when_a_legacy_sibling_blocks_reselection(
         )
 
     monkeypatch.setattr(lab_runner, "run_pipeline", fake_pipeline)
-    results = run_plan(
-        store, None, store.run_log(new_run_id()), RunTarget(C, B, tmp_path, "ref", B),
-        [PlanItem(algorithm, False)], {"fragment-size": "fake:ALGO"}, run_id=new_run_id(),
-        scrubber=Scrubber(root=tmp_path), progress=messages.append,
-    )
 
+    def run(messages: list[str]):  # noqa: ANN202
+        return run_plan(
+            store, None, store.run_log(new_run_id()), RunTarget(C, B, tmp_path, "ref", B),
+            [PlanItem(algorithm, False)], {"fragment-size": "fake:ALGO"}, run_id=new_run_id(),
+            scrubber=Scrubber(root=tmp_path), progress=messages.append,
+        )
+
+    messages: list[str] = []
+    results = run(messages)
     assert len(results) == 1 and results[0].status == "ok" and not results[0].cached
-    assert any("recomputing" in message for message in messages)
+    assert (f"{'fragment-size':<24} cache not reusable (Another result selection is invalid); "
+            "recomputing") in messages
+    selected = store.selected_attempt(C, "fragment-size", identity)
+    assert selected is not None and selected.name != first_attempt
+    orders = store._result_selection_orders(C, "fragment-size")
+    assert orders[identity] is not None and orders[identity] > (orders[A] or 0)
+    assert (legacy / "selected.json").read_bytes() == legacy_bytes
+
+    again: list[str] = []
+    second = run(again)
+    assert len(second) == 1 and second[0].cached
+    assert not any("recomputing" in message for message in again)
 
 
 def test_cached_runner_reselects_prior_identity_once(tmp_path: Path) -> None:

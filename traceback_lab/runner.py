@@ -274,9 +274,9 @@ def _reselect_cached(
 
     try:
         store.reselect_cached_result(input_id, algorithm_id, identity)
-    except ResultOrderUnavailable:
+    except ResultOrderUnavailable as exc:
         if progress:
-            progress(f"{step:<24} cache not reusable (unreadable sibling result); recomputing")
+            progress(f"{step:<24} cache not reusable ({exc}); recomputing")
         return False
     return True
 
