@@ -1,14 +1,16 @@
 # Traceback
 
 Bring your cfDNA sequencing data, run it against every publicly available
-cfDNA algorithm Traceback wraps (35 so far), get charts, and look for aberrations.
+cfDNA algorithm Traceback wraps (35 so far), get charts, and look for
+aberrations.
 
 **Traceback Lab** takes a BAM, an unaligned BAM, or a MinKNOW chunk
-directory, aligns it if needed, and runs 35 cfDNA methods on it, most from published tools:
-fragment size, copy number, methylation, cell and tissue origin, end
-motifs, nucleosome profiles, QC and more. Each method either reports a
-result, with charts where the method draws them, or names why it did not run. A local web page
-and a one-file HTML report show everything, with provenance.
+directory, aligns it if needed, and runs 35 cfDNA methods on it, most from
+published tools: fragment size, copy number, methylation, cell and tissue
+origin, end motifs, nucleosome profiles, QC and more. Each method either
+reports a result, with charts where the method draws them, or names why it
+did not run. A local web page and a one-file HTML report show everything,
+with provenance.
 
 > **Research use only. Not CLIA-validated. Not a diagnosis.** Nothing here is
 > a validated clinical assay. The Lab runs locally and uploads nothing.
