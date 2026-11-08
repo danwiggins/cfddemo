@@ -2,5 +2,5 @@
   demo (`app.py`, `bedrock_chat/`, `evals/`, the recorded replay and the
   case/claim review contracts). `boto3` and `streamlit` are no longer
   dependencies. The Lab and the signed `traceback run` path are unchanged.
-  The README and this guide carry new Mermaid diagrams of the Lab run path
+  The README and docs/LAB-GUIDE.md carry new Mermaid diagrams of the Lab run path
   and of how a method's status is decided.
