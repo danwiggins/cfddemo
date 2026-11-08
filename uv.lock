@@ -1,5 +1,5 @@
 version = 1
-revision = 5
+revision = 3
 requires-python = "==3.11.*"
 
 [[package]]
@@ -491,6 +491,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pybigwig"
+version = "0.3.26"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/91/9b/85daed040fc5a33117e97dd48047bf771f3caa633537eccd9c24a96377fa/pybigwig-0.3.26.tar.gz", hash = "sha256:8b01c6542ed9e65d0758ff18a43d6fd7b1c517e1f6aa6132368fe17ee32c1533", size = 75758, upload-time = "2026-09-14T10:04:42.569Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/75/5a/a5a34990541472cf2b7723aeacf12c606b97613f1e7c9ec5fc123fdf01b3/pybigwig-0.3.26-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:b03d6833e03b540bd846d1396ead73043a3c59b0171125b05d3d594003aacc18", size = 187502, upload-time = "2026-09-14T10:04:45.022Z" },
+]
+
+[[package]]
 name = "pycparser"
 version = "3.0"
 source = { registry = "https://pypi.org/simple" }
@@ -843,6 +852,9 @@ dev = [
     { name = "pytest-xdist" },
     { name = "websocket-client" },
 ]
+griffin = [
+    { name = "pybigwig" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -863,6 +875,7 @@ dev = [
     { name = "pytest-xdist", specifier = "==3.8.0" },
     { name = "websocket-client", specifier = "==1.9.2" },
 ]
+griffin = [{ name = "pybigwig", specifier = "==0.3.26" }]
 
 [[package]]
 name = "typing-extensions"
