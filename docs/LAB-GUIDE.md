@@ -199,7 +199,7 @@ traceback lab run (<BAM|uBAM|chunk dir>... | <id12> | latest | --example)
     [--reference ID] [--profile all|fast] [--only a,b] [--cohort ID]
     [--downsample 0.5,0.25,0.1 | --no-downsample]
     [--controls | --no-controls] [--tf 0.03,0.10,0.30]
-    [--skip-bad-chunks] [--sex M|F] [--force] [--rehash] [--timeout-s 3600]
+    [--skip-bad-chunks] [--sex M|F] [--force] [--rehash] [--below-depth] [--timeout-s 3600]
     [--threads N] [--sort-mem 1G] [--mmi PATH] [--keep-staging]
     [--memory-cap BYTES | --no-memory-cap]
     [--threads N] [--sort-mem 1G] [--mmi PATH]
@@ -621,6 +621,47 @@ when alignment is needed; the preview labels that decision as deferred.
 When detected physical RAM is below 16 GiB, both dry run and execution show
 an advisory warning in human and JSON output. This does not block a run; a
 full hg38 alignment may be slow or fail for lack of memory.
+
+**Below the depth floor (exploratory).** Without a flag, a method whose input
+is below its depth floor skips with reason `depth`. `--below-depth` runs it
+anyway and marks the result **underpowered**: the result JSON carries
+`underpowered: {floor, observed, kind}` (`kind` is `eligible_reads`,
+`counted_reads` or `depth_x`), the run line reads e.g.
+`ok (underpowered: 2,000,000 / 5,000,000 reads; 41.2s)`, the run's `--json`
+has `below_depth: true` and an `underpowered` list, and the run log's
+`run_start` flags record `below_depth`. The Lab page and `lab report --html`
+show "Underpowered — below the method's depth floor; exploratory only" on
+those results, and every metric of an underpowered result is
+`not_interpretable (depth)`: it is never placed against a reference or
+cohort. Derived downsample and split controls inherit the flag. A floor that
+a method re-checks inside its run (for example `griffin` ONT on its autosomal
+count) marks the result the same way, and a result built on an underpowered
+upstream (other than `read-summary`) is itself marked, naming that upstream.
+Underpowered results are never cohort values, give no stability verdict
+("underpowered at full depth; exploratory only, no stability verdict"), and a
+CNA spike whose copy-number is underpowered reports "underpowered; exploratory,
+no verdict" instead of recovered or not recovered.
+
+| Floor | With `--below-depth` |
+|---|---|
+| `min_eligible_reads` (registry) of every method except those below | runs, underpowered |
+| `wps` and `aligned-end-structure` 10x depth; `tss-profile` 5M autosomal reads; `griffin` ONT 5M reads | runs, underpowered |
+| `copy-number` ichorCNA 1M counted-read floor (`kind: counted_reads`) | runs, underpowered; if ichorCNA then produces no valid output it skips `low_support` |
+| `fetal-fraction`, `fetal-fraction-chry` 2M reads; `fetal-fraction-chry` and `dd-cfdna-chry` calibrated `min_depth_x` | still skips: part of the prenatal or transplant calibration contract |
+| `methylbert` 2.5M reads | still skips: the model bundle's runtime re-enforces its qualified minimum |
+| `griffin` Illumina pair gates | still skips: the pinned upstream workflow enforces them |
+| a depth that was never measured (`eligible-read count is unavailable` and similar) | still skips |
+
+Platform, reference, asset, toolchain, PoN and other non-depth skips are
+unchanged. Below its floor a method can still find nothing to measure; it
+then skips with a specific reason (for example `griffin` ONT records
+`low_support` when no site profile has usable coverage) rather than failing.
+A later run without the flag does not reuse an underpowered result: it skips
+again, and its dry run still predicts that skip. A dry run with the flag
+labels the rows that would run `runs underpowered below depth minimum
+(--below-depth)`; methods whose floor is not bypassed keep `skip expected`.
+Results marked underpowered are forward-only: a Lab older than this flag
+refuses to read them (the result schema id stays `traceback.lab.result.v1`).
 
 **Preflight limits.** A dry run can report a known disk shortfall, but it does
 not reserve space. A live run first checks known requirements and disk capacity

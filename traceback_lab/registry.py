@@ -113,6 +113,11 @@ class Ready:
 class Skip:
     reason_code: str
     message: str
+    # Set only on a method depth floor (``depth_floor`` in algorithms/_base.py),
+    # which ``lab run --below-depth`` may run past as an underpowered result.
+    floor: int | float | None = None
+    observed: int | float | None = None
+    floor_kind: str | None = None  # "eligible_reads" | "depth_x"
 
 
 @dataclass(frozen=True)

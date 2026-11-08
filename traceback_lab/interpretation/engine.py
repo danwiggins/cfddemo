@@ -44,6 +44,7 @@ NO_REFERENCE_REASONS = ("none_published", "cohort_too_small", "no_library_entry"
 RANGE_STATES = ("in_range", "above_typical", "markedly_above", "below_typical", "markedly_below")
 OUT_OF_RANGE = ("markedly_above", "markedly_below", "above_typical", "below_typical")
 COHORT_MIN = 10
+UNDERPOWERED_CAPTION = "Underpowered — below the method's depth floor; exploratory only."
 COHORT_FULL = 30
 BOOTSTRAP_RESAMPLES = 1000
 _SEMVER = re.compile(r"^\d+\.\d+\.\d+$")
@@ -491,6 +492,11 @@ def interpret_result(
             cohort=(cohorts or {}).get(metric.metric_id),
             include_interval=include_interval,
         )
+        if getattr(envelope, "underpowered", None) is not None:
+            # lab run --below-depth: never a call, whatever the value.
+            interpretation = Interpretation(
+                "not_interpretable", "depth", interpretation.reference_kind, caption=UNDERPOWERED_CAPTION,
+            )
         out.append(
             InterpretedMetric(
                 envelope.algorithm_id, metric.metric_id, metric.value, metric.unit, metric.n, entry, interpretation

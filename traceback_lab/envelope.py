@@ -136,6 +136,17 @@ class Failure(_Strict):
     reason: Literal["memory"] | None = None  # killed by the per-algorithm memory cap
 
 
+class Underpowered(_Strict):
+    """``lab run --below-depth`` ran this method below its depth floor: exploratory only."""
+
+    # One bound per branch, so the committed JSON Schema enforces it.
+    floor: Annotated[int, Field(gt=0)] | Annotated[float, Field(gt=0)]
+    observed: Annotated[int, Field(ge=0)] | Annotated[float, Field(ge=0)]
+    kind: Literal["eligible_reads", "counted_reads", "depth_x"]
+    # Set when the floor was this result's upstream's, not its own.
+    upstream: str | None = Field(default=None, pattern=ALGORITHM_ID_PATTERN.pattern)
+
+
 class ResultEnvelope(_Strict):
     schema_: Literal["traceback.lab.result.v1"] = Field(default=RESULT_SCHEMA, alias="schema")
     algorithm_id: str = Field(pattern=ALGORITHM_ID_PATTERN.pattern)
@@ -149,6 +160,7 @@ class ResultEnvelope(_Strict):
     panels: list[Panel] = Field(default_factory=list)
     failure: Failure | None = None
     duration_s: float | None = Field(default=None, ge=0)
+    underpowered: Underpowered | None = None
 
     model_config = ConfigDict(extra="forbid", frozen=True, populate_by_name=True)
 
@@ -166,6 +178,8 @@ class ResultEnvelope(_Strict):
                 raise ValueError("a failed algorithm shows no metrics (D7)")
         elif self.failure is not None:
             raise ValueError("only a failed result carries a failure")
+        if self.underpowered is not None and self.status != "ok":
+            raise ValueError("only an ok result is marked underpowered")
         if self.status == "skipped" and (self.metrics or self.panels):
             raise ValueError("a skipped result carries no metrics")
         ids = [metric.metric_id for metric in self.metrics]
@@ -179,7 +193,10 @@ class ResultEnvelope(_Strict):
     def to_bytes(self) -> bytes:
         """Canonical JSON bytes as stored on disk."""
 
-        return canonical_json_bytes(self.model_dump(mode="json", by_alias=True))
+        data = self.model_dump(mode="json", by_alias=True)
+        if data["underpowered"] is None:
+            del data["underpowered"]  # results at or above every floor keep their bytes
+        return canonical_json_bytes(data)
 
     @classmethod
     def from_bytes(cls, content: bytes) -> ResultEnvelope:
@@ -227,6 +244,7 @@ __all__ = [
     "ResultEnvelope",
     "SCHEMA_FILE",
     "SKIP_REASONS",
+    "Underpowered",
     "json_schema",
     "provenance",
     "utc_now",

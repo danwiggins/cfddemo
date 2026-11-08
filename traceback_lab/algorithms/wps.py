@@ -19,7 +19,7 @@ from typing import Any, Callable
 import numpy as np
 
 from ..registry import AlgorithmOutput, InputContext, Ready, Skip
-from ._base import Base, load_summary, metric
+from ._base import Base, depth_floor, load_summary, metric
 
 WINDOW = 120
 HALF = WINDOW // 2
@@ -114,8 +114,10 @@ class Wps(Base):
             return Skip("platform", "long-fragment WPS needs single-molecule ONT aligned spans")
         if ctx.reference_id != "hg38":
             return Skip("reference", "long-fragment WPS needs hg38 coordinates")
-        if ctx.approx_depth_x is None or ctx.approx_depth_x < MIN_DEPTH_X:
-            return Skip("depth", "long-fragment WPS needs at least 10x approximate autosomal depth")
+        floor = depth_floor(ctx, floor=MIN_DEPTH_X, observed=ctx.approx_depth_x, kind="depth_x",
+                            message="long-fragment WPS needs at least 10x approximate autosomal depth")
+        if floor is not None:
+            return floor
         upstream = ctx.extras.get("upstream", {}).get("read-summary")
         if not upstream:
             return Skip("upstream", "long-fragment WPS needs the read-summary output")

@@ -321,6 +321,67 @@
       ],
       "title": "Provenance",
       "type": "object"
+    },
+    "Underpowered": {
+      "additionalProperties": false,
+      "description": "``lab run --below-depth`` ran this method below its depth floor: exploratory only.",
+      "properties": {
+        "floor": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "integer"
+            },
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            }
+          ],
+          "title": "Floor"
+        },
+        "kind": {
+          "enum": [
+            "eligible_reads",
+            "counted_reads",
+            "depth_x"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "observed": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "minimum": 0,
+              "type": "number"
+            }
+          ],
+          "title": "Observed"
+        },
+        "upstream": {
+          "anyOf": [
+            {
+              "pattern": "^[a-z0-9-]{1,40}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Upstream"
+        }
+      },
+      "required": [
+        "floor",
+        "observed",
+        "kind"
+      ],
+      "title": "Underpowered",
+      "type": "object"
     }
   },
   "additionalProperties": false,
@@ -427,6 +488,17 @@
       ],
       "title": "Status",
       "type": "string"
+    },
+    "underpowered": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Underpowered"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     }
   },
   "required": [

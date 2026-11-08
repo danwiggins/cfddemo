@@ -14,7 +14,7 @@ import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 import pysam
@@ -112,6 +112,8 @@ def _offline_env(scratch: Path) -> dict[str, str]:
 
 @dataclass
 class Methylbert(Base):
+    # The runtime re-enforces the qualified 2.5M support floor of the model bundle.
+    below_depth_allowed: ClassVar[bool] = False
     family: str = "methylation"
     requires: Requirements = field(default_factory=lambda: Requirements(mm_tags=True, min_eligible_reads=MIN_ELIGIBLE_READS))
     consumes: str = "full_bam"

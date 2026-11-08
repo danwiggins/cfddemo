@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 
@@ -26,11 +26,56 @@ class Base:
     tools: tuple[ToolPin, ...] = ()
     upstream: tuple[str, ...] = ("read-summary",)
 
+    # ``lab run --below-depth`` may run this method below its depth floor
+    # (an underpowered, exploratory result).  False where the floor is part
+    # of an assay-validity contract rather than a statistical-power floor.
+    below_depth_allowed: ClassVar[bool] = True
+
     def preflight(self, ctx: InputContext) -> Ready | Skip:
         minimum = self.requires.min_eligible_reads
-        if minimum and ctx.eligible_reads is not None and ctx.eligible_reads < minimum:
-            return Skip("depth", f"needs {minimum:,} eligible reads; this input has {ctx.eligible_reads:,}")
+        if minimum and ctx.eligible_reads is not None:
+            floor = depth_floor(
+                ctx, floor=minimum, observed=ctx.eligible_reads, kind="eligible_reads",
+                message=f"needs {minimum:,} eligible reads; this input has {ctx.eligible_reads:,}",
+                allowed=self.below_depth_allowed,
+            )
+            if floor is not None:
+                return floor
         return Ready()
+
+
+def _plain(value: int | float) -> int | float:
+    """A JSON-safe Python number (numpy scalars are not)."""
+
+    return int(value) if isinstance(value, (int, np.integer)) else float(value)
+
+
+def below_depth(ctx: InputContext) -> bool:
+    """True when ``lab run --below-depth`` asked to run past depth floors."""
+
+    return ctx.extras.get("below_depth") is True
+
+
+def depth_floor(
+    ctx: InputContext, *, floor: int | float, observed: int | float | None, kind: str, message: str,
+    allowed: bool = True,
+) -> Skip | None:
+    """A method depth floor: ``Skip("depth")`` below it, unless ``--below-depth``.
+
+    The skip carries the floor, so the runner can mark a result it runs past
+    the floor as underpowered.  A missing ``observed`` value is below the floor.
+    """
+
+    if observed is not None and np.isfinite(observed) and observed >= floor:
+        return None
+    if allowed and observed is not None and np.isfinite(observed) and below_depth(ctx):
+        marks = ctx.extras.get("underpowered_marks")
+        if isinstance(marks, list):
+            # Inside the worker: a floor passed only because of the flag marks
+            # the result even when the runner's preflight saw a different count.
+            marks.append({"floor": _plain(floor), "observed": _plain(observed), "kind": kind})
+        return None
+    return Skip("depth", message, floor=floor, observed=observed, floor_kind=kind)
 
 
 def load_summary(ctx: InputContext) -> tuple[ReadSummary, np.ndarray | None]:

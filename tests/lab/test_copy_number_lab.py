@@ -359,3 +359,52 @@ def test_copy_number_identity_binds_asset_digests(tmp_path, monkeypatch) -> None
     with_assets = execution_identity(cn_module.COPY_NUMBER, reference_sha256="a" * 64, asset_sha256s=digests)
     without = execution_identity(cn_module.COPY_NUMBER, reference_sha256="a" * 64)
     assert with_assets != without
+
+
+def test_below_depth_runs_past_the_counted_read_floor_or_skips_cleanly(tmp_path, monkeypatch) -> None:
+    """lab run --below-depth: the adapter's counted-read floor marks instead of failing."""
+
+    from traceback_lab.algorithms import copy_number as cn_module
+    from traceback_lab.registry import InputContext, Skip
+    from traceback_runner.copy_number_method import LOCKED_BIN_SIZE_BP
+    from traceback_runner.references import register_ichor_toolchain_directory
+
+    _, bam = _write_inputs(tmp_path / "inputs")
+    toolchain = _fake_toolchain(tmp_path / "toolchain")
+    monkeypatch.setattr(cn_module, "_toolchain", lambda: toolchain)
+    root = tmp_path / "root"
+    register_ichor_toolchain_directory(
+        root, _write_assets(tmp_path / "extdata"), bin_size_bp=LOCKED_BIN_SIZE_BP, toolchain_tag=PIN.lock_sha256[:12]
+    )
+    input_dir = tmp_path / "input"
+    input_dir.mkdir()
+    (input_dir / "aligned.bam").symlink_to(bam)
+    (input_dir / "aligned.bam.bai").symlink_to(Path(str(bam) + ".bai"))
+    ctx = InputContext(root=root, source_id="a" * 64, input_id="b" * 64, reference_id="ref",
+                       reference_sha256="c" * 64, input_dir=input_dir, eligible_reads=3_000_000)
+    high = ichor.default_parameters(min_counted_reads=10**9)
+    out = tmp_path / "attempt" / "artifacts"
+    out.mkdir(parents=True)
+
+    # Without the flag: unchanged, the adapter refuses below its floor.
+    with pytest.raises(ichor.CopyNumberError, match="below the floor"):
+        cn_module.COPY_NUMBER.run_configured(ctx, out, parameters=high)
+
+    # With the flag (as the worker hands it): runs, and the floor is recorded as a mark.
+    marks: list[dict] = []
+    below = InputContext(**{**ctx.__dict__, "extras": {"below_depth": True, "underpowered_marks": marks}})
+    output = cn_module.COPY_NUMBER.run_configured(below, out, parameters=high)
+    counted = {m["metric_id"]: m["value"] for m in output.metrics}["counted_reads"]
+    assert marks == [{"floor": 10**9, "observed": counted, "kind": "counted_reads"}]
+
+    # ichorCNA that cannot produce output at that count: a clean skip, never a failure.
+    def no_output(*args, **kwargs):
+        raise ichor.IchorNoOutput("ichorCNA exited with status 1")
+
+    monkeypatch.setattr(ichor, "run_ichor", no_output)
+    skipped = cn_module.COPY_NUMBER.run_configured(below, out, parameters=high)
+    assert isinstance(skipped, Skip) and skipped.reason_code == "low_support"
+    assert "counted reads" in skipped.message and "exited with status 1" in skipped.message
+    # ... but at or above the floor the same ichorCNA failure still fails the step.
+    with pytest.raises(ichor.IchorNoOutput):
+        cn_module.COPY_NUMBER.run_configured(below, out, parameters=ichor.default_parameters(min_counted_reads=10))

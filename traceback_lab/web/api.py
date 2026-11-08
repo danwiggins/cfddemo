@@ -649,7 +649,9 @@ class LabApi:
                     "counts": counts,
                     "outside_reference": outside,
                     "controls": {
-                        "spike": None if not spikes else all(row["recovered"] for row in spikes if row["tf_expected"] >= 0.1),
+                        "spike": None if not spikes else "underpowered" if any(
+                            row.get("underpowered") for row in spikes if row["tf_expected"] >= 0.1
+                        ) else all(row["recovered"] for row in spikes if row["tf_expected"] >= 0.1),
                         "split": bool(sample.by_transform("split")),
                     },
                     **_safe_result_selections(sample, [a.id for a in _registry()]),
@@ -772,6 +774,7 @@ class LabApi:
                     "skip_message": envelope.skip_message,
                     "failure": envelope.failure.model_dump() if envelope.failure else None,
                     "duration_s": envelope.duration_s,
+                    "underpowered": envelope.underpowered.model_dump() if envelope.underpowered else None,
                     "tier": headline.tier if headline else None,
                     "min_depth_x": headline.get("min_depth_x") if headline else None,
                     "input_gate": input_gates.get(algorithm_id),

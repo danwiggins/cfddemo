@@ -20,7 +20,7 @@ import stat
 import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -138,6 +138,7 @@ class StepResult:
     attempt_id: str | None = None
     failure_reason: str | None = None  # "memory" when the cap killed the step
     memory_cap_bytes: int | None = None
+    underpowered: dict[str, Any] | None = None  # --below-depth: ran below its depth floor
 
     def public(self) -> dict[str, Any]:
         return {
@@ -153,6 +154,7 @@ class StepResult:
             "peak_disk_bytes": self.peak_disk_bytes,
             "cached": self.cached,
             "input": self.input_label,
+            "underpowered": self.underpowered,
         }
 
 
@@ -215,6 +217,7 @@ def _envelope(
     metrics: Sequence[Mapping[str, Any]] = (),
     panels: Sequence[Mapping[str, Any]] = (),
     duration_s: float | None = None,
+    underpowered: Mapping[str, Any] | None = None,
 ) -> ResultEnvelope:
     return ResultEnvelope.model_validate(
         {
@@ -235,8 +238,23 @@ def _envelope(
             "panels": list(panels),
             "failure": failure.model_dump() if failure else None,
             "duration_s": round(duration_s, 3) if duration_s is not None else None,
+            "underpowered": dict(underpowered) if underpowered is not None else None,
         }
     )
+
+
+def underpowered_text(underpowered: Mapping[str, Any]) -> str:
+    """``2,000,000 / 5,000,000 reads`` or ``4.2x / 10x depth`` (observed / floor)."""
+
+    if underpowered["kind"] == "depth_x":
+        return f"{underpowered['observed']:.3g}x / {underpowered['floor']:g}x depth"
+    return f"{int(underpowered['observed']):,} / {int(underpowered['floor']):,} reads"
+
+
+def _underpowered_of(skip: Skip) -> dict[str, Any] | None:
+    if skip.reason_code != "depth" or skip.floor is None or skip.observed is None or skip.floor_kind is None:
+        return None
+    return {"floor": skip.floor, "observed": skip.observed, "kind": skip.floor_kind}
 
 
 def _selected_upstream_attempts(
@@ -391,19 +409,25 @@ def run_plan(
             cache_valid = cache_valid and _cached_plan_matches(
                 cached_attempt, execution_plan, required=dynamic_plan,
             )
+        below_depth = target.extras.get("below_depth") is True
         if (existing is not None and existing.status == "ok" and not force and
+                (existing.underpowered is None or below_depth) and
                 not platform_rejected and not pon_unavailable and not blocked and cache_valid
                 and _reselect_cached(store, target.input_id, algorithm.id, identity, step, progress)):
             selected = store.selected_attempt(target.input_id, algorithm.id, identity)
             result = StepResult(
                 algorithm.id, "ok", item.upstream_only, identity, cached=True, input_label=target.label,
                 input_id=target.input_id, attempt_id=selected.name if selected is not None else None,
+                underpowered=(existing.underpowered.model_dump()
+                              if existing.underpowered is not None else None),
             )
             _after_ok(store, target, algorithm, identity, result, existing)
             results.append(result)
             done[algorithm.id] = result
             if progress:
-                progress(f"{step:<24} ok (cached)")
+                progress(f"{step:<24} ok (cached" + (
+                    f"; underpowered: {underpowered_text(result.underpowered)})"
+                    if result.underpowered else ")"))
             continue
         target.extras["upstream"] = {
             name: done[name].artifacts_dir
@@ -422,6 +446,13 @@ def run_plan(
         target.extras["planned_parameters"] = planned_parameters
         ctx = target.context(store.root)
         decision: Ready | Skip
+        underpowered: dict[str, Any] | None = None
+        # A result built on an underpowered upstream is itself underpowered.
+        upstream_mark = next((
+            {**done[name].underpowered, "upstream": done[name].underpowered.get("upstream") or name}
+            for name in algorithm.upstream
+            if name != DEPTH_SOURCE and name in done and done[name].underpowered
+        ), None)
         if platform_rejected:
             supported = ", ".join(sorted(algorithm.requires.platforms))
             decision = Skip("platform", f"{algorithm.id} supports {supported}; this input declares {target.platform}")
@@ -431,7 +462,19 @@ def run_plan(
             decision = Skip("upstream", f"upstream not ok: {', '.join(blocked)}")
         else:
             try:
-                decision = algorithm.preflight(ctx)
+                if below_depth:
+                    # Ask as a default run would; a depth-floor skip is retried
+                    # past its floors and the result is marked underpowered.
+                    strict = replace(ctx, extras={**ctx.extras, "below_depth": False})
+                    decision = algorithm.preflight(strict)
+                    if isinstance(decision, Skip):
+                        underpowered = _underpowered_of(decision)
+                        if underpowered is not None:
+                            decision = algorithm.preflight(ctx)
+                            if isinstance(decision, Skip):
+                                underpowered = None
+                else:
+                    decision = algorithm.preflight(ctx)
             except Exception as exc:  # noqa: BLE001 - a broken preflight is a failed result
                 result = _publish_failure(
                     store, algorithm, target, identity, item, log, step,
@@ -564,6 +607,7 @@ def run_plan(
                             metrics=produced.get("metrics", []),
                             panels=produced.get("panels", []),
                             duration_s=outcome.duration_s,
+                            underpowered=underpowered or produced.get("underpowered") or upstream_mark,
                         )
                         missing = [p.data_ref for p in envelope.panels if p.data_ref not in artifacts]
                         if missing:
@@ -602,6 +646,8 @@ def run_plan(
                         input_id=target.input_id,
                         attempt_id=attempt_id,
                         tool_versions={tool.name: tool.version for tool in algorithm.tools},
+                        **({"underpowered": envelope.underpowered.model_dump()}
+                           if envelope.underpowered is not None else {}),
                     )
                     result = StepResult(
                         algorithm.id,
@@ -617,6 +663,8 @@ def run_plan(
                         input_label=target.label,
                         input_id=target.input_id,
                         attempt_id=attempt_id,
+                        underpowered=(envelope.underpowered.model_dump()
+                                      if envelope.underpowered is not None else None),
                     )
                     if run_skip is None:
                         _after_ok(store, target, algorithm, identity, result, envelope)
@@ -652,7 +700,10 @@ def run_plan(
         results.append(result)
         done[algorithm.id] = result
         if progress:
-            if result.status == "ok":
+            if result.status == "ok" and result.underpowered:
+                progress(f"{step:<24} ok (underpowered: {underpowered_text(result.underpowered)}; "
+                         f"{result.duration_s or 0:.1f}s)")
+            elif result.status == "ok":
                 progress(f"{step:<24} ok ({result.duration_s or 0:.1f}s)")
             elif result.status == "skipped":
                 progress(f"{step:<24} skipped ({result.skip_reason}): {result.skip_message}")

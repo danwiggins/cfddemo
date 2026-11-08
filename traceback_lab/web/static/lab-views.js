@@ -303,11 +303,13 @@
       const points = rows.map((r) => [chartPercent(r.tf_expected),
         r.tf_recovered === null ? null : chartPercent(r.tf_recovered)]);
       const recovered = rows.filter((r) => r.recovered).map((r) => fmt(r.tf_expected, "fraction"));
-      const missed = rows.filter((r) => !r.recovered && r.tf_expected >= 0.1).map((r) => fmt(r.tf_expected, "fraction"));
+      const missed = rows.filter((r) => !r.recovered && !r.underpowered && r.tf_expected >= 0.1).map((r) => fmt(r.tf_expected, "fraction"));
+      const underpowered = rows.filter((r) => r.underpowered).map((r) => fmt(r.tf_expected, "fraction"));
       const tolerance = fmt(0.05, "fraction", { role: "difference" });
-      const caption = recovered.length && !missed.length
+      const caption = (recovered.length && !missed.length
         ? `Recovered within ±${tolerance} at ${recovered.join(" and ")}`
-        : `Recovered within ±${tolerance} at ${recovered.length ? recovered.join(" and ") : "none"}; not recovered at ${missed.join(" and ") || "—"} (this depth: ${fmt(sample.depth?.approx_depth_x, "x")})`;
+        : `Recovered within ±${tolerance} at ${recovered.length ? recovered.join(" and ") : "none"}; not recovered at ${missed.join(" and ") || "—"} (this depth: ${fmt(sample.depth?.approx_depth_x, "x")})`)
+        + (underpowered.length ? `; underpowered (exploratory, no verdict) at ${underpowered.join(" and ")}` : "");
       syn.append(chart(`Synthetic CNA spike: expected against recovered tumour fraction, both in %. ${caption}.`, {
         grid: { left: 50, right: 16, top: 16, bottom: 40 },
         xAxis: { type: "value", name: "expected TF (%)", min: 0, max: 35 },
@@ -322,7 +324,7 @@
         ],
       }, dataTable("Synthetic CNA spike", ["Expected TF (%)", "Recovered TF (%)", `Recovered (±${tolerance})`, "Status"],
         rows.map((r) => [rawCell(fmt(r.tf_expected, "fraction"), r.tf_expected, "fraction"),
-          rawCell(fmt(r.tf_recovered, "fraction"), r.tf_recovered, "fraction"), r.recovered, r.status]))), h("p", { class: "help" }, caption));
+          rawCell(fmt(r.tf_recovered, "fraction"), r.tf_recovered, "fraction"), r.underpowered ? "no verdict" : r.recovered, r.status]))), h("p", { class: "help" }, caption));
     }
     // REPEATABILITY
     const rep = h("div", { class: "control-block" }, h("span", { class: "control-badge" }, "REPEATABILITY"), " sampling noise, not a known answer");
@@ -393,7 +395,8 @@
           ["cohort_unavailable", "target_unavailable", "stale_target"].includes(row.cohort_state)
             ? h("span", { class: "problem" }, ` · cohort ${row.cohort_state.replace(/_/g, " ")}`) : ""),
         h("td", {}, ["completed_input_unavailable", "completion_history_unavailable"].includes(row.state) ? "unavailable"
-          : row.controls.spike === null ? "spike not run" : row.controls.spike ? "spike recovered ✓" : "spike not recovered"),
+          : row.controls.spike === null ? "spike not run" : row.controls.spike === "underpowered" ? "spike underpowered (exploratory)"
+            : row.controls.spike ? "spike recovered ✓" : "spike not recovered"),
         h("td", {}, h("a", { href: `#/?sample=${row.id12}` }, "Show on landing"))))));
     return h("section", { class: "panel", "aria-labelledby": "samples-title" }, h("h2", { id: "samples-title" }, "Samples"), h("div", { class: "table-wrap" }, table));
   }
@@ -548,6 +551,18 @@
     return h("p", { class: "help" }, metric.caption || (ref.kind === "none" ? "No published reference." : ""));
   }
 
+  // lab run --below-depth: the method ran below its depth floor (exploratory only).
+  function underpoweredBanner(algorithm) {
+    const u = algorithm && algorithm.underpowered;
+    if (!u) return "";
+    const measured = u.kind === "depth_x"
+      ? `${Number(u.observed).toPrecision(3)}x of ${u.floor}x depth`
+      : `${Math.round(u.observed).toLocaleString("en-US")} of ${Math.round(u.floor).toLocaleString("en-US")} ${u.kind === "counted_reads" ? "counted" : "eligible"} reads`;
+    return h("p", { class: "problem underpowered", role: "note" },
+      h("strong", {}, "Underpowered — below the method's depth floor; exploratory only. "),
+      `${algorithm.algorithm_id}: ${measured}. Not a call.`);
+  }
+
   function card(sample, metric, seen, open) {
     const entry = metric.entry || {};
     const perf = entry.performance;
@@ -572,6 +587,7 @@
     });
     return h("article", { class: "finding-card" },
       h("div", { class: "card-head" }, h("h3", {}, metric.label), stateChip(metric), " ", tierBadge(metric.tier)),
+      underpoweredBanner(algo(sample, metric.algorithm_id)),
       h("p", { class: "card-value" }, h("strong", {}, fmtMetric(metric))),
       strip(metric),
       h("p", {}, "Performance: ", perf ? `${perf.value} (${perf.platform || ""}${perf.depth ? ", " + perf.depth : ""}; ${perf.source || ""})` : (entry.performance_missing_reason || "none published"),
@@ -1762,7 +1778,7 @@
     const seen = new Set();
     if (!present.length && !joint.length) return [h("p", { class: "empty" }, "No methylation summary algorithm has run on this sample yet (Phase 1). Cell-type composition is in Body map.")];
     // Scalar tables scroll inside .table-wrap at narrow widths (AC24) instead of widening the page.
-    return [...joint, ...present.map((a) => h("section", { class: "panel" }, h("h2", {}, a.algorithm_id), a.status === "ok"
+    return [...joint, ...present.map((a) => h("section", { class: "panel" }, h("h2", {}, a.algorithm_id), underpoweredBanner(a), a.status === "ok"
       ? h("div", { class: "table-wrap", tabindex: "0", role: "region", "aria-label": `${a.algorithm_id} scalar metrics` },
         h("table", { class: "data-table" }, h("tbody", {}, ...a.metrics.filter((m) => m.value === null || typeof m.value !== "object").map((m) => h("tr", {}, h("th", { scope: "row" }, m.label),
           h("td", {}, rawCell(fmtMetric(m, { algorithmId: a.algorithm_id }), m.value, m.unit,

@@ -17,7 +17,7 @@ import tempfile
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import pysam
 from traceback_runner.contained_process import ContainedProcessError, run_contained
@@ -297,6 +297,8 @@ def _parse_z_output(output: str) -> dict[int, float]:
 
 @dataclass
 class FetalFraction(Base):
+    # The 2M floor is part of the prenatal calibration contract, not a power floor.
+    below_depth_allowed: ClassVar[bool] = False
     family: str = "copy-number"
     consumes: str = "full_bam"
     cost: str = "slow"

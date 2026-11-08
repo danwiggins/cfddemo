@@ -32,7 +32,7 @@ from ..adapters.griffin_ont import (
 )
 from ..griffin_assets import GriffinAssetError, inspect_griffin_assets, registration_available
 from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip, ToolPin
-from ._base import Base, load_summary, metric
+from ._base import Base, below_depth, depth_floor, load_summary, metric
 from .cell_origin import derived_name_predicate, write_transient_bam
 
 
@@ -135,9 +135,13 @@ class Griffin(Base):
             return Skip("derived_input", "Griffin supports only downsample and split selections")
         if ctx.eligible_reads is None:
             return Skip("depth", "Griffin needs a D21 eligible-read count to enforce the 5M gate")
-        if ctx.eligible_reads < MIN_ELIGIBLE_AUTOSOMAL_READS:
-            return Skip("depth", f"Griffin's ONT path needs at least {MIN_ELIGIBLE_AUTOSOMAL_READS:,} "
-                                 f"D21-eligible autosomal reads; only {ctx.eligible_reads:,} eligible reads are available")
+        floor = depth_floor(
+            ctx, floor=MIN_ELIGIBLE_AUTOSOMAL_READS, observed=ctx.eligible_reads, kind="eligible_reads",
+            message=f"Griffin's ONT path needs at least {MIN_ELIGIBLE_AUTOSOMAL_READS:,} "
+                    f"D21-eligible autosomal reads; only {ctx.eligible_reads:,} eligible reads are available",
+        )
+        if floor is not None:
+            return floor
         if ctx.reference_id != "hg38" or not ctx.extras.get("reference_fasta"):
             return Skip("reference", "Griffin requires the registered hg38 FASTA")
         if importlib.util.find_spec("pyBigWig") is None:
@@ -210,9 +214,15 @@ class Griffin(Base):
         except ValueError as exc:
             message = str(exc)
             return Skip("reference" if "autosomes" in message else "platform", message)
-        if fragments.eligible_autosomal_reads < MIN_ELIGIBLE_AUTOSOMAL_READS:
-            return Skip("depth", f"Griffin's ONT path needs {MIN_ELIGIBLE_AUTOSOMAL_READS:,} D21-eligible "
-                                 f"autosomal reads; this input has {fragments.eligible_autosomal_reads:,}")
+        floor = depth_floor(
+            ctx, floor=MIN_ELIGIBLE_AUTOSOMAL_READS, observed=fragments.eligible_autosomal_reads,
+            kind="eligible_reads",
+            message=f"Griffin's ONT path needs {MIN_ELIGIBLE_AUTOSOMAL_READS:,} D21-eligible "
+                    f"autosomal reads; this input has {fragments.eligible_autosomal_reads:,}",
+        )
+        if floor is not None:
+            return floor
+        exploratory = below_depth(ctx) and fragments.eligible_autosomal_reads < MIN_ELIGIBLE_AUTOSOMAL_READS
         attempt = out.parent / "griffin-attempt"
         try:
             profiles = run_ont(GriffinOntRun(
@@ -220,10 +230,11 @@ class Griffin(Base):
                 reference_fasta=Path(ctx.extras["reference_fasta"]), reference_id=ctx.reference_id,
                 reference_sha256=ctx.reference_sha256, ref_assets=assets.ref_assets,
                 site_lists=assets.site_lists, attempt_dir=attempt, registration_sha256=assets.sha256,
-                minimum_reads=MIN_ELIGIBLE_AUTOSOMAL_READS,
+                minimum_reads=0 if exploratory else MIN_ELIGIBLE_AUTOSOMAL_READS,
             ))
         except GriffinOntDepth as exc:
-            return Skip("depth", str(exc))
+            # Below the floor the profile can still be empty: name it, do not crash.
+            return Skip("low_support" if exploratory else "depth", str(exc))
         primary = next((profile for profile in profiles if profile.site_name == assets.primary_site), None)
         if primary is None:
             raise RuntimeError("registered primary TF site list is absent from Griffin output")

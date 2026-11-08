@@ -80,6 +80,9 @@ WITHHELD_TEXT = (
     "or read sequence; each withheld item is marked where it would appear."
 )
 RESEARCH_MARKS = "RESEARCH USE ONLY · NOT CLIA VALIDATED · NOT A DIAGNOSIS"
+# lab run --below-depth (kept in step with lab-report.js).
+UNDERPOWERED_NOTE = "underpowered (ran below the method's depth floor with --below-depth); exploratory only, not a call."
+UNDERPOWERED_BANNER = "Underpowered — below the method's depth floor; exploratory only"
 FROZEN_FOOTER = (
     "Values in this file are frozen at export time and may differ from the live Lab page; "
     "open the Lab for the current recorded result."
@@ -518,6 +521,7 @@ def project_report(sample: dict[str, Any], generated_at: str, scrub: ReportScrub
     rows: list[dict[str, Any]] = []
     recorded: set[str] = set()
     restrictions_noted: set[str] = set()
+    underpowered: dict[str, dict[str, Any]] = {}
     scanned = 0
     for algorithm in sample["algorithms"]:
         if not isinstance(algorithm, dict):
@@ -537,6 +541,9 @@ def project_report(sample: dict[str, Any], generated_at: str, scrub: ReportScrub
         if status != "ok" or not isinstance(algorithm.get("metrics"), list):
             note(f"Method {algorithm_id}: no eligible scalar rows.")
             continue
+        if _underpowered(algorithm.get("underpowered")) is not None:
+            note(f"Method {algorithm_id}: {UNDERPOWERED_NOTE}")
+            underpowered[algorithm_id] = _underpowered(algorithm["underpowered"])
         provenance = algorithm.get("provenance")
         for metric in algorithm["metrics"]:
             scanned += 1
@@ -679,7 +686,26 @@ def project_report(sample: dict[str, Any], generated_at: str, scrub: ReportScrub
         "recorded_utc_kind": recorded_kind, "interpretation_version": sample["interpretation_version"],
         "cohort_version": sample.get("cohort_version"), "limitations": note.items,
         "metrics": rows, "methods": methods, "licenses": licenses,
+        "underpowered": {key: value for key, value in underpowered.items() if key in methods},
     }
+
+
+def _underpowered(value: Any) -> dict[str, Any] | None:
+    """A recorded ``lab run --below-depth`` mark, or None when absent or malformed."""
+
+    if not isinstance(value, dict) or value.get("kind") not in ("eligible_reads", "counted_reads", "depth_x"):
+        return None
+    numbers = [value.get("floor"), value.get("observed")]
+    if not all(isinstance(n, (int, float)) and not isinstance(n, bool) and math.isfinite(n) for n in numbers):
+        return None
+    return {"floor": value["floor"], "observed": value["observed"], "kind": value["kind"]}
+
+
+def _underpowered_text(value: dict[str, Any]) -> str:
+    if value["kind"] == "depth_x":
+        return f"{value['observed']:.3g}x of {value['floor']:g}x depth"
+    noun = "counted reads" if value["kind"] == "counted_reads" else "eligible reads"
+    return f"{int(value['observed']):,} of {int(value['floor']):,} {noun}"
 
 
 # -- HTML ---------------------------------------------------------------------------------
@@ -792,6 +818,12 @@ def render_html(report: dict[str, Any], clia_short: str) -> str:
     push(field("Included scalar rows", len(report["metrics"])))
     push("</dl>\n<p>Values are the exact recorded values with their declared units; the Lab page's "
          "display rounding is not applied in this file.</p>\n</section>\n")
+    if report.get("underpowered"):
+        push('<div class="callout underpowered" id="underpowered"><p class="flag">'
+             f"{e(UNDERPOWERED_BANNER)}</p>\n<ul>\n")
+        for algorithm_id, value in report["underpowered"].items():
+            push(f"<li>{e(algorithm_id)}: {e(_underpowered_text(value))}</li>\n")
+        push("</ul></div>\n")
     push('<section id="limitations"><h2>Limitations</h2>\n<ul>\n')
     for item in report["limitations"]:
         push(f"<li>{e(item)}</li>\n")
@@ -810,7 +842,10 @@ def render_html(report: dict[str, Any], clia_short: str) -> str:
              f'<td class="num">{e(row["recorded_support_n"])}</td><td>{e(flags)}</td></tr>\n')
     push("</tbody></table>\n</section>\n")
     for algorithm_id, method in report["methods"].items():
-        push(f'<section class="method" data-method="{e(algorithm_id)}"><h2>{e(algorithm_id)}</h2>\n<dl>\n')
+        push(f'<section class="method" data-method="{e(algorithm_id)}"><h2>{e(algorithm_id)}</h2>\n')
+        if algorithm_id in report.get("underpowered", {}):
+            push(f'<p class="flag underpowered">{e(UNDERPOWERED_BANNER)}</p>\n')
+        push("<dl>\n")
         push(field("Question", method["question"]))
         push(field("Method", method["description"]))
         push(field("Requirements", method["requirements"]))

@@ -17,7 +17,7 @@ import numpy as np
 from ..end_catalog_assets import EndCatalogueError, end_catalogue_identity, inspect_end_catalogues
 from ..read_summary import CHUNK_ROWS, FLAG_EXCLUDE, MIN_MAPQ, depth_stamp, validate_fraction
 from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip
-from ._base import Base, load_summary, metric, ratio
+from ._base import Base, below_depth, depth_floor, load_summary, metric, ratio
 
 
 RADIUS = 100
@@ -113,8 +113,10 @@ class AlignedEndStructure(Base):
                 depth = depth_stamp(summary, mask)["approx_depth_x"]
             except (OSError, RuntimeError):
                 return Skip("upstream", "aligned-end structure could not read the derived read summary")
-        if depth is None or not np.isfinite(depth) or depth < MIN_DEPTH_X:
-            return Skip("depth", "aligned-end structure needs at least 10x observed eligible depth")
+        floor = depth_floor(ctx, floor=MIN_DEPTH_X, observed=depth, kind="depth_x",
+                            message="aligned-end structure needs at least 10x observed eligible depth")
+        if floor is not None:
+            return floor
         expected = ctx.extras.get("planned_asset_sha256s")
         if expected is not None:
             if not expected:
@@ -139,7 +141,8 @@ class AlignedEndStructure(Base):
         selection = _selection(ctx.derived) if ctx.derived is not None else None
         observed_depth_x = depth_stamp(summary, mask)["approx_depth_x"] if selection is not None else ctx.approx_depth_x
         if selection is not None and (
-            observed_depth_x is None or not np.isfinite(observed_depth_x) or observed_depth_x < MIN_DEPTH_X
+            observed_depth_x is None or not np.isfinite(observed_depth_x)
+            or (observed_depth_x < MIN_DEPTH_X and not below_depth(ctx))
         ):
             raise RuntimeError("derived aligned-end depth fell below 10x after preflight")
         names = summary.contigs

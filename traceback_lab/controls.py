@@ -230,10 +230,12 @@ def synthetic_summary(store: LabStore, runs: Sequence[DerivedRun]) -> list[dict[
         expected = float(run.derived.spec.parameters["tf"])
         recovered = None
         status = "not run"
+        underpowered = False
         for result in run.results:
             if result.algorithm_id != "copy-number":
                 continue
             status = result.status if result.skip_reason is None else f"skipped ({result.skip_reason})"
+            underpowered = result.status == "ok" and bool(result.underpowered)
             if result.status == "ok":
                 envelope = store.read_result(run.derived.input_id, "copy-number", result.parameters_sha256)
                 if envelope is not None:
@@ -245,8 +247,10 @@ def synthetic_summary(store: LabStore, runs: Sequence[DerivedRun]) -> list[dict[
                 "tf_recovered": recovered,
                 # A spike counts as recovered only when it is detected at all:
                 # at TF 0.03 a recovered 0.0 sits inside ±0.05 by arithmetic alone.
-                "detected": recovered is not None and recovered >= DETECTED_MIN,
-                "recovered_within_tolerance": recovered is not None
+                # lab run --below-depth: an underpowered spike gives no verdict.
+                "underpowered": underpowered,
+                "detected": not underpowered and recovered is not None and recovered >= DETECTED_MIN,
+                "recovered_within_tolerance": not underpowered and recovered is not None
                 and recovered >= DETECTED_MIN
                 and abs(recovered - expected) <= TF_TOLERANCE,
                 "status": status,
