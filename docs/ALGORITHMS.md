@@ -9,7 +9,7 @@ This repository has two sets of methods:
   [explainer](LAB-ALGORITHM-EXPLAINER.md).
 - **Historical hackathon demo** (`app.py`, `evidence_inspector/`): an early
   proof-of-concept with three fixed readouts, kept at the end of this page
-  for reference only. The separate signed `traceback run` path has its own
+  for reference only. Its dosage screen is not ichorCNA. The separate signed `traceback run` path has its own
   fragment-length, cell-origin and ichorCNA copy-number analyses; see the
   [operator guide](OPERATOR-GUIDE.md).
 
