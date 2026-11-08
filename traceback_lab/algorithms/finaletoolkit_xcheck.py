@@ -1,7 +1,24 @@
-"""Paired-end FinaleToolkit 1.1.0 end-motif and DELFI ratio cross-check.
+"""FinaleToolkit 1.1.0 end-motif and DELFI ratio cross-check.
 
-The independent comparator is deliberately paired-end. It does not relabel
-the Lab's single-end ONT end-motifs or DELFI-style track as equivalent.
+Paired-end Illumina input: FinaleToolkit reads the BAM itself (properly paired
+read1, fragment from TLEN) and an independent in-module paired-end counter
+reproduces its 4-mer end frequencies and uncorrected 100-kb DELFI counts.
+
+Native ONT single-end input: FinaleToolkit's BAM reader keeps only properly
+paired records, so a single-end BAM yields no fragments. Its readers also
+accept a tabix-indexed FinaleDB fragment file (contig, start, stop, mapq,
+strand). In ONT mode the Lab writes that file from the BAM using the Lab's
+own single-end fragment definition: each D21-eligible primary record on a
+canonical contig is one fragment spanning its aligned reference interval
+``[start, end)``. FinaleToolkit then computes its motifs and DELFI counts from
+that file with the same flags as the paired-end mode, and they are compared
+with the Lab's single-end counts over exactly the same fragments: the
+``end-motifs`` 4-mer definition (no length filter, as in that method) and the
+100-150 / 151-220 bp short/long classes of ``delfi-ratio``, binned at 100 kb
+by midpoint as upstream does. This checks the motif and ratio arithmetic on a
+shared read-as-fragment definition; it does not show that an ONT read span
+equals an Illumina TLEN fragment, and no ONT-to-Illumina equivalence is
+implied.
 """
 
 from __future__ import annotations
@@ -25,7 +42,8 @@ import pysam
 from ..platforms import for_input
 from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip, ToolPin
 from ._base import Base, metric
-from .end_motifs import MOTIFS, motif_diversity
+from ._records import eligible_record
+from .end_motifs import MOTIFS, _encode, kmer_codes, motif_diversity, revcomp_codes
 from .short_read_fragment_size import _declared_illumina
 
 VERSION = "1.1.0"
@@ -33,6 +51,21 @@ BIN = 100_000
 MAPQ = 20
 MOTIF_MIN = 4
 _AUTOSOME = re.compile(r"^(?:chr)?(?:[1-9]|1[0-9]|2[0-2])$")
+_CANONICAL = re.compile(r"^(?:chr)?(?:[1-9]|1[0-9]|2[0-2]|X|Y)$")
+# FinaleToolkit 1.1.0 end-motifs scans the genome in 1 Mb index windows.
+_MOTIF_WINDOW = 1_000_000
+PAIRED_END = "paired_end"
+ONT_SINGLE_END = "ont_single_end"
+ONT_FRAGMENT_DEFINITION = {
+    "record": "D21-eligible primary single-end record: mapped, not secondary, supplementary, "
+              "duplicate or QC-fail, MAPQ >= 20",
+    "contigs": "chr1-chr22, chrX, chrY (DELFI: chr1-chr22)",
+    "fragment": "aligned reference span [start, end) of the whole read",
+    "strand": "read strand",
+    "length_filter": "none for end motifs (as end-motifs); 100-150 bp short and 151-220 bp long "
+                     "for DELFI (as delfi-ratio)",
+    "upstream_input": "tabix-indexed FinaleDB fragment file (contig, start, stop, mapq, strand)",
+}
 _MAX_OUTPUT = 8_000_000
 _PIN_SCRIPT = """
 import hashlib, importlib.metadata as md, json, sys
@@ -123,12 +156,21 @@ def _inputs(ctx: InputContext) -> tuple[Path, Path, list[tuple[str, int]]]:
     bam_path = ctx.input_dir / "aligned.bam"
     fasta = Path(ctx.extras["reference_fasta"])
     manifest = json.loads((ctx.input_dir / "manifest.json").read_bytes())
-    if manifest.get("kind") != "prealigned" or for_input(manifest, bam_path) != "illumina":
-        raise ValueError("FinaleToolkit needs a verified prealigned Illumina BAM")
-    with pysam.AlignmentFile(str(bam_path), "rb") as bam:
-        if not _declared_illumina(bam) or not bam.has_index():
-            raise ValueError("FinaleToolkit needs an indexed BAM with unanimous Illumina read groups")
-        contigs = list(zip(bam.references, bam.lengths))
+    if ctx.platform == "ont":
+        # Lab-aligned and prealigned ONT BAMs are both verified by for_input.
+        if for_input(manifest, bam_path) != "ont":
+            raise ValueError("FinaleToolkit ONT mode needs a verified ONT BAM")
+        with pysam.AlignmentFile(str(bam_path), "rb") as bam:
+            if not bam.has_index():
+                raise ValueError("FinaleToolkit needs an indexed BAM")
+            contigs = list(zip(bam.references, bam.lengths))
+    else:
+        if manifest.get("kind") != "prealigned" or for_input(manifest, bam_path) != "illumina":
+            raise ValueError("FinaleToolkit needs a verified prealigned Illumina BAM")
+        with pysam.AlignmentFile(str(bam_path), "rb") as bam:
+            if not _declared_illumina(bam) or not bam.has_index():
+                raise ValueError("FinaleToolkit needs an indexed BAM with unanimous Illumina read groups")
+            contigs = list(zip(bam.references, bam.lengths))
     if not any(_AUTOSOME.fullmatch(name) for name, _ in contigs):
         raise ValueError("FinaleToolkit needs hg38 autosomes in the BAM")
     with pysam.FastaFile(str(fasta)) as reference:
@@ -203,6 +245,122 @@ def _reference_counts(bam_path: Path, fasta: Path, contigs: list[tuple[str, int]
     return motifs, {key: (row[0], row[1]) for key, row in counts.items()}, pairs
 
 
+@dataclass
+class _OntFragments:
+    """The Lab's single-end fragments, as handed to FinaleToolkit and counted here."""
+
+    frag_file: Path
+    contigs: list[tuple[str, int]]
+    motifs: dict[str, int]
+    delfi: dict[tuple[str, int], tuple[int, int]]
+    fragments: int
+    crossing_motif_windows: int
+
+
+def _ont_fragments(bam_path: Path, fasta: Path, contigs: list[tuple[str, int]], work: Path) -> _OntFragments:
+    """Write one FinaleDB fragment row per D21-eligible read and count the same rows.
+
+    Rows are written per contig in BAM coordinate order, so the file is sorted
+    for tabix. Only contigs holding at least one fragment are returned: 1.1.0
+    cannot query a tabix contig with no rows.
+    """
+    canonical = [(name, length) for name, length in contigs if _CANONICAL.fullmatch(name)]
+    names = {name for name, _ in canonical}
+    text, frag_file = work / "fragments.frag", work / "fragments.frag.gz"
+    for path in (text, frag_file, work / "fragments.frag.gz.tbi"):
+        path.unlink(missing_ok=True)
+    counts = np.zeros(len(MOTIFS), dtype=np.int64)
+    delfi: dict[tuple[str, int], tuple[int, int]] = {}
+    present: list[tuple[str, int]] = []
+    total = crossing = 0
+    with (pysam.AlignmentFile(str(bam_path), "rb") as bam, pysam.FastaFile(str(fasta)) as reference,
+          text.open("w") as stream):
+        for name, _length in canonical:
+            starts: list[int] = []
+            ends: list[int] = []
+            for read in bam.fetch(name):
+                if not eligible_record(read, names) or read.reference_end is None:
+                    continue
+                start, end = read.reference_start, read.reference_end
+                stream.write(f"{name}\t{start}\t{end}\t{read.mapping_quality}\t{'-' if read.is_reverse else '+'}\n")
+                starts.append(start)
+                ends.append(end)
+            if not starts:
+                continue
+            present.append((name, _length))
+            first, last = np.asarray(starts, dtype=np.int64), np.asarray(ends, dtype=np.int64)
+            total += first.size
+            # Upstream fetches each 1 Mb window by overlap, so a fragment
+            # crossing a window edge is counted once per window it touches.
+            crossing += int(np.count_nonzero(first // _MOTIF_WINDOW != (last - 1) // _MOTIF_WINDOW))
+            encoded = _encode(reference.fetch(name))
+            both = np.concatenate([kmer_codes(encoded, first), revcomp_codes(kmer_codes(encoded, last - 4))])
+            counts += np.bincount(both[both >= 0], minlength=len(MOTIFS))
+            if _AUTOSOME.fullmatch(name):
+                span = last - first
+                keep = (span >= 100) & (span <= 220)
+                bins = ((first[keep] + last[keep]) // 2 // BIN) * BIN
+                short = (span[keep] <= 150).astype(np.int64)
+                if bins.size:
+                    groups, sizes = np.unique(np.stack([bins, short]), axis=1, return_counts=True)
+                    for (start, is_short), n in zip(groups.T.tolist(), sizes.tolist()):
+                        row = delfi.get((name, start), (0, 0))
+                        delfi[(name, start)] = (row[0] + n, row[1]) if is_short else (row[0], row[1] + n)
+    if not total:
+        text.unlink(missing_ok=True)
+        raise ValueError("single-end input yielded no eligible fragments")
+    indexed = pysam.tabix_index(str(text), seq_col=0, start_col=1, end_col=2, zerobased=True, force=True)
+    if Path(indexed) != frag_file:
+        raise ValueError("fragment file was not indexed in place")
+    return _OntFragments(frag_file, present, {motif: int(counts[i]) for i, motif in enumerate(MOTIFS)},
+                         delfi, total, crossing)
+
+
+def _reference_view(fasta: Path, contigs: list[tuple[str, int]], work: Path) -> Path:
+    """The registered FASTA restricted to ``contigs`` through its own index.
+
+    FinaleToolkit end-motifs scans every reference contig, and a tabix query
+    for a contig without fragment rows raises. A link to the unchanged FASTA
+    with an index naming only the fragment contigs keeps every base and
+    offset; without links, those contigs are copied instead.
+    """
+    gz = fasta.name.endswith(".gz")
+    view = work / ("reference.fa.gz" if gz else "reference.fa")
+    for suffix in ("", ".fai", ".gzi"):
+        Path(f"{view}{suffix}").unlink(missing_ok=True)
+    wanted = {name for name, _ in contigs}
+    try:
+        view.symlink_to(fasta.resolve())
+        if gz:
+            Path(f"{view}.gzi").symlink_to(Path(f"{fasta}.gzi").resolve())
+        rows = [line for line in Path(f"{fasta}.fai").read_text().splitlines()
+                if line.split("\t", 1)[0] in wanted]
+        Path(f"{view}.fai").write_text("".join(f"{row}\n" for row in rows))
+    except OSError:
+        for suffix in ("", ".fai", ".gzi"):
+            Path(f"{view}{suffix}").unlink(missing_ok=True)
+        view = work / "reference.fa"
+        with pysam.FastaFile(str(fasta)) as reference, view.open("w") as stream:
+            for name, _length in contigs:
+                sequence = reference.fetch(name)
+                stream.write(f">{name}\n")
+                for offset in range(0, len(sequence), 60):
+                    stream.write(sequence[offset:offset + 60] + "\n")
+        pysam.faidx(str(view))
+    with pysam.FastaFile(str(view)) as check:
+        if dict(zip(check.references, check.lengths)) != dict(contigs):
+            raise ValueError("restricted reference view does not match the fragment contigs")
+    return view
+
+
+def _remove_ont_scratch(work: Path) -> None:
+    """Delete the fragment file and reference view (a copied FASTA can be genome-sized)."""
+    for name in ("fragments.frag", "fragments.frag.gz", "fragments.frag.gz.tbi",
+                 "reference.fa", "reference.fa.fai", "reference.fa.gzi",
+                 "reference.fa.gz", "reference.fa.gz.fai", "reference.fa.gz.gzi"):
+        (work / name).unlink(missing_ok=True)
+
+
 def _motifs(path: Path) -> dict[str, float]:
     if path.stat().st_size > _MAX_OUTPUT:
         raise ValueError("FinaleToolkit motif output exceeds the size limit")
@@ -243,10 +401,13 @@ def _delfi(path: Path, expected: set[tuple[str, int]]) -> dict[tuple[str, int], 
 @dataclass
 class FinaleToolkitXcheck(Base):
     platform_skip_tools: ClassVar[tuple[ToolPin, ...]] = (ToolPin("finaletoolkit", "not-applicable"),)
+    # identity_parameters returns the static parameters on these platforms, so
+    # cohorts may still rebuild a legacy result's identity without a plan.
+    static_parameter_platforms: ClassVar[frozenset[str]] = frozenset({"illumina"})
     version: str = "1"
     family: str = "fragmentomics"
     requires: Requirements = field(default_factory=lambda: Requirements(
-        min_eligible_reads=1_000_000, platforms=frozenset({"illumina"})))
+        min_eligible_reads=1_000_000, platforms=frozenset({"illumina", "ont"})))
     consumes: str = "full_bam"
     cost: str = "slow"
     upstream: tuple[str, ...] = ()
@@ -258,6 +419,14 @@ class FinaleToolkitXcheck(Base):
         "delfi_remove_hg19_nocov": False, "input": "full paired-end Illumina BAM",
     })
 
+    def identity_parameters(self, ctx: InputContext) -> dict[str, Any]:
+        """Illumina keeps its static identity; ONT records the fragment derivation."""
+
+        if ctx.platform != "ont":
+            return self.parameters
+        return {**self.parameters, "input": "native ONT single-end BAM as a FinaleDB fragment file",
+                "input_mode": ONT_SINGLE_END, "fragment": ONT_FRAGMENT_DEFINITION}
+
     @property  # type: ignore[override]
     def tools(self) -> tuple[ToolPin, ...]:
         tool = _tool()
@@ -268,9 +437,11 @@ class FinaleToolkitXcheck(Base):
         pass
 
     def preflight(self, ctx: InputContext) -> Ready | Skip:
-        if ctx.platform != "illumina":
-            return Skip("platform", "FinaleToolkit 1.1.0 requires a paired-end Illumina input; the ONT spike yielded no usable fragments")
+        if ctx.platform not in {"illumina", "ont"}:
+            return Skip("platform", "FinaleToolkit cross-check needs a declared Illumina or ONT input")
         if ctx.derived:
+            if ctx.platform == "ont":
+                return Skip("derived_not_supported", "FinaleToolkit cross-check uses the full single-end input only")
             return Skip("derived_not_supported", "FinaleToolkit cross-check uses the full paired-end input only")
         if ctx.example or ctx.reference_id.lower() not in {"hg38", "grch38"}:
             return Skip("reference", "FinaleToolkit cross-check needs a genuine registered hg38 input")
@@ -288,6 +459,8 @@ class FinaleToolkitXcheck(Base):
         except (OSError, ValueError, KeyError):
             # Input/library exceptions can include the operator's local path,
             # which must not enter a persisted skip or the Lab UI.
+            if ctx.platform == "ont":
+                return Skip("input_kind", "FinaleToolkit needs a readable indexed ONT BAM and matching registered FASTA")
             return Skip("input_kind", "FinaleToolkit needs a readable indexed prealigned Illumina BAM and matching registered FASTA")
         return Ready()
 
@@ -302,16 +475,31 @@ class FinaleToolkitXcheck(Base):
             raise RuntimeError("FinaleToolkit input or output became unreadable") from None
 
     def _run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
+        try:
+            return self._measure(ctx, out)
+        finally:
+            if ctx.platform == "ont":
+                _remove_ont_scratch(out.parent / "finaletoolkit-work")
+
+    def _measure(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
         tool = _tool()
         if tool is None or ctx.extras.get("planned_tool_pins") != [pin.identity() for pin in self.tools]:
             raise RuntimeError("FinaleToolkit tool changed since execution planning")
         bam_path, fasta, contigs = _inputs(ctx)
         work = out.parent / "finaletoolkit-work"
         work.mkdir(exist_ok=True)
+        ont = _ont_fragments(bam_path, fasta, contigs, work) if ctx.platform == "ont" else None
+        if ont is not None:
+            # FinaleToolkit reads the Lab's fragment rows, not the BAM, and
+            # only the contigs those rows occupy.
+            upstream_input, upstream_reference = ont.frag_file, _reference_view(fasta, ont.contigs, work)
+            bin_contigs = ont.contigs
+        else:
+            upstream_input, upstream_reference, bin_contigs = bam_path, fasta, contigs
         sizes, bins = work / "autosomes.chrom.sizes", work / "autosomes.100kb.bed"
         expected: set[tuple[str, int]] = set()
         with sizes.open("w") as size_stream, bins.open("w") as bin_stream:
-            for name, length in contigs:
+            for name, length in bin_contigs:
                 if not _AUTOSOME.fullmatch(name):
                     continue
                 size_stream.write(f"{name}\t{length}\n")
@@ -327,9 +515,9 @@ class FinaleToolkitXcheck(Base):
         command_base = _command_base(Path(tool[0]), Path(override).absolute() if override else Path(tool[0]),
                                      overridden=bool(override))
         commands = [
-            [*command_base, "end-motifs", str(bam_path), str(fasta), "-k", "4", "--min-length", "4",
+            [*command_base, "end-motifs", str(upstream_input), str(upstream_reference), "-k", "4", "--min-length", "4",
              "-q", str(MAPQ), "-t", "1", "-o", str(motif_path)],
-            [*command_base, "delfi", str(bam_path), str(sizes), str(fasta), str(bins),
+            [*command_base, "delfi", str(upstream_input), str(sizes), str(upstream_reference), str(bins),
              "--no-gc-correct", "--no-merge-bins", "--no-remove-nocov", "-q", str(MAPQ),
              "-t", "1", "-o", str(delfi_path)],
         ]
@@ -342,10 +530,13 @@ class FinaleToolkitXcheck(Base):
             raise RuntimeError("FinaleToolkit tool changed during execution")
         upstream_motifs = _motifs(motif_path)
         upstream_delfi = _delfi(delfi_path, expected)
-        reference_motifs, reference_delfi, pairs = _reference_counts(bam_path, fasta, contigs)
+        if ont is not None:
+            reference_motifs, reference_delfi, molecules = ont.motifs, ont.delfi, ont.fragments
+        else:
+            reference_motifs, reference_delfi, molecules = _reference_counts(bam_path, fasta, contigs)
         total = sum(reference_motifs.values())
         if total <= 0:
-            raise ValueError("paired-end input yielded no comparable 4-mer ends")
+            raise ValueError(f"{'single-end' if ont else 'paired-end'} input yielded no comparable 4-mer ends")
         reference_frequencies = {k: reference_motifs[k] / total for k in MOTIFS}
         motif_r = _pearson([upstream_motifs[k] for k in MOTIFS],
                            [reference_frequencies[k] for k in MOTIFS])
@@ -363,7 +554,9 @@ class FinaleToolkitXcheck(Base):
         panel = {
             "schema": "traceback.lab.finaletoolkit-xcheck.v1", "version": VERSION,
             "runtime_pin_sha256": tool[1],
-            "input": "verified paired-end Illumina hg38 full BAM", "mapq": MAPQ,
+            "input": ("verified native ONT hg38 full BAM as single-end read fragments" if ont else
+                      "verified paired-end Illumina hg38 full BAM"),
+            "input_mode": ONT_SINGLE_END if ont else PAIRED_END, "mapq": MAPQ,
             "motif": {"k": 4, "min_length": MOTIF_MIN, "r": motif_r, "threshold": 0.95,
                       "max_abs_frequency_difference": motif_max_abs_difference,
                       "length_filter_effective": False,
@@ -375,12 +568,19 @@ class FinaleToolkitXcheck(Base):
                       "remove_hg19_nocov": False, "r": delfi_r, "threshold": 0.90,
                       "comparable_bins": len(delfi_keys),
                       "upstream_counts_equal": counts_equal},
-            "pairs": pairs, "motif_ends": total,
+            **({"pairs": molecules} if ont is None else {"fragments": molecules}), "motif_ends": total,
             "verdict": ("discordant" if not counts_equal else
                         "insufficient_variation" if not comparable else
                         "concordant" if motif_r >= 0.95 and delfi_r >= 0.90 else "discordant"),
             "note": "Uncorrected 100-kb paired-end method parity; not the ONT Lab ratio track, original GC-corrected DELFI classifier, or clinical validation.",
         }
+        if ont is not None:
+            panel["fragment_definition"] = ONT_FRAGMENT_DEFINITION
+            panel["motif"]["fragments_crossing_1mb_windows"] = ont.crossing_motif_windows
+            panel["note"] = ("Uncorrected 100-kb method parity on single-end read fragments: FinaleToolkit and the "
+                             "Lab count the same D21-eligible aligned read spans. Not a paired-end fragment, the "
+                             "Lab's 5-Mb delfi-ratio track, the original GC-corrected DELFI classifier, or clinical "
+                             "validation.")
         return AlgorithmOutput(
             metrics=[metric("motif_pearson_r", motif_r, unit="correlation", n=256),
                      metric("delfi_ratio_pearson_r", delfi_r, unit="correlation", n=len(delfi_keys))],

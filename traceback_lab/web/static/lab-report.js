@@ -163,8 +163,8 @@
       "fetal_fraction": ["Male-fetus chrY calibrated fetal fraction", "fraction", "proportion"]
     },
     "finaletoolkit-xcheck": {
-      "delfi_ratio_pearson_r": ["FinaleToolkit paired-end uncorrected DELFI-bin concordance", "correlation", "signed"],
-      "motif_pearson_r": ["FinaleToolkit paired-end 4-mer frequency concordance", "correlation", "signed"]
+      "delfi_ratio_pearson_r": ["FinaleToolkit uncorrected DELFI-bin concordance", "correlation", "signed"],
+      "motif_pearson_r": ["FinaleToolkit 4-mer frequency concordance", "correlation", "signed"]
     },
     "frag-x-meth": {
       "short_fragment_hypomethylation_delta": ["Long minus short per-molecule CpG 5mC share", "fraction", "signed"]

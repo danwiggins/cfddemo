@@ -204,10 +204,13 @@ calibration remains unestablished.
 ### 18. Independent toolkit cross-check (`finaletoolkit-xcheck`)
 
 **Measures:** agreement between FinaleToolkit 1.1.0 and independent counters
-for motifs and fragment-ratio counts on the same Illumina BAM.
+for motifs and fragment-ratio counts on the same input: a paired-end
+Illumina BAM, or native ONT reads handed to FinaleToolkit as single-end read
+fragments (one aligned read span per molecule).
 **What we learn:** whether the implementations agree under their declared
 settings. This is an engineering cross-check, not additional independent
-biological evidence. ONT and derived inputs receive explicit skips.
+biological evidence, and ONT agreement does not make a read span equivalent
+to a paired-end fragment. Derived inputs receive explicit skips.
 
 ### 19. Mitochondrial DNA (`mtdna`)
 

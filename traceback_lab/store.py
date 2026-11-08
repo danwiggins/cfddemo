@@ -1031,13 +1031,6 @@ class LabStore:
         if selected is None or selected[1].status != "ok":
             raise ResultOrderUnavailable("Cached result selection is invalid")
         orders = self._result_selection_orders(input_id, algorithm_id)
-        for identity in orders:
-            try:
-                candidate = self._selected_result(input_id, algorithm_id, identity)
-            except ValueError as exc:
-                raise ResultOrderUnavailable("Another result selection is invalid") from exc
-            if candidate is None:
-                raise ResultOrderUnavailable("Another result selection is invalid")
         if parameters_sha256 not in orders:
             raise ResultOrderUnavailable("Cached result selection is missing")
         current_order = orders[parameters_sha256]
@@ -1047,7 +1040,16 @@ class LabStore:
             and current_order == highest
             and sum(order == highest for order in orders.values()) == 1
         ):
+            # Already the unique newest selection: nothing is switched, so an
+            # unreadable older sibling cannot make reuse unsafe.
             return False
+        for identity in orders:
+            try:
+                candidate = self._selected_result(input_id, algorithm_id, identity)
+            except ValueError as exc:
+                raise ResultOrderUnavailable("Another result selection is invalid") from exc
+            if candidate is None:
+                raise ResultOrderUnavailable("Another result selection is invalid")
 
         directory = self.result_dir(input_id, algorithm_id, parameters_sha256)
         attempt_id = selected[0].name
