@@ -351,7 +351,7 @@ pre.stderr { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; 
 .glance-row { display: grid; grid-template-columns: 15rem minmax(0, 1fr); align-items: center; gap: .5rem; padding: .15rem 0; border-top: 1px solid var(--rule); }
 .glance-label { font-weight: 650; }
 .glance-dots { display: flex; flex-wrap: wrap; gap: .25rem; }
-.lab .glance-dot { justify-content: center; width: 2.75rem; height: 2.75rem; box-sizing: border-box; border: 1.5px solid var(--ink); border-radius: .5rem; background: var(--surface); color: var(--ink); text-decoration: none; font-size: 1rem; }
+.lab .glance-dot { display: inline-flex; align-items: center; justify-content: center; width: 2.75rem; height: 2.75rem; box-sizing: border-box; border: 1.5px solid var(--ink); border-radius: .5rem; background: var(--surface); color: var(--ink); text-decoration: none; font-size: 1rem; }
 .lab .glance-dot.status-skipped, .lab .glance-dot.status-not-run { border-style: dotted; border-color: var(--muted); color: var(--muted); background: var(--surface-2); }
 .lab .glance-dot.status-underpowered { border-style: dashed; background: repeating-linear-gradient(135deg, var(--surface) 0 6px, var(--hatch) 6px 8px); }
 .lab .glance-dot.status-failed { border: 2px solid var(--problem); }
@@ -427,3 +427,4 @@ pre.stderr { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .85rem; 
 .lab .landing-summary dd { font-family: inherit; }
 .result-pager > * { min-width: 0; overflow-wrap: anywhere; }
 .lab .lab-title { flex: none; }
+.withheld { color: var(--muted); font-style: italic; }

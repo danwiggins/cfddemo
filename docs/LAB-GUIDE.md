@@ -1282,9 +1282,12 @@ the scroll controls are hidden.
   every recorded scalar metric with its interpretation state, recorded charts
   for the full input or any derived input, the headline metric across inputs,
   what the method asks, its limits and prerequisites, and evidence and
-  provenance. Previous/next links walk the methods in overview order.
-- **Theme**: the page opens in the light theme; the ◐ header button switches
-  to dark and remembers the choice in this browser only.
+  provenance. An underpowered method's values are withheld on every input
+  (they stay in the result JSON and report exports, marked underpowered),
+  and its exploratory charts draw only on request. Previous/next links walk the methods in overview order.
+- **Theme**: the page follows the system light or dark setting; the ◐ header
+  button (Dark theme, pressed when dark) overrides it and remembers the choice
+  in this browser only.
 
 - **Landing (`#/`)**: a selected-sample overview names the ID, built-in
   synthetic-example status, recorded UTC date, approximate depth,

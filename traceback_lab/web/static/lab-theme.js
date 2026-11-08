@@ -1,37 +1,39 @@
-// Traceback Lab theme: light by default; the header toggle switches to dark
-// and remembers the choice in this browser only. Loaded synchronously in
-// <head> so the first paint uses the chosen palette.
+// Traceback Lab theme: follows the system light/dark setting until the viewer
+// picks one with the header toggle (remembered in this browser only). Loaded
+// synchronously in <head> so the first paint uses the resolved palette.
 "use strict";
 
 (function () {
   const KEY = "traceback-lab-theme";
   const root = document.documentElement;
-  let chosen = "light";
+  const media = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
+  let chosen = null;
   try {
-    if (window.localStorage.getItem(KEY) === "dark") chosen = "dark";
-  } catch (_error) { /* storage blocked: stay light */ }
+    const stored = window.localStorage.getItem(KEY);
+    if (stored === "light" || stored === "dark") chosen = stored;
+  } catch (_error) { /* storage blocked: follow the system setting */ }
 
+  const resolved = () => chosen || (media && media.matches ? "dark" : "light");
   function apply() {
-    root.dataset.resolvedTheme = chosen;
-    const button = document.getElementById("theme-toggle");
-    if (button) {
-      const next = chosen === "dark" ? "light" : "dark";
-      button.setAttribute("aria-label", `Switch to ${next} theme`);
-      button.setAttribute("aria-pressed", String(chosen === "dark"));
-      button.title = `Switch to ${next} theme`;
-    }
+    root.dataset.resolvedTheme = resolved();
+    // Fixed accessible name; the state is carried by aria-pressed.
+    document.getElementById("theme-toggle")?.setAttribute("aria-pressed", String(resolved() === "dark"));
+  }
+  function redraw() {
+    // Canvas charts take their palette at draw time; redraw the current view.
+    if (document.body && document.body.dataset.ready === "1") window.TracebackLab?.render?.();
   }
   apply();
+  if (media && media.addEventListener) {
+    media.addEventListener("change", () => { if (!chosen) { apply(); redraw(); } });
+  }
   document.addEventListener("DOMContentLoaded", () => {
     apply();
-    const button = document.getElementById("theme-toggle");
-    if (!button) return;
-    button.addEventListener("click", () => {
-      chosen = chosen === "dark" ? "light" : "dark";
+    document.getElementById("theme-toggle")?.addEventListener("click", () => {
+      chosen = resolved() === "dark" ? "light" : "dark";
       try { window.localStorage.setItem(KEY, chosen); } catch (_error) { /* this page view only */ }
       apply();
-      // Canvas charts take their palette at draw time; redraw the current view.
-      if (document.body.dataset.ready === "1") window.TracebackLab?.render?.();
+      redraw();
     });
   });
 })();

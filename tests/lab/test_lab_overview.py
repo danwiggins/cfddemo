@@ -90,15 +90,90 @@ def test_result_page_explains_skip_and_fix(tmp_path) -> None:
     assert 'aria-current="page">All methods' in dom  # result pages live under the overview tab
 
 
+def _underpowered_with_inputs() -> dict:
+    sample = _mixed_sample()
+    metric = next(a for a in sample["algorithms"] if a["algorithm_id"] == UNDERPOWERED)["headline_metric"]
+    sample["curve"]["rows"] = [{
+        "algorithm_id": UNDERPOWERED, "metric_id": metric, "label": "synthetic", "tier": None,
+        "cells": [{"label": "0.5", "fraction": 0.5, "depth_x": 0.5, "state": "ok_usable", "value": 0.123456},
+                  {"label": "full", "fraction": 1.0, "depth_x": 1.0, "state": "not_interpretable", "value": 0.123456}],
+    }]
+    sample["stability"].append({"algorithm_id": UNDERPOWERED, "metric_id": metric, "label": "synthetic",
+                                "verdict": "synthetic", "points": [], "split": None,
+                                "split_status": {"A": {"state": "ok", "value": 0.123456},
+                                                 "B": {"state": "ok", "value": 0.123456}}})
+    return sample
+
+
 @needs_chrome
 def test_result_page_marks_underpowered_as_not_a_call(tmp_path) -> None:
-    with _server(tmp_path, _mixed_sample()) as server:
+    with _server(tmp_path, _underpowered_with_inputs()) as server:
         dom = _dom(server, tmp_path / "browser", route=f"/sample/{ID12}/result?algorithm={UNDERPOWERED}",
-                   want=lambda d: "result-status" in d)
+                   want=lambda d: "result-inputs" in d)
     main = _main(dom)
     assert "Underpowered — below the method" in main and "Not a call." in main
     assert "not interpretable (depth)" in main
     assert "finding-card" not in main  # no headline card that could read as a call
+    # No value is shown anywhere for an underpowered method: not in the metric
+    # table (no raw-value disclosure either) and not on any derived input.
+    metrics = re.search(r'class="panel result-metrics".*?</section>', main, re.DOTALL).group(0)
+    inputs = re.search(r'class="panel result-inputs".*?</section>', main, re.DOTALL).group(0)
+    assert "Withheld (underpowered)" in metrics and "raw-value" not in metrics
+    for block in (metrics, inputs):
+        cells = re.findall(r"<td>(.*?)</td>", block, re.DOTALL)
+        values = [re.sub(r"<[^>]+>", "", cell) for cell in cells]
+        assert not any(re.search(r"0\.12|12\.3", value) for value in values), values
+    assert "0.123" not in main and "12.3" not in main
+
+
+@needs_chrome
+def test_across_inputs_shows_values_only_for_usable_cells(tmp_path) -> None:
+    sample = _underpowered_with_inputs()
+    for algorithm in sample["algorithms"]:
+        if algorithm["algorithm_id"] == UNDERPOWERED:
+            algorithm["underpowered"] = None
+            for metric in algorithm["metrics"]:
+                metric.update(state="in_range", reason=None)
+    sample["catalog"] = _catalog(LIBRARY, REGISTRY, sample["algorithms"])
+    with _server(tmp_path, sample) as server:
+        dom = _dom(server, tmp_path / "browser", route=f"/sample/{ID12}/result?algorithm={UNDERPOWERED}",
+                   want=lambda d: "result-inputs" in d)
+    inputs = re.search(r'class="panel result-inputs".*?</section>', _main(dom), re.DOTALL).group(0)
+    rows = {re.sub(r"<[^>]+>", "", row[0]): [re.sub(r"<[^>]+>", "", c) for c in row[1:]]
+            for row in re.findall(r'<tr><th scope="row">(.*?)</th><td>(.*?)</td><td>(.*?)</td><td>(.*?)</td></tr>', inputs)}
+    assert rows["Full input"][1] == "—", rows  # not_interpretable cell: no value
+    assert rows["0.5× downsample"][1] != "—", rows  # usable cell keeps its value
+
+
+@needs_chrome
+def test_empty_root_landing_renders_onboarding_without_glance(tmp_path) -> None:
+    from traceback_lab.store import LabStore
+    from traceback_lab.web.server import RunningLabServer
+
+    with RunningLabServer(LabStore(tmp_path / "root")) as server:
+        dom = _dom(server, tmp_path / "browser", route="/", want=lambda d: "onboarding-guide" in d)
+    assert "Start with a synthetic example" in dom and "ov-glance" not in dom
+    assert 'data-csp-violations="0"' in dom
+
+
+@needs_chrome
+def test_theme_toggle_has_a_fixed_name_and_pressed_state(tmp_path) -> None:
+    observed = {}
+    with _server(tmp_path, _mixed_sample()) as server:
+        profile = tmp_path / "browser-profile"
+
+        def inspect(_command, evaluate) -> None:
+            state = "(() => { const b = document.getElementById('theme-toggle'); return [b.getAttribute('aria-label'), b.getAttribute('aria-pressed'), document.documentElement.dataset.resolvedTheme]; })()"
+            observed["before"] = evaluate(state)
+            evaluate("document.getElementById('theme-toggle').click()")
+            observed["after"] = evaluate(state)
+            evaluate("localStorage.removeItem('traceback-lab-theme')")
+
+        _dom_cdp([_chrome(), "--headless=new", "--disable-gpu", "--no-first-run", f"--user-data-dir={profile}",
+                  server.issue_link() + f"&route=/sample/{ID12}/overview"],
+                 profile, ok=lambda d: 'data-ready="1"' in d, interact=inspect)
+    # The harness pins the light system scheme; the toggle overrides it.
+    assert observed == {"before": ["Dark theme", "false", "light"], "after": ["Dark theme", "true", "dark"]}
 
 
 @needs_chrome

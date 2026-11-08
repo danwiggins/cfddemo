@@ -5,5 +5,5 @@
   result pages (`#/sample/<id>/result?algorithm=<id>`) with plain-English
   status, the fix for a skip or failure, metrics, recorded charts per input,
   the headline across inputs, and provenance. The landing gains a "Methods at
-  a glance" strip; the sample switcher keeps the current view; a header toggle
-  switches to a dark theme (remembered per browser). API unchanged.
+  a glance" strip; the sample switcher keeps the current view; the page follows
+  the system light/dark setting, with a header toggle to override it. API unchanged.

@@ -887,6 +887,10 @@ def _dom_cdp(argv: list[str], profile: Path, *, ok, timeout: float = 90,
             break
     else:
         argv = [argv[0], profile_flag, *argv[1:]]
+    # The Lab follows the system colour scheme; pin light so colour and pixel
+    # contracts do not depend on the workstation's dark-mode setting.
+    if not any(flag.startswith("--blink-settings=") for flag in argv):
+        argv = [*argv[:-1], "--blink-settings=preferredColorScheme=1", argv[-1]]
     page_url = argv[-1]
     destination = urllib.parse.urlsplit(page_url)
     origin = f"{destination.scheme}://{destination.netloc}"

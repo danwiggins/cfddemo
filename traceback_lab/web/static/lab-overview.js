@@ -192,7 +192,7 @@
       const metric = headlineMetric(a);
       if (!cell) body.push(h("span", { class: "tile-state" }, "Not recorded for this input"));
       else {
-        if (metric && cell.value !== null && cell.value !== undefined && cell.state === "ok_usable") {
+        if (metric && !a?.underpowered && cell.value !== null && cell.value !== undefined && cell.state === "ok_usable") {
           body.push(h("span", { class: "tile-value" }, L.fmtMetricValue(metric, cell.value, { algorithmId: id })));
         }
         body.push(h("span", { class: "tile-state" }, P.cellText(cell.state, cell.reason ? humanize(cell.reason) : null)));
@@ -367,8 +367,12 @@
       h("thead", {}, h("tr", {}, ...["Metric", "Value", "Interpretation"].map((t) => h("th", { scope: "col" }, t)))),
       h("tbody", {}, ...metrics.map((m) => h("tr", { "data-metric-id": m.metric_id },
         h("th", { scope: "row" }, m.label, m.metric_id === a.headline_metric ? h("span", { class: "help" }, " (headline)") : ""),
-        h("td", {}, rawCell(fmtMetric(m, { algorithmId: id }), m.value, m.unit, `${id}/${m.metric_id}`)),
+        // An underpowered value is never shown: it could read as a call.
+        h("td", {}, a.underpowered ? h("span", { class: "withheld" }, "Withheld (underpowered)")
+          : rawCell(fmtMetric(m, { algorithmId: id }), m.value, m.unit, `${id}/${m.metric_id}`)),
         h("td", {}, P.stateChip(m))))))));
+    if (a.underpowered) section.append(h("p", { class: "help" },
+      "Values are withheld because this method ran below its depth floor. The exact numbers stay in the result JSON and report exports, marked underpowered."));
     return section;
   }
 
@@ -443,10 +447,19 @@
         return box;
       }));
     };
-    if ((sample.derived || []).length) section.append(inputPicker(sample, draw));
+    const underpowered = status.key === "underpowered";
+    let revealed = !underpowered;
+    const show = (label) => { if (revealed) draw(label); };
+    if ((sample.derived || []).length) section.append(inputPicker(sample, show));
     section.append(slot, h("p", { class: "help" }, "Charts show recorded panel data for the selected input. ",
       h("a", { href: `#/sample/${sample.id12}/signals?algorithm=${id}` }, "Dedicated view in Signals →")));
-    draw(selectedInput(sample));
+    if (underpowered) {
+      // Exploratory panels from an underpowered run are drawn only on request.
+      slot.replaceChildren(h("button", { type: "button", class: "control chip-button", onclick: () => {
+        revealed = true;
+        draw(selectedInput(sample));
+      } }, "Show exploratory charts (not a call)"));
+    } else draw(selectedInput(sample));
     return section;
   }
 
@@ -455,19 +468,21 @@
     const stability = (sample.stability || []).find((row) => row.algorithm_id === id && row.headline !== false);
     if (!curve && !stability) return "";
     const metric = headlineMetric(a);
-    const value = (cell) => cell && cell.value !== null && cell.value !== undefined
+    // Same gate as the overview tile: only a usable cell shows a value, and an
+    // underpowered method shows none on any input.
+    const value = (cell, usable) => usable && !a?.underpowered && cell && cell.value !== null && cell.value !== undefined
       ? (metric ? L.fmtMetricValue(metric, cell.value, { algorithmId: id }) : fmt(cell.value)) : "—";
     const rows = [];
     for (const cell of curve?.cells || []) {
       rows.push(h("tr", {}, h("th", { scope: "row" }, cell.label === "full" ? "Full input" : `${cell.label}× downsample`),
         h("td", {}, cell.depth_x != null ? fmt(cell.depth_x, "x") : "—"),
-        h("td", {}, value(cell)), h("td", {}, P.cellText(cell.state, cell.reason ? humanize(cell.reason) : null))));
+        h("td", {}, value(cell, cell.state === "ok_usable")), h("td", {}, P.cellText(cell.state, cell.reason ? humanize(cell.reason) : null))));
     }
     for (const half of ["A", "B"]) {
       const s = stability?.split_status?.[half];
       if (!s) continue;
       rows.push(h("tr", {}, h("th", { scope: "row" }, `Split half ${half}`), h("td", {}, "—"),
-        h("td", {}, value(s)), h("td", {}, s.state === "ok" ? "ran" : `${humanize(s.state)}${s.reason ? ` (${humanize(s.reason)})` : ""}`)));
+        h("td", {}, value(s, s.state === "ok")), h("td", {}, s.state === "ok" ? "ran" : `${humanize(s.state)}${s.reason ? ` (${humanize(s.reason)})` : ""}`)));
     }
     return h("section", { class: "panel result-inputs", "aria-labelledby": "result-inputs-title" },
       h("h2", { id: "result-inputs-title" }, "Across inputs"),
@@ -514,15 +529,19 @@
       pager,
       statusSection(sample, id, a, status),
     ];
-    if (a && a.status === "ok") out.push(metricsSection(sample, id, a));
-    out.push(chartsSection(sample, id, a, status), acrossInputsSection(sample, id, a), aboutSection(row));
-    if (a) {
+    // Gate on the computed status: an unreadable or ambiguous selection shows no result data.
+    const recorded = a && (status.key === "ok" || status.key === "underpowered");
+    if (recorded) out.push(metricsSection(sample, id, a));
+    out.push(chartsSection(sample, id, a, status), recorded ? acrossInputsSection(sample, id, a) : "", aboutSection(row));
+    if (a && status.key !== "unavailable") {
       out.push(h("section", { class: "panel result-evidence", "aria-labelledby": "result-evidence-title" },
         h("h2", { id: "result-evidence-title" }, "Evidence and provenance"), ...P.context(sample, id, seen),
         h("p", {}, h("a", { href: `#/sample/${sample.id12}/methods?algorithm=${id}` }, "Method catalog entry →"), " · ",
           h("a", { href: `#/sample/${sample.id12}/evidence` }, "Evidence →"))));
     }
-    out.push(pager.cloneNode(true));
+    const footer = pager.cloneNode(true);
+    footer.setAttribute("aria-label", "Other methods (end of page)");
+    out.push(footer);
     return out.filter(Boolean);
   }
 
@@ -531,6 +550,7 @@
   const baseLanding = V.landing;
   V.landing = (sample) => {
     const nodes = baseLanding(sample);
+    if (!sample || !sample.found || !Array.isArray(sample.catalog)) return nodes;
     const band = nodes.findIndex((node) => node instanceof Element && node.classList.contains("landing-band"));
     nodes.splice(band >= 0 ? band + 1 : nodes.length, 0, glance(sample));
     return nodes;
