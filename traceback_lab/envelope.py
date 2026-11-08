@@ -142,7 +142,7 @@ class Underpowered(_Strict):
     # One bound per branch, so the committed JSON Schema enforces it.
     floor: Annotated[int, Field(gt=0)] | Annotated[float, Field(gt=0)]
     observed: Annotated[int, Field(ge=0)] | Annotated[float, Field(ge=0)]
-    kind: Literal["eligible_reads", "depth_x"]
+    kind: Literal["eligible_reads", "counted_reads", "depth_x"]
     # Set when the floor was this result's upstream's, not its own.
     upstream: str | None = Field(default=None, pattern=ALGORITHM_ID_PATTERN.pattern)
 

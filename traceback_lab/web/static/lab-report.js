@@ -577,7 +577,7 @@
   const UNDERPOWERED_BANNER = "Underpowered — below the method's depth floor; exploratory only";
   const UNDERPOWERED_NOTE = "underpowered (ran below the method's depth floor with --below-depth); exploratory only, not a call.";
   function underpoweredMark(value) {
-    return Boolean(value) && typeof value === "object" && ["eligible_reads", "depth_x"].includes(value.kind) &&
+    return Boolean(value) && typeof value === "object" && ["eligible_reads", "counted_reads", "depth_x"].includes(value.kind) &&
       [value.floor, value.observed].every((n) => typeof n === "number" && Number.isFinite(n));
   }
 

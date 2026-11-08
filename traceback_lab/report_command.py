@@ -693,7 +693,7 @@ def project_report(sample: dict[str, Any], generated_at: str, scrub: ReportScrub
 def _underpowered(value: Any) -> dict[str, Any] | None:
     """A recorded ``lab run --below-depth`` mark, or None when absent or malformed."""
 
-    if not isinstance(value, dict) or value.get("kind") not in ("eligible_reads", "depth_x"):
+    if not isinstance(value, dict) or value.get("kind") not in ("eligible_reads", "counted_reads", "depth_x"):
         return None
     numbers = [value.get("floor"), value.get("observed")]
     if not all(isinstance(n, (int, float)) and not isinstance(n, bool) and math.isfinite(n) for n in numbers):
@@ -704,7 +704,8 @@ def _underpowered(value: Any) -> dict[str, Any] | None:
 def _underpowered_text(value: dict[str, Any]) -> str:
     if value["kind"] == "depth_x":
         return f"{value['observed']:.3g}x of {value['floor']:g}x depth"
-    return f"{int(value['observed']):,} of {int(value['floor']):,} eligible reads"
+    noun = "counted reads" if value["kind"] == "counted_reads" else "eligible reads"
+    return f"{int(value['observed']):,} of {int(value['floor']):,} {noun}"
 
 
 # -- HTML ---------------------------------------------------------------------------------

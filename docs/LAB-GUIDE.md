@@ -625,8 +625,8 @@ full hg38 alignment may be slow or fail for lack of memory.
 **Below the depth floor (exploratory).** Without a flag, a method whose input
 is below its depth floor skips with reason `depth`. `--below-depth` runs it
 anyway and marks the result **underpowered**: the result JSON carries
-`underpowered: {floor, observed, kind}` (`kind` is `eligible_reads` or
-`depth_x`), the run line reads e.g.
+`underpowered: {floor, observed, kind}` (`kind` is `eligible_reads`,
+`counted_reads` or `depth_x`), the run line reads e.g.
 `ok (underpowered: 2,000,000 / 5,000,000 reads; 41.2s)`, the run's `--json`
 has `below_depth: true` and an `underpowered` list, and the run log's
 `run_start` flags record `below_depth`. The Lab page and `lab report --html`
@@ -646,6 +646,7 @@ no verdict" instead of recovered or not recovered.
 |---|---|
 | `min_eligible_reads` (registry) of every method except those below | runs, underpowered |
 | `wps` and `aligned-end-structure` 10x depth; `tss-profile` 5M autosomal reads; `griffin` ONT 5M reads | runs, underpowered |
+| `copy-number` ichorCNA 1M counted-read floor (`kind: counted_reads`) | runs, underpowered; if ichorCNA then produces no valid output it skips `low_support` |
 | `fetal-fraction`, `fetal-fraction-chry` 2M reads; `fetal-fraction-chry` and `dd-cfdna-chry` calibrated `min_depth_x` | still skips: part of the prenatal or transplant calibration contract |
 | `methylbert` 2.5M reads | still skips: the model bundle's runtime re-enforces its qualified minimum |
 | `griffin` Illumina pair gates | still skips: the pinned upstream workflow enforces them |

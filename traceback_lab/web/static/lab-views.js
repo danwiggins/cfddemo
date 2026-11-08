@@ -557,7 +557,7 @@
     if (!u) return "";
     const measured = u.kind === "depth_x"
       ? `${Number(u.observed).toPrecision(3)}x of ${u.floor}x depth`
-      : `${Math.round(u.observed).toLocaleString("en-US")} of ${Math.round(u.floor).toLocaleString("en-US")} eligible reads`;
+      : `${Math.round(u.observed).toLocaleString("en-US")} of ${Math.round(u.floor).toLocaleString("en-US")} ${u.kind === "counted_reads" ? "counted" : "eligible"} reads`;
     return h("p", { class: "problem underpowered", role: "note" },
       h("strong", {}, "Underpowered — below the method's depth floor; exploratory only. "),
       `${algorithm.algorithm_id}: ${measured}. Not a call.`);

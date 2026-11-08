@@ -18,7 +18,7 @@ from typing import Any
 
 from ..adapters import ichor
 from ..registry import AlgorithmOutput, InputContext, Ready, Requirements, Skip, ToolPin
-from ._base import Base, metric
+from ._base import Base, depth_floor, metric
 
 MIN_ELIGIBLE_READS = 2_000_000
 
@@ -81,7 +81,7 @@ class CopyNumber(Base):
             )
         return super().preflight(ctx)
 
-    def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput:
+    def run(self, ctx: InputContext, out: Path) -> AlgorithmOutput | Skip:
         parameters = ichor.default_parameters()
         if "min_counted_reads" in ctx.extras:
             requested = ctx.extras["min_counted_reads"]
@@ -105,7 +105,7 @@ class CopyNumber(Base):
         parameters: ichor.LabCopyNumberParameters,
         pon: Path | None = None,
         validate_grid: Callable[[str], None] | None = None,
-    ) -> AlgorithmOutput:
+    ) -> AlgorithmOutput | Skip:
         """Execute one pinned Lab CN contract; the caller selects any PoN."""
 
         if (pon is None) != (parameters.pon_policy == "none"):
@@ -124,10 +124,23 @@ class CopyNumber(Base):
             else:
                 counting = work / "counting.bam"
                 scanned, _, counted = ichor.write_counting(ctx.input_dir / "aligned.bam", counting, parameters)
-            result = ichor.measure(
-                counting, counted, scanned, work, toolchain=toolchain, assets=assets, parameters=parameters,
-                pon=pon, validate_grid=validate_grid,
-            )
+            minimum = parameters.signed.min_counted_reads
+            # lab run --below-depth runs past the counted-read floor (marked
+            # underpowered); without the flag measure() refuses as before.
+            exploratory = depth_floor(
+                ctx, floor=minimum, observed=counted, kind="counted_reads",
+                message=f"{counted:,} counted reads, below the floor of {minimum:,}",
+            ) is None and counted < minimum
+            try:
+                result = ichor.measure(
+                    counting, counted, scanned, work, toolchain=toolchain, assets=assets, parameters=parameters,
+                    pon=pon, validate_grid=validate_grid, below_floor=exploratory,
+                )
+            except ichor.IchorNoOutput as exc:
+                if not exploratory:
+                    raise
+                return Skip("low_support", f"ichorCNA produced no usable output at {counted:,} counted reads "
+                                           f"(floor {minimum:,}): {exc}")
         track = {"bins": result.bins}
         segments = {"segments": result.segments}
         return AlgorithmOutput(

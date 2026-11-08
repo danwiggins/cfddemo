@@ -39,6 +39,10 @@ class CopyNumberError(RuntimeError):
     """The adapter failed; the message is safe to show (no paths)."""
 
 
+class IchorNoOutput(CopyNumberError):
+    """ichorCNA ran but produced no valid output (e.g. too few counted reads)."""
+
+
 @dataclass(frozen=True)
 class IchorAssets:
     gc_wig: Path
@@ -283,9 +287,9 @@ def run_ichor(
     if run.libpaths_mismatch:
         raise CopyNumberError("the ichorCNA toolchain's R library paths are not the declared ones")
     if not run.succeeded:
-        raise CopyNumberError(
-            "ichorCNA timed out" if run.process.outcome == "timeout" else f"ichorCNA exited with status {run.process.returncode}"
-        )
+        if run.process.outcome == "timeout":
+            raise CopyNumberError("ichorCNA timed out")
+        raise IchorNoOutput(f"ichorCNA exited with status {run.process.returncode}")
     try:
         return validate_local_ichor_outputs(
             out_dir,
@@ -296,7 +300,7 @@ def run_ichor(
             run_sha256=run_sha256,
         )
     except IchorOutputError as exc:
-        raise CopyNumberError(f"the output failed validation: {exc}") from exc
+        raise IchorNoOutput(f"the output failed validation: {exc}") from exc
 
 
 @dataclass(frozen=True)
@@ -364,10 +368,15 @@ def measure(
     parameters: LabCopyNumberParameters,
     pon: Path | None = None,
     validate_grid: Callable[[str], None] | None = None,
+    below_floor: bool = False,
 ) -> CopyNumberResult:
-    """readCounter → grid → ichorCNA → validated → mapped.  ``work`` is scratch."""
+    """readCounter → grid → ichorCNA → validated → mapped.  ``work`` is scratch.
 
-    if counted_reads < parameters.signed.min_counted_reads:
+    ``below_floor`` (``lab run --below-depth`` only) runs below the counted-read
+    floor; the caller marks the result underpowered.
+    """
+
+    if counted_reads < parameters.signed.min_counted_reads and not below_floor:
         raise CopyNumberError(
             f"{counted_reads:,} counted reads, below the floor of {parameters.signed.min_counted_reads:,}"
         )
