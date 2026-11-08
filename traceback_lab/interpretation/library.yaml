@@ -103,8 +103,8 @@ method_catalog:
   finaletoolkit-xcheck:
     description: "Agreement between FinaleToolkit and independent motif and fragment-ratio counters."
     question: "Do the implementations agree under declared settings?"
-    limitations: "This is an engineering cross-check on paired-end Illumina input, not independent biological evidence."
-    requirements: ["Paired-end Illumina BAM", "FinaleToolkit toolchain"]
+    limitations: "This is an engineering cross-check (paired-end Illumina BAM, or native ONT reads as single-end read fragments), not independent biological evidence."
+    requirements: ["Paired-end Illumina or native ONT BAM", "FinaleToolkit toolchain"]
   breakpoint-motifs:
     description: "Aligned-end motifs and their proximity to reference CpG sites."
     question: "Do observed endpoints occur in different sequence contexts?"
@@ -3761,21 +3761,21 @@ entries:
   # ---------------------------------------------- finaletoolkit-xcheck
   - algorithm_id: finaletoolkit-xcheck
     metric_id: motif_pearson_r
-    label: "FinaleToolkit paired-end 4-mer frequency concordance"
+    label: "FinaleToolkit 4-mer frequency concordance"
     value_kind: signed
     tier: SPECULATIVE
     origin_tier: NEWER
-    origin_platform: "paired-end Illumina"
+    origin_platform: "paired-end Illumina; ONT as single-end read fragments"
     min_depth_x: null
     reference: {kind: none}
     performance: null
     performance_missing_reason: "Method parity is not biological or clinical validation"
-    missing_value_caption: "Correlation unavailable when paired-end motifs have insufficient variation."
-    meaning_high: "The pinned toolkit and independent paired-end counter have correlated 4-mer frequency patterns; inspect the artifact for absolute differences."
-    meaning_low: "The toolkit and independent counter disagree; inspect input filters and the paired-end artifact."
-    confounders: ["BAM pair flags", "MAPQ", "reference end coordinates", "sparse motifs"]
+    missing_value_caption: "Correlation unavailable when motifs have insufficient variation."
+    meaning_high: "The pinned toolkit and the Lab counter have correlated 4-mer frequency patterns on the same fragments; inspect the artifact for absolute differences."
+    meaning_low: "The toolkit and the Lab counter disagree; inspect input filters, the input mode and the artifact."
+    confounders: ["BAM pair flags", "MAPQ", "reference end coordinates", "sparse motifs", "ONT reads crossing 1-Mb toolkit windows"]
     next_steps:
-      analytical: ["Inspect paired-end method settings and the 256-frequency artifact", "Do not transfer this concordance to single-end ONT"]
+      analytical: ["Inspect the input mode, method settings and the 256-frequency artifact", "Do not transfer concordance between paired-end and ONT single-end modes"]
       clinical_setting: null
     license_ids: [method-patents]
     flags: [LEGAL]
@@ -3786,21 +3786,21 @@ entries:
 
   - algorithm_id: finaletoolkit-xcheck
     metric_id: delfi_ratio_pearson_r
-    label: "FinaleToolkit paired-end uncorrected DELFI-bin concordance"
+    label: "FinaleToolkit uncorrected DELFI-bin concordance"
     value_kind: signed
     tier: SPECULATIVE
     origin_tier: NEWER
-    origin_platform: "paired-end Illumina"
+    origin_platform: "paired-end Illumina; ONT as single-end read fragments"
     min_depth_x: null
     reference: {kind: none}
     performance: null
     performance_missing_reason: "Uncorrected 100-kb method parity is not the published GC-corrected classifier"
     missing_value_caption: "Correlation unavailable without at least two variable bins containing long fragments."
-    meaning_high: "The toolkit and independent paired-end counter agree on comparable short/long bins."
-    meaning_low: "The toolkit and independent counter disagree on comparable short/long bins."
+    meaning_high: "The toolkit and the Lab counter agree on comparable short/long bins of the same fragments."
+    meaning_low: "The toolkit and the Lab counter disagree on comparable short/long bins."
     confounders: ["BAM pair flags", "MAPQ", "sparse bins", "GC correction intentionally disabled"]
     next_steps:
-      analytical: ["Inspect per-bin counts and method settings", "Do not transfer this concordance to the Lab ONT track"]
+      analytical: ["Inspect the input mode, per-bin counts and method settings", "Do not transfer this concordance to the Lab's 5-Mb ONT delfi-ratio track"]
       clinical_setting: null
     license_ids: [method-patents, no-license-not-adopted]
     flags: [LEGAL]

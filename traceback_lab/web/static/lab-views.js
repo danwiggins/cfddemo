@@ -1620,33 +1620,37 @@
   function finaletoolkitSignals(sample, seen) {
     const a = algo(sample, "finaletoolkit-xcheck");
     if (!a && !unreadableArtifact(sample, "finaletoolkit-xcheck")) return [];
-    const section = h("section", { class: "panel" }, h("h2", {}, "FinaleToolkit paired-end cross-check"), flagPill("LEGAL"));
+    const section = h("section", { class: "panel" }, h("h2", {}, "FinaleToolkit cross-check"), flagPill("LEGAL"));
     if (!a || a.status !== "ok") return [section, absent(a, "finaletoolkit-xcheck", sample)];
-    section.append(h("p", { class: "help" }, "Engineering parity on a verified paired-end Illumina BAM. Neither the single-end ONT results nor the published GC-corrected DELFI classifier are compared here."),
+    section.append(h("p", { class: "help" }, "Engineering parity: paired-end Illumina BAMs are read by FinaleToolkit directly; native ONT reads are handed to it as single-end read fragments (one aligned read span per molecule). No ONT-to-Illumina equivalence and not the published GC-corrected DELFI classifier."),
       ...context(sample, "finaletoolkit-xcheck", seen));
-    const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading paired-end cross-check…"));
+    const slot = h("div", { "aria-live": "polite" }, h("p", {}, "Loading cross-check…"));
     section.append(slot);
     artifact(sample, "finaletoolkit-xcheck", "finaletoolkit-xcheck").then((data) => {
       const correlation = (value) => value === null || (typeof value === "number" && Number.isFinite(value) && value >= -1 && value <= 1);
       const motifDifference = data.motif?.max_abs_frequency_difference;
+      // Artifacts written before ONT mode carry no input_mode and are paired-end.
+      const singleEnd = data.input_mode === "ont_single_end";
+      const molecules = singleEnd ? data.fragments : data.pairs;
       if (data.schema !== "traceback.lab.finaletoolkit-xcheck.v1" || data.version !== "1.1.0" ||
           !/^[0-9a-f]{64}$/.test(data.runtime_pin_sha256 || "") ||
           !correlation(data.motif?.r) || !correlation(data.delfi?.r) ||
           (motifDifference !== undefined && (typeof motifDifference !== "number" || !Number.isFinite(motifDifference) || motifDifference < 0 || motifDifference > 1)) ||
           !Number.isInteger(data.delfi?.comparable_bins) || data.delfi.comparable_bins < 0 ||
-          !Number.isInteger(data.pairs) || data.pairs < 0 ||
+          !(data.input_mode === undefined || data.input_mode === "paired_end" || singleEnd) ||
+          !Number.isInteger(molecules) || molecules < 0 ||
           !["concordant", "discordant", "insufficient_variation"].includes(data.verdict)) {
         throw new Error("cross-check artifact is malformed");
       }
       slot.replaceWith(
-        h("p", {}, `Result: ${data.verdict.replace(/_/g, " ")}; ${data.pairs.toLocaleString("en-US")} paired molecules; runtime pin ${data.runtime_pin_sha256.slice(0, 12)}.`),
-        dataTable("Paired-end method concordance", ["Comparison", "Pearson r", "Engineering threshold", "Support"], [
+        h("p", {}, `Result: ${data.verdict.replace(/_/g, " ")}; ${molecules.toLocaleString("en-US")} ${singleEnd ? "single-end read fragments" : "paired molecules"}; runtime pin ${data.runtime_pin_sha256.slice(0, 12)}.`),
+        dataTable(singleEnd ? "Single-end read-fragment method concordance" : "Paired-end method concordance", ["Comparison", "Pearson r", "Engineering threshold", "Support"], [
           ["4-mer end frequencies", fmt(data.motif.r, "correlation", { unitDisplay: false }), "≥0.95", "256 motifs"],
           ["Uncorrected 100-kb short/long ratios", fmt(data.delfi.r, "correlation", { unitDisplay: false }), "≥0.90", `${data.delfi.comparable_bins} bins with long fragments`],
         ]),
         h("p", { class: "help" }, `Maximum absolute 4-mer frequency difference: ${motifDifference === undefined ? "not recorded" : motifDifference.toExponential(2)}. Pearson compares patterns and does not establish absolute frequency equality. Exact short/long count agreement: ${data.delfi.upstream_counts_equal ? "yes" : "no"}. ${data.note}`),
       );
-    }).catch((_error) => slot.replaceWith(h("p", { class: "problem" }, "Paired-end cross-check unavailable. Retry loading this selected result.")));
+    }).catch((_error) => slot.replaceWith(h("p", { class: "problem" }, "FinaleToolkit cross-check unavailable. Retry loading this selected result.")));
     return [section];
   }
 

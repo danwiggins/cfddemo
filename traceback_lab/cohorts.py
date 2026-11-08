@@ -700,8 +700,9 @@ def _selected_results_once(
                     pass
                 else:
                     continue
+                static_parameters = platform in getattr(algorithm, "static_parameter_platforms", frozenset())
                 if (callable(identity_tools) or callable(identity_assets)
-                        or callable(getattr(algorithm, "identity_parameters", None))):
+                        or (callable(getattr(algorithm, "identity_parameters", None)) and not static_parameters)):
                     # Dynamic identities need a producer-recorded plan. A
                     # reader's GPU, packages or PATH cannot reconstruct one.
                     continue
