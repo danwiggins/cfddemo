@@ -182,7 +182,8 @@ def simulate_command(args: argparse.Namespace, store: LabStore) -> tuple[int, di
             lines = [f"ROOT    {store.root}", f"RUN     {run_id}", f"SAMPLE  {id12}"]
             for row in synthetic:
                 recovered = "-" if row["tf_recovered"] is None else f"{row['tf_recovered']:.3f}"
-                verdict = "recovered" if row["recovered_within_tolerance"] else "not recovered"
+                verdict = ("underpowered; exploratory, no verdict" if row.get("underpowered")
+                           else "recovered" if row["recovered_within_tolerance"] else "not recovered")
                 lines.append(
                     f"SPIKE   TF {row['tf_expected']:.2f} -> {recovered}  ({verdict} within ±{TF_TOLERANCE}; {row['status']})"
                 )

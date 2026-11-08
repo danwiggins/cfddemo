@@ -512,6 +512,13 @@ def _parity_cases() -> dict[str, tuple[dict, list[str]]]:
     excluded["excluded_chunks"] = [4, 7]
     excluded["run_utc"] = excluded["completed_utc"] = "2026-10-19T11:00Z"
     cases["excluded"] = (excluded, [])
+
+    underpowered = copy_of(base)
+    _algorithm(underpowered, "sex-check")["underpowered"] = {
+        "floor": 500_000, "observed": 1_234, "kind": "eligible_reads", "upstream": None}
+    _algorithm(underpowered, "fragment-size")["underpowered"] = {"floor": 1, "observed": 0, "kind": "bogus"}
+    _algorithm(underpowered, "bam-qc")["underpowered"] = {"floor": True, "observed": 1, "kind": "depth_x"}
+    cases["underpowered"] = (underpowered, [])
     return cases
 
 
@@ -556,9 +563,12 @@ def test_rows_and_limitations_match_the_browser_projection() -> None:
         assert [[row[key] for key in keys] for row in py["metrics"]] == \
             [[row[key] for key in keys] for row in js["metrics"]], name
         assert py["limitations"] == js["limitations"], name
+        assert py["underpowered"] == js["underpowered"], name
         for key in ("schema_version", "sample_id", "source_id", "full_input_id", "recorded_utc",
                     "recorded_utc_kind", "interpretation_version", "cohort_version", "example"):
             assert py[key] == js[key], (name, key)
+    marked = project_report(cases["underpowered"][0], FROZEN_AT, report_scrubber(Path("/nonexistent")))
+    assert marked["underpowered"] == {"sex-check": {"floor": 500_000, "observed": 1_234, "kind": "eligible_reads"}}
     base = project_report(cases["base"][0], FROZEN_AT, report_scrubber(Path("/nonexistent")))
     exported = {(row["algorithm_id"], row["metric_id"]) for row in base["metrics"]}
     assert ("sex-check", "call") in exported and ("copy-number", "identifiable") in exported
@@ -746,3 +756,9 @@ def test_report_renders_its_metrics_table_with_javascript_disabled(tmp_path) -> 
     assert table["rows"] == len(report["metrics"])
     assert table["flag"] > 0
     assert FROZEN_FOOTER in table["footer"]
+
+
+def test_underpowered_copy_matches_the_browser_export() -> None:
+    text = REPORT_JS.read_text(encoding="utf-8")
+    assert f'const UNDERPOWERED_BANNER = "{report_command.UNDERPOWERED_BANNER}";' in text
+    assert f'const UNDERPOWERED_NOTE = "{report_command.UNDERPOWERED_NOTE}";' in text

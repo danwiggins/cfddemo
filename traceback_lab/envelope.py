@@ -139,9 +139,11 @@ class Failure(_Strict):
 class Underpowered(_Strict):
     """``lab run --below-depth`` ran this method below its depth floor: exploratory only."""
 
-    floor: float = Field(gt=0)
-    observed: float = Field(ge=0)
+    floor: int | float = Field(gt=0)
+    observed: int | float = Field(ge=0)
     kind: Literal["eligible_reads", "depth_x"]
+    # Set when the floor was this result's upstream's, not its own.
+    upstream: str | None = Field(default=None, pattern=ALGORITHM_ID_PATTERN.pattern)
 
 
 class ResultEnvelope(_Strict):

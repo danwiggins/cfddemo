@@ -721,6 +721,8 @@ def _selected_results_once(
             continue
         if chosen is None or chosen.status != "ok":
             continue
+        if chosen.underpowered is not None:
+            continue  # lab run --below-depth: exploratory, never a cohort value
         if algorithm.upstream and not _consumed_attempts_current(
             store, attempt, upstream, chosen_snapshots, input_id,
         ):

@@ -540,7 +540,8 @@ def _dry_run(args: argparse.Namespace, store: LabStore, progress: Callable[[str]
                         if row["decision"] != "decided after alignment":
                             continue
                         minimum = item.algorithm.requires.min_eligible_reads
-                        if minimum and eligible < minimum and getattr(args, "below_depth", False):
+                        if (minimum and eligible < minimum and getattr(args, "below_depth", False)
+                                and getattr(item.algorithm, "below_depth_allowed", True)):
                             row["decision"] = "runs underpowered below depth minimum (--below-depth)"
                             row["eligible_reads"] = eligible
                             row["minimum_eligible_reads"] = minimum
@@ -1307,7 +1308,8 @@ def _summary(
             lines.append("        controls: " + " · ".join(parts))
         for row in controls.get("cna", []):
             recovered = "-" if row["tf_recovered"] is None else f"{row['tf_recovered']:.3f}"
-            verdict = "recovered" if row["recovered_within_tolerance"] else "not recovered"
+            verdict = ("underpowered; exploratory, no verdict" if row.get("underpowered")
+                       else "recovered" if row["recovered_within_tolerance"] else "not recovered")
             lines.append(f"        spike TF {row['tf_expected']:g} -> {recovered} ({verdict})")
     underpowered = [result for result in results if result.status == "ok" and result.underpowered]
     if underpowered:

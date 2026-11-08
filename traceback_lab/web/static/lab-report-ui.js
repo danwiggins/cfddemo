@@ -194,6 +194,15 @@
     return value == null || value === "" ? "unavailable" : String(value);
   }
 
+  // lab run --below-depth: methods that ran below their depth floor.
+  function underpoweredBanner(report) {
+    const ids = Object.keys(report.underpowered || {});
+    if (!ids.length) return "";
+    return h("div", { class: "callout underpowered", id: "report-underpowered", role: "note" },
+      h("p", {}, h("strong", {}, core.UNDERPOWERED_BANNER)),
+      h("ul", {}, ...ids.map((id) => h("li", {}, id))));
+  }
+
   function printTree(capture) {
     const { report, context } = capture;
     const root = h("section", { id: "lab-report-print", "aria-label": "Captured research report",
@@ -210,6 +219,7 @@
       field("Interpretation version", report.interpretation_version),
       field("Cohort version", report.cohort_version),
       h("p", {}, "Freshly captured report; values may differ from the earlier page."),
+      underpoweredBanner(report),
       h("h2", {}, "Limitations"), h("ul", {}, ...report.limitations.map((item) => h("li", {}, item))));
     const groups = new Map();
     for (const row of report.metrics) {

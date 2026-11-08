@@ -63,6 +63,11 @@ def depth_floor(
     if observed is not None and np.isfinite(observed) and observed >= floor:
         return None
     if allowed and observed is not None and np.isfinite(observed) and below_depth(ctx):
+        marks = ctx.extras.get("underpowered_marks")
+        if isinstance(marks, list):
+            # Inside the worker: a floor passed only because of the flag marks
+            # the result even when the runner's preflight saw a different count.
+            marks.append({"floor": floor, "observed": observed, "kind": kind})
         return None
     return Skip("depth", message, floor=floor, observed=observed, floor_kind=kind)
 

@@ -414,6 +414,9 @@ def _split_half_status(view: InputView | None, algorithm_id: str, metric_id: str
     if envelope.status != "ok":
         reason = envelope.skip_reason if envelope.status == "skipped" else "algorithm failed"
         return {"state": envelope.status, "reason": reason, "value": None, "deviation": None}
+    if getattr(envelope, "underpowered", None) is not None:
+        return {"state": "not_interpretable", "reason": "underpowered (below the method's depth floor)",
+                "value": None, "deviation": None}
     current = _value(envelope, metric_id)
     try:
         current_finite = current is not None and _numeric(current.value) and math.isfinite(current.value)
@@ -610,7 +613,11 @@ def stability_panels(sample: SampleView, library: Library | None = None) -> list
                 if point["state"] != "ok_usable":
                     break
                 usable_to = point["fraction"]
-            if usable_to is not None:
+            if getattr(full_envelope, "underpowered", None) is not None:
+                # lab run --below-depth: no stability verdict from an exploratory result.
+                split = None
+                verdict_text = "underpowered at full depth; exploratory only, no stability verdict"
+            elif usable_to is not None:
                 verdict_text = f"usable to {usable_to:g}"
             elif not downs or all(point["state"] == "skipped" for point in points if point["fraction"] < 1.0):
                 verdict_text = "not measured below full depth"
@@ -681,6 +688,7 @@ def synthetic(sample: SampleView) -> list[dict[str, Any]]:
         expected = float(view.parameters["tf"])
         recovered = None
         status = "not run" if envelope is None else envelope.status
+        underpowered = envelope is not None and getattr(envelope, "underpowered", None) is not None
         if envelope is not None and envelope.status == "ok":
             metric = _value(envelope, "tumor_fraction")
             recovered = metric.value if metric else None
@@ -688,9 +696,12 @@ def synthetic(sample: SampleView) -> list[dict[str, Any]]:
             {
                 "tf_expected": expected,
                 "tf_recovered": recovered,
-                "status": status,
+                "status": "ok (underpowered; exploratory)" if underpowered else status,
                 "skip_reason": envelope.skip_reason if envelope is not None else None,
-                "recovered": recovered is not None and recovered >= DETECTED_MIN and abs(recovered - expected) <= TF_TOLERANCE,
+                # An underpowered spike gives no recovered/not-recovered verdict.
+                "underpowered": underpowered,
+                "recovered": not underpowered and recovered is not None and recovered >= DETECTED_MIN
+                and abs(recovered - expected) <= TF_TOLERANCE,
             }
         )
     return rows

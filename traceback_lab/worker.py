@@ -15,6 +15,7 @@ import os
 import signal
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from traceback_runner.serialization import canonical_json_bytes
@@ -75,6 +76,8 @@ def main(argv: list[str]) -> int:
     request = json.loads(Path(argv[0]).read_bytes())
     algorithm = load_entry(request["entry"])
     context = context_from_json(request["context"])
+    marks: list[dict[str, object]] = []  # depth floors run() passed only under --below-depth
+    context = replace(context, extras={**context.extras, "underpowered_marks": marks})
     out = Path(request["out_dir"])
     artifacts = out / "artifacts"
     artifacts.mkdir(parents=True, exist_ok=True)
@@ -95,9 +98,10 @@ def main(argv: list[str]) -> int:
         target = artifacts / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(content)
-    (out / "output.json").write_bytes(
-        canonical_json_bytes({"metrics": output.metrics, "panels": output.panels})
-    )
+    produced: dict[str, object] = {"metrics": output.metrics, "panels": output.panels}
+    if marks:
+        produced["underpowered"] = marks[0]
+    (out / "output.json").write_bytes(canonical_json_bytes(produced))
     return 0
 
 

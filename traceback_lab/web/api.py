@@ -649,7 +649,9 @@ class LabApi:
                     "counts": counts,
                     "outside_reference": outside,
                     "controls": {
-                        "spike": None if not spikes else all(row["recovered"] for row in spikes if row["tf_expected"] >= 0.1),
+                        "spike": None if not spikes else "underpowered" if any(
+                            row.get("underpowered") for row in spikes if row["tf_expected"] >= 0.1
+                        ) else all(row["recovered"] for row in spikes if row["tf_expected"] >= 0.1),
                         "split": bool(sample.by_transform("split")),
                     },
                     **_safe_result_selections(sample, [a.id for a in _registry()]),

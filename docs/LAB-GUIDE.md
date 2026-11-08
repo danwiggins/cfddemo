@@ -633,7 +633,14 @@ has `below_depth: true` and an `underpowered` list, and the run log's
 show "Underpowered — below the method's depth floor; exploratory only" on
 those results, and every metric of an underpowered result is
 `not_interpretable (depth)`: it is never placed against a reference or
-cohort. Derived downsample and split controls inherit the flag.
+cohort. Derived downsample and split controls inherit the flag. A floor that
+a method re-checks inside its run (for example `griffin` ONT on its autosomal
+count) marks the result the same way, and a result built on an underpowered
+upstream (other than `read-summary`) is itself marked, naming that upstream.
+Underpowered results are never cohort values, give no stability verdict
+("underpowered at full depth; exploratory only, no stability verdict"), and a
+CNA spike whose copy-number is underpowered reports "underpowered; exploratory,
+no verdict" instead of recovered or not recovered.
 
 | Floor | With `--below-depth` |
 |---|---|
@@ -649,8 +656,11 @@ unchanged. Below its floor a method can still find nothing to measure; it
 then skips with a specific reason (for example `griffin` ONT records
 `low_support` when no site profile has usable coverage) rather than failing.
 A later run without the flag does not reuse an underpowered result: it skips
-again. A dry run with the flag labels such rows
-`runs underpowered below depth minimum (--below-depth)`.
+again, and its dry run still predicts that skip. A dry run with the flag
+labels the rows that would run `runs underpowered below depth minimum
+(--below-depth)`; methods whose floor is not bypassed keep `skip expected`.
+Results marked underpowered are forward-only: a Lab older than this flag
+refuses to read them (the result schema id stays `traceback.lab.result.v1`).
 
 **Preflight limits.** A dry run can report a known disk shortfall, but it does
 not reserve space. A live run first checks known requirements and disk capacity

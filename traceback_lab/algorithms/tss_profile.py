@@ -164,7 +164,9 @@ class TssProfile(Base):
         eligible = summary.eligible(contigs=summary.autosome_ids())
         if mask is not None:
             eligible &= mask
-        if int(eligible.sum()) < MIN_READS:
+        count = int(eligible.sum())
+        if depth_floor(ctx, floor=MIN_READS, observed=count, kind="eligible_reads",
+                       message="TSS profile needs 5 million autosomal eligible reads") is not None:
             raise ValueError("TSS profile needs 5 million autosomal eligible reads")
         store = LabStore(ctx.root)
         annotation = inspect_asset(store, TSS_KIND, expected_sha256=TSS_SHA256)

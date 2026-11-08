@@ -574,6 +574,7 @@
   }
 
   // lab run --below-depth (kept in step with report_command.py).
+  const UNDERPOWERED_BANNER = "Underpowered — below the method's depth floor; exploratory only";
   const UNDERPOWERED_NOTE = "underpowered (ran below the method's depth floor with --below-depth); exploratory only, not a call.";
   function underpoweredMark(value) {
     return Boolean(value) && typeof value === "object" && ["eligible_reads", "depth_x"].includes(value.kind) &&
@@ -665,6 +666,7 @@
     let scanned = 0;
     const recorded = new Set();
     const restrictionsNoted = new Set();
+    const underpowered = {};
     for (const algorithm of sample.algorithms) {
       if (!algorithm || !visible.has(algorithm.algorithm_id) ||
           !Object.hasOwn(audited, algorithm.algorithm_id) || algorithm.hidden === true) continue;
@@ -679,7 +681,11 @@
       }
       if (status !== "ok") { note(`Method ${algorithmId}: no eligible scalar rows.`); continue; }
       if (!Array.isArray(algorithm.metrics)) { note(`Method ${algorithmId}: no eligible scalar rows.`); continue; }
-      if (underpoweredMark(algorithm.underpowered)) note(`Method ${algorithmId}: ${UNDERPOWERED_NOTE}`);
+      if (underpoweredMark(algorithm.underpowered)) {
+        note(`Method ${algorithmId}: ${UNDERPOWERED_NOTE}`);
+        const { floor, observed, kind } = algorithm.underpowered;
+        underpowered[algorithmId] = { floor, observed, kind };
+      }
       for (const metric of algorithm.metrics) {
         if (++scanned > 100000) fail("report_too_large", "The report exceeds the export processing limit.");
         const definition = metric && metricId.test(metric.metric_id) &&
@@ -781,6 +787,9 @@
       interpretation_version: sample.interpretation_version,
       cohort_version: sample.cohort_version ?? null,
       limitations: Object.freeze(limitations), metrics: Object.freeze(metrics.map((row) => Object.freeze(row))),
+      // lab run --below-depth marks, for methods with rows (kept in step with report_command.py).
+      underpowered: Object.freeze(Object.fromEntries(Object.entries(underpowered)
+        .filter(([id]) => metrics.some((row) => row.algorithm_id === id)))),
     };
     sizeCheck(JSON.stringify(report));
     Object.freeze(report);
@@ -826,5 +835,5 @@
     return `traceback-research-${report.sample_id}-${stamp}Z.${extension}`;
   }
 
-  globalThis.TracebackLabReport = { project, json, csv, filename, restrictionsForMetric, clinicalAdviceWarning };
+  globalThis.TracebackLabReport = { project, json, csv, filename, restrictionsForMetric, clinicalAdviceWarning, UNDERPOWERED_BANNER };
 })();

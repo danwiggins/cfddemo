@@ -303,11 +303,13 @@
       const points = rows.map((r) => [chartPercent(r.tf_expected),
         r.tf_recovered === null ? null : chartPercent(r.tf_recovered)]);
       const recovered = rows.filter((r) => r.recovered).map((r) => fmt(r.tf_expected, "fraction"));
-      const missed = rows.filter((r) => !r.recovered && r.tf_expected >= 0.1).map((r) => fmt(r.tf_expected, "fraction"));
+      const missed = rows.filter((r) => !r.recovered && !r.underpowered && r.tf_expected >= 0.1).map((r) => fmt(r.tf_expected, "fraction"));
+      const underpowered = rows.filter((r) => r.underpowered).map((r) => fmt(r.tf_expected, "fraction"));
       const tolerance = fmt(0.05, "fraction", { role: "difference" });
-      const caption = recovered.length && !missed.length
+      const caption = (recovered.length && !missed.length
         ? `Recovered within ±${tolerance} at ${recovered.join(" and ")}`
-        : `Recovered within ±${tolerance} at ${recovered.length ? recovered.join(" and ") : "none"}; not recovered at ${missed.join(" and ") || "—"} (this depth: ${fmt(sample.depth?.approx_depth_x, "x")})`;
+        : `Recovered within ±${tolerance} at ${recovered.length ? recovered.join(" and ") : "none"}; not recovered at ${missed.join(" and ") || "—"} (this depth: ${fmt(sample.depth?.approx_depth_x, "x")})`)
+        + (underpowered.length ? `; underpowered (exploratory, no verdict) at ${underpowered.join(" and ")}` : "");
       syn.append(chart(`Synthetic CNA spike: expected against recovered tumour fraction, both in %. ${caption}.`, {
         grid: { left: 50, right: 16, top: 16, bottom: 40 },
         xAxis: { type: "value", name: "expected TF (%)", min: 0, max: 35 },
@@ -322,7 +324,7 @@
         ],
       }, dataTable("Synthetic CNA spike", ["Expected TF (%)", "Recovered TF (%)", `Recovered (±${tolerance})`, "Status"],
         rows.map((r) => [rawCell(fmt(r.tf_expected, "fraction"), r.tf_expected, "fraction"),
-          rawCell(fmt(r.tf_recovered, "fraction"), r.tf_recovered, "fraction"), r.recovered, r.status]))), h("p", { class: "help" }, caption));
+          rawCell(fmt(r.tf_recovered, "fraction"), r.tf_recovered, "fraction"), r.underpowered ? "no verdict" : r.recovered, r.status]))), h("p", { class: "help" }, caption));
     }
     // REPEATABILITY
     const rep = h("div", { class: "control-block" }, h("span", { class: "control-badge" }, "REPEATABILITY"), " sampling noise, not a known answer");
@@ -393,7 +395,8 @@
           ["cohort_unavailable", "target_unavailable", "stale_target"].includes(row.cohort_state)
             ? h("span", { class: "problem" }, ` · cohort ${row.cohort_state.replace(/_/g, " ")}`) : ""),
         h("td", {}, ["completed_input_unavailable", "completion_history_unavailable"].includes(row.state) ? "unavailable"
-          : row.controls.spike === null ? "spike not run" : row.controls.spike ? "spike recovered ✓" : "spike not recovered"),
+          : row.controls.spike === null ? "spike not run" : row.controls.spike === "underpowered" ? "spike underpowered (exploratory)"
+            : row.controls.spike ? "spike recovered ✓" : "spike not recovered"),
         h("td", {}, h("a", { href: `#/?sample=${row.id12}` }, "Show on landing"))))));
     return h("section", { class: "panel", "aria-labelledby": "samples-title" }, h("h2", { id: "samples-title" }, "Samples"), h("div", { class: "table-wrap" }, table));
   }

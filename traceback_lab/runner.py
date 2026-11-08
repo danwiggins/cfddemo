@@ -426,6 +426,12 @@ def run_plan(
         ctx = target.context(store.root)
         decision: Ready | Skip
         underpowered: dict[str, Any] | None = None
+        # A result built on an underpowered upstream is itself underpowered.
+        upstream_mark = next((
+            {**done[name].underpowered, "upstream": done[name].underpowered.get("upstream") or name}
+            for name in algorithm.upstream
+            if name != DEPTH_SOURCE and name in done and done[name].underpowered
+        ), None)
         if platform_rejected:
             supported = ", ".join(sorted(algorithm.requires.platforms))
             decision = Skip("platform", f"{algorithm.id} supports {supported}; this input declares {target.platform}")
@@ -580,7 +586,7 @@ def run_plan(
                             metrics=produced.get("metrics", []),
                             panels=produced.get("panels", []),
                             duration_s=outcome.duration_s,
-                            underpowered=underpowered,
+                            underpowered=underpowered or produced.get("underpowered") or upstream_mark,
                         )
                         missing = [p.data_ref for p in envelope.panels if p.data_ref not in artifacts]
                         if missing:
@@ -636,7 +642,8 @@ def run_plan(
                         input_label=target.label,
                         input_id=target.input_id,
                         attempt_id=attempt_id,
-                        underpowered=underpowered if run_skip is None else None,
+                        underpowered=(envelope.underpowered.model_dump()
+                                      if envelope.underpowered is not None else None),
                     )
                     if run_skip is None:
                         _after_ok(store, target, algorithm, identity, result, envelope)
