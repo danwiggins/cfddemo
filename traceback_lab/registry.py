@@ -83,7 +83,11 @@ ALGORITHMS: tuple[str, ...] = (
 # An algorithm absent here starts at the 2 GiB default; a floor replaces that
 # default and the cap still grows to 2x the algorithm's recorded peak RSS.
 # Declare one only with a measured reason, as a comment on the entry.
-MEMORY_FLOOR_BYTES: dict[str, int] = {}
+MEMORY_FLOOR_BYTES: dict[str, int] = {
+    # Upstream LIONHEART v2.2.0 extract_features: 14.8 GiB measured peak tree RSS
+    # on a whole-genome hg38 ONT input, feature tasks run in-process one at a time.
+    "lionheart": 24 * 1024**3,
+}
 
 
 @dataclass(frozen=True)

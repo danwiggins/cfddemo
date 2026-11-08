@@ -980,7 +980,7 @@ uses a separate verified scratch copy, so a changed installed resource cannot
 silently enter a result. The CLI, its installed Python package code, and the
 modified mosdepth binary are hashed into the result identity; the installed
 package must report version 2.2.0. The selected mosdepth library directory
-must contain `libhts.so`; its loaded bytes and the `samtools` and `unpigz`
+must contain `libhts.so` (`libhts.dylib` on macOS); its loaded bytes and the `samtools` and `unpigz`
 executables are also pinned. Neither the pack nor scores are bundled in this repo;
 Zenodo says its shared scores and models derive from non-commercial,
 research-purpose-only data.
@@ -1008,6 +1008,17 @@ BAM validation and coverage decompression. The library-directory setting supplie
 upstream's required `--ld_library_path` argument; it defaults to the mosdepth
 binary's directory when unset.
 Set it to the directory containing mosdepth's shared libraries when needed.
+On macOS, build the fork with `nim c -d:release --mm:refc --dynlibOverride:libhts`
+linking Homebrew htslib (`--passL:-lhts` plus its `-L` and `-rpath`), since
+macOS ignores the `LD_LIBRARY_PATH` upstream sets, and point this setting at
+Homebrew's htslib `lib` directory. Install LIONHEART with `scipy<1.14`
+(upstream calls `scipy.special.btdtr`, removed in SciPy 1.14; its conda
+environment pins 1.7.3). Feature extraction peaked at 14.8 GiB tree RSS on a
+whole-genome hg38 input: its default cap starts at a 24 GiB floor, clamped to
+0.8 x RAM, so on a machine with less than about 19 GiB RAM the cap falls below
+that peak and the step is stopped; an explicit `--memory-cap 8GiB` also stops it. `lab run --below-depth` runs LIONHEART
+below its 5M eligible-read gate like other depth-floored methods; that result
+is marked underpowered.
 Without the explicit ONT opt-in, or when a dependency,
 resource or hg38 input is missing, this algorithm skips with a reason and
 leaves other Lab results available. Signals shows the 898 raw scores with
