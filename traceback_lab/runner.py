@@ -260,7 +260,6 @@ def _selected_upstream_attempts(
     return tuple(rows)
 
 
-
 def _reselect_cached(
     store: LabStore, input_id: str, algorithm_id: str, identity: str,
     step: str, progress: Callable[[str], None] | None,
@@ -279,6 +278,7 @@ def _reselect_cached(
             progress(f"{step:<24} cache not reusable ({exc}); recomputing")
         return False
     return True
+
 
 def run_plan(
     store: LabStore,
